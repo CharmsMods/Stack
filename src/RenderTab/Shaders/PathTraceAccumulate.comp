@@ -1,0 +1,43 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(rgba32f, binding = 0) uniform image2D uHdrAccumImage;
+layout(rgba32f, binding = 1) uniform writeonly image2D uDisplayImage;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= uint(uPixelCount)) {
+        return;
+    }
+
+    RayState rayState = uRayStates[index];
+    ivec2 pixelCoord = PixelCoordFromIndex(index);
+    vec3 sampleRgb = SpectralToDisplayRgb(rayState.radiance, rayState.wavelengths, rayState.wavelengthPdfs) * uExposure;
+    sampleRgb = max(sampleRgb, vec3(0.0));
+
+    vec4 accumulation = vec4(sampleRgb, 1.0);
+    if (uAccumulationEnabled != 0 && uSampleIndex > 0) {
+        vec4 previous = imageLoad(uHdrAccumImage, pixelCoord);
+        accumulation.rgb = previous.rgb + sampleRgb;
+        accumulation.a = previous.a + 1.0;
+    }
+
+    imageStore(uHdrAccumImage, pixelCoord, accumulation);
+    vec3 averaged = accumulation.rgb / max(accumulation.a, 1.0);
+    vec3 displayColor = TonemapAces(averaged);
+    if (uDebugMode == kDebugModeRefractedSourceClass) {
+        int sourceClass = int(round(rayState.params.y));
+        if (sourceClass == kDebugSourceClassEmissive) {
+            displayColor = vec3(0.18, 0.95, 0.45);
+        } else if (sourceClass == kDebugSourceClassDark) {
+            displayColor = vec3(0.96, 0.28, 0.24);
+        } else if (sourceClass == kDebugSourceClassMiss) {
+            displayColor = vec3(0.22, 0.52, 0.95);
+        } else {
+            displayColor *= 0.18;
+        }
+    } else if (uDebugMode == kDebugModeSelfHitHeatmap) {
+        float heat = clamp(rayState.params.w, 0.0, 1.0);
+        displayColor = mix(displayColor * 0.2, vec3(1.0, 0.15, 0.05), heat);
+    }
+    imageStore(uDisplayImage, pixelCoord, vec4(displayColor, 1.0));
+}

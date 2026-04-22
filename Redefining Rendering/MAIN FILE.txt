@@ -1,0 +1,413 @@
+AI should NEVER Edit this file.
+
+
+
+there seems to be a never ending flow of issues with the render tab in my c++ program, so first ill describe what i want, and then what the current state of the render tab is:
+
+what i want is a simple looking at first and on load, render tab, with a viewport, and a inspector panel/window.
+the viewport should have 2 viewing modes, one that is an unlit view, and the other, which is the main rendering view, Path Trace. The path trace should update in real time to changes, and show the proper and very common accumulation over time.
+in order for the user to actually construct a scene they want however, some things need to be in place, first off is being able to control the gizmos for selected objects, this should be reliable, and when an object is selected by clicking on it, the user should be able to edit it in different ways, this means applying a material like glass or metal to it, in different strengths and with different settings that ill get into later. it also means that the user should be able to Move, Rotate, and Scale it with good visual gizmos for each type of transform, and the user should be able to switch between these modes using W for move, E for rotate, and R for scale. this should not get in the way of first-person-like viewport navigation, since the user should only be able to 3D navigate the viewport when right click is held down, then those key binds, (WASD, especially W) work as navigation directions, with Q going down, and E going up.
+
+
+For lights, there should be an easy way to add lights, such as point lights, Spot lights, Area Lights, and a directional light. these should be (except physically the directional light) moveable just like objects are in the scene. they should show up, be UI visible in the scene to show where they're pointing and other such behaviors depending on the light type and it's inherent properties.
+
+
+
+There should be a full set of object primitives that a user can easily add to the scene, such as a sphere, cube, and plane.
+
+
+In the viewport, if an object is selected, it's properties should show up in an inspector panel/window, and the user should be able to apply certain traits to the material like glass or metal and all subsets.
+
+
+
+
+
+
+CORE RENDERING PRINCIPLES
+1. Spectral light simulation (always enabled)
+Light should be treated as wavelength-based, not simple RGB
+All rendering should naturally account for wavelength differences
+This enables realistic color behavior across all materials
+
+2. Chromatic dispersion (built-in behavior)
+Refractive materials should automatically bend different wavelengths differently
+The refractive index is not a single fixed value
+Dispersion should happen by default without needing to enable it
+
+3. Realism-first defaults
+The renderer should prioritize physical accuracy by default
+The user should not need to enable realism features manually
+
+
+
+
+
+
+MATERIAL COMBINATION RULES
+Material system must clearly distinguish between base material type, surface properties, and additional layers.
+1. Materials should be built from combined properties, not locked to a single material type
+An object should not be limited to only “glass” or only “metal” or only one effect at a time
+Most material traits should be able to exist together on the same object when they do not contradict each other
+2. Material properties should stack where physically reasonable
+A material can have base properties plus added layers or traits
+Example: rough glass with absorption, internal reflections, and a smooth outer coating all at the same time
+3. Some properties are base behaviors, others are added layers
+Base behavior defines what the object mainly is
+Extra traits modify or add to that behavior without replacing it entirely
+4. Contradictory material states should be prevented or clearly limited
+The UI should not allow combinations that do not make physical sense
+If two properties conflict, one should override the other or the UI should explain the limitation
+5. A single object should support layered and mixed material behavior
+Example: metal with roughness and clear coat
+Example: glass with frosted transmission, smooth surface reflections, absorption, and dispersion
+Example: diffuse base with subsurface scattering and surface variation
+
+
+
+GLASS: [For Glass, the following must exist all at the same time in order for the render to be as realistic as possible from the start without the user needing to do anything (but still allowing any parameter material changes)]
+
+1. Physically correct refraction (Snell’s law)
+Must bend rays based on index of refraction (IOR)
+Support entering/exiting materials properly (for example air ↔ glass transitions)
+Handle total internal reflection correctly
+
+2. Fresnel reflection (angle-based reflectivity)
+Reflection vs refraction ratio changes with angle
+At grazing angles → mostly reflection (critical for realism)
+Use full Fresnel equations (not just Schlick if aiming for maximum accuracy)
+
+3. Uses global spectral rendering system
+Glass automatically uses wavelength-based light behavior
+Dispersion is not optional and should always be present
+Each wavelength has a different refractive response
+
+4. Caustics support
+Focused light patterns from glass (bright patterns on surfaces)
+Requires advanced techniques:
+Bidirectional Path Tracing (BDPT)
+Metropolis Light Transport (MLT)
+Photon mapping (or hybrids)
+Standard path tracing struggles here
+
+5. Thickness awareness
+Thin vs thick glass should behave differently visually
+Light should not pass through identically regardless of object size
+
+6. Internal reflections
+Light should be able to bounce inside glass before exiting
+Important for realistic edges and depth
+
+7. Rough vs clear glass
+Smooth = sharp refraction
+Rough = frosted / blurry refraction
+
+8. Layered glass surfaces
+Ability to have a smooth surface over a rough interior
+Example: polished outer surface with frosted interior
+Should produce sharp reflections but blurry transmission
+
+
+
+
+
+
+GENERAL MATERIALS:
+
+1. Metal
+Fully reflective
+Supports roughness (sharp ↔ blurry reflections)
+Can have colored reflections
+
+2. Diffuse (matte)
+Soft light scattering
+No artificial shine
+
+3. Roughness control (global)
+All materials support roughness
+Controls clarity of reflections
+
+4. Emission
+Objects can emit light
+Used as real light sources (mesh lights)
+
+5. Surface variation
+Subtle imperfections (not perfectly uniform surfaces)
+
+6. Coating layer (clear coat)
+Thin outer layer over a material
+Adds an extra sharp reflection layer
+Example: car paint, polished surfaces
+
+7. Thin-film effects
+Very thin layers can create color shifts (iridescence)
+Example: soap bubbles, oil on water
+
+
+
+
+
+
+
+TRANSLUCENT PROPERTIES:
+
+1. Subsurface scattering
+Light should enter a material, scatter inside, and exit at a different point
+Creates soft, “glowy” look in materials
+Important for:
+Skin
+Wax
+Marble
+Leaves
+
+
+
+
+
+CAMERA:
+
+The render camera should be it's own window that can be docked, and it should also be a scene object that can be moved and rotated around in the main viewport.
+
+1. Depth of field
+Focus-based blur
+
+2. Exposure
+Controls brightness like a real camera
+
+3. White balance
+Adjust scene color temperature
+
+
+
+
+
+VOLUMETRICS
+1. Participating media (fog / smoke)
+Light should scatter inside volumes (not just on surfaces)
+Makes light rays visible in air (fog, dust, smoke)
+
+2. Volumetric objects (fog volumes)
+User can create a “fog cloud” as a movable object
+Supports position, scale, and shape
+Can be placed anywhere in the scene
+
+3. Light scattering in volumes
+Light beams should become visible when passing through fog
+Stronger with higher density
+
+4. Density control
+Controls how thick the fog is
+Low = subtle haze
+High = dense smoke
+
+5. Absorption in volumes
+Light fades as it travels through fog
+Can tint light (colored fog)
+
+
+
+
+
+
+
+
+
+UI:
+
+
+
+UI LAYOUT:
+
+1. Viewport-first design
+The viewport should be the dominant element on screen
+All editing should revolve around direct interaction with the viewport
+2. Inspector panel (left side)
+Context-sensitive (changes based on selection)
+Shows object, material, and light properties
+Should be clean and not overwhelming
+3. Minimal default UI
+Only essential elements visible on load
+Advanced controls hidden until needed
+4. Dockable windows
+Inspector and camera view should be movable/dockable
+Layout should remain flexible but simple
+
+
+UI PHILOSOPHY:
+
+1. Realism by default
+Materials should look realistic without user setup
+
+2. Simplicity first, depth available
+Easy to use at first glance
+Advanced control available when needed
+
+3. No unnecessary friction
+Avoid extra clicks, menus, or confirmations
+Keep workflow fast and direct
+Nested menus should remain shallow and fast to navigate, avoiding excessive depth.
+
+
+
+
+USER INTERACTION MODEL
+
+1. Right-click driven workflow
+Most actions accessed through right-click menus, with options that the user would most likely come back to consistently, in their own windows or in a more easily accessible place.
+Menus can have multiple levels (nested options)
+
+2. Context-aware menus
+Right-click on empty space → scene creation options
+Right-click on object → object + material options
+Right-click on material → material-specific options
+
+3. Direct manipulation
+Objects should be edited directly in the viewport
+Gizmos must be reliable and visually clear
+
+4. No mode-heavy workflow
+Avoid switching between many modes
+Most actions should be available without changing context
+
+
+
+
+
+
+MATERIAL EDITING SYSTEM:
+
+1. Preset-based starting point
+Materials should start from simple presets (glass, metal, diffuse, etc.)
+Presets should already look realistic by default
+Presets define an initial base material configuration, which can then be extended with additional properties and layers.
+
+2. Core controls always visible
+Only the most important controls shown initially
+Example:
+Color
+Roughness
+IOR (for glass)
+Emission (if applicable)
+
+3. Expandable advanced controls
+Additional properties hidden behind expandable sections
+User can reveal more control when needed
+Prevents UI clutter
+
+4. Add-property system
+Materials are built by adding properties, not toggling everything
+Example:
+Add coating
+Add thin film
+Add subsurface scattering
+
+5. Real-time feedback
+All changes should update the path traced view immediately
+No “apply” or confirmation steps
+
+6. Layered material clarity
+The UI should clearly show what layers/properties are active
+Order and stacking should be understandable
+(Optional but strong addition)
+
+
+
+
+
+
+
+
+
+
+RENDERING BEHAVIOR RULES:
+1. Accumulation reset rules
+Accumulation should only reset when necessary
+Small parameter changes should not fully reset if avoidable
+Camera movement should reset accumulation
+Object/material changes should partially or fully reset depending on impact
+
+2. Continuous refinement
+Image should progressively improve over time
+No flickering or instability between frames
+
+3. Stable stochastic behavior
+Noise patterns should converge consistently over time without flickering or instability
+
+
+
+
+
+TRANSFORM SYSTEM:
+1. Transform space
+Support local and world transform modes
+
+2. Gizmo behavior
+Gizmos must always align correctly with object or world space
+Must not lag or desync from object
+
+3. Precision control
+Allow fine adjustments (slow movement / snapping optional)
+
+
+
+
+
+PERFORMANCE EXPECTATIONS:
+1. Real-time interaction priority
+UI and camera movement must remain responsive at all times
+Rendering should never block input
+
+2. Progressive rendering priority
+Rendering quality can degrade temporarily during interaction
+Full quality should resume when interaction stops
+
+3. Graceful degradation
+System should reduce quality rather than freeze or crash
+
+
+
+
+
+MATERIAL PRIORITY RULES:
+1. Layer order matters
+Top layers (like coating) affect final appearance first
+Base material defines underlying behavior
+
+2. Conflict handling
+When properties conflict, system must resolve predictably
+UI should clearly indicate which property is dominant
+
+3. Default correctness
+Default material setup must always produce physically plausible results
+
+
+
+
+
+
+
+VIEWPORT BEHAVIOR:
+1. Navigation priority
+Right-click navigation must always override other controls
+Movement must feel consistent and smooth
+
+2. Input separation
+Navigation input must not interfere with editing input
+Editing should only occur when explicitly intended
+
+3. Visual clarity
+UI overlays (gizmos, highlights) must not interfere with scene visibility
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

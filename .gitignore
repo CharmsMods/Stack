@@ -1,0 +1,41 @@
+# --- C++ / CMake ---
+build/
+bin/
+out/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+install/
+
+# --- Visual Studio ---
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.db
+*.opendb
+*.ipch
+*.aps
+*.ncb
+*.sdf
+*.user
+*.pdb
+*.ilk
+*.exe
+*.obj
+*.lib
+*.dll
+*.exp
+
+# --- System / OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Other ---
+*.log
+*.tmp
+node_modules/
+dist/

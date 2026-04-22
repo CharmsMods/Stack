@@ -1,0 +1,17 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint queueIndex = gl_GlobalInvocationID.x;
+    if (queueIndex >= uint(uPixelCount) || queueIndex >= uActiveCount) {
+        return;
+    }
+
+    uint rayIndex = uActiveQueue[queueIndex];
+    RayState rayState = uRayStates[rayIndex];
+    if (rayState.direction.w < 0.5) {
+        uHitStates[rayIndex] = MakeMissState();
+        return;
+    }
+
+    uHitStates[rayIndex] = TraceScene(rayState.origin.xyz, normalize(rayState.direction.xyz));
+}

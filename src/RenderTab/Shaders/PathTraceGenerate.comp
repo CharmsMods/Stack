@@ -1,0 +1,59 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= uint(uPixelCount)) {
+        return;
+    }
+
+    ivec2 pixelCoord = PixelCoordFromIndex(index);
+    vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(uResolution);
+    vec2 centered = uv * 2.0 - 1.0;
+
+    uint rngState = uint(uEpoch) * 747796405u + index * 2891336453u + uint(max(uSampleIndex, 0)) * 277803737u;
+    vec2 jitter = (randomFloat2(rngState) - 0.5) / vec2(max(uResolution, ivec2(1)));
+    centered += jitter;
+
+    vec3 forward = ForwardFromYawPitch(uYawDegrees, uPitchDegrees);
+    vec3 right = RightFromForward(forward);
+    vec3 up = UpFromBasis(right, forward);
+    float aspectRatio = float(uResolution.x) / float(max(uResolution.y, 1));
+    float halfTan = tan(radians(uFieldOfViewDegrees) * 0.5);
+    vec3 direction = normalize(
+        forward +
+        centered.x * aspectRatio * halfTan * right +
+        centered.y * halfTan * up);
+
+    vec3 origin = uCameraPosition;
+    if (uApertureRadius > kEpsilon && uFocusDistance > kEpsilon) {
+        float focusT = uFocusDistance / max(dot(direction, forward), kEpsilon);
+        vec3 focusPoint = origin + direction * focusT;
+        vec2 lensSample = SampleConcentricDisk(randomFloat2(rngState)) * uApertureRadius;
+        vec3 lensOffset = right * lensSample.x + up * lensSample.y;
+        origin += lensOffset;
+        direction = normalize(focusPoint - origin);
+    }
+
+    RayState rayState;
+    rayState.origin = vec4(origin, 0.0);
+    rayState.direction = vec4(direction, 1.0);
+    rayState.throughput = vec4(1.0);
+    rayState.radiance = vec4(0.0);
+    rayState.wavelengths = SampleHeroWavelengths(rngState);
+    rayState.wavelengthPdfs = vec4(1.0);
+    rayState.absorptionCoefficients = vec4(0.0);
+    rayState.meta = ivec4(int(index), 0, 0, 0);
+    rayState.params = vec4(1.0, float(kDebugSourceClassNone), -1.0, 0.0);
+    uRayStates[index] = rayState;
+    uHitStates[index] = MakeMissState();
+    uActiveQueue[index] = index;
+    uNextQueue[index] = 0u;
+    ResetSelectedRayLog(index);
+
+    if (index == 0u) {
+        uActiveCount = uint(uPixelCount);
+        uNextCount = 0u;
+        uShadowCount = 0u;
+        uPixelCountStored = uint(uPixelCount);
+    }
+}

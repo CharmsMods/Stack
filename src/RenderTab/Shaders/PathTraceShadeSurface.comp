@@ -1,0 +1,173 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint queueIndex = gl_GlobalInvocationID.x;
+    if (queueIndex >= uint(uPixelCount) || queueIndex >= uActiveCount) {
+        return;
+    }
+
+    uint rayIndex = uActiveQueue[queueIndex];
+    RayState rayState = uRayStates[rayIndex];
+    if (rayState.direction.w < 0.5) {
+        return;
+    }
+
+    HitState hit = uHitStates[rayIndex];
+    if (!HitStateIsValid(hit)) {
+        if (uDebugMode == kDebugModeRefractedSourceClass && rayState.params.w > 0.5) {
+            rayState.params.y = float(kDebugSourceClassMiss);
+            rayState.params.w = 0.0;
+        }
+        rayState.radiance += rayState.throughput * EvaluateEnvironmentSpectrum(normalize(rayState.direction.xyz), rayState.wavelengths);
+        rayState.direction.w = 0.0;
+        uRayStates[rayIndex] = rayState;
+        return;
+    }
+
+    int materialIndex = HitMaterialIndex(hit);
+    if (materialIndex < 0) {
+        rayState.direction.w = 0.0;
+        uRayStates[rayIndex] = rayState;
+        return;
+    }
+
+    MaterialData material = uMaterials[materialIndex];
+    int objectId = HitObjectId(hit);
+    vec3 rayDirection = normalize(rayState.direction.xyz);
+    vec3 hitPosition = rayState.origin.xyz + rayDirection * hit.hit0.x;
+    vec3 shadingNormal = normalize(hit.hit1.xyz);
+    vec3 geometricNormal = normalize(hit.hit2.xyz);
+    bool frontFace = hit.hit1.w > 0.5;
+
+    if (uDebugMode == kDebugModeSelfHitHeatmap) {
+        if (rayState.params.z >= 0.0 &&
+            abs(rayState.params.z - float(objectId)) < 0.5 &&
+            hit.hit0.x <= 0.01) {
+            rayState.params.w = 1.0;
+        }
+        rayState.params.z = float(objectId);
+    }
+
+    if (uDebugMode == kDebugModeRefractedSourceClass &&
+        rayState.params.w > 0.5 &&
+        !IsGlass(material) &&
+        rayState.meta.z == 0) {
+        rayState.params.y = MaterialHasEmission(material)
+            ? float(kDebugSourceClassEmissive)
+            : float(kDebugSourceClassDark);
+        rayState.params.w = 0.0;
+    }
+
+    if (rayState.meta.z > 0) {
+        rayState.throughput *= EvaluateAbsorption(
+            rayState.absorptionCoefficients,
+            rayState.wavelengths,
+            hit.hit0.x,
+            rayState.params.x);
+    }
+
+    if (MaterialHasEmission(material)) {
+        rayState.radiance += rayState.throughput * EvaluateEmissionSpectrum(material, rayState.wavelengths);
+    }
+
+    if (uBounceIndex >= (uMaxBounces - 1)) {
+        rayState.direction.w = 0.0;
+        uRayStates[rayIndex] = rayState;
+        return;
+    }
+
+    uint rngState =
+        uint(uEpoch) * 747796405u +
+        uint(max(uSampleIndex, 0)) * 277803737u +
+        uint(max(uBounceIndex, 0)) * 1442695041u +
+        rayIndex * 2891336453u;
+
+    ShadowRay shadowRay;
+    if (SampleDirectLight(
+            material,
+            hitPosition,
+            hit.hit0.x,
+            shadingNormal,
+            geometricNormal,
+            -rayDirection,
+            rayState.wavelengths,
+            rngState,
+            shadowRay)) {
+        uint shadowIndex = atomicAdd(uShadowCount, 1u);
+        if (shadowIndex < uint(uPixelCount)) {
+            shadowRay.meta = ivec4(int(rayIndex), 0, 0, 0);
+            uShadowQueue[shadowIndex] = shadowRay;
+        }
+    }
+
+    vec3 nextDirection = rayDirection;
+    vec4 nextAbsorptionCoefficients = rayState.absorptionCoefficients;
+    float nextAbsorptionDistance = rayState.params.x;
+    int insideMedium = rayState.meta.z;
+    bool isDelta = false;
+    int debugDecision = kDebugDecisionNone;
+    vec4 debugEtaInfo = vec4(1.0, 1.0, 1.0, 0.0);
+    vec4 bounceWeight = SampleSurfaceBounce(
+        material,
+        hitPosition,
+        shadingNormal,
+        geometricNormal,
+        frontFace,
+        -rayDirection,
+        rayState.wavelengths,
+        rngState,
+        nextDirection,
+        nextAbsorptionCoefficients,
+        nextAbsorptionDistance,
+        insideMedium,
+        isDelta,
+        debugDecision,
+        debugEtaInfo);
+
+    if (all(lessThanEqual(bounceWeight, vec4(kEpsilon)))) {
+        rayState.direction.w = 0.0;
+        uRayStates[rayIndex] = rayState;
+        return;
+    }
+
+    if (uDebugMode == kDebugModeRefractedSourceClass && uBounceIndex == 0 && IsGlass(material)) {
+        const bool tracksRefractedSource =
+            debugDecision == kDebugDecisionRefract ||
+            debugDecision == kDebugDecisionThinSheetPass;
+        rayState.params.y = float(kDebugSourceClassNone);
+        rayState.params.w = tracksRefractedSource ? 1.0 : 0.0;
+    }
+
+    vec3 spawnedOrigin = OffsetRayOrigin(hitPosition, geometricNormal, nextDirection, hit.hit0.x);
+    AppendSelectedRayLog(
+        rayIndex,
+        hit.hit0.x,
+        objectId,
+        materialIndex,
+        frontFace,
+        insideMedium,
+        geometricNormal,
+        shadingNormal,
+        debugEtaInfo.x,
+        debugEtaInfo.y,
+        debugEtaInfo.z,
+        debugEtaInfo.w,
+        debugDecision,
+        spawnedOrigin,
+        normalize(nextDirection));
+
+    rayState.origin = vec4(spawnedOrigin, 0.0);
+    rayState.direction = vec4(normalize(nextDirection), 1.0);
+    rayState.throughput *= bounceWeight;
+    rayState.absorptionCoefficients = nextAbsorptionCoefficients;
+    rayState.meta.y += 1;
+    rayState.meta.z = insideMedium;
+    rayState.meta.w = isDelta ? 1 : 0;
+    rayState.params.x = nextAbsorptionDistance;
+    uRayStates[rayIndex] = rayState;
+
+    uint nextIndex = atomicAdd(uNextCount, 1u);
+    if (nextIndex < uint(uPixelCount)) {
+        uNextQueue[nextIndex] = rayIndex;
+    }
+}

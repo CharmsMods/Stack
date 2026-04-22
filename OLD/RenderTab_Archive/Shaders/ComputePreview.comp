@@ -1,0 +1,1740 @@
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(rgba32f, binding = 0) uniform image2D uAccumulationImage;
+layout(rgba8, binding = 1) uniform writeonly image2D uDisplayImage;
+layout(rgba32f, binding = 2) uniform image2D uMomentImage;
+
+struct SphereData {
+    vec4 centerRadius;
+    vec4 albedo;
+    vec4 emission;
+    vec4 surfaceParams;
+    vec4 dielectricParams;
+    vec4 mediumParams0;
+    vec4 mediumParams1;
+    ivec4 textureRefs;
+};
+
+struct TriangleData {
+    vec4 a;
+    vec4 b;
+    vec4 c;
+    vec4 normalA;
+    vec4 normalB;
+    vec4 normalC;
+    vec4 uvAuvB;
+    vec4 uvC;
+    vec4 albedo;
+    vec4 emission;
+    vec4 surfaceParams;
+    vec4 dielectricParams;
+    vec4 mediumParams0;
+    vec4 mediumParams1;
+    ivec4 textureRefs;
+};
+
+struct PrimitiveRefData {
+    ivec4 meta;
+};
+
+struct BvhNodeData {
+    vec4 minBounds;
+    vec4 maxBounds;
+    ivec4 meta0;
+    ivec4 meta1;
+};
+
+struct SceneLightData {
+    vec4 positionType;
+    vec4 directionRange;
+    vec4 colorIntensity;
+    vec4 sizeAndAngles;
+    vec4 rightEnabled;
+    vec4 upData;
+};
+
+layout(std430, binding = 2) readonly buffer SphereBuffer {
+    SphereData uSpheres[];
+};
+
+layout(std430, binding = 3) readonly buffer TriangleBuffer {
+    TriangleData uTriangles[];
+};
+
+layout(std430, binding = 4) readonly buffer PrimitiveRefBuffer {
+    PrimitiveRefData uPrimitiveRefs[];
+};
+
+layout(std430, binding = 5) readonly buffer BvhBuffer {
+    BvhNodeData uBvhNodes[];
+};
+
+layout(std430, binding = 6) readonly buffer LightBuffer {
+    SceneLightData uLights[];
+};
+
+uniform sampler2DArray uBaseColorTextures;
+uniform sampler2DArray uMaterialParamTextures;
+uniform sampler2DArray uEmissiveTextures;
+
+uniform ivec2 uResolution;
+uniform int uSampleIndex;
+uniform int uPreviewSampleTarget;
+uniform int uAccumulationEnabled;
+uniform int uIntegratorMode;
+uniform int uMaxBounces;
+uniform int uDisplayMode;
+uniform int uTonemapMode;
+uniform int uBackgroundMode;
+uniform int uDebugViewMode;
+uniform int uEnvironmentEnabled;
+uniform float uEnvironmentIntensity;
+uniform int uFogEnabled;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uFogAnisotropy;
+uniform int uUseBvhTraversal;
+uniform int uSphereCount;
+uniform int uTriangleCount;
+uniform int uPrimitiveRefCount;
+uniform int uBvhNodeCount;
+uniform int uLightCount;
+uniform vec3 uCameraPosition;
+uniform float uYawDegrees;
+uniform float uPitchDegrees;
+uniform float uFieldOfViewDegrees;
+uniform float uFocusDistance;
+uniform float uApertureRadius;
+uniform float uExposure;
+
+const float kEpsilon = 0.0001;
+const float kHitDistanceMax = 1000.0;
+const float kPi = 3.14159265359;
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Hit {
+    float t;
+    vec3 normal;
+    vec3 shadingNormal;
+    vec3 geometricNormal;
+    vec3 albedo;
+    vec3 emission;
+    vec2 uv;
+    float roughness;
+    float metallic;
+    float transmission;
+    float ior;
+    vec3 absorptionColor;
+    float absorptionDistance;
+    float transmissionRoughness;
+    bool thinWalled;
+    int geometryType;
+    int geometryIndex;
+    int materialId;
+    int primitiveId;
+    int bvhDepth;
+    ivec4 textureRefs;
+};
+
+struct LightSample {
+    vec3 position;
+    vec3 normal;
+    vec3 emission;
+    float pdfArea;
+    bool valid;
+};
+
+struct SurfaceBsdfState {
+    vec3 normal;
+    vec3 shadingNormal;
+    vec3 geometricNormal;
+    vec3 incidentDirection;
+    vec3 diffuseColor;
+    vec3 specularColor;
+    vec3 reflectionDirection;
+    float roughness;
+    float metallic;
+    float phongExponent;
+    float diffuseProbability;
+    float specularProbability;
+    float transmission;
+    float ior;
+    float transmissionRoughness;
+    bool thinWalled;
+    bool frontFace;
+};
+
+struct BsdfSample {
+    vec3 direction;
+    vec3 weight;
+    float pdf;
+    bool isDelta;
+    bool isTransmission;
+};
+
+vec3 offsetRayOrigin(vec3 position, vec3 geometricNormal, vec3 direction, float hitDistance);
+float fresnelDielectric(float etaI, float etaT, float cosThetaI, out float cosThetaT);
+bool safeRefractDirection(vec3 incidentDirection, vec3 normal, float eta, out vec3 refractedDirection);
+bool isLightEnabled(SceneLightData light);
+int getLightType(SceneLightData light);
+vec3 getLightDirection(SceneLightData light);
+vec3 getLightColor(SceneLightData light);
+float getLightIntensity(SceneLightData light);
+
+Hit MakeDefaultHit(float maxDistance) {
+    Hit hit;
+    hit.t = maxDistance;
+    hit.normal = vec3(0.0, 1.0, 0.0);
+    hit.shadingNormal = hit.normal;
+    hit.geometricNormal = hit.normal;
+    hit.albedo = vec3(1.0);
+    hit.emission = vec3(0.0);
+    hit.uv = vec2(0.0);
+    hit.roughness = 1.0;
+    hit.metallic = 0.0;
+    hit.transmission = 0.0;
+    hit.ior = 1.5;
+    hit.absorptionColor = vec3(1.0);
+    hit.absorptionDistance = 1.0;
+    hit.transmissionRoughness = 0.0;
+    hit.thinWalled = false;
+    hit.geometryType = -1;
+    hit.geometryIndex = -1;
+    hit.materialId = -1;
+    hit.primitiveId = -1;
+    hit.bvhDepth = 0;
+    hit.textureRefs = ivec4(-1);
+    return hit;
+}
+
+float hash13(vec3 seed) {
+    return fract(sin(dot(seed, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+vec2 hash23(vec3 seed) {
+    return vec2(
+        hash13(seed + vec3(0.17, 0.31, 0.53)),
+        hash13(seed + vec3(1.91, 2.73, 3.37)));
+}
+
+vec3 evaluateBackground(vec2 uv, vec2 centered, float samplePhase) {
+    float yaw = radians(uYawDegrees);
+    float pitch = radians(uPitchDegrees);
+    float viewTilt = clamp((uPitchDegrees + 90.0) / 180.0, 0.0, 1.0);
+    float focusFactor = clamp(uFocusDistance / 10.0, 0.1, 3.0);
+    float fovFactor = clamp(uFieldOfViewDegrees / 110.0, 0.15, 1.0);
+
+    vec2 rotated = vec2(
+        centered.x * cos(yaw) - centered.y * sin(yaw),
+        centered.x * sin(yaw) + centered.y * cos(yaw)
+    );
+    rotated.y += sin(pitch) * 0.25;
+
+    vec3 gradientLow = vec3(0.10, 0.13, 0.20);
+    vec3 gradientHigh = vec3(0.55, 0.72, 0.96);
+    vec3 gradient = mix(gradientLow, gradientHigh, clamp(uv.y + viewTilt * 0.2, 0.0, 1.0));
+
+    float checker = mod(floor((uv.x + samplePhase * 0.01) * (12.0 + focusFactor * 2.0)) +
+                        floor((uv.y - samplePhase * 0.01) * (12.0 + focusFactor * 2.0)), 2.0);
+    vec3 checkerColor = mix(vec3(0.14, 0.17, 0.22), vec3(0.28, 0.32, 0.40), checker);
+
+    vec2 gridUv = rotated * (7.0 + fovFactor * 6.0);
+    vec2 gridLines = abs(fract(gridUv) - 0.5);
+    float grid = 1.0 - smoothstep(0.44, 0.50, min(gridLines.x, gridLines.y));
+    vec3 gridColor = mix(vec3(0.05, 0.07, 0.11), vec3(0.18, 0.48, 0.82), grid);
+
+    if (uBackgroundMode == 3) {
+        return vec3(0.0);
+    }
+    if (uBackgroundMode == 1) {
+        return checkerColor;
+    }
+    if (uBackgroundMode == 2) {
+        return mix(gradient * 0.65, gridColor, 0.8);
+    }
+    return gradient;
+}
+
+vec3 evaluateEnvironmentDirection(vec3 direction) {
+    if (uEnvironmentEnabled == 0 || uEnvironmentIntensity <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float upAmount = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 zenith = vec3(0.18, 0.28, 0.54);
+    vec3 horizon = vec3(0.78, 0.84, 0.92);
+    vec3 ground = vec3(0.05, 0.06, 0.08);
+
+    vec3 sky = mix(horizon, zenith, pow(upAmount, 0.65));
+    if (direction.y < 0.0) {
+        float groundBlend = clamp(direction.y + 1.0, 0.0, 1.0);
+        sky = mix(ground, horizon * 0.22, groundBlend);
+    }
+
+    return sky * uEnvironmentIntensity;
+}
+
+vec3 evaluateFogTransmittance(float distance) {
+    if (uFogEnabled == 0 || uFogDensity <= kEpsilon) {
+        return vec3(1.0);
+    }
+
+    return vec3(exp(-max(distance, 0.0) * uFogDensity));
+}
+
+vec3 evaluateFogInscatter(vec3 rayDirection, float distance) {
+    if (uFogEnabled == 0 || uFogDensity <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float transmittance = exp(-max(distance, 0.0) * uFogDensity);
+    float integratedDensity = 1.0 - transmittance;
+    vec3 inscatter = evaluateEnvironmentDirection(rayDirection) * 0.25;
+
+    for (int i = 0; i < uLightCount; ++i) {
+        SceneLightData light = uLights[i];
+        if (!isLightEnabled(light) || getLightType(light) != 3) {
+            continue;
+        }
+
+        vec3 sunDirection = -getLightDirection(light);
+        float phase = henyeyGreenstein(clamp(dot(rayDirection, sunDirection), -1.0, 1.0), uFogAnisotropy);
+        inscatter += getLightColor(light) * getLightIntensity(light) * phase * 18.0;
+    }
+
+    return uFogColor * inscatter * integratedDensity;
+}
+
+bool isPathTraceAovMode() {
+    return uDisplayMode >= 3 && uDisplayMode <= 7;
+}
+
+vec3 applyColorDisplayMode(vec3 color, vec2 uv, int sampleIndex) {
+    if (uDisplayMode == 1) {
+        float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        return vec3(luma);
+    }
+
+    if (uDisplayMode == 2) {
+        float tint = clamp(float(sampleIndex + 1) / 64.0, 0.0, 1.0);
+        return mix(color, vec3(tint, uv.x, uv.y), 0.35);
+    }
+
+    return color;
+}
+
+vec3 applyLinearClampTonemap(vec3 color) {
+    return clamp(color, 0.0, 1.0);
+}
+
+vec3 applyReinhardTonemap(vec3 color) {
+    vec3 safeColor = max(color, vec3(0.0));
+    return safeColor / (vec3(1.0) + safeColor);
+}
+
+vec3 applyAcesFilmTonemap(vec3 color) {
+    vec3 safeColor = max(color, vec3(0.0));
+    vec3 numerator = safeColor * (2.51 * safeColor + 0.03);
+    vec3 denominator = safeColor * (2.43 * safeColor + 0.59) + 0.14;
+    return clamp(numerator / max(denominator, vec3(kEpsilon)), 0.0, 1.0);
+}
+
+vec3 applyPreviewTonemap(vec3 color) {
+    if (uTonemapMode == 1) {
+        return applyReinhardTonemap(color);
+    }
+    if (uTonemapMode == 2) {
+        return applyAcesFilmTonemap(color);
+    }
+    return applyLinearClampTonemap(color);
+}
+
+float maxComponent(vec3 value) {
+    return max(value.x, max(value.y, value.z));
+}
+
+bool isFiniteFloat(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+bool isFiniteVec3(vec3 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+bool isEmissiveValue(vec3 emission) {
+    return maxComponent(emission) > 0.0001;
+}
+
+bool isDielectricValue(float transmission, float ior) {
+    return transmission > 0.0001 && ior > 1.0 + kEpsilon;
+}
+
+bool isDielectricSurface(float transmission, float ior, float metallic) {
+    return transmission > 0.0001 &&
+        ior > 1.0 + kEpsilon &&
+        metallic <= 0.08;
+}
+
+bool isDeltaDielectricSurface(float transmission, float ior, float roughness, float transmissionRoughness, float metallic) {
+    return transmission > 0.0001 &&
+        ior > 1.0 + kEpsilon &&
+        max(roughness, transmissionRoughness) <= 0.08 &&
+        metallic <= 0.08;
+}
+
+vec3 evaluateAbsorptionTransmittance(vec3 absorptionColor, float absorptionDistance, float distance) {
+    vec3 clampedColor = clamp(absorptionColor, vec3(0.001), vec3(1.0));
+    float clampedDistance = max(absorptionDistance, 0.01);
+    vec3 sigmaA = -log(clampedColor) / clampedDistance;
+    return exp(-sigmaA * max(distance, 0.0));
+}
+
+float henyeyGreenstein(float cosTheta, float g) {
+    float gSquared = g * g;
+    float denominator = pow(max(1.0 + gSquared - 2.0 * g * cosTheta, 0.001), 1.5);
+    return (1.0 - gSquared) / max(4.0 * kPi * denominator, 0.001);
+}
+
+float luminance(vec3 value) {
+    return dot(value, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float textureLayer(int textureIndex) {
+    return textureIndex >= 0 ? float(textureIndex + 1) : 0.0;
+}
+
+vec2 wrapUv(vec2 uv) {
+    vec2 wrapped = fract(uv);
+    if (wrapped.x < 0.0) {
+        wrapped.x += 1.0;
+    }
+    if (wrapped.y < 0.0) {
+        wrapped.y += 1.0;
+    }
+    return wrapped;
+}
+
+vec3 sampleTextureArrayRgb(sampler2DArray textureArray, int textureIndex, vec2 uv) {
+    return texture(textureArray, vec3(wrapUv(uv), textureLayer(textureIndex))).rgb;
+}
+
+void applyMaterialTextures(inout Hit hit) {
+    hit.albedo *= sampleTextureArrayRgb(uBaseColorTextures, hit.textureRefs.x, hit.uv);
+    vec3 materialParams = sampleTextureArrayRgb(uMaterialParamTextures, hit.textureRefs.y, hit.uv);
+    hit.roughness = clamp(hit.roughness * materialParams.g, 0.0, 1.0);
+    hit.metallic = clamp(hit.metallic * materialParams.b, 0.0, 1.0);
+    if (hit.textureRefs.z >= 0) {
+        hit.emission *= sampleTextureArrayRgb(uEmissiveTextures, hit.textureRefs.z, hit.uv);
+    }
+}
+
+vec3 safeInvDir(vec3 direction) {
+    vec3 safeDirection = direction;
+    if (abs(safeDirection.x) < kEpsilon) {
+        safeDirection.x = safeDirection.x < 0.0 ? -kEpsilon : kEpsilon;
+    }
+    if (abs(safeDirection.y) < kEpsilon) {
+        safeDirection.y = safeDirection.y < 0.0 ? -kEpsilon : kEpsilon;
+    }
+    if (abs(safeDirection.z) < kEpsilon) {
+        safeDirection.z = safeDirection.z < 0.0 ? -kEpsilon : kEpsilon;
+    }
+    return 1.0 / safeDirection;
+}
+
+float intersectAabb(vec3 rayOrigin, vec3 invDir, vec3 minimumBounds, vec3 maximumBounds, float maxDistance) {
+    vec3 t0 = (minimumBounds - rayOrigin) * invDir;
+    vec3 t1 = (maximumBounds - rayOrigin) * invDir;
+    vec3 tMin = min(t0, t1);
+    vec3 tMax = max(t0, t1);
+
+    float entry = max(max(tMin.x, tMin.y), max(tMin.z, 0.0));
+    float exit = min(min(tMax.x, tMax.y), tMax.z);
+    if (exit < entry || entry >= maxDistance) {
+        return -1.0;
+    }
+
+    return entry;
+}
+
+bool intersectSphere(int sphereIndex, Ray ray, inout Hit hit, int primitiveId, int bvhDepth) {
+    SphereData sphere = uSpheres[sphereIndex];
+    vec3 oc = ray.origin - sphere.centerRadius.xyz;
+    float b = dot(oc, ray.direction);
+    float c = dot(oc, oc) - sphere.centerRadius.w * sphere.centerRadius.w;
+    float discriminant = b * b - c;
+    if (discriminant < 0.0) {
+        return false;
+    }
+
+    float sqrtDiscriminant = sqrt(discriminant);
+    float t = -b - sqrtDiscriminant;
+    if (t <= kEpsilon) {
+        t = -b + sqrtDiscriminant;
+    }
+
+    if (t <= kEpsilon || t >= hit.t) {
+        return false;
+    }
+
+    vec3 position = ray.origin + ray.direction * t;
+    vec3 sphereNormal = normalize(position - sphere.centerRadius.xyz);
+    hit.t = t;
+    hit.normal = sphereNormal;
+    hit.shadingNormal = sphereNormal;
+    hit.geometricNormal = sphereNormal;
+    hit.albedo = sphere.albedo.xyz;
+    hit.emission = sphere.emission.xyz;
+    hit.uv = vec2(
+        0.5 + atan(sphereNormal.z, sphereNormal.x) * (0.5 / kPi),
+        0.5 - asin(clamp(sphereNormal.y, -1.0, 1.0)) * (1.0 / kPi));
+    hit.roughness = clamp(sphere.surfaceParams.x, 0.0, 1.0);
+    hit.metallic = clamp(sphere.surfaceParams.y, 0.0, 1.0);
+    hit.transmission = clamp(sphere.dielectricParams.x, 0.0, 1.0);
+    hit.ior = max(sphere.dielectricParams.y, 1.0);
+    hit.absorptionColor = clamp(sphere.mediumParams0.xyz, vec3(0.0), vec3(1.0));
+    hit.absorptionDistance = max(sphere.mediumParams0.w, 0.01);
+    hit.transmissionRoughness = clamp(sphere.mediumParams1.x, 0.0, 1.0);
+    hit.thinWalled = sphere.mediumParams1.y > 0.5;
+    hit.geometryType = 0;
+    hit.geometryIndex = sphereIndex;
+    hit.materialId = int(round(sphere.surfaceParams.z));
+    hit.primitiveId = primitiveId;
+    hit.bvhDepth = bvhDepth;
+    hit.textureRefs = sphere.textureRefs;
+    applyMaterialTextures(hit);
+    return true;
+}
+
+bool intersectTriangle(int triangleIndex, Ray ray, inout Hit hit, int primitiveId, int bvhDepth) {
+    TriangleData triangle = uTriangles[triangleIndex];
+    vec3 edge1 = triangle.b.xyz - triangle.a.xyz;
+    vec3 edge2 = triangle.c.xyz - triangle.a.xyz;
+    vec3 p = cross(ray.direction, edge2);
+    float det = dot(edge1, p);
+    if (abs(det) < kEpsilon) {
+        return false;
+    }
+
+    float invDet = 1.0 / det;
+    vec3 tvec = ray.origin - triangle.a.xyz;
+    float u = dot(tvec, p) * invDet;
+    if (u < 0.0 || u > 1.0) {
+        return false;
+    }
+
+    vec3 q = cross(tvec, edge1);
+    float v = dot(ray.direction, q) * invDet;
+    if (v < 0.0 || u + v > 1.0) {
+        return false;
+    }
+
+    float t = dot(edge2, q) * invDet;
+    if (t <= kEpsilon || t >= hit.t) {
+        return false;
+    }
+
+    float w = 1.0 - u - v;
+    vec3 shadingNormal = normalize(
+        triangle.normalA.xyz * w +
+        triangle.normalB.xyz * u +
+        triangle.normalC.xyz * v);
+    vec3 geometricNormal = normalize(cross(edge1, edge2));
+    if (length(shadingNormal) <= kEpsilon) {
+        shadingNormal = geometricNormal;
+    }
+    if (dot(shadingNormal, geometricNormal) < 0.0) {
+        shadingNormal *= -1.0;
+    }
+
+    hit.t = t;
+    hit.normal = shadingNormal;
+    hit.shadingNormal = shadingNormal;
+    hit.geometricNormal = geometricNormal;
+    hit.albedo = triangle.albedo.xyz;
+    hit.emission = triangle.emission.xyz;
+    hit.uv = triangle.uvAuvB.xy * w + triangle.uvAuvB.zw * u + triangle.uvC.xy * v;
+    hit.roughness = clamp(triangle.surfaceParams.x, 0.0, 1.0);
+    hit.metallic = clamp(triangle.surfaceParams.y, 0.0, 1.0);
+    hit.transmission = clamp(triangle.dielectricParams.x, 0.0, 1.0);
+    hit.ior = max(triangle.dielectricParams.y, 1.0);
+    hit.absorptionColor = clamp(triangle.mediumParams0.xyz, vec3(0.0), vec3(1.0));
+    hit.absorptionDistance = max(triangle.mediumParams0.w, 0.01);
+    hit.transmissionRoughness = clamp(triangle.mediumParams1.x, 0.0, 1.0);
+    hit.thinWalled = triangle.mediumParams1.y > 0.5;
+    hit.geometryType = 1;
+    hit.geometryIndex = triangleIndex;
+    hit.materialId = int(round(triangle.surfaceParams.z));
+    hit.primitiveId = primitiveId;
+    hit.bvhDepth = bvhDepth;
+    hit.textureRefs = triangle.textureRefs;
+    applyMaterialTextures(hit);
+    return true;
+}
+
+bool intersectPrimitiveRef(int primitiveRefIndex, Ray ray, inout Hit hit, int bvhDepth) {
+    PrimitiveRefData primitiveRef = uPrimitiveRefs[primitiveRefIndex];
+    if (primitiveRef.meta.x == 0) {
+        return intersectSphere(primitiveRef.meta.y, ray, hit, primitiveRefIndex, bvhDepth);
+    }
+    return intersectTriangle(primitiveRef.meta.y, ray, hit, primitiveRefIndex, bvhDepth);
+}
+
+bool traceSceneBruteForce(Ray ray, inout Hit hit) {
+    bool foundHit = false;
+
+    for (int i = 0; i < uSphereCount; ++i) {
+        foundHit = intersectSphere(i, ray, hit, i, 0) || foundHit;
+    }
+
+    for (int i = 0; i < uTriangleCount; ++i) {
+        foundHit = intersectTriangle(i, ray, hit, uSphereCount + i, 0) || foundHit;
+    }
+
+    return foundHit;
+}
+
+bool traceSceneBvh(Ray ray, inout Hit hit) {
+    if (uBvhNodeCount == 0 || uPrimitiveRefCount == 0) {
+        return false;
+    }
+
+    int stack[64];
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+    bool foundHit = false;
+    vec3 invDir = safeInvDir(ray.direction);
+
+    while (stackSize > 0) {
+        int nodeIndex = stack[--stackSize];
+        BvhNodeData node = uBvhNodes[nodeIndex];
+        float boundsHit = intersectAabb(ray.origin, invDir, node.minBounds.xyz, node.maxBounds.xyz, hit.t);
+        if (boundsHit < 0.0) {
+            continue;
+        }
+
+        if (node.meta0.w > 0) {
+            for (int i = 0; i < node.meta0.w; ++i) {
+                int primitiveIndex = node.meta0.z + i;
+                foundHit = intersectPrimitiveRef(primitiveIndex, ray, hit, node.meta1.x) || foundHit;
+            }
+            continue;
+        }
+
+        int leftChild = node.meta0.x;
+        int rightChild = node.meta0.y;
+
+        float leftHit = -1.0;
+        float rightHit = -1.0;
+        if (leftChild >= 0) {
+            BvhNodeData leftNode = uBvhNodes[leftChild];
+            leftHit = intersectAabb(ray.origin, invDir, leftNode.minBounds.xyz, leftNode.maxBounds.xyz, hit.t);
+        }
+        if (rightChild >= 0) {
+            BvhNodeData rightNode = uBvhNodes[rightChild];
+            rightHit = intersectAabb(ray.origin, invDir, rightNode.minBounds.xyz, rightNode.maxBounds.xyz, hit.t);
+        }
+
+        if (leftHit >= 0.0 && rightHit >= 0.0) {
+            if (leftHit < rightHit) {
+                stack[stackSize++] = rightChild;
+                stack[stackSize++] = leftChild;
+            } else {
+                stack[stackSize++] = leftChild;
+                stack[stackSize++] = rightChild;
+            }
+        } else if (leftHit >= 0.0) {
+            stack[stackSize++] = leftChild;
+        } else if (rightHit >= 0.0) {
+            stack[stackSize++] = rightChild;
+        }
+    }
+
+    return foundHit;
+}
+
+bool traceScene(Ray ray, inout Hit hit) {
+    if (uUseBvhTraversal != 0) {
+        return traceSceneBvh(ray, hit);
+    }
+    return traceSceneBruteForce(ray, hit);
+}
+
+bool traceSceneAnyHit(Ray ray, float maxDistance) {
+    Hit hit = MakeDefaultHit(maxDistance);
+    return traceScene(ray, hit);
+}
+
+bool traceSceneOpaqueAnyHit(Ray ray, float maxDistance) {
+    float remainingDistance = maxDistance;
+    for (int step = 0; step < 16; ++step) {
+        Hit hit = MakeDefaultHit(remainingDistance);
+        if (!traceScene(ray, hit)) {
+            return false;
+        }
+
+        if (hit.t <= kEpsilon || hit.t >= remainingDistance) {
+            return false;
+        }
+
+        vec3 hitPosition = ray.origin + ray.direction * hit.t;
+        if (isDielectricSurface(hit.transmission, hit.ior, hit.metallic)) {
+            vec3 geometricNormal = dot(ray.direction, hit.geometricNormal) < 0.0
+                ? normalize(hit.geometricNormal)
+                : -normalize(hit.geometricNormal);
+            ray.origin = offsetRayOrigin(hitPosition, geometricNormal, ray.direction, hit.t);
+            remainingDistance -= hit.t;
+            if (remainingDistance <= kEpsilon) {
+                return false;
+            }
+            continue;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+vec3 shadeHit(Hit hit) {
+    vec3 lightDirection = normalize(vec3(-0.6, 0.8, 0.4));
+    float diffuse = max(dot(hit.normal, lightDirection), 0.0);
+    float hemisphere = clamp(hit.normal.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 ambient = mix(vec3(0.08, 0.10, 0.12), vec3(0.18, 0.22, 0.28), hemisphere);
+    return hit.albedo * (ambient + diffuse * 0.85) + hit.emission;
+}
+
+vec3 debugPrimitiveId(int primitiveId) {
+    float seed = float(primitiveId + 1);
+    return vec3(
+        fract(seed * 0.382),
+        fract(seed * 0.618),
+        fract(seed * 0.271));
+}
+
+vec3 debugMaterialId(int materialId) {
+    float seed = float(materialId + 11);
+    return vec3(
+        fract(seed * 0.271),
+        fract(seed * 0.553),
+        fract(seed * 0.821));
+}
+
+vec3 debugBvhDepth(int depth) {
+    float t = clamp(float(depth) / 8.0, 0.0, 1.0);
+    return mix(vec3(0.10, 0.18, 0.38), vec3(0.95, 0.48, 0.22), t);
+}
+
+vec3 evaluateDepthAov(float distanceToHit) {
+    float normalizedDistance = 1.0 - exp(-0.2 * distanceToHit);
+    return vec3(normalizedDistance);
+}
+
+vec3 evaluateSampleCountAov(float sampleCountValue) {
+    float denominator = log2(float(max(uPreviewSampleTarget, 1)) + 1.0);
+    if (denominator <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float normalized = clamp(log2(max(sampleCountValue, 0.0) + 1.0) / denominator, 0.0, 1.0);
+    return mix(vec3(0.05, 0.08, 0.16), vec3(0.78, 0.96, 1.00), normalized);
+}
+
+vec3 evaluateVarianceAov(vec2 luminanceMoments, float sampleCountValue) {
+    if (sampleCountValue <= 1.0) {
+        return vec3(0.0);
+    }
+
+    float mean = luminanceMoments.x / sampleCountValue;
+    float secondMoment = luminanceMoments.y / sampleCountValue;
+    float variance = max(secondMoment - mean * mean, 0.0);
+    float normalized = 1.0 - exp(-variance * 48.0);
+    return mix(
+        vec3(0.03, 0.03, 0.07),
+        vec3(1.00, 0.72, 0.18),
+        clamp(normalized, 0.0, 1.0));
+}
+
+vec3 evaluatePathTraceAov(bool foundHit, Hit hit, int sampleIndex) {
+    if (!foundHit) {
+        return vec3(0.0);
+    }
+
+    if (uDisplayMode == 3) {
+        return clamp(hit.albedo, 0.0, 1.0);
+    }
+    if (uDisplayMode == 4) {
+        return hit.normal * 0.5 + 0.5;
+    }
+    if (uDisplayMode == 5) {
+        return evaluateDepthAov(hit.t);
+    }
+    if (uDisplayMode == 6) {
+        return debugMaterialId(hit.materialId);
+    }
+    if (uDisplayMode == 7) {
+        return debugPrimitiveId(hit.primitiveId);
+    }
+
+    return applyColorDisplayMode(shadeHit(hit), vec2(0.0), sampleIndex);
+}
+
+vec3 evaluateDebugHitColor(Hit hit, vec2 uv, int sampleIndex) {
+    if (uDebugViewMode == 1) {
+        return hit.normal * 0.5 + 0.5;
+    }
+    if (uDebugViewMode == 2) {
+        float normalizedDistance = 1.0 - exp(-0.2 * hit.t);
+        return vec3(normalizedDistance, normalizedDistance * 0.8, 1.0 - normalizedDistance);
+    }
+    if (uDebugViewMode == 3) {
+        return debugPrimitiveId(hit.primitiveId);
+    }
+    if (uDebugViewMode == 4) {
+        return debugBvhDepth(hit.bvhDepth);
+    }
+
+    if (isPathTraceAovMode()) {
+        return evaluatePathTraceAov(true, hit, sampleIndex);
+    }
+
+    vec3 shaded = shadeHit(hit);
+    return applyColorDisplayMode(shaded, uv, sampleIndex);
+}
+
+vec3 sampleCosineHemisphere(vec3 normal, vec2 xi) {
+    float phi = 2.0 * kPi * xi.x;
+    float radius = sqrt(xi.y);
+    float x = cos(phi) * radius;
+    float z = sin(phi) * radius;
+    float y = sqrt(max(0.0, 1.0 - xi.y));
+
+    vec3 tangent = normalize(abs(normal.y) < 0.999
+        ? cross(vec3(0.0, 1.0, 0.0), normal)
+        : cross(vec3(1.0, 0.0, 0.0), normal));
+    vec3 bitangent = normalize(cross(normal, tangent));
+    return normalize(tangent * x + normal * y + bitangent * z);
+}
+
+vec3 sampleGlossyDirection(vec3 reflectionDirection, float roughness, vec2 xi) {
+    vec3 reflection = normalize(reflectionDirection);
+    vec3 tangent = normalize(abs(reflection.y) < 0.999
+        ? cross(vec3(0.0, 1.0, 0.0), reflection)
+        : cross(vec3(1.0, 0.0, 0.0), reflection));
+    vec3 bitangent = normalize(cross(reflection, tangent));
+
+    float exponent = mix(256.0, 2.0, clamp(roughness, 0.0, 1.0));
+    float phi = 2.0 * kPi * xi.x;
+    float cosTheta = pow(max(1.0 - xi.y, 0.0), 1.0 / (exponent + 1.0));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+
+    return normalize(
+        tangent * cos(phi) * sinTheta +
+        bitangent * sin(phi) * sinTheta +
+        reflection * cosTheta);
+}
+
+float computePhongExponent(float roughness) {
+    return mix(256.0, 2.0, clamp(roughness, 0.0, 1.0));
+}
+
+float cosineHemispherePdf(vec3 normal, vec3 direction) {
+    float cosine = max(dot(normal, normalize(direction)), 0.0);
+    return cosine * (1.0 / kPi);
+}
+
+float glossyLobePdf(vec3 reflectionDirection, vec3 direction, float phongExponent) {
+    float alignment = max(dot(normalize(reflectionDirection), normalize(direction)), 0.0);
+    if (alignment <= 0.0) {
+        return 0.0;
+    }
+    return ((phongExponent + 1.0) * (1.0 / (2.0 * kPi))) * pow(alignment, phongExponent);
+}
+
+vec3 offsetRayOrigin(vec3 position, vec3 geometricNormal, vec3 direction, float hitDistance) {
+    vec3 safeNormal = normalize(geometricNormal);
+    float offsetDistance = clamp(max(0.0015, hitDistance * 0.0015), 0.0015, 0.02);
+    float sign = dot(direction, safeNormal) >= 0.0 ? 1.0 : -1.0;
+    return position + safeNormal * (offsetDistance * sign);
+}
+
+float fresnelDielectric(float etaI, float etaT, float cosThetaI, out float cosThetaT) {
+    float eta = etaI / max(etaT, kEpsilon);
+    float sinThetaTSquared = eta * eta * max(0.0, 1.0 - cosThetaI * cosThetaI);
+    if (sinThetaTSquared >= 1.0) {
+        cosThetaT = 0.0;
+        return 1.0;
+    }
+
+    cosThetaT = sqrt(max(0.0, 1.0 - sinThetaTSquared));
+    float rParallel = ((etaT * cosThetaI) - (etaI * cosThetaT)) /
+        max((etaT * cosThetaI) + (etaI * cosThetaT), kEpsilon);
+    float rPerpendicular = ((etaI * cosThetaI) - (etaT * cosThetaT)) /
+        max((etaI * cosThetaI) + (etaT * cosThetaT), kEpsilon);
+    return clamp(0.5 * (rParallel * rParallel + rPerpendicular * rPerpendicular), 0.0, 1.0);
+}
+
+bool safeRefractDirection(vec3 incidentDirection, vec3 normal, float eta, out vec3 refractedDirection) {
+    vec3 refracted = refract(normalize(incidentDirection), normalize(normal), eta);
+    if (dot(refracted, refracted) <= kEpsilon || !isFiniteVec3(refracted)) {
+        refractedDirection = vec3(0.0);
+        return false;
+    }
+
+    refractedDirection = normalize(refracted);
+    return true;
+}
+
+SurfaceBsdfState buildSurfaceBsdfState(Hit hit, vec3 incomingDirection) {
+    SurfaceBsdfState state;
+    state.incidentDirection = normalize(incomingDirection);
+    state.transmission = clamp(hit.transmission, 0.0, 1.0);
+    state.ior = max(hit.ior, 1.0);
+    state.roughness = clamp(hit.roughness, 0.0, 1.0);
+    state.metallic = clamp(hit.metallic, 0.0, 1.0);
+    state.transmissionRoughness = clamp(hit.transmissionRoughness, 0.0, 1.0);
+    state.thinWalled = hit.thinWalled;
+
+    if (isDielectricSurface(state.transmission, state.ior, state.metallic)) {
+        state.frontFace = dot(state.incidentDirection, hit.geometricNormal) < 0.0;
+        state.geometricNormal = state.frontFace ? normalize(hit.geometricNormal) : -normalize(hit.geometricNormal);
+        state.shadingNormal = normalize(hit.shadingNormal);
+        if (dot(state.shadingNormal, state.geometricNormal) < 0.0) {
+            state.shadingNormal *= -1.0;
+        }
+        if (dot(state.incidentDirection, state.shadingNormal) > 0.0) {
+            state.shadingNormal *= -1.0;
+        }
+        state.normal = state.shadingNormal;
+    } else {
+        state.frontFace = dot(state.incidentDirection, hit.geometricNormal) < 0.0;
+        state.geometricNormal = state.frontFace ? normalize(hit.geometricNormal) : -normalize(hit.geometricNormal);
+        state.shadingNormal = normalize(hit.shadingNormal);
+        if (dot(state.shadingNormal, state.geometricNormal) < 0.0) {
+            state.shadingNormal *= -1.0;
+        }
+        state.normal = state.shadingNormal;
+    }
+
+    state.diffuseColor = hit.albedo * (1.0 - hit.metallic);
+    state.specularColor = mix(vec3(0.04), hit.albedo, hit.metallic);
+    state.reflectionDirection = reflect(state.incidentDirection, state.normal);
+    state.phongExponent = computePhongExponent(state.roughness);
+
+    float diffuseStrength = luminance(state.diffuseColor);
+    float specularStrength = luminance(state.specularColor);
+    float totalStrength = diffuseStrength + specularStrength;
+    if (totalStrength <= kEpsilon) {
+        state.diffuseProbability = 1.0;
+        state.specularProbability = 0.0;
+    } else {
+        state.specularProbability = clamp(specularStrength / totalStrength, 0.05, 0.95);
+        if (diffuseStrength <= kEpsilon) {
+            state.specularProbability = 1.0;
+        }
+        if (specularStrength <= kEpsilon) {
+            state.specularProbability = 0.0;
+        }
+        state.diffuseProbability = 1.0 - state.specularProbability;
+    }
+
+    return state;
+}
+
+vec3 evaluateBsdf(SurfaceBsdfState state, vec3 outgoingDirection) {
+    vec3 outgoing = normalize(outgoingDirection);
+    float surfaceCosine = max(dot(state.normal, outgoing), 0.0);
+    if (surfaceCosine <= 0.0) {
+        return vec3(0.0);
+    }
+
+    vec3 diffuse = state.diffuseColor * (1.0 / kPi);
+    float specularAlignment = max(dot(normalize(state.reflectionDirection), outgoing), 0.0);
+    vec3 glossy = vec3(0.0);
+    if (specularAlignment > 0.0) {
+        float normalization = (state.phongExponent + 2.0) * (1.0 / (2.0 * kPi));
+        glossy = state.specularColor * normalization * pow(specularAlignment, state.phongExponent);
+    }
+
+    return diffuse + glossy;
+}
+
+float evaluateBsdfPdf(SurfaceBsdfState state, vec3 outgoingDirection) {
+    float diffusePdf = state.diffuseProbability > 0.0
+        ? cosineHemispherePdf(state.normal, outgoingDirection)
+        : 0.0;
+    float glossyPdf = state.specularProbability > 0.0
+        ? glossyLobePdf(state.reflectionDirection, outgoingDirection, state.phongExponent)
+        : 0.0;
+    return diffusePdf * state.diffuseProbability + glossyPdf * state.specularProbability;
+}
+
+BsdfSample sampleBsdf(SurfaceBsdfState state, vec2 xiChoice, vec2 xiDirection) {
+    BsdfSample bsdfSample;
+    bsdfSample.direction = state.normal;
+    bsdfSample.pdf = 0.0;
+    bsdfSample.weight = vec3(0.0);
+    bsdfSample.isDelta = false;
+    bsdfSample.isTransmission = false;
+
+    if (isDielectricSurface(state.transmission, state.ior, state.metallic) && xiChoice.y < state.transmission) {
+        float etaI = state.frontFace ? 1.0 : state.ior;
+        float etaT = state.frontFace ? state.ior : 1.0;
+        float cosThetaT = 0.0;
+        float cosThetaI = clamp(dot(-state.incidentDirection, state.geometricNormal), 0.0, 1.0);
+        float fresnel = fresnelDielectric(etaI, etaT, cosThetaI, cosThetaT);
+        bool chooseReflection = fresnel >= 1.0 - kEpsilon || xiChoice.x < fresnel;
+        if (chooseReflection) {
+            vec3 reflectionDirection = normalize(reflect(state.incidentDirection, state.geometricNormal));
+            if (isFiniteVec3(reflectionDirection)) {
+                if (state.roughness <= 0.08) {
+                    bsdfSample.direction = reflectionDirection;
+                    bsdfSample.pdf = max(fresnel, kEpsilon);
+                    bsdfSample.weight = vec3(1.0);
+                    bsdfSample.isDelta = true;
+                    return bsdfSample;
+                }
+
+                bsdfSample.direction = sampleGlossyDirection(reflectionDirection, state.roughness, xiDirection);
+                bsdfSample.pdf = glossyLobePdf(reflectionDirection, bsdfSample.direction, computePhongExponent(state.roughness));
+                bsdfSample.weight = vec3(1.0);
+                return bsdfSample;
+            }
+        }
+
+        if (state.thinWalled) {
+            bsdfSample.direction = normalize(state.incidentDirection);
+            bsdfSample.pdf = max(1.0 - fresnel, kEpsilon);
+            bsdfSample.weight = vec3(1.0);
+            bsdfSample.isDelta = true;
+            bsdfSample.isTransmission = true;
+            return bsdfSample;
+        }
+
+        vec3 refractedDirection = vec3(0.0);
+        if (safeRefractDirection(state.incidentDirection, state.geometricNormal, etaI / max(etaT, kEpsilon), refractedDirection)) {
+            if (state.transmissionRoughness <= 0.08) {
+                bsdfSample.direction = refractedDirection;
+                bsdfSample.pdf = max(1.0 - fresnel, kEpsilon);
+                bsdfSample.weight = vec3(1.0);
+                bsdfSample.isDelta = true;
+                bsdfSample.isTransmission = true;
+                return bsdfSample;
+            }
+
+            bsdfSample.direction = sampleGlossyDirection(refractedDirection, state.transmissionRoughness, xiDirection);
+            bsdfSample.pdf = glossyLobePdf(refractedDirection, bsdfSample.direction, computePhongExponent(state.transmissionRoughness));
+            bsdfSample.weight = vec3(1.0);
+            bsdfSample.isTransmission = true;
+            return bsdfSample;
+        }
+
+        vec3 fallbackReflection = normalize(reflect(state.incidentDirection, state.geometricNormal));
+        if (isFiniteVec3(fallbackReflection)) {
+            bsdfSample.direction = fallbackReflection;
+            bsdfSample.pdf = 1.0;
+            bsdfSample.weight = vec3(1.0);
+            bsdfSample.isDelta = true;
+            return bsdfSample;
+        }
+    }
+
+    bool chooseSpecular = state.specularProbability > 0.0 && xiChoice.x < state.specularProbability;
+    bsdfSample.direction = chooseSpecular
+        ? sampleGlossyDirection(state.reflectionDirection, state.roughness, xiDirection)
+        : sampleCosineHemisphere(state.normal, xiDirection);
+    bsdfSample.pdf = evaluateBsdfPdf(state, bsdfSample.direction);
+
+    float surfaceCosine = max(dot(state.normal, bsdfSample.direction), 0.0);
+    if (bsdfSample.pdf > kEpsilon && surfaceCosine > 0.0) {
+        bsdfSample.weight = evaluateBsdf(state, bsdfSample.direction) * surfaceCosine / bsdfSample.pdf;
+    }
+
+    return bsdfSample;
+}
+
+vec3 evaluateDirectEnvironment(ivec2 pixel, float samplePhase, int bounce, vec3 hitPosition, SurfaceBsdfState state) {
+    if (uEnvironmentEnabled == 0 || uEnvironmentIntensity <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    if (maxComponent(state.diffuseColor + state.specularColor) <= 0.0001) {
+        return vec3(0.0);
+    }
+
+    vec2 xiEnvironment = hash23(vec3(
+        float(pixel.x + bounce * 17),
+        float(pixel.y + bounce * 29),
+        samplePhase + float(bounce) * 19.13 + 61.0));
+    vec3 environmentDirection = sampleCosineHemisphere(vec3(0.0, 1.0, 0.0), xiEnvironment);
+    float lightPdf = cosineHemispherePdf(vec3(0.0, 1.0, 0.0), environmentDirection);
+    if (lightPdf <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float surfaceCosine = max(dot(state.normal, environmentDirection), 0.0);
+    if (surfaceCosine <= 0.0) {
+        return vec3(0.0);
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = offsetRayOrigin(hitPosition, state.geometricNormal, environmentDirection, 1.0);
+    shadowRay.direction = environmentDirection;
+    if (traceSceneOpaqueAnyHit(shadowRay, kHitDistanceMax)) {
+        return vec3(0.0);
+    }
+
+    vec3 environmentRadiance = evaluateEnvironmentDirection(environmentDirection);
+    if (maxComponent(environmentRadiance) <= 0.0001) {
+        return vec3(0.0);
+    }
+
+    vec3 bsdf = evaluateBsdf(state, environmentDirection);
+    float bsdfPdf = evaluateBsdfPdf(state, environmentDirection);
+    float misWeight = lightPdf / max(lightPdf + bsdfPdf, kEpsilon);
+    return bsdf * environmentRadiance * surfaceCosine * misWeight / lightPdf;
+}
+
+vec2 sampleConcentricDisk(vec2 xi) {
+    vec2 offset = xi * 2.0 - 1.0;
+    if (abs(offset.x) < kEpsilon && abs(offset.y) < kEpsilon) {
+        return vec2(0.0);
+    }
+
+    float radius;
+    float theta;
+    if (abs(offset.x) > abs(offset.y)) {
+        radius = offset.x;
+        theta = (kPi * 0.25) * (offset.y / max(abs(offset.x), kEpsilon));
+    } else {
+        radius = offset.y;
+        theta = (kPi * 0.5) - (kPi * 0.25) * (offset.x / max(abs(offset.y), kEpsilon));
+    }
+
+    return radius * vec2(cos(theta), sin(theta));
+}
+
+bool isLightEnabled(SceneLightData light) {
+    return light.rightEnabled.w > 0.5;
+}
+
+int getLightType(SceneLightData light) {
+    return int(round(light.positionType.w));
+}
+
+vec3 getLightPosition(SceneLightData light) {
+    return light.positionType.xyz;
+}
+
+vec3 getLightDirection(SceneLightData light) {
+    return normalize(light.directionRange.xyz);
+}
+
+vec3 getLightColor(SceneLightData light) {
+    return light.colorIntensity.rgb;
+}
+
+float getLightIntensity(SceneLightData light) {
+    return max(light.colorIntensity.w, 0.0);
+}
+
+vec3 getLightRight(SceneLightData light) {
+    return normalize(light.rightEnabled.xyz);
+}
+
+vec3 getLightUp(SceneLightData light) {
+    return normalize(light.upData.xyz);
+}
+
+int countExplicitSunLights() {
+    int count = 0;
+    for (int i = 0; i < uLightCount; ++i) {
+        SceneLightData light = uLights[i];
+        if (isLightEnabled(light) && getLightType(light) == 3) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int countEmissiveSpheres() {
+    int count = 0;
+    for (int i = 0; i < uSphereCount; ++i) {
+        if (isEmissiveValue(uSpheres[i].emission.xyz)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int countEmissiveTriangles() {
+    int count = 0;
+    for (int i = 0; i < uTriangleCount; ++i) {
+        if (isEmissiveValue(uTriangles[i].emission.xyz)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+LightSample sampleNthEmissiveLight(int selectedLightIndex, vec2 xi) {
+    LightSample lightSample;
+    lightSample.position = vec3(0.0);
+    lightSample.normal = vec3(0.0, 1.0, 0.0);
+    lightSample.emission = vec3(0.0);
+    lightSample.pdfArea = 0.0;
+    lightSample.valid = false;
+
+    const int emissiveSphereCount = countEmissiveSpheres();
+    const int emissiveTriangleCount = countEmissiveTriangles();
+    const int totalEmissiveCount = emissiveSphereCount + emissiveTriangleCount;
+    if (selectedLightIndex < 0 || selectedLightIndex >= totalEmissiveCount || totalEmissiveCount <= 0) {
+        return lightSample;
+    }
+
+    int runningIndex = 0;
+    for (int i = 0; i < uSphereCount; ++i) {
+        SphereData sphere = uSpheres[i];
+        if (!isEmissiveValue(sphere.emission.xyz)) {
+            continue;
+        }
+
+        if (runningIndex == selectedLightIndex) {
+            float z = 1.0 - 2.0 * xi.x;
+            float radius = sqrt(max(0.0, 1.0 - z * z));
+            float phi = 2.0 * kPi * xi.y;
+            vec3 lightNormal = vec3(cos(phi) * radius, z, sin(phi) * radius);
+            float sphereRadius = max(sphere.centerRadius.w, kEpsilon);
+            lightSample.position = sphere.centerRadius.xyz + lightNormal * sphereRadius;
+            lightSample.normal = normalize(lightNormal);
+            lightSample.emission = sphere.emission.xyz;
+            lightSample.pdfArea = 1.0 / (float(totalEmissiveCount) * (4.0 * kPi * sphereRadius * sphereRadius));
+            lightSample.valid = true;
+            return lightSample;
+        }
+
+        ++runningIndex;
+    }
+
+    for (int i = 0; i < uTriangleCount; ++i) {
+        TriangleData triangle = uTriangles[i];
+        if (!isEmissiveValue(triangle.emission.xyz)) {
+            continue;
+        }
+
+        if (runningIndex == selectedLightIndex) {
+            float su = sqrt(xi.x);
+            float b0 = 1.0 - su;
+            float b1 = xi.y * su;
+            float b2 = 1.0 - b0 - b1;
+            vec3 edge1 = triangle.b.xyz - triangle.a.xyz;
+            vec3 edge2 = triangle.c.xyz - triangle.a.xyz;
+            vec3 geometricNormal = normalize(cross(edge1, edge2));
+            float area = max(length(cross(edge1, edge2)) * 0.5, kEpsilon);
+            lightSample.position = triangle.a.xyz * b0 + triangle.b.xyz * b1 + triangle.c.xyz * b2;
+            lightSample.normal = geometricNormal;
+            lightSample.emission = triangle.emission.xyz;
+            lightSample.pdfArea = 1.0 / (float(totalEmissiveCount) * area);
+            lightSample.valid = true;
+            return lightSample;
+        }
+
+        ++runningIndex;
+    }
+
+    return lightSample;
+}
+
+float evaluateHitLightPdf(Hit hit, vec3 incomingDirection) {
+    if (!isEmissiveValue(hit.emission)) {
+        return 0.0;
+    }
+
+    const int totalEmissiveCount = countEmissiveSpheres() + countEmissiveTriangles();
+    if (totalEmissiveCount <= 0) {
+        return 0.0;
+    }
+
+    float area = 0.0;
+    if (hit.geometryType == 0 && hit.geometryIndex >= 0 && hit.geometryIndex < uSphereCount) {
+        float radius = max(uSpheres[hit.geometryIndex].centerRadius.w, kEpsilon);
+        area = 4.0 * kPi * radius * radius;
+    } else if (hit.geometryType == 1 && hit.geometryIndex >= 0 && hit.geometryIndex < uTriangleCount) {
+        TriangleData triangle = uTriangles[hit.geometryIndex];
+        vec3 edge1 = triangle.b.xyz - triangle.a.xyz;
+        vec3 edge2 = triangle.c.xyz - triangle.a.xyz;
+        area = max(length(cross(edge1, edge2)) * 0.5, kEpsilon);
+    }
+
+    if (area <= kEpsilon) {
+        return 0.0;
+    }
+
+    float lightCosine = abs(dot(hit.normal, -normalize(incomingDirection)));
+    if (lightCosine <= kEpsilon) {
+        return 0.0;
+    }
+
+    float pdfArea = 1.0 / (float(totalEmissiveCount) * area);
+    return pdfArea * hit.t * hit.t / lightCosine;
+}
+
+vec3 evaluateDirectSunLights(vec3 hitPosition, SurfaceBsdfState state) {
+    vec3 contribution = vec3(0.0);
+    for (int i = 0; i < uLightCount; ++i) {
+        SceneLightData light = uLights[i];
+        if (!isLightEnabled(light) || getLightType(light) != 3) {
+            continue;
+        }
+
+        vec3 lightDirection = -getLightDirection(light);
+        float ndotl = max(dot(state.normal, lightDirection), 0.0);
+        if (ndotl <= 0.0) {
+            continue;
+        }
+
+        Ray shadowRay;
+        shadowRay.origin = offsetRayOrigin(hitPosition, state.geometricNormal, lightDirection, 1.0);
+        shadowRay.direction = lightDirection;
+        if (traceSceneOpaqueAnyHit(shadowRay, kHitDistanceMax)) {
+            continue;
+        }
+
+        vec3 bsdf = evaluateBsdf(state, lightDirection);
+        contribution += bsdf * getLightColor(light) * getLightIntensity(light) * ndotl;
+    }
+    return contribution;
+}
+
+float evaluateSpotFactor(SceneLightData light, vec3 hitPosition) {
+    vec3 toSurface = normalize(hitPosition - getLightPosition(light));
+    vec3 forward = getLightDirection(light);
+    float cosTheta = dot(forward, toSurface);
+    float innerCos = cos(radians(light.sizeAndAngles.z));
+    float outerCos = cos(radians(light.sizeAndAngles.w));
+    if (cosTheta <= outerCos) {
+        return 0.0;
+    }
+    if (cosTheta >= innerCos || innerCos <= outerCos) {
+        return 1.0;
+    }
+    return clamp((cosTheta - outerCos) / max(innerCos - outerCos, kEpsilon), 0.0, 1.0);
+}
+
+vec3 evaluateRectAreaLight(
+    ivec2 pixel,
+    float samplePhase,
+    int bounce,
+    vec3 hitPosition,
+    SurfaceBsdfState state,
+    SceneLightData light,
+    int lightIndex) {
+    float width = max(light.sizeAndAngles.x, 0.01);
+    float height = max(light.sizeAndAngles.y, 0.01);
+    vec2 xi = hash23(vec3(
+        float(pixel.x + lightIndex * 19 + bounce * 7),
+        float(pixel.y + lightIndex * 23 + bounce * 11),
+        samplePhase + float(lightIndex) * 0.173 + float(bounce) * 3.17));
+    vec2 centered = xi * 2.0 - 1.0;
+    vec3 lightPosition =
+        getLightPosition(light) +
+        getLightRight(light) * (centered.x * width * 0.5) +
+        getLightUp(light) * (centered.y * height * 0.5);
+    vec3 toLight = lightPosition - hitPosition;
+    float distanceSquared = dot(toLight, toLight);
+    if (distanceSquared <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float distanceToLight = sqrt(distanceSquared);
+    vec3 lightDirection = toLight / distanceToLight;
+    float surfaceCosine = max(dot(state.normal, lightDirection), 0.0);
+    float lightCosine = max(dot(getLightDirection(light), -lightDirection), 0.0);
+    if (surfaceCosine <= 0.0 || lightCosine <= 0.0) {
+        return vec3(0.0);
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = offsetRayOrigin(hitPosition, state.geometricNormal, lightDirection, distanceToLight);
+    shadowRay.direction = lightDirection;
+    if (traceSceneOpaqueAnyHit(shadowRay, max(distanceToLight - 0.005, kEpsilon))) {
+        return vec3(0.0);
+    }
+
+    float area = width * height;
+    float lightPdf = (1.0 / max(area, kEpsilon)) * distanceSquared / max(lightCosine, kEpsilon);
+    if (lightPdf <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    vec3 bsdf = evaluateBsdf(state, lightDirection);
+    float bsdfPdf = evaluateBsdfPdf(state, lightDirection);
+    float misWeight = lightPdf / max(lightPdf + bsdfPdf, kEpsilon);
+    vec3 radiance = getLightColor(light) * getLightIntensity(light);
+    return bsdf * radiance * surfaceCosine * misWeight / lightPdf;
+}
+
+vec3 evaluatePointLikeLight(vec3 hitPosition, SurfaceBsdfState state, SceneLightData light) {
+    vec3 toLight = getLightPosition(light) - hitPosition;
+    float distanceSquared = dot(toLight, toLight);
+    if (distanceSquared <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float distanceToLight = sqrt(distanceSquared);
+    if (distanceToLight > light.directionRange.w) {
+        return vec3(0.0);
+    }
+
+    vec3 lightDirection = toLight / distanceToLight;
+    float surfaceCosine = max(dot(state.normal, lightDirection), 0.0);
+    if (surfaceCosine <= 0.0) {
+        return vec3(0.0);
+    }
+
+    float attenuation = 1.0 / max(distanceSquared, 0.01);
+    if (getLightType(light) == 2) {
+        attenuation *= evaluateSpotFactor(light, hitPosition);
+        if (attenuation <= kEpsilon) {
+            return vec3(0.0);
+        }
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = offsetRayOrigin(hitPosition, state.geometricNormal, lightDirection, distanceToLight);
+    shadowRay.direction = lightDirection;
+    if (traceSceneOpaqueAnyHit(shadowRay, max(distanceToLight - 0.005, kEpsilon))) {
+        return vec3(0.0);
+    }
+
+    vec3 bsdf = evaluateBsdf(state, lightDirection);
+    vec3 radiance = getLightColor(light) * getLightIntensity(light) * attenuation;
+    return bsdf * radiance * surfaceCosine;
+}
+
+vec3 evaluateDirectExplicitLights(ivec2 pixel, float samplePhase, int bounce, vec3 hitPosition, SurfaceBsdfState state) {
+    vec3 contribution = vec3(0.0);
+    for (int i = 0; i < uLightCount; ++i) {
+        SceneLightData light = uLights[i];
+        if (!isLightEnabled(light)) {
+            continue;
+        }
+
+        int lightType = getLightType(light);
+        if (lightType == 0) {
+            contribution += evaluateRectAreaLight(pixel, samplePhase, bounce, hitPosition, state, light, i);
+        } else if (lightType == 1 || lightType == 2) {
+            contribution += evaluatePointLikeLight(hitPosition, state, light);
+        }
+    }
+    return contribution;
+}
+
+vec3 evaluateDirectEmissive(ivec2 pixel, float samplePhase, int bounce, vec3 hitPosition, SurfaceBsdfState state) {
+    if (maxComponent(state.diffuseColor + state.specularColor) <= 0.0001) {
+        return vec3(0.0);
+    }
+
+    const int totalEmissiveCount = countEmissiveSpheres() + countEmissiveTriangles();
+    if (totalEmissiveCount <= 0) {
+        return vec3(0.0);
+    }
+
+    vec2 xiLightPick = hash23(vec3(pixel, samplePhase + float(bounce) * 9.73 + 31.0));
+    int lightIndex = min(int(floor(xiLightPick.x * float(totalEmissiveCount))), totalEmissiveCount - 1);
+    vec2 xiLightSurface = hash23(vec3(pixel.yx, samplePhase + float(bounce) * 13.37 + 47.0));
+    LightSample light = sampleNthEmissiveLight(lightIndex, xiLightSurface);
+    if (!light.valid || light.pdfArea <= 0.0) {
+        return vec3(0.0);
+    }
+
+    vec3 toLight = light.position - hitPosition;
+    float distanceSquared = dot(toLight, toLight);
+    if (distanceSquared <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float distanceToLight = sqrt(distanceSquared);
+    vec3 lightDirection = toLight / distanceToLight;
+    float surfaceCosine = max(dot(state.normal, lightDirection), 0.0);
+    float lightCosine = abs(dot(light.normal, -lightDirection));
+    if (surfaceCosine <= 0.0 || lightCosine <= 0.0) {
+        return vec3(0.0);
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = offsetRayOrigin(hitPosition, state.geometricNormal, lightDirection, distanceToLight);
+    shadowRay.direction = lightDirection;
+    if (traceSceneOpaqueAnyHit(shadowRay, max(distanceToLight - 0.005, kEpsilon))) {
+        return vec3(0.0);
+    }
+
+    vec3 bsdf = evaluateBsdf(state, lightDirection);
+    float bsdfPdf = evaluateBsdfPdf(state, lightDirection);
+    float lightPdf = light.pdfArea * distanceSquared / max(lightCosine, kEpsilon);
+    if (lightPdf <= kEpsilon) {
+        return vec3(0.0);
+    }
+
+    float misWeight = lightPdf / max(lightPdf + bsdfPdf, kEpsilon);
+    return bsdf * light.emission * surfaceCosine * misWeight / lightPdf;
+}
+
+vec3 traceRasterPreview(Ray ray, ivec2 pixel, vec2 uv) {
+    Hit hit = MakeDefaultHit(kHitDistanceMax);
+
+    bool foundHit = traceScene(ray, hit);
+    if (!foundHit) {
+        vec3 background = evaluateBackground(uv, uv * 2.0 - 1.0, 0.0);
+        vec3 fogScatter = evaluateFogInscatter(ray.direction, 24.0);
+        vec3 fogTransmittance = evaluateFogTransmittance(24.0);
+        return background * fogTransmittance + fogScatter;
+    }
+
+    vec3 hitPosition = ray.origin + ray.direction * hit.t;
+    SurfaceBsdfState bsdfState = buildSurfaceBsdfState(hit, ray.direction);
+    vec3 ambient = hit.albedo * vec3(0.04, 0.05, 0.06);
+    vec3 shaded = ambient;
+    shaded += hit.emission;
+    shaded += evaluateDirectSunLights(hitPosition, bsdfState);
+    shaded += evaluateDirectEnvironment(pixel, 0.0, 0, hitPosition, bsdfState);
+    shaded += evaluateDirectExplicitLights(pixel, 0.0, 0, hitPosition, bsdfState);
+    shaded += evaluateDirectEmissive(pixel, 0.0, 0, hitPosition, bsdfState);
+    vec3 fogScatter = evaluateFogInscatter(ray.direction, hit.t);
+    vec3 fogTransmittance = evaluateFogTransmittance(hit.t);
+    shaded = shaded * fogTransmittance + fogScatter;
+    return applyColorDisplayMode(shaded, uv, 0);
+}
+
+vec3 tracePathPreview(Ray ray, ivec2 pixel, vec2 uv, int sampleIndex) {
+    vec3 radiance = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    float samplePhase = float(max(sampleIndex, 0));
+    float lastBsdfPdf = 0.0;
+    bool lastSampleWasDelta = false;
+    bool insideAbsorbingMedium = false;
+    vec3 currentAbsorptionColor = vec3(1.0);
+    float currentAbsorptionDistance = 1.0;
+
+    for (int bounce = 0; bounce < 12; ++bounce) {
+        if (bounce >= uMaxBounces) {
+            break;
+        }
+
+        Hit hit = MakeDefaultHit(kHitDistanceMax);
+
+        bool foundHit = traceScene(ray, hit);
+        if (!foundHit) {
+            if (bounce == 0 && isPathTraceAovMode()) {
+                return vec3(0.0);
+            }
+            float fogDistance = 24.0;
+            vec3 fogScatter = evaluateFogInscatter(ray.direction, fogDistance);
+            vec3 fogTransmittance = evaluateFogTransmittance(fogDistance);
+            radiance += throughput * fogScatter;
+            radiance += throughput * evaluateEnvironmentDirection(ray.direction) * fogTransmittance;
+            break;
+        }
+
+        if (bounce == 0 && isPathTraceAovMode()) {
+            return evaluatePathTraceAov(true, hit, sampleIndex);
+        }
+
+        vec3 hitPosition = ray.origin + ray.direction * hit.t;
+        radiance += throughput * evaluateFogInscatter(ray.direction, hit.t);
+        throughput *= evaluateFogTransmittance(hit.t);
+        if (insideAbsorbingMedium) {
+            throughput *= evaluateAbsorptionTransmittance(currentAbsorptionColor, currentAbsorptionDistance, hit.t);
+        }
+        SurfaceBsdfState bsdfState = buildSurfaceBsdfState(hit, ray.direction);
+
+        if (isEmissiveValue(hit.emission)) {
+            float emissionWeight = 1.0;
+            if (bounce > 0 && !lastSampleWasDelta) {
+                float lightPdf = evaluateHitLightPdf(hit, ray.direction);
+                if (lightPdf > 0.0) {
+                    emissionWeight = lastBsdfPdf / max(lastBsdfPdf + lightPdf, kEpsilon);
+                }
+            }
+            radiance += throughput * hit.emission * emissionWeight;
+        }
+        float directLightingScale = isDielectricSurface(
+            bsdfState.transmission,
+            bsdfState.ior,
+            bsdfState.metallic)
+            ? 0.0
+            : 1.0;
+        if (directLightingScale > kEpsilon) {
+            radiance += throughput * evaluateDirectSunLights(hitPosition, bsdfState) * directLightingScale;
+            radiance += throughput * evaluateDirectEnvironment(pixel, samplePhase, bounce, hitPosition, bsdfState) * directLightingScale;
+            radiance += throughput * evaluateDirectExplicitLights(pixel, samplePhase, bounce, hitPosition, bsdfState) * directLightingScale;
+            radiance += throughput * evaluateDirectEmissive(pixel, samplePhase, bounce, hitPosition, bsdfState) * directLightingScale;
+        }
+
+        vec2 xiChoice = hash23(vec3(pixel, samplePhase + float(bounce) * 7.17 + uv.x * 3.11 + uv.y * 5.83));
+        vec2 xiDirection = hash23(vec3(pixel.yx, samplePhase + float(bounce) * 11.41 + uv.x * 5.29 + uv.y * 2.73));
+        BsdfSample bsdfSample = sampleBsdf(bsdfState, xiChoice, xiDirection);
+        if (bsdfSample.pdf <= kEpsilon || maxComponent(bsdfSample.weight) <= kEpsilon || !isFiniteVec3(bsdfSample.direction) || !isFiniteVec3(bsdfSample.weight)) {
+            break;
+        }
+
+        ray.origin = offsetRayOrigin(hitPosition, bsdfState.geometricNormal, bsdfSample.direction, hit.t);
+        ray.direction = bsdfSample.direction;
+        throughput *= bsdfSample.weight;
+        if (bsdfSample.isTransmission && isDielectricSurface(bsdfState.transmission, bsdfState.ior, bsdfState.metallic)) {
+            if (bsdfState.thinWalled) {
+                insideAbsorbingMedium = false;
+            } else if (bsdfState.frontFace) {
+                insideAbsorbingMedium = true;
+                currentAbsorptionColor = hit.absorptionColor;
+                currentAbsorptionDistance = max(hit.absorptionDistance, 0.01);
+            } else {
+                insideAbsorbingMedium = false;
+            }
+        }
+        lastBsdfPdf = bsdfSample.pdf;
+        lastSampleWasDelta = bsdfSample.isDelta;
+        if (!isFiniteVec3(throughput) || maxComponent(throughput) <= kEpsilon) {
+            break;
+        }
+
+        if (bounce >= 2) {
+            float continueProbability = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.12, 0.95);
+            float rr = hash13(vec3(pixel, samplePhase + float(bounce) * 1.91 + 13.0));
+            if (rr > continueProbability) {
+                break;
+            }
+            throughput /= continueProbability;
+            if (!isFiniteVec3(throughput)) {
+                break;
+            }
+        }
+    }
+
+    return applyColorDisplayMode(radiance, uv, sampleIndex);
+}
+
+Ray generateCameraRay(ivec2 pixel, vec2 uv, vec2 centered, float samplePhase) {
+    float yaw = radians(uYawDegrees);
+    float pitch = radians(uPitchDegrees);
+    vec3 forward = normalize(vec3(
+        cos(pitch) * cos(yaw),
+        sin(pitch),
+        cos(pitch) * sin(yaw)));
+
+    vec3 origin = uCameraPosition;
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    vec3 right = normalize(cross(forward, worldUp));
+    if (length(right) < kEpsilon) {
+        right = vec3(1.0, 0.0, 0.0);
+    }
+    vec3 up = normalize(cross(right, forward));
+
+    float aspectRatio = float(uResolution.x) / float(max(uResolution.y, 1));
+    float halfTan = tan(radians(uFieldOfViewDegrees) * 0.5);
+    vec3 direction = normalize(
+        forward +
+        centered.x * aspectRatio * halfTan * right +
+        centered.y * halfTan * up);
+
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+
+    if (uIntegratorMode != 1 || uApertureRadius <= kEpsilon || uFocusDistance <= kEpsilon) {
+        return ray;
+    }
+
+    float focusT = uFocusDistance / max(dot(direction, forward), kEpsilon);
+    vec3 focusPoint = origin + direction * focusT;
+    vec2 lensXi = hash23(vec3(
+        float(pixel.x) + uv.x * 13.0,
+        float(pixel.y) + uv.y * 17.0,
+        samplePhase * 1.91 + 23.0));
+    vec2 lensSample = sampleConcentricDisk(lensXi) * uApertureRadius;
+    vec3 lensOffset = right * lensSample.x + up * lensSample.y;
+    ray.origin = origin + lensOffset;
+    ray.direction = normalize(focusPoint - ray.origin);
+    return ray;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= uResolution.x || pixel.y >= uResolution.y) {
+        return;
+    }
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(uResolution);
+    vec2 centered = uv * 2.0 - 1.0;
+    float samplePhase = float(max(uSampleIndex, 0));
+    float jitterSeed = hash13(vec3(pixel, samplePhase + 1.0));
+    vec2 jitter = (vec2(jitterSeed, hash13(vec3(pixel.yx, samplePhase + 7.0))) - 0.5) / vec2(max(uResolution, ivec2(1)));
+    centered += jitter * (uAccumulationEnabled != 0 ? 1.0 : 0.25);
+
+    Ray ray = generateCameraRay(pixel, uv, centered, samplePhase);
+
+    vec3 color = vec3(0.0);
+    if (uIntegratorMode == 0) {
+        color = traceRasterPreview(ray, pixel, uv);
+    } else if (uIntegratorMode == 1) {
+        color = tracePathPreview(ray, pixel, uv, uSampleIndex);
+    } else {
+        Hit hit = MakeDefaultHit(kHitDistanceMax);
+        bool foundHit = traceScene(ray, hit);
+        color = foundHit
+            ? evaluateDebugHitColor(hit, uv, uSampleIndex)
+            : (isPathTraceAovMode() ? vec3(0.0) : evaluateBackground(uv, centered, samplePhase));
+    }
+
+    float vignette = smoothstep(1.35, 0.25, dot(centered, centered));
+    color *= mix(0.7, 1.08, vignette);
+    color *= clamp(uExposure, 0.25, 4.0);
+
+    vec4 accumulation = vec4(color, 1.0);
+    if (uAccumulationEnabled != 0 && uSampleIndex > 0) {
+        vec4 previous = imageLoad(uAccumulationImage, pixel);
+        accumulation.rgb = previous.rgb + color;
+        accumulation.a = previous.a + 1.0;
+    }
+
+    imageStore(uAccumulationImage, pixel, accumulation);
+
+    vec4 momentAccumulation = vec4(0.0);
+    float sampleLuminance = luminance(color);
+    if (uAccumulationEnabled != 0 && uSampleIndex > 0) {
+        vec4 previousMoment = imageLoad(uMomentImage, pixel);
+        momentAccumulation.r = previousMoment.r + sampleLuminance;
+        momentAccumulation.g = previousMoment.g + sampleLuminance * sampleLuminance;
+        momentAccumulation.b = 0.0;
+        momentAccumulation.a = accumulation.a;
+    } else {
+        momentAccumulation.r = sampleLuminance;
+        momentAccumulation.g = sampleLuminance * sampleLuminance;
+        momentAccumulation.b = 0.0;
+        momentAccumulation.a = accumulation.a;
+    }
+
+    imageStore(uMomentImage, pixel, momentAccumulation);
+
+    vec3 averaged = accumulation.rgb / max(accumulation.a, 1.0);
+    bool applyBeautyTonemap =
+        uIntegratorMode != 2 &&
+        uDisplayMode >= 0 &&
+        uDisplayMode <= 2;
+    vec3 displayColor = applyBeautyTonemap
+        ? applyPreviewTonemap(averaged)
+        : clamp(averaged, 0.0, 1.0);
+    if (uDisplayMode == 8) {
+        displayColor = evaluateSampleCountAov(accumulation.a);
+    } else if (uDisplayMode == 9) {
+        displayColor = evaluateVarianceAov(momentAccumulation.rg, accumulation.a);
+    }
+
+    imageStore(uDisplayImage, pixel, vec4(clamp(displayColor, 0.0, 1.0), 1.0));
+}
