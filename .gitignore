@@ -39,3 +39,7 @@ Desktop.ini
 *.tmp
 node_modules/
 dist/
+
+# --- User Specified ---
+Current Plan Files and Documentation In Use/
+OLD/
