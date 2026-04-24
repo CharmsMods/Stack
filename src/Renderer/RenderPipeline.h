@@ -38,6 +38,10 @@ public:
     // Read downsampled pixels for scopes (fast)
     std::vector<unsigned char> GetScopesPixels(int& outW, int& outH);
 
+    // Read-only access to raw source pixels
+    const std::vector<unsigned char>& GetSourcePixelsRaw() const { return m_SourcePixels; }
+    int GetSourceChannels() const { return m_SourceChannels; }
+
     FullscreenQuad& GetQuad() { return m_Quad; }
 
 private:

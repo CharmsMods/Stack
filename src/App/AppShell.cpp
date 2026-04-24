@@ -114,6 +114,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     // Now that we are back in the main context, upload the library textures
     LibraryManager::Get().UploadLibraryTextures();
 
+    glfwMaximizeWindow(m_Window);
     glfwShowWindow(m_Window);
     m_IsRunning = true;
     return true;
@@ -127,6 +128,14 @@ void AppShell::Run() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         Async::TaskSystem::Get().PumpMainThreadTasks();
+        LibraryManager::Get().UploadLibraryTextures();
+
+        std::string savedProjectFileName;
+        std::string savedProjectKind;
+        if (LibraryManager::Get().ConsumeSavedProjectEvent(savedProjectFileName, savedProjectKind)) {
+            (void)savedProjectKind;
+            (void)savedProjectFileName;
+        }
 
         RenderUI();
 
@@ -180,9 +189,10 @@ void AppShell::RenderUI() {
 
     int selectedTab = -1;
     if (ImGui::BeginTabBar("ProgramContextTabs", ImGuiTabBarFlags_None)) {
+        const int requestedTabAtFrameStart = m_RequestedTab;
         for (const RootTabDescriptor& tab : tabs) {
             const ImGuiTabItemFlags flags =
-                (m_RequestedTab == tab.id) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+                (requestedTabAtFrameStart == tab.id) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
 
             if (ImGui::BeginTabItem(tab.label, nullptr, flags)) {
                 selectedTab = tab.id;
@@ -191,7 +201,17 @@ void AppShell::RenderUI() {
             }
         }
 
-        if (m_RequestedTab != -1) {
+        if (selectedTab == RootTabComposite && m_Composite.ConsumePendingOpenInEditorRequest()) {
+            if (m_Editor.GetPipeline().HasSourceImage()) {
+                m_ShowEditorSavePrompt = true;
+            } else {
+                RequestTabSwitch(RootTabEditor);
+            }
+        }
+
+        if (requestedTabAtFrameStart != -1 &&
+            m_RequestedTab == requestedTabAtFrameStart &&
+            selectedTab == requestedTabAtFrameStart) {
             m_RequestedTab = -1;
         }
 
@@ -203,14 +223,88 @@ void AppShell::RenderUI() {
         m_CurrentTabId = selectedTab;
     }
 
+    m_Library.RenderGlobalPopups();
+    RenderEditorSavePrompts();
+
     ImGui::End(); // End ModularStudioMain
+}
+
+void AppShell::RenderEditorSavePrompts() {
+    if (m_ShowEditorSavePrompt) {
+        ImGui::OpenPopup("Editor Project Already Open##AppShell");
+        m_ShowEditorSavePrompt = false;
+    }
+
+    if (m_ShowEditorNamePrompt) {
+        ImGui::OpenPopup("Save New Editor Project##AppShell");
+        m_ShowEditorNamePrompt = false;
+    }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Editor Project Already Open##AppShell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("There is already a project open in the Editor tab. Would you like to save it before loading the new project?");
+        ImGui::Spacing();
+
+        if (ImGui::Button("Save & Continue", ImVec2(140.0f, 0.0f))) {
+            if (m_Editor.GetCurrentProjectFileName().empty()) {
+                m_ShowEditorNamePrompt = true;
+            } else {
+                LibraryManager::Get().RequestSaveProject(
+                    m_Editor.GetCurrentProjectName(),
+                    &m_Editor,
+                    m_Editor.GetCurrentProjectFileName());
+                RequestTabSwitch(RootTabEditor);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Discard & Continue", ImVec2(140.0f, 0.0f))) {
+            RequestTabSwitch(RootTabEditor);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Save New Editor Project##AppShell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Enter a name for the current project:");
+        ImGui::Spacing();
+        ImGui::InputText("##ProjectName", m_SaveNameBuffer, sizeof(m_SaveNameBuffer));
+        ImGui::Spacing();
+
+        if (ImGui::Button("Save", ImVec2(100.0f, 0.0f))) {
+            std::string newName = m_SaveNameBuffer;
+            if (newName.empty()) {
+                newName = "Untitled Project";
+            }
+            LibraryManager::Get().RequestSaveProject(newName, &m_Editor, "");
+            RequestTabSwitch(RootTabEditor);
+            m_SaveNameBuffer[0] = '\0';
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
 }
 
 void AppShell::OnTabChanged(int oldTab, int newTab) {
     // 1. Leaving Composite, entering Editor
     if (oldTab == RootTabComposite && newTab == RootTabEditor) {
         CompositeLayer* selected = m_Composite.GetSelectedLayer();
-        if (selected && selected->kind == LayerKind::EditorProject && !selected->sourceImagePng.empty()) {
+        if (selected && selected->kind == LayerKind::EditorProject && !selected->originalSourcePng.empty()) {
             // Load this layer into the editor
             EditorModule::LoadedProjectData data;
             data.projectName = selected->name;
@@ -222,7 +316,7 @@ void AppShell::OnTabChanged(int oldTab, int newTab) {
             
             // Re-decode the ORIGINAL source image for high-fidelity editing
             int sw = 0, sh = 0, sc = 4;
-            if (LibraryManager::DecodeImageBytes(selected->sourceImagePng, data.sourcePixels, sw, sh, sc)) {
+            if (LibraryManager::DecodeImageBytes(selected->originalSourcePng, data.sourcePixels, sw, sh, sc)) {
                 data.width = sw;
                 data.height = sh;
                 data.channels = sc;
@@ -435,9 +529,6 @@ void AppShell::ShowSplashScreen() {
 
     glfwDestroyWindow(m_SplashWindow);
     m_SplashWindow = nullptr;
-
-    // Add a 1 second delay between splash disappearing and main window appearing
-    std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // Restore Main Context
     ImGui::SetCurrentContext(mainContext);

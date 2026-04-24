@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <functional>
 
 #include "UI/EditorScopes.h"
 
@@ -106,6 +107,16 @@ public:
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
     bool IsExportBusy() const { return Async::IsBusy(m_ExportTaskState); }
 
+    bool IsPickingColor() const { return m_IsPickingColor; }
+    void SetPickingColor(bool picking, std::function<void(float, float, float)> callback = nullptr) {
+        m_IsPickingColor = picking;
+        m_ColorPickerCallback = callback;
+    }
+    void OnColorPicked(float r, float g, float b) {
+        if (m_ColorPickerCallback) m_ColorPickerCallback(r, g, b);
+        m_IsPickingColor = false;
+    }
+
 private:
     EditorSidebar m_Sidebar;
     EditorViewport m_Viewport;
@@ -126,4 +137,7 @@ private:
     std::uint64_t m_ExportGeneration = 0;
     Async::TaskState m_ExportTaskState = Async::TaskState::Idle;
     std::string m_ExportStatusText;
+
+    bool m_IsPickingColor = false;
+    std::function<void(float, float, float)> m_ColorPickerCallback;
 };

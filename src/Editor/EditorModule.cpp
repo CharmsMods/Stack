@@ -1,6 +1,8 @@
 #include "EditorModule.h"
 
 #include "Async/TaskSystem.h"
+#include "Library/LibraryManager.h"
+#include "Utils/ImGuiExtras.h"
 #include "Layers/AdjustmentsLayer.h"
 #include "Layers/AiryBloomLayer.h"
 #include "Layers/AlphaHandlingLayer.h"
@@ -216,6 +218,14 @@ void EditorModule::RenderUI() {
     m_Sidebar.Render(this);
     m_Viewport.Render(this);
     m_Scopes.Render(this);
+
+    if (IsSourceLoadBusy()) {
+        ImGuiExtras::RenderBusyOverlay("Loading source image...");
+    } else if (IsExportBusy()) {
+        ImGuiExtras::RenderBusyOverlay("Exporting image...");
+    } else if (Async::IsBusy(LibraryManager::Get().GetSaveTaskState())) {
+        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetSaveStatusText().c_str());
+    }
 
     ImGui::EndChild();
 }

@@ -24,6 +24,7 @@ public:
 private:
     void ShowSplashScreen();
     void RenderUI();
+    void RenderEditorSavePrompts();
     void OnTabChanged(int oldTab, int newTab);
 
     GLFWwindow* m_Window;
@@ -34,6 +35,9 @@ private:
     int m_RequestedTab = 0; // 0 = Library, 1 = Editor
     int m_CurrentTabId = 0;
     std::string m_ActiveSyncLayerId;
+    bool m_ShowEditorSavePrompt = false;
+    bool m_ShowEditorNamePrompt = false;
+    char m_SaveNameBuffer[256] = {};
     EditorModule m_Editor;
     LibraryModule m_Library;
     RenderTab m_RenderTab;

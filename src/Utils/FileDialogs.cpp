@@ -6,6 +6,7 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <shobjidl.h>
 #endif
 
 namespace FileDialogs {
@@ -217,7 +218,7 @@ std::string OpenProjectFileDialog(const char* title) {
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = nullptr;
-    ofn.lpstrFilter = "Modular Studio Project\0*.stack\0All Files\0*.*\0";
+    ofn.lpstrFilter = "Modular Studio Project\0*.stack;*.comp\0Stack Project\0*.stack\0Composite Project\0*.comp\0All Files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
@@ -260,6 +261,48 @@ std::string SaveProjectFileDialog(const char* title, const char* defaultFileName
     (void)defaultFileName;
 #endif
     return "";
+}
+
+std::string OpenFolderDialog(const char* title) {
+#ifdef _WIN32
+    std::string result = "";
+    IFileOpenDialog *pfd = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
+        DWORD dwOptions;
+        if (SUCCEEDED(pfd->GetOptions(&dwOptions))) {
+            pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        }
+        
+        int len = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
+        if (len > 0) {
+            std::wstring wtitle(len, 0);
+            MultiByteToWideChar(CP_UTF8, 0, title, -1, &wtitle[0], len);
+            pfd->SetTitle(wtitle.c_str());
+        }
+
+        if (SUCCEEDED(pfd->Show(NULL))) {
+            IShellItem *psi;
+            if (SUCCEEDED(pfd->GetResult(&psi))) {
+                PWSTR pszPath;
+                if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
+                    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, NULL, 0, NULL, NULL);
+                    if (utf8Len > 0) {
+                        std::string path(utf8Len - 1, 0);
+                        WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, &path[0], utf8Len, NULL, NULL);
+                        result = path;
+                    }
+                    CoTaskMemFree(pszPath);
+                }
+                psi->Release();
+            }
+        }
+        pfd->Release();
+    }
+    return result;
+#else
+    (void)title;
+    return "";
+#endif
 }
 
 } // namespace FileDialogs

@@ -1,5 +1,6 @@
 #include "BackgroundPatcherLayer.h"
 #include "Renderer/FullscreenQuad.h"
+#include "Editor/EditorModule.h"
 #include <imgui.h>
 
 static const char* s_BgPatcherVert = R"(
@@ -27,7 +28,6 @@ uniform float uTolerance;
 uniform float uSmoothing;
 uniform float uDefringe;
 uniform float uEdgeShift;
-uniform int uShowMask;
 uniform int uKeepSelectedRange;
 uniform int uAaEnabled;
 uniform float uAntialias;
@@ -36,6 +36,7 @@ uniform int uUseFloodMask;
 uniform int uUseBrushMask;
 uniform int uPatchEnabled;
 uniform vec2 uResolution;
+uniform int uShowDebugOverlay;
 
 float getMask(vec2 uv) {
     vec3 sampleRgb = texture(uInputTex, uv).rgb;
@@ -91,13 +92,20 @@ void main() {
     float effectiveDefringe = uKeepSelectedRange == 1 ? 0.0 : uDefringe;
     vec3 defringedColor = clamp((color.rgb - uTargetColor * removedAlpha * effectiveDefringe) / max(1.0 - removedAlpha * effectiveDefringe, 0.0001), 0.0, 1.0);
 
-    if (uShowMask == 1) {
+    if (uShowDebugOverlay == 1) {
         float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+        vec3 bw = vec3(luma);
         if (mask > 0.001) {
-            FragColor = vec4(1.0, 1.0, 0.0, 1.0);
-            return;
+            if (centerMask > 0.001) {
+                // Within tolerance range => magenta at 50% over grayscale
+                FragColor = vec4(mix(bw, vec3(1.0, 0.0, 1.0), 0.5), 1.0);
+            } else {
+                // Outside tolerance but affected by edge bleed => cyan at 50% over grayscale
+                FragColor = vec4(mix(bw, vec3(0.0, 1.0, 1.0), 0.5), 1.0);
+            }
+        } else {
+            FragColor = vec4(bw, color.a);
         }
-        FragColor = vec4(vec3(luma), 1.0);
         return;
     }
 
@@ -140,7 +148,7 @@ void BackgroundPatcherLayer::Execute(unsigned int inputTexture, int width, int h
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uSmoothing"), m_Smoothing);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uDefringe"), m_Defringe);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uEdgeShift"), m_EdgeShift);
-    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uShowMask"), m_ShowMask ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uShowDebugOverlay"), m_ShowDebugOverlay ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uKeepSelectedRange"), m_KeepSelected ? 1 : 0);
     glUniform2f(glGetUniformLocation(m_ShaderProgram, "uResolution"), (float)width, (float)height);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uUseFloodMask"), 0); // Not implemented yet
@@ -150,15 +158,89 @@ void BackgroundPatcherLayer::Execute(unsigned int inputTexture, int width, int h
     glUseProgram(0);
 }
 
-void BackgroundPatcherLayer::RenderUI() {
-    ImGui::ColorEdit3("Target Color", m_TargetColor);
-    ImGui::SliderFloat("Target Alpha", &m_TargetAlpha, 0.0f, 1.0f);
-    ImGui::SliderFloat("Tolerance", &m_Tolerance, 0.0f, 1.0f);
-    ImGui::SliderFloat("Smoothing", &m_Smoothing, 0.0f, 1.0f);
-    ImGui::SliderFloat("Defringe", &m_Defringe, 0.0f, 1.0f);
-    ImGui::SliderFloat("Edge Shift", &m_EdgeShift, 0.0f, 10.0f);
-    ImGui::Checkbox("Keep Selected", &m_KeepSelected);
-    ImGui::Checkbox("Show Selection Mask", &m_ShowMask);
+void BackgroundPatcherLayer::RenderUI(EditorModule* editor) {
+    if (!editor) return;
+
+    ImGui::Text("SELECTION");
+    ImGui::Spacing();
+
+    bool isPicking = editor->IsPickingColor();
+    if (isPicking) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
+    }
+    if (ImGui::Button(isPicking ? "Cancel Picking" : "Pick Color To Remove", ImVec2(160, 30))) {
+        if (isPicking) {
+            editor->SetPickingColor(false);
+        } else {
+            editor->SetPickingColor(true, [this](float r, float g, float b) {
+                m_TargetColor[0] = r;
+                m_TargetColor[1] = g;
+                m_TargetColor[2] = b;
+            });
+        }
+    }
+    if (isPicking) {
+        ImGui::PopStyleColor(2);
+    }
+
+    ImGui::SameLine();
+    ImGui::ColorEdit3("##TargetColor", m_TargetColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+
+    ImGui::Spacing();
+    
+    // Removed Area Opacity goes from 0-100. It translates to target alpha.
+    float opacity = m_TargetAlpha * 100.0f;
+    if (ImGui::SliderFloat("Removed Area Opacity", &opacity, 0.0f, 100.0f, "%.0f")) {
+        m_TargetAlpha = opacity / 100.0f;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::Text("TOLERANCE & EDGES");
+    ImGui::Spacing();
+
+    float tol100 = m_Tolerance * 100.0f;
+    if (ImGui::SliderFloat("Color Tolerance", &tol100, 0.0f, 100.0f, "%.0f")) {
+        m_Tolerance = tol100 / 100.0f;
+    }
+
+    // Draw the gradient bar
+    ImGui::Spacing();
+    ImGui::TextDisabled("RANGE OF COLORS CURRENTLY REMOVED");
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    float h = 12.0f;
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    
+    // Gradient from picked color to transparent/faded
+    ImU32 colLeft = ImGui::ColorConvertFloat4ToU32(ImVec4(m_TargetColor[0], m_TargetColor[1], m_TargetColor[2], 1.0f));
+    ImU32 colRight = ImGui::ColorConvertFloat4ToU32(ImVec4(m_TargetColor[0], m_TargetColor[1], m_TargetColor[2], 0.0f));
+    drawList->AddRectFilledMultiColor(p, ImVec2(p.x + w, p.y + h), colLeft, colRight, colRight, colLeft);
+    drawList->AddRect(p, ImVec2(p.x + w, p.y + h), IM_COL32(100, 100, 100, 255));
+    ImGui::Dummy(ImVec2(w, h));
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    float smoothing100 = m_Smoothing * 100.0f;
+    if (ImGui::SliderFloat("Edge Smoothing", &smoothing100, 0.0f, 100.0f, "%.0f")) {
+        m_Smoothing = smoothing100 / 100.0f;
+    }
+
+    ImGui::SliderFloat("Edge Shift (px)", &m_EdgeShift, -10.0f, 10.0f, "%.0f");
+
+    float defringe100 = m_Defringe * 100.0f;
+    if (ImGui::SliderFloat("Defringe", &defringe100, 0.0f, 100.0f, "%.0f")) {
+        m_Defringe = defringe100 / 100.0f;
+    }
+
+    ImGui::Spacing();
+    ImGui::Checkbox("Keep Selected Range Only", &m_KeepSelected);
+    ImGui::Checkbox("Removal Visualizer (Magenta=In Range, Cyan=Edge Bleed)", &m_ShowDebugOverlay);
 }
 
 json BackgroundPatcherLayer::Serialize() const {
@@ -171,7 +253,6 @@ json BackgroundPatcherLayer::Serialize() const {
     j["defringe"] = m_Defringe;
     j["edgeShift"] = m_EdgeShift;
     j["keepSelected"] = m_KeepSelected;
-    j["showMask"] = m_ShowMask;
     return j;
 }
 
@@ -188,5 +269,4 @@ void BackgroundPatcherLayer::Deserialize(const json& j) {
     if (j.contains("defringe")) m_Defringe = j["defringe"];
     if (j.contains("edgeShift")) m_EdgeShift = j["edgeShift"];
     if (j.contains("keepSelected")) m_KeepSelected = j["keepSelected"];
-    if (j.contains("showMask")) m_ShowMask = j["showMask"];
 }

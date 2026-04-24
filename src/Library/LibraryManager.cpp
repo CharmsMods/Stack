@@ -1,4 +1,5 @@
 #include "LibraryManager.h"
+#include "TagManager.h"
 
 #include "Async/TaskSystem.h"
 #include "Composite/CompositeModule.h"
@@ -7,12 +8,15 @@
 #include "Renderer/GLHelpers.h"
 #include "Utils/Base64.h"
 #include <algorithm>
+#include <array>
+#include <bitset>
 #include <cctype>
 #include <chrono>
 #include <cstring>
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <system_error>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -63,6 +67,110 @@ bool HasMeaningfulPixels(const std::vector<unsigned char>& pixels) {
             return true;
         }
     }
+    return false;
+}
+
+bool LoadRgbaImageFromFile(const std::filesystem::path& path, std::vector<unsigned char>& outPixels, int& outW, int& outH);
+
+bool DecodePreviewBytes(
+    const std::vector<unsigned char>& encodedBytes,
+    std::vector<unsigned char>& outPixels,
+    int& outW,
+    int& outH) {
+    int channels = 4;
+    return !encodedBytes.empty() && LibraryManager::DecodeImageBytes(encodedBytes, outPixels, outW, outH, channels);
+}
+
+bool ResolveProjectPreviewPixels(
+    const StackFormat::ProjectDocument& project,
+    const std::filesystem::path* fallbackAssetPath,
+    const std::vector<unsigned char>* fallbackAssetBytes,
+    std::vector<unsigned char>& outPixels,
+    int& outW,
+    int& outH,
+    std::string& outStatus) {
+    outPixels.clear();
+    outW = 0;
+    outH = 0;
+    outStatus.clear();
+
+    const std::string projectKind = project.metadata.projectKind.empty()
+        ? StackFormat::kEditorProjectKind
+        : project.metadata.projectKind;
+    const bool isComposite = projectKind == StackFormat::kCompositeProjectKind;
+    const bool isRender = projectKind == StackFormat::kRenderProjectKind;
+
+    std::vector<unsigned char> sourcePixels;
+    int sourceW = 0;
+    int sourceH = 0;
+    const bool hasSourcePixels = DecodePreviewBytes(project.sourceImageBytes, sourcePixels, sourceW, sourceH);
+
+    if (isComposite || isRender) {
+        if (hasSourcePixels) {
+            outPixels = std::move(sourcePixels);
+            outW = sourceW;
+            outH = sourceH;
+            outStatus = isComposite ? "Using embedded composite preview." : "Using embedded render preview.";
+            return true;
+        }
+        if (DecodePreviewBytes(project.thumbnailBytes, outPixels, outW, outH)) {
+            outStatus = "Using embedded thumbnail preview.";
+            return true;
+        }
+        outStatus = "This project does not contain a usable embedded preview image.";
+        return false;
+    }
+
+    if (fallbackAssetBytes != nullptr && !fallbackAssetBytes->empty()) {
+        if (DecodePreviewBytes(*fallbackAssetBytes, outPixels, outW, outH)) {
+            outStatus = "Using the imported saved rendered preview.";
+            return true;
+        }
+    }
+
+    if (fallbackAssetPath != nullptr && LoadRgbaImageFromFile(*fallbackAssetPath, outPixels, outW, outH)) {
+        outStatus = "Using the saved rendered preview.";
+        return true;
+    }
+
+    if (hasSourcePixels && !project.pipelineData.is_null()) {
+        EditorModule previewEditor;
+        previewEditor.Initialize();
+        previewEditor.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, 4);
+        previewEditor.DeserializePipeline(project.pipelineData);
+        previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
+
+        int renderedW = 0;
+        int renderedH = 0;
+        std::vector<unsigned char> renderedPixels = previewEditor.GetPipeline().GetOutputPixels(renderedW, renderedH);
+        const bool renderedLooksBlank =
+            !renderedPixels.empty() &&
+            !HasMeaningfulPixels(renderedPixels) &&
+            HasMeaningfulPixels(sourcePixels);
+        if (!renderedPixels.empty() && renderedW > 0 && renderedH > 0 && !renderedLooksBlank) {
+            LibraryManager::FlipImageRowsInPlace(renderedPixels, renderedW, renderedH, 4);
+            outPixels = std::move(renderedPixels);
+            outW = renderedW;
+            outH = renderedH;
+            outStatus = "Rendered a live preview from the editor pipeline.";
+            return true;
+        }
+    }
+
+    if (DecodePreviewBytes(project.thumbnailBytes, outPixels, outW, outH)) {
+        outStatus = "Using embedded thumbnail preview.";
+        return true;
+    }
+
+    if (hasSourcePixels) {
+        outPixels = std::move(sourcePixels);
+        outW = sourceW;
+        outH = sourceH;
+        outStatus = "Using source image fallback.";
+        return true;
+    }
+
+    outStatus = "Failed to build a preview from the project, its rendered asset, thumbnail, or source image.";
     return false;
 }
 
@@ -132,6 +240,159 @@ bool IsSupportedAssetExtension(const std::filesystem::path& path) {
            extension == ".jpeg" ||
            extension == ".bmp" ||
            extension == ".tga";
+}
+
+bool IsSupportedProjectExtension(const std::filesystem::path& path) {
+    const std::string extension = path.extension().string();
+    return extension == ".stack" || extension == ".comp";
+}
+
+std::string DefaultProjectExtensionForKind(const std::string& projectKind) {
+    return projectKind == StackFormat::kCompositeProjectKind ? ".comp" : ".stack";
+}
+
+std::string EnsureProjectFileNameForKind(
+    const std::string& fileName,
+    const std::string& fallbackStem,
+    const std::string& projectKind) {
+
+    std::filesystem::path resolved = fileName.empty() ? std::filesystem::path(fallbackStem) : std::filesystem::path(fileName);
+    if (!IsSupportedProjectExtension(resolved)) {
+        resolved = resolved.stem().string() + DefaultProjectExtensionForKind(projectKind);
+    } else if (projectKind == StackFormat::kCompositeProjectKind && resolved.extension() != ".comp") {
+        resolved = resolved.stem().string() + ".comp";
+    }
+
+    return resolved.filename().string();
+}
+
+std::string ResolveAssetProjectFileName(const std::string& stem, const std::vector<std::shared_ptr<ProjectEntry>>& projects) {
+    for (const auto& project : projects) {
+        if (project && std::filesystem::path(project->fileName).stem().string() == stem) {
+            return project->fileName;
+        }
+    }
+    return {};
+}
+
+std::string ResolveAssetProjectFileName(const std::string& stem, const std::vector<StackFormat::BundledProjectDocument>& projects) {
+    for (const auto& project : projects) {
+        if (std::filesystem::path(project.fileName).stem().string() == stem) {
+            return project.fileName;
+        }
+    }
+    return {};
+}
+
+std::string NormalizeComparableName(const std::string& value) {
+    std::string normalized;
+    normalized.reserve(value.size());
+    for (const unsigned char ch : value) {
+        if (std::isalnum(ch) != 0) {
+            normalized.push_back(static_cast<char>(std::tolower(ch)));
+        }
+    }
+    return normalized;
+}
+
+std::uint64_t ComputeExactPixelFingerprint(const std::vector<unsigned char>& pixels) {
+    constexpr std::uint64_t kOffset = 1469598103934665603ull;
+    constexpr std::uint64_t kPrime = 1099511628211ull;
+    std::uint64_t hash = kOffset;
+    for (const unsigned char byte : pixels) {
+        hash ^= byte;
+        hash *= kPrime;
+    }
+    return hash;
+}
+
+std::uint64_t ComputeAverageHash64(const std::vector<unsigned char>& pixels, const int width, const int height) {
+    if (pixels.empty() || width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    std::array<float, 64> luminance {};
+    float total = 0.0f;
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const int srcX = std::clamp((x * width) / 8, 0, width - 1);
+            const int srcY = std::clamp((y * height) / 8, 0, height - 1);
+            const std::size_t index =
+                (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * 4;
+            const float r = pixels[index + 0] / 255.0f;
+            const float g = pixels[index + 1] / 255.0f;
+            const float b = pixels[index + 2] / 255.0f;
+            const float a = pixels[index + 3] / 255.0f;
+            const float value = ((r * 0.299f) + (g * 0.587f) + (b * 0.114f)) * a;
+            luminance[static_cast<std::size_t>(y) * 8 + static_cast<std::size_t>(x)] = value;
+            total += value;
+        }
+    }
+
+    const float average = total / 64.0f;
+    std::uint64_t hash = 0;
+    for (std::size_t index = 0; index < luminance.size(); ++index) {
+        if (luminance[index] >= average) {
+            hash |= (1ull << index);
+        }
+    }
+    return hash;
+}
+
+int CountHammingDistance64(const std::uint64_t a, const std::uint64_t b) {
+    return static_cast<int>(std::bitset<64>(a ^ b).count());
+}
+
+float ComputeNameSimilarityScore(const std::string& a, const std::string& b) {
+    const std::string normalizedA = NormalizeComparableName(a);
+    const std::string normalizedB = NormalizeComparableName(b);
+    if (normalizedA.empty() || normalizedB.empty()) {
+        return 0.0f;
+    }
+    if (normalizedA == normalizedB) {
+        return 1.0f;
+    }
+    if (normalizedA.find(normalizedB) != std::string::npos || normalizedB.find(normalizedA) != std::string::npos) {
+        return 0.9f;
+    }
+
+    std::size_t prefix = 0;
+    while (prefix < normalizedA.size() && prefix < normalizedB.size() && normalizedA[prefix] == normalizedB[prefix]) {
+        ++prefix;
+    }
+    return static_cast<float>(prefix) / static_cast<float>(std::max(normalizedA.size(), normalizedB.size()));
+}
+
+bool ShouldQueueAssetConflict(
+    const std::string& localName,
+    const std::vector<unsigned char>& localPixels,
+    const int localWidth,
+    const int localHeight,
+    const std::string& importedName,
+    const std::vector<unsigned char>& importedPixels,
+    const int importedWidth,
+    const int importedHeight,
+    bool& outExactMatch) {
+
+    outExactMatch = false;
+    if (localPixels.empty() || importedPixels.empty() || localWidth <= 0 || localHeight <= 0 || importedWidth <= 0 || importedHeight <= 0) {
+        return false;
+    }
+
+    if (localWidth == importedWidth &&
+        localHeight == importedHeight &&
+        localPixels.size() == importedPixels.size() &&
+        ComputeExactPixelFingerprint(localPixels) == ComputeExactPixelFingerprint(importedPixels) &&
+        localPixels == importedPixels) {
+        outExactMatch = true;
+        return true;
+    }
+
+    const std::uint64_t localHash = ComputeAverageHash64(localPixels, localWidth, localHeight);
+    const std::uint64_t importedHash = ComputeAverageHash64(importedPixels, importedWidth, importedHeight);
+    const int hashDistance = CountHammingDistance64(localHash, importedHash);
+    const float nameScore = ComputeNameSimilarityScore(localName, importedName);
+    return hashDistance <= 4 || (hashDistance <= 8 && nameScore >= 0.55f);
 }
 
 std::vector<unsigned char> ResizePixelsNearest(
@@ -280,11 +541,7 @@ bool LoadLegacyProjectDocument(
 }
 
 std::string EnsureProjectFileName(const std::string& fileName, const std::string& fallbackName) {
-    std::string resolved = fileName.empty() ? fallbackName : fileName;
-    if (std::filesystem::path(resolved).extension() != ".stack") {
-        resolved += ".stack";
-    }
-    return resolved;
+    return EnsureProjectFileNameForKind(fileName, std::filesystem::path(fallbackName).stem().string(), StackFormat::kEditorProjectKind);
 }
 
 std::string EnsureAssetFileName(const std::string& fileName, const std::string& fallbackName) {
@@ -485,13 +742,14 @@ bool LibraryManager::DecodeImageBytes(
 void LibraryManager::PrepareConflictPreview(int index) {
     if (index < 0 || index >= (int)m_PendingConflicts.size()) return;
     auto& conflict = m_PendingConflicts[index];
-    if (conflict.previewsReady) return;
+    if (conflict.previewsReady || conflict.previewFailed) return;
 
     if (conflict.importedProjectIndex < 0 || conflict.importedProjectIndex >= (int)m_ActiveImportBundle.projects.size()) {
         return;
     }
 
-    const auto& importedProjectObj = m_ActiveImportBundle.projects[conflict.importedProjectIndex].project;
+    const auto& importedProjectEntry = m_ActiveImportBundle.projects[conflict.importedProjectIndex];
+    const auto& importedProjectObj = importedProjectEntry.project;
 
     StackFormat::ProjectLoadOptions loadOptions;
     loadOptions.includeThumbnail = true;
@@ -503,52 +761,338 @@ void LibraryManager::PrepareConflictPreview(int index) {
         return;
     }
 
-    EditorModule previewEditor;
-    previewEditor.Initialize();
+    std::vector<unsigned char> importedAssetBytes;
+    for (const auto& asset : m_ActiveImportBundle.assets) {
+        if (asset.projectFileName == importedProjectEntry.fileName && !asset.imageBytes.empty()) {
+            importedAssetBytes = asset.imageBytes;
+            break;
+        }
+    }
+    const std::filesystem::path localAssetPath = BuildAssetPathForProjectFile(conflict.localProjectFileName);
 
-    // 1. Render Local
-    int localW = 0, localH = 0, localC = 4;
     std::vector<unsigned char> localPixels;
-    if (DecodeImageBytes(localProjectObj.sourceImageBytes, localPixels, localW, localH, localC)) {
-        previewEditor.LoadSourceFromPixels(localPixels.data(), localW, localH, localC);
-        previewEditor.DeserializePipeline(localProjectObj.pipelineData);
-        previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
-        auto rendered = previewEditor.GetPipeline().GetOutputPixels(localW, localH);
-        if (!rendered.empty()) {
-            FlipImageRowsInPlace(rendered, localW, localH, 4);
-            conflict.localPreviewTex = GLHelpers::CreateTextureFromPixels(rendered.data(), localW, localH, 4);
-        } else {
-            std::cerr << "[LibraryManager] Failed to capture output pixels for local project: " << conflict.localProjectFileName << "\n";
-        }
-    } else {
-        std::cerr << "[LibraryManager] Failed to decode source image for local project: " << conflict.localProjectFileName << "\n";
+    int localW = 0;
+    int localH = 0;
+    std::string localStatus;
+    const bool localPreviewOk = ResolveProjectPreviewPixels(
+        localProjectObj,
+        &localAssetPath,
+        nullptr,
+        localPixels,
+        localW,
+        localH,
+        localStatus);
+
+    std::vector<unsigned char> importedPixels;
+    int importedW = 0;
+    int importedH = 0;
+    std::string importedStatus;
+    const bool importedPreviewOk = ResolveProjectPreviewPixels(
+        importedProjectObj,
+        nullptr,
+        importedAssetBytes.empty() ? nullptr : &importedAssetBytes,
+        importedPixels,
+        importedW,
+        importedH,
+        importedStatus);
+
+    if (localPreviewOk && !localPixels.empty()) {
+        conflict.localPreviewTex = GLHelpers::CreateTextureFromPixels(localPixels.data(), localW, localH, 4);
+    }
+    if (importedPreviewOk && !importedPixels.empty()) {
+        conflict.importedPreviewTex = GLHelpers::CreateTextureFromPixels(importedPixels.data(), importedW, importedH, 4);
     }
 
-    // 2. Render Imported
-    int impW = 0, impH = 0, impC = 4;
-    std::vector<unsigned char> impPixels;
-    if (DecodeImageBytes(importedProjectObj.sourceImageBytes, impPixels, impW, impH, impC)) {
-        previewEditor.LoadSourceFromPixels(impPixels.data(), impW, impH, impC);
-        previewEditor.DeserializePipeline(importedProjectObj.pipelineData);
-        previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
-        auto rendered = previewEditor.GetPipeline().GetOutputPixels(impW, impH);
-        if (!rendered.empty()) {
-            FlipImageRowsInPlace(rendered, impW, impH, 4);
-            conflict.importedPreviewTex = GLHelpers::CreateTextureFromPixels(rendered.data(), impW, impH, 4);
-        } else {
-            std::cerr << "[LibraryManager] Failed to capture output pixels for imported project at index: " << conflict.importedProjectIndex << "\n";
+    conflict.previewsReady = conflict.localPreviewTex != 0 && conflict.importedPreviewTex != 0;
+    conflict.previewFailed = !conflict.previewsReady;
+    if (conflict.previewFailed) {
+        conflict.previewStatusText = "Preview generation failed.";
+        if (!localStatus.empty()) {
+            conflict.previewStatusText += "\nLocal: " + localStatus;
         }
-    } else {
-        std::cerr << "[LibraryManager] Failed to decode source image for imported project at index: " << conflict.importedProjectIndex << "\n";
-    }
-
-    // Only mark as ready if we have both, otherwise the UI will show "Failed" or retry
-    if (conflict.localPreviewTex != 0 && conflict.importedPreviewTex != 0) {
-        conflict.previewsReady = true;
-    } else {
-        // We set it to true anyway so we don't spam the renderer in an infinite loop if it's truly broken
-        conflict.previewsReady = true;
+        if (!importedStatus.empty()) {
+            conflict.previewStatusText += "\nImported: " + importedStatus;
+        }
         std::cerr << "[LibraryManager] Preview generation failed for conflict at index " << index << "\n";
+    } else {
+        conflict.previewStatusText.clear();
+    }
+}
+
+void LibraryManager::ResetConflictPreview(int index) {
+    if (index < 0 || index >= static_cast<int>(m_PendingConflicts.size())) {
+        return;
+    }
+
+    auto& conflict = m_PendingConflicts[static_cast<std::size_t>(index)];
+    if (conflict.localPreviewTex) {
+        m_DeferredTextureDeletions.push_back(conflict.localPreviewTex);
+        conflict.localPreviewTex = 0;
+    }
+    if (conflict.importedPreviewTex) {
+        m_DeferredTextureDeletions.push_back(conflict.importedPreviewTex);
+        conflict.importedPreviewTex = 0;
+    }
+    conflict.previewsReady = false;
+    conflict.previewFailed = false;
+    conflict.previewStatusText.clear();
+}
+
+void LibraryManager::ClearAssetConflicts() {
+    for (auto& conflict : m_PendingAssetConflicts) {
+        if (conflict.localPreviewTex) {
+            m_DeferredTextureDeletions.push_back(conflict.localPreviewTex);
+        }
+        if (conflict.importedPreviewTex) {
+            m_DeferredTextureDeletions.push_back(conflict.importedPreviewTex);
+        }
+    }
+    m_PendingAssetConflicts.clear();
+}
+
+void LibraryManager::PrepareAssetConflictPreview(int index) {
+    if (index < 0 || index >= static_cast<int>(m_PendingAssetConflicts.size())) {
+        return;
+    }
+
+    auto& conflict = m_PendingAssetConflicts[index];
+    if (conflict.previewsReady) {
+        return;
+    }
+
+    std::vector<unsigned char> localPixels;
+    int localW = 0;
+    int localH = 0;
+    if (LoadRgbaImageFromFile(m_AssetsPath / conflict.localAssetFileName, localPixels, localW, localH)) {
+        conflict.localPreviewTex = GLHelpers::CreateTextureFromPixels(localPixels.data(), localW, localH, 4);
+    }
+
+    std::vector<unsigned char> importedPixels;
+    int importedW = 0;
+    int importedH = 0;
+    int importedC = 4;
+    if (DecodeImageBytes(conflict.importedImageBytes, importedPixels, importedW, importedH, importedC)) {
+        conflict.importedPreviewTex = GLHelpers::CreateTextureFromPixels(importedPixels.data(), importedW, importedH, 4);
+    }
+
+    conflict.previewsReady = true;
+}
+
+void LibraryManager::ResolveAssetConflict(int index, AssetConflictAction action) {
+    if (index < 0 || index >= static_cast<int>(m_PendingAssetConflicts.size())) {
+        return;
+    }
+
+    auto conflict = m_PendingAssetConflicts[static_cast<std::size_t>(index)];
+    bool resolved = false;
+
+    auto buildUniqueAssetFileName = [this](const std::string& preferredStem) {
+        const std::string safeStem = SanitizeFileStem(preferredStem.empty() ? "imported_asset" : preferredStem);
+        std::string candidate = safeStem + ".png";
+        int suffix = 1;
+        while (std::filesystem::exists(m_AssetsPath / candidate)) {
+            candidate = safeStem + "_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(suffix++) + ".png";
+        }
+        return candidate;
+    };
+
+    if (action == AssetConflictAction::UseExisting) {
+        resolved = true;
+    } else if (action == AssetConflictAction::Replace) {
+        resolved = WriteFileBytes(m_AssetsPath / conflict.localAssetFileName, conflict.importedImageBytes);
+    } else if (action == AssetConflictAction::KeepBoth) {
+        const std::string baseStem = std::filesystem::path(
+            conflict.importedAssetFileName.empty() ? conflict.importedDisplayName : conflict.importedAssetFileName).stem().string();
+        const std::string targetFileName = buildUniqueAssetFileName(baseStem);
+        resolved = WriteFileBytes(m_AssetsPath / targetFileName, conflict.importedImageBytes);
+    }
+
+    if (!resolved) {
+        return;
+    }
+
+    if (conflict.localPreviewTex) {
+        m_DeferredTextureDeletions.push_back(conflict.localPreviewTex);
+    }
+    if (conflict.importedPreviewTex) {
+        m_DeferredTextureDeletions.push_back(conflict.importedPreviewTex);
+    }
+
+    m_PendingAssetConflicts.erase(m_PendingAssetConflicts.begin() + index);
+    if (action != AssetConflictAction::UseExisting) {
+        m_LastLibrarySignature = 0;
+        RefreshLibrary();
+    }
+}
+
+void LibraryManager::QueueLooseAssetSave(
+    const std::string& displayName,
+    const std::vector<unsigned char>& imageBytes,
+    const std::string& preferredFileName,
+    const std::string& projectFileName,
+    const std::string& projectName,
+    const std::string& projectKind) {
+
+    if (imageBytes.empty()) {
+        return;
+    }
+
+    const std::string trimmedDisplayName = TrimWhitespace(displayName).empty() ? "Imported Asset" : TrimWhitespace(displayName);
+    const std::string fallbackFileName = SanitizeFileStem(trimmedDisplayName) + ".png";
+    const std::string resolvedPreferredFileName = EnsureAssetFileName(preferredFileName, fallbackFileName);
+
+    Async::TaskSystem::Get().Submit([this,
+                                     trimmedDisplayName,
+                                     imageBytes,
+                                     resolvedPreferredFileName,
+                                     projectFileName,
+                                     projectName,
+                                     projectKind]() mutable {
+        std::vector<unsigned char> importedPixels;
+        int importedW = 0;
+        int importedH = 0;
+        int importedC = 4;
+        if (!DecodeImageBytes(imageBytes, importedPixels, importedW, importedH, importedC)) {
+            return;
+        }
+
+        if (!std::filesystem::exists(m_AssetsPath)) {
+            std::filesystem::create_directories(m_AssetsPath);
+        }
+
+        bool foundConflict = false;
+        AssetImportConflict pendingConflict;
+        int bestHashDistance = std::numeric_limits<int>::max();
+        float bestNameScore = -1.0f;
+
+        for (const auto& entry : std::filesystem::directory_iterator(m_AssetsPath)) {
+            if (!IsSupportedAssetExtension(entry.path())) {
+                continue;
+            }
+
+            std::vector<unsigned char> localPixels;
+            int localW = 0;
+            int localH = 0;
+            if (!LoadRgbaImageFromFile(entry.path(), localPixels, localW, localH)) {
+                continue;
+            }
+
+            const std::string localDisplayName = DisplayNameFromStem(entry.path().stem().string());
+            bool exactMatch = false;
+            if (!ShouldQueueAssetConflict(
+                    localDisplayName,
+                    localPixels,
+                    localW,
+                    localH,
+                    trimmedDisplayName,
+                    importedPixels,
+                    importedW,
+                    importedH,
+                    exactMatch)) {
+                continue;
+            }
+
+            const int hashDistance = CountHammingDistance64(
+                ComputeAverageHash64(localPixels, localW, localH),
+                ComputeAverageHash64(importedPixels, importedW, importedH));
+            const float nameScore = ComputeNameSimilarityScore(localDisplayName, trimmedDisplayName);
+
+            if (!foundConflict ||
+                exactMatch ||
+                hashDistance < bestHashDistance ||
+                (hashDistance == bestHashDistance && nameScore > bestNameScore)) {
+                foundConflict = true;
+                bestHashDistance = hashDistance;
+                bestNameScore = nameScore;
+
+                pendingConflict = AssetImportConflict {};
+                pendingConflict.localAssetFileName = entry.path().filename().string();
+                pendingConflict.localDisplayName = localDisplayName;
+                pendingConflict.localWidth = localW;
+                pendingConflict.localHeight = localH;
+                pendingConflict.importedAssetFileName = resolvedPreferredFileName;
+                pendingConflict.importedDisplayName = trimmedDisplayName;
+                pendingConflict.importedWidth = importedW;
+                pendingConflict.importedHeight = importedH;
+                pendingConflict.importedProjectFileName = projectFileName;
+                pendingConflict.importedProjectName = projectName;
+                pendingConflict.importedProjectKind = projectKind;
+                pendingConflict.importedImageBytes = imageBytes;
+                pendingConflict.areIdentical = exactMatch;
+
+                std::error_code ec;
+                const auto writeTime = std::filesystem::last_write_time(entry.path(), ec);
+                pendingConflict.localTimestamp = ec ? "Unknown" : BuildTimestampStringFromFileTime(writeTime);
+                pendingConflict.importedTimestamp = BuildTimestampString();
+            }
+        }
+
+        if (foundConflict) {
+            Async::TaskSystem::Get().PostToMain([this, conflict = std::move(pendingConflict)]() mutable {
+                const auto alreadyQueued = std::find_if(
+                    m_PendingAssetConflicts.begin(),
+                    m_PendingAssetConflicts.end(),
+                    [&](const AssetImportConflict& existing) {
+                        return existing.localAssetFileName == conflict.localAssetFileName &&
+                               existing.importedDisplayName == conflict.importedDisplayName &&
+                               existing.importedWidth == conflict.importedWidth &&
+                               existing.importedHeight == conflict.importedHeight;
+                    });
+                if (alreadyQueued == m_PendingAssetConflicts.end()) {
+                    m_PendingAssetConflicts.push_back(std::move(conflict));
+                }
+            });
+            return;
+        }
+
+        std::string targetFileName = resolvedPreferredFileName;
+        int suffix = 1;
+        while (std::filesystem::exists(m_AssetsPath / targetFileName)) {
+            targetFileName = SanitizeFileStem(std::filesystem::path(resolvedPreferredFileName).stem().string())
+                + "_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(suffix++) + ".png";
+        }
+
+        if (!WriteFileBytes(m_AssetsPath / targetFileName, imageBytes)) {
+            return;
+        }
+
+        Async::TaskSystem::Get().PostToMain([this]() {
+            m_LastLibrarySignature = 0;
+            RefreshLibrary();
+        });
+    });
+}
+
+void LibraryManager::MirrorCompositeEmbeddedAssets(const StackFormat::ProjectDocument& document) {
+    if (document.metadata.projectKind != StackFormat::kCompositeProjectKind || !document.pipelineData.is_object()) {
+        return;
+    }
+
+    const StackFormat::json layers = document.pipelineData.value("layers", StackFormat::json::array());
+    for (const auto& item : layers) {
+        if (!item.is_object()) {
+            continue;
+        }
+
+        const bool generatedFromImage = item.value("generatedFromImage", false);
+        const bool isImageLayer = item.value("kind", std::string("image")) == "image";
+        if (!isImageLayer && !generatedFromImage) {
+            continue;
+        }
+
+        std::vector<unsigned char> imageBytes;
+        if (item.contains("sourcePng") && item["sourcePng"].is_binary()) {
+            imageBytes = item["sourcePng"].get_binary();
+        } else if (item.contains("imagePng") && item["imagePng"].is_binary()) {
+            imageBytes = item["imagePng"].get_binary();
+        }
+
+        if (imageBytes.empty()) {
+            continue;
+        }
+
+        const std::string layerName = item.value("name", std::string("Composite Asset"));
+        QueueLooseAssetSave(layerName, imageBytes, SanitizeFileStem(layerName) + ".png");
     }
 }
 
@@ -587,7 +1131,7 @@ std::uintmax_t LibraryManager::BuildLibrarySignature() const {
     if (std::filesystem::exists(m_LibraryPath)) {
         for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath, ec)) {
             if (ec) break;
-            if (entry.path().extension() != ".stack") continue;
+            if (!IsSupportedProjectExtension(entry.path())) continue;
             accumulateEntry(entry);
         }
     }
@@ -609,7 +1153,7 @@ int LibraryManager::GetProjectCount() const {
     std::error_code ec;
     if (std::filesystem::exists(m_LibraryPath)) {
         for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath, ec)) {
-            if (!ec && entry.path().extension() == ".stack") count++;
+            if (!ec && IsSupportedProjectExtension(entry.path())) count++;
         }
     }
     if (std::filesystem::exists(m_AssetsPath)) {
@@ -620,8 +1164,30 @@ int LibraryManager::GetProjectCount() const {
     return count;
 }
 
+bool LibraryManager::ConsumeSavedProjectEvent(std::string& outFileName, std::string& outProjectKind) {
+    if (m_PendingSavedProjectFileName.empty()) {
+        outFileName.clear();
+        outProjectKind.clear();
+        return false;
+    }
+
+    outFileName = m_PendingSavedProjectFileName;
+    outProjectKind = m_PendingSavedProjectKind;
+    m_PendingSavedProjectFileName.clear();
+    m_PendingSavedProjectKind.clear();
+    return true;
+}
+
+void LibraryManager::QueueSavedProjectEvent(const std::string& fileName, const std::string& projectKind) {
+    m_PendingSavedProjectFileName = fileName;
+    m_PendingSavedProjectKind = projectKind;
+}
+
 void LibraryManager::RefreshLibrary(std::function<void(int current, int total, const std::string& name)> progressCallback) {
     std::lock_guard<std::mutex> lock(m_ProjectsMutex);
+
+    TagManager::Get().SetLibraryPath(m_LibraryPath);
+    TagManager::Get().Load();
 
     for (auto& project : m_Projects) {
         ReleaseProjectTextures(project);
@@ -650,7 +1216,7 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
     int currentItem = 0;
 
     for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath)) {
-        if (entry.path().extension() != ".stack") continue;
+        if (!IsSupportedProjectExtension(entry.path())) continue;
 
         currentItem++;
         if (progressCallback) progressCallback(currentItem, totalItems, entry.path().filename().string());
@@ -683,20 +1249,24 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
 
             auto asset = std::make_shared<AssetEntry>();
             asset->fileName = entry.path().filename().string();
-            asset->projectFileName = entry.path().stem().string() + ".stack";
             asset->displayName = DisplayNameFromStem(entry.path().stem().string());
+            asset->projectFileName = ResolveAssetProjectFileName(entry.path().stem().string(), m_Projects);
 
             const auto projectIt = std::find_if(
                 m_Projects.begin(),
                 m_Projects.end(),
                 [&](const std::shared_ptr<ProjectEntry>& p) {
-                    return p && p->fileName == asset->projectFileName;
+                    return p && !asset->projectFileName.empty() && p->fileName == asset->projectFileName;
                 });
 
             if (projectIt != m_Projects.end() && *projectIt) {
-                asset->projectName = (*projectIt)->projectName;
-                asset->projectKind = (*projectIt)->projectKind;
-                asset->displayName = (*projectIt)->projectName;
+                if ((*projectIt)->projectKind != StackFormat::kCompositeProjectKind) {
+                    asset->projectName = (*projectIt)->projectName;
+                    asset->projectKind = (*projectIt)->projectKind;
+                    asset->displayName = (*projectIt)->projectName;
+                } else {
+                    asset->projectFileName.clear();
+                }
             }
 
             int width = 0;
@@ -721,18 +1291,26 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
 
 void LibraryManager::UploadLibraryTextures() {
     std::lock_guard<std::mutex> lock(m_ProjectsMutex);
-    
-    // Process Projects
+
+    int uploadedProjectCount = 0;
     for (auto& project : m_Projects) {
-        if (project && !project->thumbnailBytes.empty()) {
+        if (project && project->thumbnailTex == 0 && !project->thumbnailBytes.empty()) {
             InitializeThumbnail(project);
+            ++uploadedProjectCount;
+            if (uploadedProjectCount >= 4) {
+                break;
+            }
         }
     }
-    
-    // Process Assets
+
+    int uploadedAssetCount = 0;
     for (auto& asset : m_Assets) {
-        if (asset) {
+        if (asset && asset->thumbnailTex == 0) {
             InitializeAssetThumbnail(asset);
+            ++uploadedAssetCount;
+            if (uploadedAssetCount >= 4) {
+                break;
+            }
         }
     }
 }
@@ -769,6 +1347,74 @@ std::vector<unsigned char> LibraryManager::GenerateThumbnailBytes(const std::vec
     std::vector<unsigned char> pngData;
     stbi_write_png_to_func(png_write_func, &pngData, thumbW, thumbH, 4, thumbPixels.data(), thumbW * 4);
     return pngData;
+}
+
+bool LibraryManager::OverwriteEditorProject(
+    const std::string& fileName,
+    const std::string& projectName,
+    const std::vector<unsigned char>& sourcePngBytes,
+    const StackFormat::json& pipelineData,
+    const std::vector<unsigned char>& renderedPixels,
+    const int renderedW,
+    const int renderedH) {
+
+    if (fileName.empty() ||
+        sourcePngBytes.empty() ||
+        renderedPixels.empty() ||
+        renderedW <= 0 ||
+        renderedH <= 0) {
+        return false;
+    }
+
+    const std::string trimmedName = TrimWhitespace(projectName).empty() ? "Untitled Project" : TrimWhitespace(projectName);
+    const std::string resolvedFileName = EnsureProjectFileName(fileName, SanitizeFileStem(trimmedName) + ".stack");
+    const std::filesystem::path projectPath = m_LibraryPath / resolvedFileName;
+    const std::filesystem::path assetPath = BuildAssetPathForProjectFile(resolvedFileName);
+
+    int sourceW = 0;
+    int sourceH = 0;
+    int sourceChannels = 0;
+    std::vector<unsigned char> decodedSourcePixels;
+    if (!DecodeImageBytes(sourcePngBytes, decodedSourcePixels, sourceW, sourceH, sourceChannels)) {
+        return false;
+    }
+
+    StackFormat::ProjectDocument document;
+    document.metadata.projectKind = StackFormat::kEditorProjectKind;
+    document.metadata.projectName = trimmedName;
+    document.metadata.timestamp = BuildTimestampString();
+    document.metadata.sourceWidth = sourceW;
+    document.metadata.sourceHeight = sourceH;
+    document.thumbnailBytes = GenerateThumbnailBytes(renderedPixels, renderedW, renderedH);
+    document.sourceImageBytes = sourcePngBytes;
+    document.pipelineData = pipelineData;
+
+    std::vector<unsigned char> renderedPngBytes;
+    stbi_write_png_to_func(
+        png_write_func,
+        &renderedPngBytes,
+        renderedW,
+        renderedH,
+        4,
+        renderedPixels.data(),
+        renderedW * 4);
+    if (renderedPngBytes.empty()) {
+        return false;
+    }
+
+    try {
+        if (!StackFormat::WriteProjectFile(projectPath, document)) {
+            return false;
+        }
+        if (!WriteFileBytes(assetPath, renderedPngBytes)) {
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+
+    m_LastLibrarySignature = 0;
+    return true;
 }
 
 void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName) {
@@ -1141,13 +1787,17 @@ void LibraryManager::RequestSaveCompositeProject(
     document.metadata.timestamp = BuildTimestampString();
 
     const std::string safeStem = SanitizeFileStem(trimmedName);
-    const std::string fileName = existingFileName.empty()
-        ? safeStem + "_" + std::to_string(std::time(nullptr)) + ".stack"
-        : existingFileName;
-    const std::string assetFileName = BuildAssetPathForProjectFile(fileName).filename().string();
-
-    composite->SetCurrentProjectName(trimmedName);
-    composite->SetCurrentProjectFileName(fileName);
+    const std::string fallbackStem = safeStem + "_" + std::to_string(std::time(nullptr));
+    const std::string fileName = EnsureProjectFileNameForKind(
+        existingFileName,
+        fallbackStem,
+        StackFormat::kCompositeProjectKind);
+    const std::string legacyProjectFileToDelete =
+        (!existingFileName.empty() &&
+         existingFileName != fileName &&
+         std::filesystem::path(existingFileName).extension() == ".stack")
+            ? existingFileName
+            : std::string();
 
     ++m_SaveGeneration;
     const std::uint64_t generation = m_SaveGeneration;
@@ -1157,32 +1807,36 @@ void LibraryManager::RequestSaveCompositeProject(
     Async::TaskSystem::Get().Submit([this,
                                      generation,
                                      fileName,
-                                     assetFileName,
+                                     legacyProjectFileToDelete,
+                                     trimmedName,
                                      document = std::move(document),
                                      composite]() mutable {
         bool wroteProject = false;
-        bool wroteAsset = false;
 
         try {
             wroteProject = StackFormat::WriteProjectFile(m_LibraryPath / fileName, document);
-            if (wroteProject) {
-                wroteAsset = WriteFileBytes(m_AssetsPath / assetFileName, document.sourceImageBytes);
+            if (wroteProject && !legacyProjectFileToDelete.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(m_LibraryPath / legacyProjectFileToDelete, ec);
             }
         } catch (...) {
             wroteProject = false;
-            wroteAsset = false;
         }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, wroteProject, wroteAsset, composite]() {
+        Async::TaskSystem::Get().PostToMain([this, generation, wroteProject, fileName, trimmedName, composite]() {
             if (generation != m_SaveGeneration) {
                 return;
             }
 
-            if (wroteProject && wroteAsset) {
+            if (wroteProject) {
                 m_SaveTaskState = Async::TaskState::Idle;
                 m_SaveStatusText = "Composite project saved to the library.";
                 m_LastLibrarySignature = 0;
+                RefreshLibrary();
+                QueueSavedProjectEvent(fileName, StackFormat::kCompositeProjectKind);
                 if (composite) {
+                    composite->SetCurrentProjectName(trimmedName);
+                    composite->SetCurrentProjectFileName(fileName);
                     composite->ClearDirty();
                 }
             } else {
@@ -1398,11 +2052,13 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                 preview.pipelineData = document.pipelineData.is_null()
                     ? ((preview.renderProject || isComposite) ? StackFormat::json::object() : StackFormat::json::array())
                     : document.pipelineData;
-                preview.fallbackAssetSuccess = LoadRgbaImageFromFile(
-                    BuildAssetPathForProjectFile(project->fileName),
-                    preview.fallbackAssetPixels,
-                    preview.fallbackAssetWidth,
-                    preview.fallbackAssetHeight);
+                if (!isComposite) {
+                    preview.fallbackAssetSuccess = LoadRgbaImageFromFile(
+                        BuildAssetPathForProjectFile(project->fileName),
+                        preview.fallbackAssetPixels,
+                        preview.fallbackAssetWidth,
+                        preview.fallbackAssetHeight);
+                }
             }
         }
 
@@ -1620,11 +2276,16 @@ bool LibraryManager::DeleteProject(const std::string& fileName) {
         const std::filesystem::path projectPath = m_LibraryPath / fileName;
         if (!std::filesystem::exists(projectPath)) return false;
 
+        StackFormat::ProjectDocument document;
+        StackFormat::ProjectLoadOptions metadataOnly { true, false, false };
+        const bool loadedMetadata = LoadProjectDocument(fileName, document, metadataOnly);
         const bool removedProject = std::filesystem::remove(projectPath);
-        const std::filesystem::path assetPath = BuildAssetPathForProjectFile(fileName);
-        if (std::filesystem::exists(assetPath)) {
-            std::error_code ec;
-            std::filesystem::remove(assetPath, ec);
+        if (!loadedMetadata || document.metadata.projectKind != StackFormat::kCompositeProjectKind) {
+            const std::filesystem::path assetPath = BuildAssetPathForProjectFile(fileName);
+            if (std::filesystem::exists(assetPath)) {
+                std::error_code ec;
+                std::filesystem::remove(assetPath, ec);
+            }
         }
 
         m_LastLibrarySignature = 0;
@@ -1708,15 +2369,19 @@ void LibraryManager::ResolveConflict(int index, ConflictAction action, const std
     if (action == ConflictAction::Ignore) {
         resolved = true;
     } else if (action == ConflictAction::Replace) {
-        const std::string fileName = EnsureProjectFileName(
+        const std::string fileName = EnsureProjectFileNameForKind(
             importedBundledProject.fileName,
-            SanitizeFileStem(importedBundledProject.project.metadata.projectName) + ".stack");
+            SanitizeFileStem(importedBundledProject.project.metadata.projectName),
+            importedBundledProject.project.metadata.projectKind);
         if (StackFormat::WriteProjectFile(m_LibraryPath / fileName, importedBundledProject.project)) {
             resolved = true;
         }
     } else if (action == ConflictAction::KeepBoth) {
         std::string targetName = newName.empty() ? importedBundledProject.project.metadata.projectName + " (Imported)" : newName;
-        std::string fileName = SanitizeFileStem(targetName) + "_" + std::to_string(std::time(nullptr)) + ".stack";
+        std::string fileName = EnsureProjectFileNameForKind(
+            std::string(),
+            SanitizeFileStem(targetName) + "_" + std::to_string(std::time(nullptr)),
+            importedBundledProject.project.metadata.projectKind);
         
         StackFormat::ProjectDocument doc = importedBundledProject.project;
         doc.metadata.projectName = targetName;
@@ -1786,7 +2451,7 @@ bool LibraryManager::WriteLibraryBundle(const std::string& destinationPath) {
         };
 
         for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath)) {
-            if (entry.path().extension() != ".stack") continue;
+            if (!IsSupportedProjectExtension(entry.path())) continue;
 
             StackFormat::ProjectDocument document;
             if (!LoadProjectDocument(entry.path().filename().string(), document, fullProjectLoad)) {
@@ -1804,19 +2469,23 @@ bool LibraryManager::WriteLibraryBundle(const std::string& destinationPath) {
 
             StackFormat::AssetDocument asset;
             asset.fileName = entry.path().filename().string();
-            asset.projectFileName = entry.path().stem().string() + ".stack";
             asset.displayName = DisplayNameFromStem(entry.path().stem().string());
+            asset.projectFileName = ResolveAssetProjectFileName(entry.path().stem().string(), bundle.projects);
 
             const auto projectIt = std::find_if(
                 bundle.projects.begin(),
                 bundle.projects.end(),
                 [&](const StackFormat::BundledProjectDocument& project) {
-                    return project.fileName == asset.projectFileName;
+                    return !asset.projectFileName.empty() && project.fileName == asset.projectFileName;
                 });
 
             if (projectIt != bundle.projects.end()) {
-                asset.projectName = projectIt->project.metadata.projectName;
-                asset.displayName = projectIt->project.metadata.projectName;
+                if (projectIt->project.metadata.projectKind != StackFormat::kCompositeProjectKind) {
+                    asset.projectName = projectIt->project.metadata.projectName;
+                    asset.displayName = projectIt->project.metadata.projectName;
+                } else {
+                    asset.projectFileName.clear();
+                }
             }
 
             int width = 0;
@@ -1858,9 +2527,10 @@ bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath) {
 
         for (int i = 0; i < (int)bundle.projects.size(); ++i) {
             const auto& project = bundle.projects[i];
-            const std::string fileName = EnsureProjectFileName(
+            const std::string fileName = EnsureProjectFileNameForKind(
                 project.fileName,
-                SanitizeFileStem(project.project.metadata.projectName) + ".stack");
+                SanitizeFileStem(project.project.metadata.projectName),
+                project.project.metadata.projectKind);
 
             if (std::filesystem::exists(m_LibraryPath / fileName)) {
                 ImportConflict conflict;
@@ -1936,9 +2606,10 @@ void LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bu
         if (skip) continue;
 
         const auto& project = bundle.projects[i];
-        const std::string fileName = EnsureProjectFileName(
+        const std::string fileName = EnsureProjectFileNameForKind(
             project.fileName,
-            SanitizeFileStem(project.project.metadata.projectName) + ".stack");
+            SanitizeFileStem(project.project.metadata.projectName),
+            project.project.metadata.projectKind);
 
         StackFormat::WriteProjectFile(m_LibraryPath / fileName, project.project);
     }
@@ -2164,7 +2835,7 @@ void LibraryManager::RequestImportAndLoad(
         return;
     }
 
-    if (path.extension() == ".stack") {
+    if (IsSupportedProjectExtension(path)) {
         // 0. Tab IDs (Library=0, Editor=1, Render=3)
         // These can be passed via the callback
         
@@ -2185,7 +2856,10 @@ void LibraryManager::RequestImportAndLoad(
         }
 
         // 2. Check for collision
-        const std::string fileName = EnsureProjectFileName(path.filename().string(), SanitizeFileStem(document.metadata.projectName) + ".stack");
+        const std::string fileName = EnsureProjectFileNameForKind(
+            path.filename().string(),
+            SanitizeFileStem(document.metadata.projectName),
+            document.metadata.projectKind);
         if (std::filesystem::exists(m_LibraryPath / fileName)) {
             // Trigger Conflict resolution
             m_ImportStatusText = "Project already exists in library. Resolving conflict...";
@@ -2212,7 +2886,9 @@ void LibraryManager::RequestImportAndLoad(
             }
 
             // Reload full doc for the imported one to ensure we have all data
-            StackFormat::ReadProjectFile(path, document, fullLoad);
+            if (!StackFormat::ReadProjectFile(path, document, fullLoad)) {
+                LoadLegacyProjectDocument(path, document, fullLoad);
+            }
 
             StackFormat::LibraryBundleDocument bundle;
             bundle.timestamp = BuildTimestampString();
@@ -2225,9 +2901,6 @@ void LibraryManager::RequestImportAndLoad(
             m_ActiveImportBundle = std::move(bundle);
             m_PendingConflicts.push_back(std::move(conflict));
             m_ImportTaskState = Async::TaskState::Idle;
-            
-            // Switch to Library tab to show the resolution dialog
-            if (onTabSwitchRequested) onTabSwitchRequested(0);
             return;
         }
 
@@ -2242,6 +2915,14 @@ void LibraryManager::RequestImportAndLoad(
 
         m_LastLibrarySignature = 0;
         RefreshLibrary();
+
+        if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
+            StackFormat::ProjectLoadOptions fullLoad { true, true, true };
+            StackFormat::ProjectDocument fullDocument;
+            if (StackFormat::ReadProjectFile(path, fullDocument, fullLoad)) {
+                MirrorCompositeEmbeddedAssets(fullDocument);
+            }
+        }
 
         if (document.metadata.projectKind == StackFormat::kRenderProjectKind) {
             if (onTabSwitchRequested) onTabSwitchRequested(3);
@@ -2282,4 +2963,16 @@ void LibraryManager::RequestImportAndLoad(
 
     m_ImportStatusText = "Unsupported file type dropped.";
     m_ImportTaskState = Async::TaskState::Failed;
+}
+
+bool LibraryManager::DeleteAsset(const std::string& fileName) {
+    auto path = m_AssetsPath / fileName;
+    std::error_code ec;
+    if (!std::filesystem::remove(path, ec)) {
+        std::cerr << "[LibraryManager] Failed to delete asset: " << fileName << " (" << ec.message() << ")\n";
+        return false;
+    }
+    std::cout << "[LibraryManager] Deleted asset: " << fileName << "\n";
+    m_LastLibrarySignature = 0;
+    return true;
 }

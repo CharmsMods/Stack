@@ -21,5 +21,5 @@ void SelectedTab::Render(EditorModule* editor) {
     ImGui::Spacing();
 
     // Each layer draws its own controls via the virtual RenderUI()
-    layer->RenderUI();
+    layer->RenderUI(editor);
 }

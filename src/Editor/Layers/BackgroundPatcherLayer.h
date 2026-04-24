@@ -14,7 +14,8 @@ public:
 
     void InitializeGL() override;
     void Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) override;
-    void RenderUI() override;
+    void RenderUI() override {}
+    void RenderUI(class EditorModule* editor) override;
 
     json Serialize() const override;
     void Deserialize(const json& j) override;
@@ -32,10 +33,10 @@ private:
     float m_Smoothing = 0.05f;
     float m_Defringe = 0.0f;
     float m_EdgeShift = 0.0f;
-    bool  m_ShowMask = false;
     bool  m_KeepSelected = false;
     bool  m_AAEnabled = false;
     float m_AARadius = 1.0f;
     
-    bool m_PatchEnabled = false;
+    bool  m_PatchEnabled = false;
+    bool  m_ShowDebugOverlay = false;
 };

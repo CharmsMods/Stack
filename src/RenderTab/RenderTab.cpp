@@ -5,6 +5,7 @@
 #include "RenderTab/Foundation/RenderFoundationPreview.h"
 #include "RenderTab/Foundation/RenderFoundationSerialization.h"
 #include "RenderTab/Contracts/RenderContracts.h"
+#include "Utils/ImGuiExtras.h"
 
 #include <algorithm>
 #include <array>
@@ -394,6 +395,10 @@ void RenderTab::RenderUI() {
     RenderBody();
     RenderCameraWindow();
     RenderResetScenePopup();
+
+    if (Async::IsBusy(LibraryManager::Get().GetSaveTaskState())) {
+        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetSaveStatusText().c_str());
+    }
 }
 
 bool RenderTab::BuildLibraryProjectPayload(
