@@ -9,7 +9,7 @@
 namespace {
 
 RenderMaterial BuildFallbackMaterial() {
-    return BuildRenderMaterial("Default Diffuse", MakeRenderFloat3(0.8f, 0.8f, 0.8f));
+    return BuildRenderMaterial("Warm Diffuse", MakeRenderFloat3(0.86f, 0.78f, 0.64f));
 }
 
 void SanitizeMaterial(RenderMaterial& material) {

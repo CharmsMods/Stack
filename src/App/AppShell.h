@@ -1,10 +1,14 @@
 #pragma once
 
 #include <string>
+#include <memory>
+#include "settings/AppearanceTheme.h"
+#include "SettingsModule.h"
 #include "../Composite/CompositeModule.h"
 #include "../Editor/EditorModule.h"
 #include "../Library/LibraryModule.h"
 #include "../RenderTab/RenderTab.h"
+#include "../Bundler/BundlerModule.h"
 
 struct GLFWwindow;
 
@@ -38,8 +42,11 @@ private:
     bool m_ShowEditorSavePrompt = false;
     bool m_ShowEditorNamePrompt = false;
     char m_SaveNameBuffer[256] = {};
+    std::unique_ptr<StackAppearance::AppearanceManager> m_Appearance;
     EditorModule m_Editor;
     LibraryModule m_Library;
     RenderTab m_RenderTab;
     CompositeModule m_Composite;
+    BundlerModule m_Bundler;
+    SettingsModule m_Settings;
 };

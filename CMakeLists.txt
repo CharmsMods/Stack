@@ -7,10 +7,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Ensure folders for outputs are nicely mapped
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if (MSVC)
+    # Use the static MSVC runtime so the portable build does not require a separate VC++ redistributable.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
-# ==============================================================================
 # Dependency Management (Zero-Install Configuration via FetchContent)
 # ==============================================================================
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
@@ -69,9 +73,24 @@ target_link_libraries(imgui_core PUBLIC glfw)
 
 # Automatically bake the splash image into a header if it changes
 add_custom_target(BakeAssets
-    COMMAND python "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_splash.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_splash.py"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Baking assets into C++..."
+    VERBATIM
+)
+
+# Automatically bake shaders into a header if they change
+add_custom_target(BakeShaders
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_shaders.py" "${CMAKE_BINARY_DIR}/generated/src/RenderTab/Shaders/EmbeddedShaders.h"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Baking shaders into C++..."
+    VERBATIM
+)
+
+add_custom_target(BakeFonts
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_fonts.py"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Baking fonts into C++..."
     VERBATIM
 )
 
@@ -81,9 +100,10 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 )
 
 add_executable(${PROJECT_NAME} ${SRC_FILES})
-add_dependencies(${PROJECT_NAME} BakeAssets)
+add_dependencies(${PROJECT_NAME} BakeAssets BakeShaders BakeFonts)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_BINARY_DIR}/generated/src
     src
     src/ThirdParty
 )
@@ -101,3 +121,11 @@ elseif (APPLE)
 elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
+
+set(STACK_PORTABLE_DIR "${CMAKE_BINARY_DIR}/portable")
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${STACK_PORTABLE_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${STACK_PORTABLE_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:${PROJECT_NAME}>" "${STACK_PORTABLE_DIR}/"
+    COMMAND "${CMAKE_COMMAND}" -E echo "Portable bundle staged at: ${STACK_PORTABLE_DIR}"
+)

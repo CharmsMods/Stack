@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderTab/Contracts/AccumulationManager.h"
+#include "RenderFoundationModelImport.h"
 #include "RenderFoundationTypes.h"
 
 #include <string>
@@ -38,6 +39,15 @@ public:
     const std::vector<Material>& GetMaterials() const { return m_Materials; }
     std::vector<Material>& GetMaterials() { return m_Materials; }
 
+    const std::vector<RenderImportedAsset>& GetImportedAssets() const { return m_ImportedAssets; }
+    std::vector<RenderImportedAsset>& GetImportedAssets() { return m_ImportedAssets; }
+
+    const std::vector<RenderImportedTexture>& GetImportedTextures() const { return m_ImportedTextures; }
+    std::vector<RenderImportedTexture>& GetImportedTextures() { return m_ImportedTextures; }
+
+    const std::vector<RenderMeshDefinition>& GetImportedMeshes() const { return m_ImportedMeshes; }
+    std::vector<RenderMeshDefinition>& GetImportedMeshes() { return m_ImportedMeshes; }
+
     const std::vector<Primitive>& GetPrimitives() const { return m_Primitives; }
     std::vector<Primitive>& GetPrimitives() { return m_Primitives; }
 
@@ -50,6 +60,18 @@ public:
     const Primitive* FindPrimitive(Id id) const;
     Light* FindLight(Id id);
     const Light* FindLight(Id id) const;
+    int CountMaterialUsers(Id materialId) const;
+    Material* DuplicateMaterialForPrimitive(Id primitiveId, const std::string& requestedName = {});
+    Material* EnsureEditableMaterialForPrimitive(Id primitiveId);
+    bool ImportModelFromFile(
+        const std::string& filePath,
+        const ImportedModelOptions& options,
+        ImportedModelResult& outResult,
+        std::string& errorMessage) const;
+    bool ApplyImportedModelResult(
+        ImportedModelResult result,
+        Id* outPrimitiveId = nullptr,
+        ImportedModelDiagnostics* outDiagnostics = nullptr);
 
     Id AddPrimitive(PrimitiveType type);
     Id AddLight(LightType type);
@@ -68,6 +90,7 @@ public:
     int GetAccumulatedSamples() const { return m_AccumulationManager.GetAccumulatedSamples(); }
     std::uint64_t GetTransportEpoch() const { return m_AccumulationManager.GetTransportEpoch(); }
     std::uint64_t GetDisplayEpoch() const { return m_AccumulationManager.GetDisplayEpoch(); }
+    std::uint64_t GetSceneRevision() const { return m_SceneRevision; }
     const std::string& GetLastChangeReason() const { return m_LastChangeReason; }
 
     bool HasUnsavedChanges() const { return m_HasUnsavedChanges; }
@@ -81,6 +104,7 @@ private:
     void SeedDefaultScene();
     void RefreshNextId();
     Id ResolveMaterialId(Id requestedId) const;
+    std::string MakeUniqueMaterialName(const std::string& requestedName) const;
     void ApplyChangeSet(const RenderContracts::SceneChangeSet& changeSet);
 
 private:
@@ -89,10 +113,14 @@ private:
     Settings m_Settings {};
     Camera m_Camera {};
     Selection m_Selection {};
+    std::vector<RenderImportedAsset> m_ImportedAssets;
+    std::vector<RenderImportedTexture> m_ImportedTextures;
+    std::vector<RenderMeshDefinition> m_ImportedMeshes;
     std::vector<Material> m_Materials;
     std::vector<Primitive> m_Primitives;
     std::vector<Light> m_Lights;
     RenderContracts::AccumulationManager m_AccumulationManager {};
+    std::uint64_t m_SceneRevision = 1;
     bool m_HasUnsavedChanges = false;
     std::string m_LastChangeReason = "Scene initialized.";
     std::string m_ProjectName;

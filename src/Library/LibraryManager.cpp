@@ -4,6 +4,7 @@
 #include "Async/TaskSystem.h"
 #include "Composite/CompositeModule.h"
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "RenderTab/RenderTab.h"
 #include "Renderer/GLHelpers.h"
 #include "Utils/Base64.h"
@@ -71,6 +72,25 @@ bool HasMeaningfulPixels(const std::vector<unsigned char>& pixels) {
 }
 
 bool LoadRgbaImageFromFile(const std::filesystem::path& path, std::vector<unsigned char>& outPixels, int& outW, int& outH);
+
+std::filesystem::path GetStartupTracePath() {
+    std::error_code ec;
+    const std::filesystem::path current = std::filesystem::current_path(ec);
+    if (ec) {
+        return std::filesystem::path("StackStartup.log");
+    }
+    return current / "StackStartup.log";
+}
+
+void TraceStartupStep(const std::string& message) {
+    std::ofstream file(GetStartupTracePath(), std::ios::app);
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << message << '\n';
+    file.flush();
+}
 
 bool DecodePreviewBytes(
     const std::vector<unsigned char>& encodedBytes,
@@ -1185,6 +1205,7 @@ void LibraryManager::QueueSavedProjectEvent(const std::string& fileName, const s
 
 void LibraryManager::RefreshLibrary(std::function<void(int current, int total, const std::string& name)> progressCallback) {
     std::lock_guard<std::mutex> lock(m_ProjectsMutex);
+    TraceStartupStep("[LibraryManager] RefreshLibrary begin");
 
     TagManager::Get().SetLibraryPath(m_LibraryPath);
     TagManager::Get().Load();
@@ -1214,11 +1235,13 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
 
     int totalItems = GetProjectCount();
     int currentItem = 0;
+    TraceStartupStep("[LibraryManager] Refresh counts: " + std::to_string(totalItems));
 
     for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath)) {
         if (!IsSupportedProjectExtension(entry.path())) continue;
 
         currentItem++;
+        TraceStartupStep("[LibraryManager] Loading project: " + entry.path().filename().string());
         if (progressCallback) progressCallback(currentItem, totalItems, entry.path().filename().string());
 
         StackFormat::ProjectDocument document;
@@ -1245,6 +1268,7 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
             if (!IsSupportedAssetExtension(entry.path())) continue;
 
             currentItem++;
+            TraceStartupStep("[LibraryManager] Loading asset: " + entry.path().filename().string());
             if (progressCallback) progressCallback(currentItem, totalItems, entry.path().filename().string());
 
             auto asset = std::make_shared<AssetEntry>();
@@ -1287,6 +1311,7 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
     }
 
     m_LastLibrarySignature = BuildLibrarySignature();
+    TraceStartupStep("[LibraryManager] RefreshLibrary complete");
 }
 
 void LibraryManager::UploadLibraryTextures() {
@@ -1558,7 +1583,7 @@ void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModul
                 loadedProject.width = width;
                 loadedProject.height = height;
                 loadedProject.channels = channels;
-                loadedProject.pipelineData = document.pipelineData.is_array() ? document.pipelineData : StackFormat::json::array();
+                loadedProject.pipelineData = document.pipelineData.is_null() ? StackFormat::json::array() : document.pipelineData;
                 loadedProject.projectName = document.metadata.projectName;
                 loadedProject.projectFileName = fileName;
             }
@@ -2709,7 +2734,7 @@ void LibraryManager::RequestLoadProjectFromPath(const std::filesystem::path& abs
                 loadedProject.width = width;
                 loadedProject.height = height;
                 loadedProject.channels = channels;
-                loadedProject.pipelineData = document.pipelineData.is_array() ? document.pipelineData : StackFormat::json::array();
+                loadedProject.pipelineData = document.pipelineData.is_null() ? StackFormat::json::array() : document.pipelineData;
                 loadedProject.projectName = document.metadata.projectName;
                 loadedProject.projectFileName = absolutePath.filename().string();
             }

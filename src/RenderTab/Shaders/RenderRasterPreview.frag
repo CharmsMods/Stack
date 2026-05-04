@@ -27,6 +27,8 @@ struct GpuRasterLight {
     vec4 sizeAndAngles;
     vec4 rightEnabled;
     vec4 upData;
+    vec4 laserParams;
+    vec4 laserInfo;
 };
 
 layout(std430, binding = 0) readonly buffer MaterialBuffer {
@@ -52,6 +54,20 @@ uniform int uMaterialCount;
 uniform int uLightCount;
 
 const float kEpsilon = 0.0001;
+
+float gaussian(float value, float mean, float sigma) {
+    float delta = (value - mean) / max(sigma, 0.001);
+    return exp(-0.5 * delta * delta);
+}
+
+vec3 wavelengthToDisplayRgb(float wavelengthNm) {
+    vec3 rgb = vec3(
+        gaussian(wavelengthNm, 610.0, 48.0) + 0.35 * gaussian(wavelengthNm, 700.0, 35.0),
+        gaussian(wavelengthNm, 545.0, 38.0),
+        gaussian(wavelengthNm, 450.0, 32.0) + 0.18 * gaussian(wavelengthNm, 500.0, 45.0));
+    float peak = max(max(rgb.r, rgb.g), max(rgb.b, kEpsilon));
+    return clamp(rgb / peak, vec3(0.0), vec3(1.0));
+}
 
 vec4 encodeObjectId(int objectId) {
     int safeId = max(objectId, 0);
@@ -131,12 +147,42 @@ vec3 getLightDirection(GpuRasterLight light) {
     return normalize(light.directionRange.xyz);
 }
 
+float getLaserWavelength(GpuRasterLight light);
+
 vec3 getLightColor(GpuRasterLight light) {
+    if (getLightType(light) == 4) {
+        return wavelengthToDisplayRgb(getLaserWavelength(light));
+    }
     return light.colorIntensity.rgb;
 }
 
 float getLightIntensity(GpuRasterLight light) {
     return max(light.colorIntensity.w, 0.0);
+}
+
+float getLaserWavelength(GpuRasterLight light) {
+    return max(light.laserParams.x, 380.0);
+}
+
+float getLaserLinewidth(GpuRasterLight light) {
+    return max(light.laserParams.y, 0.001);
+}
+
+float getLaserApertureRadius(GpuRasterLight light) {
+    return max(light.laserParams.z, 0.0001);
+}
+
+float getLaserBeamWaistRadius(GpuRasterLight light) {
+    return max(light.laserParams.w, 0.0001);
+}
+
+float getLaserBeamQuality(GpuRasterLight light) {
+    return max(light.laserInfo.x, 1.0);
+}
+
+float getLaserBeamSigma(GpuRasterLight light) {
+    float wavelengthMeters = getLaserWavelength(light) * 1e-9;
+    return clamp((getLaserBeamQuality(light) * wavelengthMeters) / max(3.14159265359 * getLaserBeamWaistRadius(light), kEpsilon), 0.00001, 0.5);
 }
 
 int countSunLights() {
@@ -177,6 +223,23 @@ vec3 evaluateLightContribution(
 
     if (lightType == 3) {
         lightDirection = -getLightDirection(light);
+    } else if (lightType == 4) {
+        vec3 toLight = getLightPosition(light) - vWorldPosition;
+        float distanceSquared = dot(toLight, toLight);
+        if (distanceSquared <= kEpsilon) {
+            return vec3(0.0);
+        }
+
+        float distanceToLight = sqrt(distanceSquared);
+        if (distanceToLight > light.directionRange.w) {
+            return vec3(0.0);
+        }
+
+        lightDirection = toLight / distanceToLight;
+        float beamAngle = acos(clamp(dot(getLightDirection(light), -lightDirection), -1.0, 1.0));
+        float beamSigma = getLaserBeamSigma(light);
+        float beamProfile = exp(-0.5 * beamAngle * beamAngle / max(beamSigma * beamSigma, kEpsilon));
+        attenuation = beamProfile / max(distanceSquared, 0.2);
     } else {
         vec3 toLight = getLightPosition(light) - vWorldPosition;
         float distanceSquared = dot(toLight, toLight);
@@ -240,45 +303,26 @@ void main() {
 
     vec3 normal = computeWorldSpaceNormal(vWorldNormal, material.textureRefs.w, vUv);
     vec3 viewDirection = normalize(uCameraPosition - vWorldPosition);
-    float ambientFactor = 0.08;
     vec3 diffuseColor = baseColor * (1.0 - metallic);
-    vec3 specularColor = mix(vec3(0.04), baseColor, metallic);
+    vec3 specularColor = mix(vec3(0.08), baseColor, metallic);
+    float facing = clamp(dot(normal, viewDirection) * 0.5 + 0.5, 0.0, 1.0);
 
-    vec3 environment = evaluateEnvironment(normal);
-    vec3 litColor = diffuseColor * (ambientFactor + environment);
-    for (int lightIndex = 0; lightIndex < uLightCount; ++lightIndex) {
-        GpuRasterLight light = uLights[lightIndex];
-        if (!isLightEnabled(light)) {
-            continue;
-        }
-        litColor += evaluateLightContribution(light, normal, viewDirection, diffuseColor, specularColor, roughness);
+    vec3 litColor = diffuseColor * mix(vec3(0.62), vec3(1.0), pow(facing, 0.65));
+    if (metallic > kEpsilon) {
+        vec3 metalPreview = specularColor * mix(0.45, 1.35, pow(facing, 1.5));
+        litColor = mix(litColor, metalPreview, clamp(metallic, 0.0, 1.0));
     }
-    litColor += emissive;
 
     if (transmission > kEpsilon) {
-        vec3 throughColor = evaluateEnvironment(-viewDirection);
-        throughColor *= mix(vec3(1.0), absorptionTint, 0.45);
-        float glassBlend = transmission * mix(1.0, 0.75, transmissionRoughness);
-        litColor = mix(litColor, throughColor + specularColor * 0.2, clamp(glassBlend, 0.0, 1.0));
+        vec3 glassPreview = mix(baseColor, vec3(1.0), 0.55);
+        glassPreview *= mix(vec3(1.0), absorptionTint, 0.35);
+        glassPreview *= mix(0.58, 1.12, facing);
+        glassPreview += specularColor * 0.18;
+        float glassBlend = transmission * mix(1.0, 0.78, transmissionRoughness);
+        litColor = mix(litColor, glassPreview, clamp(glassBlend, 0.0, 1.0));
     }
 
-    if (uFogEnabled != 0 && uFogDensity > kEpsilon) {
-        vec3 rayDirection = normalize(vWorldPosition - uCameraPosition);
-        float distanceToSurface = max(length(vWorldPosition - uCameraPosition), 0.0);
-        float transmittance = exp(-distanceToSurface * uFogDensity);
-        vec3 fogScatter = evaluateEnvironment(rayDirection) * 0.25;
-        for (int lightIndex = 0; lightIndex < uLightCount; ++lightIndex) {
-            GpuRasterLight light = uLights[lightIndex];
-            if (!isLightEnabled(light) || getLightType(light) != 3) {
-                continue;
-            }
-
-            vec3 sunDirection = -getLightDirection(light);
-            float phase = henyeyGreenstein(clamp(dot(rayDirection, sunDirection), -1.0, 1.0), uFogAnisotropy);
-            fogScatter += getLightColor(light) * getLightIntensity(light) * phase * 18.0;
-        }
-        litColor = litColor * transmittance + uFogColor * fogScatter * (1.0 - transmittance);
-    }
+    litColor += emissive;
 
     oColor = vec4(clamp(litColor, 0.0, 32.0), 1.0);
     oObjectId = encodeObjectId(vObjectId);

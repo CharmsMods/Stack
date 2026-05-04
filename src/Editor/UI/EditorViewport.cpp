@@ -3,6 +3,7 @@
 #include "Renderer/GLHelpers.h"
 #include <imgui.h>
 #include <algorithm>
+#include <cmath>
 
 EditorViewport::EditorViewport() 
     : m_ZoomLevel(1.0f), m_PanX(0.0f), m_PanY(0.0f), m_IsLocked(false) 
@@ -32,8 +33,12 @@ void EditorViewport::Render(EditorModule* editor) {
 
     ImGui::Begin("Canvas Viewport");
 
-    if (!pipeline.HasSourceImage()) {
-        ImGui::Text("No image loaded. Go to the 'Canvas' tab to load an image.");
+    if (!pipeline.HasSourceImage() || !editor->GetNodeGraph().IsOutputConnected() || pipeline.GetOutputTexture() == 0) {
+        ImGui::Text(editor->IsEditorRenderBusy()
+            ? "Rendering editor output..."
+            : (editor->GetNodeGraph().GetActiveImageNodeId() > 0
+                ? "No graph output is connected."
+                : "Drop an image onto the node graph, then connect it to the output chain."));
         ImGui::End();
         return;
     }
@@ -91,21 +96,23 @@ void EditorViewport::Render(EditorModule* editor) {
         m_PanY = -mouseNormY * overflowY;
     }
 
-    // Overlay lock status
-    if (m_IsLocked) {
-        ImGui::SetCursorPos(ImVec2(10, 30));
-        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "[ ZOOM LOCKED ] - Press 'L' to unlock");
-    } else {
-        ImGui::SetCursorPos(ImVec2(10, 30));
-        ImGui::TextDisabled("Scroll to Zoom | 'L' to Lock | Movement Pans");
+    const ImVec2 contentCursor = ImGui::GetCursorPos();
+    const ImVec2 contentScreen = ImGui::GetCursorScreenPos();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f),
+                      m_IsLocked ? IM_COL32(255, 150, 40, 255) : IM_COL32(170, 170, 178, 220),
+                      m_IsLocked ? "[ ZOOM LOCKED ] - Press 'L' to unlock" : "Scroll to Zoom | 'L' to Lock | Movement Pans");
+    if (editor->IsEditorRenderBusy()) {
+        drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 32.0f),
+                          IM_COL32(190, 195, 205, 230),
+                          "Rendering...");
     }
 
     // Centering calculations
     float offsetX = (avail.x - dispW) * 0.5f + m_PanX;
     float offsetY = (avail.y - dispH) * 0.5f + m_PanY;
 
-    ImVec2 cursorPos = ImGui::GetCursorPos();
-    ImVec2 startCursorPos = ImVec2(cursorPos.x + offsetX, cursorPos.y + offsetY);
+    ImVec2 startCursorPos = ImVec2(contentCursor.x + offsetX, contentCursor.y + offsetY);
     ImGui::SetCursorPos(startCursorPos);
     
     ImVec2 drawScreenPos = ImGui::GetCursorScreenPos();
@@ -198,28 +205,28 @@ void EditorViewport::Render(EditorModule* editor) {
     float tilesY = dispH / checkerSize;
     ImGui::Image((ImTextureID)(intptr_t)m_CheckerTex, ImVec2(dispW, dispH),
                  ImVec2(0, 0), ImVec2(tilesX, tilesY));
+    const bool imageHovered = ImGui::IsItemHovered();
+    const ImVec2 imageMin = ImGui::GetItemRectMin();
+    const ImVec2 imageMax = ImGui::GetItemRectMax();
 
     // Handle Fade Factor (hover to compare with original)
-    float hoverTarget = (ImGui::IsItemHovered() && !m_IsLocked) ? 1.0f : 0.0f;
+    float hoverTarget = (imageHovered && !m_IsLocked) ? 1.0f : 0.0f;
     float currentFactor = editor->GetHoverFade();
-    currentFactor += (hoverTarget - currentFactor) * 8.0f * ImGui::GetIO().DeltaTime;
+    const float fadeStep = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.5f);
+    currentFactor += (hoverTarget - currentFactor) * fadeStep;
     currentFactor = std::max(0.0f, std::min(currentFactor, 1.0f));
     editor->SetHoverFade(currentFactor);
 
-    // 2) On hover, fade in the original source image for comparison
+    // 2) Draw processed output fully opaque, then fade the original over it.
+    drawList->AddImage((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
+                       ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE);
+
     unsigned int sourceTex = pipeline.GetSourceTexture();
     if (currentFactor > 0.001f) {
-        ImGui::SetCursorScreenPos(drawScreenPos);
-        ImGui::Image((ImTextureID)(intptr_t)sourceTex, ImVec2(dispW, dispH),
-                     ImVec2(0, 1), ImVec2(1, 0),
-                     ImVec4(1, 1, 1, currentFactor), ImVec4(0, 0, 0, 0));
+        drawList->AddImage((ImTextureID)(intptr_t)sourceTex, imageMin, imageMax,
+                           ImVec2(0, 0), ImVec2(1, 1),
+                           IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f)));
     }
-
-    // 3) Draw processed image on top (alpha blending reveals checkerboard through transparent areas)
-    ImGui::SetCursorScreenPos(drawScreenPos);
-    ImGui::Image((ImTextureID)(intptr_t)outputTex, ImVec2(dispW, dispH),
-                 ImVec2(0, 1), ImVec2(1, 0),
-                 ImVec4(1, 1, 1, 1.0f - currentFactor), ImVec4(0, 0, 0, 0));
 
     ImGui::End();
 }

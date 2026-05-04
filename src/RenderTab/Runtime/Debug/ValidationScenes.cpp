@@ -104,6 +104,20 @@ const std::vector<RenderValidationSceneOption>& GetSceneOptionsInternal() {
             "Classic Cornell Box with emissive ceiling, red/green walls, a tall box, and a sphere for path trace validation.",
             RenderBackgroundMode::Black,
             false
+        },
+        {
+            RenderValidationSceneId::CausticsStudy,
+            "Caustics Study",
+            "Small area-light and glass-sphere transport scene for focused caustic validation.",
+            RenderBackgroundMode::Black,
+            false
+        },
+        {
+            RenderValidationSceneId::LaserBenchStudy,
+            "Laser Bench",
+            "Continuous-wave laser, glass prism, and receiver bench for beam, fog, and refraction validation.",
+            RenderBackgroundMode::Black,
+            false
         }
     };
 
@@ -1227,6 +1241,138 @@ RenderValidationSceneTemplate BuildCornellBoxScene() {
     return scene;
 }
 
+RenderValidationSceneTemplate BuildCausticsStudyScene() {
+    RenderValidationSceneTemplate scene;
+    scene.id = RenderValidationSceneId::CausticsStudy;
+    scene.label = "Caustics Study";
+    scene.description = "Small emissive ceiling strip, area light, and glass-sphere transport scene for focused caustic validation.";
+    scene.defaultBackground = RenderBackgroundMode::Black;
+    scene.defaultEnvironmentEnabled = false;
+    scene.materials = {
+        MakeDiffuseMaterial("Receiver White", MakeRenderFloat3(0.78f, 0.78f, 0.74f)),
+        MakeDiffuseMaterial("Back Wall", MakeRenderFloat3(0.10f, 0.10f, 0.11f)),
+        MakeGlassMaterial("Clear Glass", 1.5f),
+        MakeEmissiveMaterial("Ceiling Emit", MakeRenderFloat3(1.0f, 1.0f, 1.0f), MakeRenderFloat3(1.0f, 0.98f, 0.90f), 12.0f)
+    };
+
+    const float L = -3.5f;
+    const float R = 3.5f;
+    const float B = 0.0f;
+    const float T = 4.8f;
+    const float F = -3.0f;
+    const float K = 3.0f;
+
+    AppendQuad(scene.triangles, "Floor",
+        MakeRenderFloat3(L, B, F), MakeRenderFloat3(R, B, F),
+        MakeRenderFloat3(L, B, K), MakeRenderFloat3(R, B, K), 0, MakeRenderFloat3(1.0f, 1.0f, 1.0f));
+
+    AppendQuad(scene.triangles, "Back Wall",
+        MakeRenderFloat3(L, B, K), MakeRenderFloat3(R, B, K),
+        MakeRenderFloat3(L, T, K), MakeRenderFloat3(R, T, K), 1, MakeRenderFloat3(1.0f, 1.0f, 1.0f));
+    AppendQuad(scene.triangles, "Ceiling Emit",
+        MakeRenderFloat3(-0.60f, 4.55f, -0.35f), MakeRenderFloat3(0.60f, 4.55f, -0.35f),
+        MakeRenderFloat3(-0.60f, 4.55f, 0.35f), MakeRenderFloat3(0.60f, 4.55f, 0.35f), 3, MakeRenderFloat3(1.0f, 1.0f, 1.0f));
+
+    scene.spheres = {
+        MakeSphere("Glass Sphere", MakeRenderFloat3(0.0f, 0.92f, 0.15f), 0.92f, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f))
+    };
+
+    RenderLight light;
+    light.id = 1;
+    light.name = "Top Area Light";
+    light.type = RenderLightType::RectArea;
+    light.transform.translation = MakeRenderFloat3(0.0f, 4.55f, 0.0f);
+    light.transform.rotationDegrees = MakeRenderFloat3(0.0f, 0.0f, -90.0f);
+    light.color = MakeRenderFloat3(1.0f, 0.98f, 0.90f);
+    light.intensity = 12.0f;
+    light.areaSize = MakeRenderFloat2(0.75f, 0.55f);
+    light.enabled = true;
+    scene.lights = { light };
+    return scene;
+}
+
+RenderMeshDefinition BuildTriangularPrismMesh() {
+    const RenderFloat3 a0 = MakeRenderFloat3(-0.38f, 0.0f, -0.28f);
+    const RenderFloat3 b0 = MakeRenderFloat3(0.38f, 0.0f, -0.28f);
+    const RenderFloat3 c0 = MakeRenderFloat3(0.0f, 0.66f, -0.28f);
+    const RenderFloat3 a1 = MakeRenderFloat3(-0.38f, 0.0f, 0.28f);
+    const RenderFloat3 b1 = MakeRenderFloat3(0.38f, 0.0f, 0.28f);
+    const RenderFloat3 c1 = MakeRenderFloat3(0.0f, 0.66f, 0.28f);
+
+    return BuildRenderMeshDefinition("Laser Prism", {
+        MakeMeshTriangle("Prism Front", a0, b0, c0, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Back", a1, c1, b1, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Base A", a0, b1, b0, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Base B", a0, a1, b1, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Right A", b0, b1, c1, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Right B", b0, c1, c0, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Left A", c0, c1, a1, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Left B", c0, a1, a0, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Top A", c0, b0, c1, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f)),
+        MakeMeshTriangle("Prism Top B", c1, b0, b1, 2, MakeRenderFloat3(1.0f, 1.0f, 1.0f))
+    });
+}
+
+RenderValidationSceneTemplate BuildLaserBenchScene() {
+    RenderValidationSceneTemplate scene;
+    scene.id = RenderValidationSceneId::LaserBenchStudy;
+    scene.label = "Laser Bench";
+    scene.description = "Continuous-wave green laser through a glass prism and onto a receiver screen for beam, fog, and refraction validation.";
+    scene.defaultBackground = RenderBackgroundMode::Black;
+    scene.defaultEnvironmentEnabled = false;
+    scene.defaultFogEnabled = false;
+    scene.materials = {
+        MakeDiffuseMaterial("Receiver White", MakeRenderFloat3(0.82f, 0.82f, 0.78f)),
+        MakeDiffuseMaterial("Bench Dark", MakeRenderFloat3(0.06f, 0.06f, 0.07f)),
+        MakeGlassMaterial("Prism Glass", 1.52f)
+    };
+
+    const float L = -3.8f;
+    const float R = 3.8f;
+    const float B = 0.0f;
+    const float T = 2.8f;
+    const float N = -4.0f;
+    const float F = 4.0f;
+
+    AppendQuad(scene.triangles, "Floor",
+        MakeRenderFloat3(L, B, N), MakeRenderFloat3(R, B, N),
+        MakeRenderFloat3(L, B, F), MakeRenderFloat3(R, B, F), 1, MakeRenderFloat3(1.0f, 1.0f, 1.0f));
+    AppendQuad(scene.triangles, "Screen",
+        MakeRenderFloat3(-1.6f, 0.35f, 3.65f), MakeRenderFloat3(1.6f, 0.35f, 3.65f),
+        MakeRenderFloat3(-1.6f, 2.45f, 3.65f), MakeRenderFloat3(1.6f, 2.45f, 3.65f), 0, MakeRenderFloat3(1.0f, 1.0f, 1.0f));
+    AppendQuad(scene.triangles, "Backdrop",
+        MakeRenderFloat3(-3.8f, 0.0f, 4.0f), MakeRenderFloat3(3.8f, 0.0f, 4.0f),
+        MakeRenderFloat3(-3.8f, 2.8f, 4.0f), MakeRenderFloat3(3.8f, 2.8f, 4.0f), 1, MakeRenderFloat3(1.0f, 1.0f, 1.0f));
+
+    scene.meshes = { BuildTriangularPrismMesh() };
+    RenderMeshInstance prism;
+    prism.name = "Glass Prism";
+    prism.meshIndex = 0;
+    prism.transform.translation = MakeRenderFloat3(0.0f, 0.75f, 0.1f);
+    prism.transform.rotationDegrees = MakeRenderFloat3(0.0f, 0.0f, 0.0f);
+    prism.transform.scale = MakeRenderFloat3(1.4f, 1.4f, 1.1f);
+    prism.colorTint = MakeRenderFloat3(1.0f, 1.0f, 1.0f);
+    scene.meshInstances = { prism };
+
+    RenderLight laser;
+    laser.id = 1;
+    laser.name = "Green Laser";
+    laser.type = RenderLightType::Laser;
+    laser.transform.translation = MakeRenderFloat3(0.0f, 0.55f, -3.1f);
+    laser.transform.rotationDegrees = MakeRenderFloat3(0.0f, -90.0f, 0.0f);
+    laser.color = MakeRenderFloat3(0.18f, 1.0f, 0.20f);
+    laser.intensity = 18.0f;
+    laser.range = 8.0f;
+    laser.laserWavelengthNm = 532.0f;
+    laser.laserLinewidthNm = 0.8f;
+    laser.laserApertureRadius = 0.008f;
+    laser.laserBeamWaistRadius = 0.002f;
+    laser.laserBeamQuality = 1.05f;
+    laser.enabled = true;
+    scene.lights = { laser };
+    return scene;
+}
+
 } // namespace
 
 const std::vector<RenderValidationSceneOption>& GetRenderValidationSceneOptions() {
@@ -1277,6 +1423,10 @@ RenderValidationSceneTemplate BuildRenderValidationScene(RenderValidationSceneId
         return BuildFogBeamStudyScene();
     case RenderValidationSceneId::CornellBox:
         return BuildCornellBoxScene();
+    case RenderValidationSceneId::CausticsStudy:
+        return BuildCausticsStudyScene();
+    case RenderValidationSceneId::LaserBenchStudy:
+        return BuildLaserBenchScene();
     case RenderValidationSceneId::Custom:
         break;
     }

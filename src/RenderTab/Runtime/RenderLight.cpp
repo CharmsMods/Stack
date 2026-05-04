@@ -1,5 +1,8 @@
 #include "RenderLight.h"
 
+#include <algorithm>
+#include <cmath>
+
 bool NearlyEqual(const RenderLight& a, const RenderLight& b, float epsilon) {
     return a.name == b.name &&
         a.type == b.type &&
@@ -10,6 +13,11 @@ bool NearlyEqual(const RenderLight& a, const RenderLight& b, float epsilon) {
         NearlyEqual(a.range, b.range, epsilon) &&
         NearlyEqual(a.innerConeDegrees, b.innerConeDegrees, epsilon) &&
         NearlyEqual(a.outerConeDegrees, b.outerConeDegrees, epsilon) &&
+        NearlyEqual(a.laserWavelengthNm, b.laserWavelengthNm, epsilon) &&
+        NearlyEqual(a.laserLinewidthNm, b.laserLinewidthNm, epsilon) &&
+        NearlyEqual(a.laserApertureRadius, b.laserApertureRadius, epsilon) &&
+        NearlyEqual(a.laserBeamWaistRadius, b.laserBeamWaistRadius, epsilon) &&
+        NearlyEqual(a.laserBeamQuality, b.laserBeamQuality, epsilon) &&
         a.enabled == b.enabled;
 }
 
@@ -23,6 +31,8 @@ const char* GetRenderLightTypeLabel(RenderLightType type) {
         return "Spot";
     case RenderLightType::Sun:
         return "Sun";
+    case RenderLightType::Laser:
+        return "Laser";
     }
 
     return "Unknown";
@@ -64,6 +74,27 @@ RenderBounds ComputeBounds(const RenderLight& light) {
             bounds.max.y = points[i].y > bounds.max.y ? points[i].y : bounds.max.y;
             bounds.max.z = points[i].z > bounds.max.z ? points[i].z : bounds.max.z;
         }
+        return bounds;
+    }
+
+    if (light.type == RenderLightType::Laser) {
+        const RenderFloat3 axis = Normalize(GetRenderLightDirection(light));
+        const float beamLength = std::max(light.range, 0.5f);
+        const float wavelengthMeters = std::max(light.laserWavelengthNm, 380.0f) * 1e-9f;
+        const float beamWaist = std::max(light.laserBeamWaistRadius, 0.0001f);
+        const float beamQuality = std::max(light.laserBeamQuality, 1.0f);
+        const float divergence = std::clamp((beamQuality * wavelengthMeters) / (3.14159265359f * beamWaist), 0.0001f, 0.5f);
+        const float startRadius = std::max(0.001f, light.laserApertureRadius);
+        const float endRadius = startRadius + beamLength * std::tan(divergence);
+        const RenderFloat3 endPoint = Add(light.transform.translation, Scale(axis, beamLength));
+        bounds.min = MakeRenderFloat3(
+            std::min(light.transform.translation.x - startRadius, endPoint.x - endRadius),
+            std::min(light.transform.translation.y - startRadius, endPoint.y - endRadius),
+            std::min(light.transform.translation.z - startRadius, endPoint.z - endRadius));
+        bounds.max = MakeRenderFloat3(
+            std::max(light.transform.translation.x + startRadius, endPoint.x + endRadius),
+            std::max(light.transform.translation.y + startRadius, endPoint.y + endRadius),
+            std::max(light.transform.translation.z + startRadius, endPoint.z + endRadius));
         return bounds;
     }
 

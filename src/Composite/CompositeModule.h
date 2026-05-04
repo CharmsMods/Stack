@@ -71,6 +71,7 @@ struct CompositeExportSettings {
 struct CompositeLayer {
     std::string id;
     std::string name;
+    std::string parentId;
     LayerKind kind = LayerKind::Image;
     float x = 0.0f;
     float y = 0.0f;
@@ -184,6 +185,7 @@ private:
     bool EnsureStageCompositeProgram();
     bool EnsureStagePreviewTargets(int width, int height);
     void RenderStagePreviewTexture(
+        const std::vector<CompositeLayer>& allLayers,
         const std::vector<const CompositeLayer*>& layers,
         float viewX,
         float viewY,
@@ -285,7 +287,6 @@ private:
     float m_ResizeAnchorX = 0.0f;
     float m_ResizeAnchorY = 0.0f;
     float m_StartMouseAngle = 0.0f;
-    float m_StartMouseDist = 1.0f;
     ExportHandleType m_ActiveExportHandle = ExportHandleType::None;
     float m_ExportDragStartX = 0.0f;
     float m_ExportDragStartY = 0.0f;
@@ -299,6 +300,7 @@ private:
     bool m_SnapToObjects = true;
     bool m_SnapToCenters = true;
     bool m_SnapToCanvasCenter = true;
+    bool m_SnapToExportBounds = false;
     bool m_SnapToSpacing = true;
     bool m_ShowLibraryPicker = false;
     bool m_LimitProjectResolution = true;

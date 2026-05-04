@@ -1,6 +1,8 @@
 #include "AppShell.h"
 #include "Async/TaskSystem.h"
 #include "Renderer/GLLoader.h"
+#include "settings/AppearanceTheme.h"
+#include "SettingsModule.h"
 #include <GLFW/glfw3.h>
 #include "imgui.h"
 #include <imgui_internal.h>
@@ -22,7 +24,9 @@ enum RootTabId {
     RootTabLibrary = 0,
     RootTabEditor = 1,
     RootTabComposite = 2,
-    RootTabRender = 3
+    RootTabRender = 3,
+    RootTabBundler = 4,
+    RootTabSettings = 5
 };
 
 struct RootTabDescriptor {
@@ -95,7 +99,10 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;     
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;   
 
-    ImGui::StyleColorsDark();
+    m_Appearance = std::make_unique<StackAppearance::AppearanceManager>();
+    const bool loadedAppearance = m_Appearance->Load();
+    m_Appearance->SetupFonts(io);
+    m_Appearance->ApplyCurrentTheme(io, ImGui::GetStyle());
 
     ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
     ImGui_ImplOpenGL3_Init("#version 430 core");
@@ -104,12 +111,19 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     glfwSetDropCallback(m_Window, OnFileDrop);
 
     Async::TaskSystem::Get().Initialize();
-    m_Editor.Initialize();
+    m_Editor.Initialize(m_Window);
     m_Composite.Initialize();
     // m_Library.Initialize(); // We will call this manually in the splash screen
     m_RenderTab.Initialize();
+    m_Bundler.Initialize();
 
     ShowSplashScreen();
+
+    if (!loadedAppearance) {
+        m_Appearance->Save();
+    }
+
+    m_Settings.Initialize(m_Appearance.get());
 
     // Now that we are back in the main context, upload the library textures
     LibraryManager::Get().UploadLibraryTextures();
@@ -143,8 +157,9 @@ void AppShell::Run() {
         int display_w, display_h;
         glfwGetFramebufferSize(m_Window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
-        
-        glClearColor(0.1f, 0.11f, 0.12f, 1.0f);
+
+        const ImVec4 clearColor = m_Appearance ? m_Appearance->GetClearColor() : ImVec4(0.1f, 0.1f, 0.1f, 1.0f);
+        glClearColor(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
         glClear(GL_COLOR_BUFFER_BIT);
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -184,7 +199,9 @@ void AppShell::RenderUI() {
         { RootTabLibrary, "Library", [this]() { m_Library.RenderUI(&m_Editor, &m_RenderTab, &m_Composite, &m_RequestedTab); } },
         { RootTabEditor, "Editor", [this]() { m_Editor.RenderUI(); } },
         { RootTabComposite, "Composite", [this]() { m_Composite.RenderUI(); } },
-        { RootTabRender, "Render", [this]() { m_RenderTab.RenderUI(); } }
+        { RootTabRender, "Render", [this]() { m_RenderTab.RenderUI(); } },
+        { RootTabBundler, "Bundler", [this]() { m_Bundler.RenderUI(); } },
+        { RootTabSettings, "Settings", [this]() { m_Settings.RenderUI(); } }
     };
 
     int selectedTab = -1;
@@ -347,6 +364,11 @@ void AppShell::OnTabChanged(int oldTab, int newTab) {
 void AppShell::Shutdown() {
     if (!m_Window) return;
 
+    if (m_Appearance) {
+        m_Appearance->Save();
+    }
+    m_Settings.Shutdown();
+    m_Bundler.Shutdown();
     m_RenderTab.Shutdown();
     m_Composite.Shutdown();
     Async::TaskSystem::Get().Shutdown();
@@ -373,8 +395,19 @@ void AppShell::OnFileDrop(GLFWwindow* window, int count, const char** paths) {
 void AppShell::HandleDrop(int count, const char** paths) {
     if (count <= 0 || !paths) return;
 
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    if (m_Window) {
+        glfwGetCursorPos(m_Window, &cursorX, &cursorY);
+    }
+
     for (int i = 0; i < count; ++i) {
         std::string path = paths[i];
+
+        if (m_CurrentTabId == RootTabEditor &&
+            m_Editor.HandleGraphFileDrop(path, static_cast<float>(cursorX), static_cast<float>(cursorY))) {
+            continue;
+        }
         
         // Pass a lambda to handle tab switching
         LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, &m_Composite, [this](int tabId) {
@@ -429,9 +462,6 @@ void AppShell::ShowSplashScreen() {
     glfwMakeContextCurrent(m_SplashWindow);
     glfwSwapInterval(1);
 
-    // Ensure Assets folder exists for user to put their splash image
-    std::filesystem::create_directories("Assets/Splash");
-
     // Initialize GL for this context
     if (!LoadGLFunctions()) return;
 
@@ -450,16 +480,20 @@ void AppShell::ShowSplashScreen() {
     ImGuiContext* splashContext = ImGui::CreateContext();
     ImGui::SetCurrentContext(splashContext);
     
+    if (m_Appearance) {
+        m_Appearance->SetupFonts(ImGui::GetIO());
+    }
     ImGui_ImplGlfw_InitForOpenGL(m_SplashWindow, true);
     ImGui_ImplOpenGL3_Init("#version 430 core");
-    ImGui::StyleColorsDark();
+    if (m_Appearance) {
+        m_Appearance->ApplyCurrentTheme(ImGui::GetIO(), ImGui::GetStyle());
+    }
 
     // Customize Style for splash
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0.0f;
     style.WindowBorderSize = 0.0f;
     style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    style.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.2f, 0.6f, 1.0f, 1.0f);
 
     auto progressCallback = [&](int current, int total, const std::string& name) {
         glfwPollEvents();

@@ -6,9 +6,13 @@
 #include "RenderTab/Runtime/Geometry/RenderMesh.h"
 #include "RenderTab/Runtime/Geometry/RenderSceneGeometry.h"
 #include "Renderer/GLHelpers.h"
+#include "RenderTab/Shaders/EmbeddedShaders.h"
 
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -44,12 +48,22 @@ struct alignas(16) GpuRasterLight {
     float sizeAndAngles[4];
     float rightEnabled[4];
     float upData[4];
+    float laserParams[4];
+    float laserInfo[4];
 };
 
 std::string LoadShaderSource(const char* fileName) {
+    // 1. Try to load from disk relative to source (dev convenience)
     const std::filesystem::path shaderPath =
         std::filesystem::path(__FILE__).parent_path().parent_path() / "Shaders" / fileName;
-    return GLHelpers::ReadFile(shaderPath.string());
+    std::string source = GLHelpers::ReadFile(shaderPath.string());
+    
+    // 2. Fallback to embedded source (for portability)
+    if (source.empty()) {
+        source = EmbeddedShaders::Get(fileName);
+    }
+    
+    return source;
 }
 
 void StoreFloat3(float target[3], const RenderFloat3& value) {
@@ -343,6 +357,14 @@ GpuRasterLight ToGpuLight(const RenderLight& light) {
     result.upData[1] = up.y;
     result.upData[2] = up.z;
     result.upData[3] = 0.0f;
+    result.laserParams[0] = light.laserWavelengthNm;
+    result.laserParams[1] = light.laserLinewidthNm;
+    result.laserParams[2] = light.laserApertureRadius;
+    result.laserParams[3] = light.laserBeamWaistRadius;
+    result.laserInfo[0] = light.laserBeamQuality;
+    result.laserInfo[1] = light.range;
+    result.laserInfo[2] = 0.0f;
+    result.laserInfo[3] = 0.0f;
     return result;
 }
 
@@ -358,6 +380,68 @@ void EncodeDefaultLayer(
         pixels[i + 2] = b;
         pixels[i + 3] = a;
     }
+}
+
+std::uint64_t HashMix(std::uint64_t hash, std::uint64_t value) {
+    hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+    return hash;
+}
+
+std::uint64_t HashFloat(std::uint64_t hash, float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return HashMix(hash, bits);
+}
+
+std::uint64_t HashFloat3(std::uint64_t hash, const RenderFloat3& value) {
+    hash = HashFloat(hash, value.x);
+    hash = HashFloat(hash, value.y);
+    hash = HashFloat(hash, value.z);
+    return hash;
+}
+
+std::uint64_t BuildSceneUploadKey(const RenderScene& scene) {
+    std::uint64_t hash = 1469598103934665603ull;
+    hash = HashMix(hash, scene.GetRevision());
+    hash = HashMix(hash, static_cast<std::uint64_t>(scene.GetResolvedTriangleCount()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(scene.GetSphereCount()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(scene.GetMaterialCount()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(scene.GetLightCount()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(scene.GetImportedTextureCount()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(scene.GetPrimitiveRefs().size()));
+
+    for (const RenderPrimitiveRef& primitiveRef : scene.GetPrimitiveRefs()) {
+        hash = HashMix(hash, static_cast<std::uint64_t>(primitiveRef.type));
+        hash = HashMix(hash, static_cast<std::uint64_t>(primitiveRef.index + 1));
+        hash = HashFloat3(hash, primitiveRef.bounds.min);
+        hash = HashFloat3(hash, primitiveRef.bounds.max);
+    }
+
+    for (int materialIndex = 0; materialIndex < scene.GetMaterialCount(); ++materialIndex) {
+        const RenderMaterial& material = scene.GetMaterial(materialIndex);
+        hash = HashFloat3(hash, material.baseColor);
+        hash = HashFloat3(hash, material.emissionColor);
+        hash = HashFloat(hash, material.emissionStrength);
+        hash = HashFloat(hash, material.roughness);
+        hash = HashFloat(hash, material.metallic);
+        hash = HashFloat(hash, material.transmission);
+        hash = HashMix(hash, static_cast<std::uint64_t>(material.baseColorTexture.textureIndex + 1));
+        hash = HashMix(hash, static_cast<std::uint64_t>(material.metallicRoughnessTexture.textureIndex + 1));
+        hash = HashMix(hash, static_cast<std::uint64_t>(material.emissiveTexture.textureIndex + 1));
+        hash = HashMix(hash, static_cast<std::uint64_t>(material.normalTexture.textureIndex + 1));
+    }
+
+    for (int lightIndex = 0; lightIndex < scene.GetLightCount(); ++lightIndex) {
+        const RenderLight& light = scene.GetLight(lightIndex);
+        hash = HashMix(hash, static_cast<std::uint64_t>(light.type));
+        hash = HashFloat3(hash, light.transform.translation);
+        hash = HashFloat3(hash, light.transform.rotationDegrees);
+        hash = HashFloat3(hash, light.color);
+        hash = HashFloat(hash, light.intensity);
+        hash = HashMix(hash, light.enabled ? 1u : 0u);
+    }
+
+    return hash;
 }
 
 } // namespace
@@ -447,6 +531,7 @@ void RenderRasterPreviewRenderer::Shutdown() {
         m_VertexArray = 0;
     }
     m_UploadedSceneRevision = 0;
+    m_UploadedSceneKey = 0;
     m_UploadedVertexCount = 0;
     m_UploadedMaterialCount = 0;
     m_UploadedLightCount = 0;
@@ -542,9 +627,13 @@ bool RenderRasterPreviewRenderer::EnsureTargets(int width, int height) {
 }
 
 bool RenderRasterPreviewRenderer::UploadScene(const RenderScene& scene) {
-    if (m_UploadedSceneRevision == scene.GetRevision()) {
+    const std::uint64_t sceneUploadKey = BuildSceneUploadKey(scene);
+    if (m_UploadedSceneRevision == scene.GetRevision() && m_UploadedSceneKey == sceneUploadKey) {
+        m_LastUploadMilliseconds = 0.0;
         return true;
     }
+
+    const auto uploadStart = std::chrono::steady_clock::now();
 
     std::vector<RasterVertex> vertices;
     vertices.reserve(static_cast<std::size_t>(scene.GetResolvedTriangleCount() * 3 + scene.GetSphereCount() * kSphereSlices * kSphereStacks * 6));
@@ -627,10 +716,13 @@ bool RenderRasterPreviewRenderer::UploadScene(const RenderScene& scene) {
     }
 
     m_UploadedSceneRevision = scene.GetRevision();
+    m_UploadedSceneKey = sceneUploadKey;
     m_UploadedVertexCount = static_cast<int>(vertices.size());
     m_UploadedMaterialCount = static_cast<int>(materials.size());
     m_UploadedLightCount = static_cast<int>(lights.size());
     m_UploadedTextureCount = scene.GetImportedTextureCount();
+    m_LastUploadMilliseconds =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadStart).count();
     return true;
 }
 
@@ -737,6 +829,7 @@ bool RenderRasterPreviewRenderer::ComposeViewport(unsigned int baseTexture, int 
 
 void RenderRasterPreviewRenderer::ReleaseSceneBuffers() {
     m_UploadedSceneRevision = 0;
+    m_UploadedSceneKey = 0;
     m_UploadedVertexCount = 0;
     m_UploadedMaterialCount = 0;
     m_UploadedLightCount = 0;

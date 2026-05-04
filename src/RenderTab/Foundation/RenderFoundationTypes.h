@@ -1,5 +1,8 @@
 #pragma once
 
+#include "RenderTab/Runtime/Assets/RenderImportedAsset.h"
+#include "RenderTab/Runtime/Geometry/RenderMesh.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -32,11 +35,45 @@ enum class ViewMode : std::uint8_t {
     PathTrace = 1
 };
 
+enum class PathTraceTransportMode : std::uint8_t {
+    Preview = 0,
+    CausticsReference = 1
+};
+
 enum class PathTraceDebugMode : std::uint8_t {
     None = 0,
     SelectedRayLog = 1,
     RefractedSourceClass = 2,
     SelfHitHeatmap = 3
+};
+
+enum class PathTraceTerminationMode : std::uint8_t {
+    BruteForce = 0,
+    Optimized = 1,
+    Smart = 2
+};
+
+enum class DenoiserMode : std::uint8_t {
+    Off = 0,
+    Bilateral = 1,
+    ATrous = 2
+};
+
+enum class DenoiserDebugView : std::uint8_t {
+    FinalOutput = 0,
+    NoisyBeauty = 1,
+    DenoisedBeauty = 2,
+    CurrentSample = 3,
+    GuideAlbedo = 4,
+    GuideNormal = 5,
+    GuideDepth = 6,
+    VarianceHeatmap = 7,
+    DifferenceHeatmap = 8
+};
+
+enum class DenoiserExportMode : std::uint8_t {
+    Noisy = 0,
+    Denoised = 1
 };
 
 enum class TransformMode : std::uint8_t {
@@ -64,17 +101,36 @@ enum class MaterialLayerType : std::uint8_t {
     ClearCoat = 3
 };
 
+enum class ImportedMaterialMode : std::uint8_t {
+    UseImported = 0,
+    OverrideOnly = 1,
+    Blend = 2
+};
+
+enum class ViewportPerformanceMode : std::uint8_t {
+    Auto = 0,
+    Exact = 1,
+    Proxy = 2
+};
+
+enum class ImportedModelScaleMode : std::uint8_t {
+    KeepOriginal = 0,
+    AutoFit = 1
+};
+
 enum class PrimitiveType : std::uint8_t {
     Sphere = 0,
     Cube = 1,
-    Plane = 2
+    Plane = 2,
+    ImportedMesh = 3
 };
 
 enum class LightType : std::uint8_t {
     Point = 0,
     Spot = 1,
     Area = 2,
-    Directional = 3
+    Directional = 3,
+    Laser = 4
 };
 
 enum class SelectionType : std::uint8_t {
@@ -87,7 +143,11 @@ enum class SelectionType : std::uint8_t {
 struct Material {
     Id id = 0;
     std::string name = "Material";
+    bool isTemplate = false;
+    bool importedSource = false;
     BaseMaterial baseMaterial = BaseMaterial::Diffuse;
+    int sourceAssetIndex = -1;
+    std::string sourceMaterialName;
     Vec3 baseColor { 0.8f, 0.8f, 0.8f };
     Vec3 emissionColor { 1.0f, 1.0f, 1.0f };
     float emissionStrength = 0.0f;
@@ -102,6 +162,10 @@ struct Material {
     float clearCoat = 0.0f;
     float thinFilm = 0.0f;
     float subsurface = 0.0f;
+    RenderMaterialTextureRef baseColorTexture {};
+    RenderMaterialTextureRef metallicRoughnessTexture {};
+    RenderMaterialTextureRef emissiveTexture {};
+    RenderMaterialTextureRef normalTexture {};
     struct Layer {
         MaterialLayerType type = MaterialLayerType::BaseDiffuse;
         Vec3 color { 1.0f, 1.0f, 1.0f };
@@ -122,7 +186,20 @@ struct Primitive {
     PrimitiveType type = PrimitiveType::Sphere;
     Transform transform {};
     Id materialId = 0;
+    int meshIndex = -1;
+    ImportedMaterialMode importedMaterialMode = ImportedMaterialMode::UseImported;
+    float importedMaterialBlend = 0.5f;
+    Vec3 colorTint { 1.0f, 1.0f, 1.0f };
     bool visible = true;
+    std::string importedAssetLabel;
+    int importedPartCount = 0;
+    int importedTriangleCount = 0;
+    int importedMaterialCount = 0;
+    float importedAppliedScale = 1.0f;
+    ImportedModelScaleMode importedScaleMode = ImportedModelScaleMode::AutoFit;
+    Vec3 importedLocalBoundsMin {};
+    Vec3 importedLocalBoundsMax {};
+    std::string importedWarningText;
 };
 
 struct Light {
@@ -136,6 +213,11 @@ struct Light {
     float range = 20.0f;
     float innerConeDegrees = 18.0f;
     float outerConeDegrees = 32.0f;
+    float laserWavelengthNm = 532.0f;
+    float laserLinewidthNm = 1.0f;
+    float laserApertureRadius = 0.01f;
+    float laserBeamWaistRadius = 0.002f;
+    float laserBeamQuality = 1.0f;
     bool enabled = true;
 };
 
@@ -143,19 +225,49 @@ struct Camera {
     Vec3 position { -4.5f, 2.25f, 6.5f };
     float yawDegrees = -34.0f;
     float pitchDegrees = -16.0f;
-    float fieldOfViewDegrees = 50.0f;
+    float fieldOfViewDegrees = 80.0f;
     float focusDistance = 6.0f;
     float apertureRadius = 0.0f;
     float exposure = 1.0f;
+    float whiteBalanceTemperature = 6500.0f;
     float movementSpeed = 5.0f;
+};
+
+struct CameraPreviewSettings {
+    int resolutionX = 960;
+    int resolutionY = 540;
+    int maxBounceCount = 512;
+    PathTraceTerminationMode terminationMode = PathTraceTerminationMode::Smart;
 };
 
 struct FinalRenderSettings {
     int resolutionX = 1280;
     int resolutionY = 720;
     int sampleTarget = 256;
-    int maxBounceCount = 8;
+    int maxBounceCount = 512;
+    PathTraceTerminationMode terminationMode = PathTraceTerminationMode::Smart;
     std::string outputName = "Final Render";
+};
+
+struct DenoiserSettings {
+    bool enabled = false;
+    DenoiserMode mode = DenoiserMode::Bilateral;
+    DenoiserDebugView debugView = DenoiserDebugView::FinalOutput;
+    bool fireflyClampEnabled = false;
+    float fireflyClampThreshold = 8.0f;
+    int bilateralRadius = 2;
+    float bilateralSpatialSigma = 1.5f;
+    float bilateralColorSigma = 0.35f;
+    float bilateralDepthPhi = 4.0f;
+    float bilateralNormalPhi = 64.0f;
+    float bilateralAlbedoPhi = 4.0f;
+    int atrousPassCount = 5;
+    float atrousDepthPhi = 4.0f;
+    float atrousNormalPhi = 64.0f;
+    float atrousAlbedoPhi = 4.0f;
+    bool varianceEnabled = false;
+    float varianceStrength = 1.0f;
+    DenoiserExportMode exportMode = DenoiserExportMode::Denoised;
 };
 
 struct Settings {
@@ -163,14 +275,36 @@ struct Settings {
     int resolutionY = 720;
     int previewSampleTarget = 128;
     bool accumulationEnabled = true;
+    bool viewportResolutionOverrideEnabled = false;
+    int viewportResolutionX = 960;
+    int viewportResolutionY = 540;
+    ViewportPerformanceMode viewportPerformanceMode = ViewportPerformanceMode::Exact;
     ViewMode viewMode = ViewMode::Unlit;
+    PathTraceTransportMode pathTraceTransportMode = PathTraceTransportMode::Preview;
     PathTraceDebugMode pathTraceDebugMode = PathTraceDebugMode::None;
     int pathTraceDebugPixelX = -1;
     int pathTraceDebugPixelY = -1;
-    int maxBounceCount = 4;
+    int maxBounceCount = 512;
+    PathTraceTerminationMode pathTraceTerminationMode = PathTraceTerminationMode::Smart;
     TransformMode transformMode = TransformMode::Translate;
     TransformSpace transformSpace = TransformSpace::Local;
+    DenoiserSettings denoiser {};
+    CameraPreviewSettings cameraPreview {};
     FinalRenderSettings finalRender {};
+};
+
+struct ImportedModelDiagnostics {
+    std::string assetLabel;
+    std::string sourcePath;
+    int partCount = 0;
+    int triangleCount = 0;
+    int materialCount = 0;
+    int textureCount = 0;
+    float appliedScale = 1.0f;
+    ImportedModelScaleMode scaleMode = ImportedModelScaleMode::AutoFit;
+    Vec3 localBoundsMin {};
+    Vec3 localBoundsMax {};
+    std::vector<std::string> warnings;
 };
 
 struct SceneMetadata {
@@ -194,6 +328,9 @@ struct Selection {
 struct Snapshot {
     Id cameraId = 0;
     SceneMetadata metadata {};
+    std::vector<RenderImportedAsset> importedAssets;
+    std::vector<RenderImportedTexture> importedTextures;
+    std::vector<RenderMeshDefinition> importedMeshes;
     std::vector<Material> materials;
     std::vector<Primitive> primitives;
     std::vector<Light> lights;
@@ -269,6 +406,18 @@ inline const char* MaterialLayerTypeLabel(MaterialLayerType type) {
             return "Clear Coat";
     }
     return "Layer";
+}
+
+inline const char* ImportedMaterialModeLabel(ImportedMaterialMode mode) {
+    switch (mode) {
+        case ImportedMaterialMode::OverrideOnly:
+            return "Override";
+        case ImportedMaterialMode::Blend:
+            return "Blend";
+        case ImportedMaterialMode::UseImported:
+        default:
+            return "Use Imported";
+    }
 }
 
 inline bool IsBaseMaterialLayerType(MaterialLayerType type) {

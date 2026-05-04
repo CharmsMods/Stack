@@ -39,13 +39,14 @@ void main() {
     rayState.direction = vec4(direction, 1.0);
     rayState.throughput = vec4(1.0);
     rayState.radiance = vec4(0.0);
-    rayState.wavelengths = SampleHeroWavelengths(rngState);
-    rayState.wavelengthPdfs = vec4(1.0);
+    SampleHeroWavelengths(rngState, rayState.wavelengths, rayState.wavelengthPdfs);
     rayState.absorptionCoefficients = vec4(0.0);
     rayState.meta = ivec4(int(index), 0, 0, 0);
     rayState.params = vec4(1.0, float(kDebugSourceClassNone), -1.0, 0.0);
     uRayStates[index] = rayState;
     uHitStates[index] = MakeMissState();
+    uGuideStates[index].albedo = vec4(0.0);
+    uGuideStates[index].normalDepth = vec4(0.0, 0.0, 0.0, -1.0);
     uActiveQueue[index] = index;
     uNextQueue[index] = 0u;
     ResetSelectedRayLog(index);

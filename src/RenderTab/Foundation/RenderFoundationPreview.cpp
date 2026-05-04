@@ -49,7 +49,7 @@ bool ProjectPoint(
 Vec3 ResolvePrimitiveColor(const State& state, const Primitive& primitive) {
     const Material* material = state.FindMaterial(primitive.materialId);
     if (material == nullptr) {
-        return { 0.8f, 0.8f, 0.8f };
+        return Clamp01(primitive.colorTint);
     }
 
     Vec3 color = material->baseColor;
@@ -60,7 +60,11 @@ Vec3 ResolvePrimitiveColor(const State& state, const Primitive& primitive) {
     } else if (material->baseMaterial == BaseMaterial::Emissive) {
         color = Clamp01(material->emissionColor);
     }
-    return Clamp01(color);
+    return Clamp01({
+        color.x * primitive.colorTint.x,
+        color.y * primitive.colorTint.y,
+        color.z * primitive.colorTint.z
+    });
 }
 
 PreviewGlyph ResolveGlyph(PrimitiveType type) {
@@ -68,6 +72,7 @@ PreviewGlyph ResolveGlyph(PrimitiveType type) {
         case PrimitiveType::Sphere:
             return PreviewGlyph::Sphere;
         case PrimitiveType::Cube:
+        case PrimitiveType::ImportedMesh:
             return PreviewGlyph::Cube;
         case PrimitiveType::Plane:
             return PreviewGlyph::Plane;
@@ -85,6 +90,8 @@ PreviewGlyph ResolveGlyph(LightType type) {
             return PreviewGlyph::LightArea;
         case LightType::Directional:
             return PreviewGlyph::LightDirectional;
+        case LightType::Laser:
+            return PreviewGlyph::LightLaser;
     }
     return PreviewGlyph::LightPoint;
 }
@@ -216,6 +223,10 @@ void DrawPreviewElement(
         case PreviewGlyph::LightArea:
             DrawFilledRect(pixels, width, height, cx - hx, cy - hy, cx + hx, cy + hy, element.color, 0.9f);
             break;
+        case PreviewGlyph::LightLaser:
+            DrawFilledRect(pixels, width, height, cx - hx, cy - std::max(2, hy / 3), cx + hx, cy + std::max(2, hy / 3), element.color, 0.96f);
+            DrawFilledCircle(pixels, width, height, cx - std::max(2, hx / 2), cy, std::max(2, hy), { 1.0f, 1.0f, 1.0f }, 0.18f);
+            break;
         case PreviewGlyph::LightDirectional:
         case PreviewGlyph::LightPoint:
         case PreviewGlyph::LightSpot:
@@ -284,14 +295,15 @@ std::vector<ProjectedElement> BuildProjectedElements(const State& state, float w
         element.label = primitive.name;
         element.selected = selection.type == SelectionType::Primitive && selection.id == primitive.id;
 
-        switch (primitive.type) {
-            case PrimitiveType::Sphere:
-                element.halfSize = { projectedRadius, projectedRadius };
-                break;
-            case PrimitiveType::Cube:
-                element.halfSize = { projectedRadius * 0.9f, projectedRadius * 0.9f };
-                break;
-            case PrimitiveType::Plane:
+            switch (primitive.type) {
+                case PrimitiveType::Sphere:
+                    element.halfSize = { projectedRadius, projectedRadius };
+                    break;
+                case PrimitiveType::Cube:
+                case PrimitiveType::ImportedMesh:
+                    element.halfSize = { projectedRadius * 0.9f, projectedRadius * 0.9f };
+                    break;
+                case PrimitiveType::Plane:
                 element.halfSize = { projectedRadius * 1.7f, std::max(6.0f, projectedRadius * 0.25f) };
                 break;
         }
@@ -328,6 +340,8 @@ std::vector<ProjectedElement> BuildProjectedElements(const State& state, float w
             element.halfSize = { projectedRadius * 1.4f, projectedRadius };
         } else if (light.type == LightType::Directional) {
             element.halfSize = { projectedRadius * 1.15f, projectedRadius * 0.85f };
+        } else if (light.type == LightType::Laser) {
+            element.halfSize = { projectedRadius * 1.8f, std::max(4.0f, projectedRadius * 0.3f) };
         }
         element.depth = depth;
         element.label = light.name;

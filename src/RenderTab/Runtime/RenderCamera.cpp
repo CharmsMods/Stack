@@ -7,10 +7,11 @@ namespace {
 
 constexpr float kDefaultYawDegrees = 18.0f;
 constexpr float kDefaultPitchDegrees = -12.0f;
-constexpr float kDefaultFieldOfViewDegrees = 50.0f;
+constexpr float kDefaultFieldOfViewDegrees = 80.0f;
 constexpr float kDefaultFocusDistance = 6.0f;
 constexpr float kDefaultApertureRadius = 0.0f;
 constexpr float kDefaultExposure = 1.0f;
+constexpr float kDefaultWhiteBalanceTemperature = 6500.0f;
 constexpr RenderFloat3 kLegacyOrbitTarget { 0.0f, 0.75f, 0.0f };
 
 float NormalizeYawDegrees(float value) {
@@ -48,6 +49,7 @@ RenderCamera::RenderCamera()
     , m_FocusDistance(kDefaultFocusDistance)
     , m_ApertureRadius(kDefaultApertureRadius)
     , m_Exposure(kDefaultExposure)
+    , m_WhiteBalanceTemperature(kDefaultWhiteBalanceTemperature)
     , m_Revision(1)
     , m_LastChangeReason("Initial camera state.") {
 }
@@ -144,6 +146,17 @@ bool RenderCamera::SetExposure(float value) {
     return true;
 }
 
+bool RenderCamera::SetWhiteBalanceTemperature(float value) {
+    const float clamped = std::clamp(value, 1000.0f, 15000.0f);
+    if (NearlyEqual(m_WhiteBalanceTemperature, clamped)) {
+        return false;
+    }
+
+    m_WhiteBalanceTemperature = clamped;
+    Touch("Camera white balance changed.");
+    return true;
+}
+
 bool RenderCamera::ResetToDefaultView(const std::string& reason) {
     return ApplySnapshot(
         BuildLegacyOrbitPosition(kDefaultYawDegrees, kDefaultPitchDegrees, kDefaultFocusDistance),
@@ -153,6 +166,7 @@ bool RenderCamera::ResetToDefaultView(const std::string& reason) {
         kDefaultFocusDistance,
         kDefaultApertureRadius,
         kDefaultExposure,
+        kDefaultWhiteBalanceTemperature,
         reason.empty() ? std::string("Camera reset to the default view.") : reason);
 }
 
@@ -164,6 +178,7 @@ bool RenderCamera::ApplySnapshot(
     float focusDistance,
     float apertureRadius,
     float exposure,
+    float whiteBalanceTemperature,
     const std::string& reason) {
     const float normalizedYaw = NormalizeYawDegrees(yawDegrees);
     const float clampedPitch = std::clamp(pitchDegrees, -89.0f, 89.0f);
@@ -171,6 +186,7 @@ bool RenderCamera::ApplySnapshot(
     const float clampedFocusDistance = std::clamp(focusDistance, 0.1f, 100.0f);
     const float clampedApertureRadius = std::clamp(apertureRadius, 0.0f, 1.5f);
     const float clampedExposure = std::clamp(exposure, 0.25f, 4.0f);
+    const float clampedWhiteBalanceTemperature = std::clamp(whiteBalanceTemperature, 1000.0f, 15000.0f);
 
     if (NearlyEqual(m_Position, position) &&
         NearlyEqual(m_YawDegrees, normalizedYaw) &&
@@ -178,7 +194,8 @@ bool RenderCamera::ApplySnapshot(
         NearlyEqual(m_FieldOfViewDegrees, clampedFieldOfView) &&
         NearlyEqual(m_FocusDistance, clampedFocusDistance) &&
         NearlyEqual(m_ApertureRadius, clampedApertureRadius) &&
-        NearlyEqual(m_Exposure, clampedExposure)) {
+        NearlyEqual(m_Exposure, clampedExposure) &&
+        NearlyEqual(m_WhiteBalanceTemperature, clampedWhiteBalanceTemperature)) {
         return false;
     }
 
@@ -189,6 +206,7 @@ bool RenderCamera::ApplySnapshot(
     m_FocusDistance = clampedFocusDistance;
     m_ApertureRadius = clampedApertureRadius;
     m_Exposure = clampedExposure;
+    m_WhiteBalanceTemperature = clampedWhiteBalanceTemperature;
     Touch(reason.empty() ? std::string("Camera snapshot applied.") : reason);
     return true;
 }
@@ -200,6 +218,7 @@ bool RenderCamera::ApplySnapshot(
     float focusDistance,
     float apertureRadius,
     float exposure,
+    float whiteBalanceTemperature,
     const std::string& reason) {
     return ApplySnapshot(
         BuildLegacyOrbitPosition(yawDegrees, pitchDegrees, focusDistance),
@@ -209,6 +228,7 @@ bool RenderCamera::ApplySnapshot(
         focusDistance,
         apertureRadius,
         exposure,
+        whiteBalanceTemperature,
         reason);
 }
 

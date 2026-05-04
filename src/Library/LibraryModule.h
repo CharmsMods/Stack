@@ -46,6 +46,7 @@ private:
     std::shared_ptr<struct ProjectEntry> m_PreviewProject = nullptr;
     std::shared_ptr<struct AssetEntry> m_PreviewAsset = nullptr;
     bool m_ShowAssets = false;
+    bool m_BlockLibraryGridContextMenuThisFrame = false;
     char m_SearchFilter[128] = "";
     char m_RenameBuffer[256] = "";
     float m_CompareSplit = 0.5f;

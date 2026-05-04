@@ -15,6 +15,8 @@ using namespace RenderFoundation;
 
 constexpr float kSelectionRayMinT = 0.001f;
 constexpr float kGizmoHoverDistancePixels = 15.0f;
+constexpr float kGizmoPlaneHandleSizePixels = 34.0f;
+constexpr float kGizmoCenterHandleRadiusPixels = 10.0f;
 constexpr float kGizmoMinimumHandleWorldLength = 0.5f;
 constexpr float kGizmoHandleDistanceFactor = 0.2f;
 constexpr float kGizmoScaleSensitivity = 0.35f;
@@ -24,6 +26,14 @@ struct PickHit {
     SelectionType type = SelectionType::None;
     Id objectId = 0;
     float distance = std::numeric_limits<float>::max();
+};
+
+struct PrimitiveTraceHit {
+    bool hit = false;
+    Id objectId = 0;
+    float distance = std::numeric_limits<float>::max();
+    Vec3 point {};
+    Vec3 normal {};
 };
 
 struct GizmoProjection {
@@ -321,8 +331,80 @@ bool BuildGizmoProjection(
     return true;
 }
 
-int FindHoveredAxis(const GizmoProjection& projection, const ImVec2& mousePosition) {
-    int hoveredAxis = -1;
+int AxisMask(int axis) {
+    return 1 << axis;
+}
+
+int AxisCount(int axisMask) {
+    int count = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        if ((axisMask & AxisMask(axis)) != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+ImVec2 AddPoint(const ImVec2& left, const ImVec2& right) {
+    return ImVec2(left.x + right.x, left.y + right.y);
+}
+
+ImVec2 ScalePoint(const ImVec2& point, float scale) {
+    return ImVec2(point.x * scale, point.y * scale);
+}
+
+float DistanceSquared(const ImVec2& a, const ImVec2& b) {
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
+
+int FindHoveredAxisMask(const GizmoProjection& projection, const ImVec2& mousePosition, TransformMode transformMode) {
+    if (transformMode != TransformMode::Rotate &&
+        DistanceSquared(mousePosition, projection.originScreen) <= kGizmoCenterHandleRadiusPixels * kGizmoCenterHandleRadiusPixels) {
+        return AxisMask(0) | AxisMask(1) | AxisMask(2);
+    }
+
+    if (transformMode != TransformMode::Rotate) {
+        for (int fixedAxis = 2; fixedAxis >= 0; --fixedAxis) {
+            const int axisA = (fixedAxis + 1) % 3;
+            const int axisB = (fixedAxis + 2) % 3;
+            if (!projection.axisVisible[axisA] || !projection.axisVisible[axisB]) {
+                continue;
+            }
+
+            const ImVec2 dirA = ScalePoint(
+                ImVec2(
+                    projection.axisEndScreen[axisA].x - projection.originScreen.x,
+                    projection.axisEndScreen[axisA].y - projection.originScreen.y),
+                1.0f / std::max(projection.pixelsPerUnit[axisA] * projection.handleWorldLength, 1.0f));
+            const ImVec2 dirB = ScalePoint(
+                ImVec2(
+                    projection.axisEndScreen[axisB].x - projection.originScreen.x,
+                    projection.axisEndScreen[axisB].y - projection.originScreen.y),
+                1.0f / std::max(projection.pixelsPerUnit[axisB] * projection.handleWorldLength, 1.0f));
+            const ImVec2 corner0 = AddPoint(
+                projection.originScreen,
+                AddPoint(ScalePoint(dirA, kGizmoPlaneHandleSizePixels * 0.85f), ScalePoint(dirB, kGizmoPlaneHandleSizePixels * 0.85f)));
+            const ImVec2 cornerA = AddPoint(corner0, ScalePoint(dirA, kGizmoPlaneHandleSizePixels));
+            const ImVec2 cornerB = AddPoint(corner0, ScalePoint(dirB, kGizmoPlaneHandleSizePixels));
+            const ImVec2 toMouse(mousePosition.x - corner0.x, mousePosition.y - corner0.y);
+            const float aProjection = toMouse.x * dirA.x + toMouse.y * dirA.y;
+            const float bProjection = toMouse.x * dirB.x + toMouse.y * dirB.y;
+            if (aProjection >= 0.0f && aProjection <= kGizmoPlaneHandleSizePixels &&
+                bProjection >= 0.0f && bProjection <= kGizmoPlaneHandleSizePixels) {
+                const float distanceToA = DistancePointToSegmentSquared(mousePosition, corner0, cornerA);
+                const float distanceToB = DistancePointToSegmentSquared(mousePosition, corner0, cornerB);
+                if (distanceToA <= kGizmoHoverDistancePixels * kGizmoHoverDistancePixels ||
+                    distanceToB <= kGizmoHoverDistancePixels * kGizmoHoverDistancePixels ||
+                    (aProjection >= 3.0f && bProjection >= 3.0f)) {
+                    return AxisMask(axisA) | AxisMask(axisB);
+                }
+            }
+        }
+    }
+
+    int hoveredAxisMask = 0;
     float hoveredDistance = kGizmoHoverDistancePixels * kGizmoHoverDistancePixels;
 
     for (int axis = 0; axis < 3; ++axis) {
@@ -334,11 +416,11 @@ int FindHoveredAxis(const GizmoProjection& projection, const ImVec2& mousePositi
             DistancePointToSegmentSquared(mousePosition, projection.originScreen, projection.axisEndScreen[axis]);
         if (distanceSquared < hoveredDistance) {
             hoveredDistance = distanceSquared;
-            hoveredAxis = axis;
+            hoveredAxisMask = AxisMask(axis);
         }
     }
 
-    return hoveredAxis;
+    return hoveredAxisMask;
 }
 
 ImU32 GetAxisColor(int axis, bool emphasized) {
@@ -354,6 +436,89 @@ ImU32 GetAxisColor(int axis, bool emphasized) {
     }
 }
 
+bool SelectionSupportsScale(SelectionType selectionType) {
+    return selectionType == SelectionType::Primitive;
+}
+
+bool TraceNearestPrimitiveHit(
+    const CompiledScene& compiledScene,
+    const Vec3& rayOrigin,
+    const Vec3& rayDirection,
+    PrimitiveTraceHit& outHit) {
+
+    if (!compiledScene.valid) {
+        return false;
+    }
+
+    PrimitiveTraceHit bestHit {};
+    const std::vector<RenderBvhNode>& nodes = compiledScene.scene.GetBvhNodes();
+    const std::vector<RenderPrimitiveRef>& refs = compiledScene.scene.GetPrimitiveRefs();
+    if (nodes.empty()) {
+        return false;
+    }
+
+    std::vector<int> stack;
+    stack.reserve(nodes.size());
+    stack.push_back(0);
+    while (!stack.empty()) {
+        const RenderBvhNode& node = nodes[static_cast<std::size_t>(stack.back())];
+        stack.pop_back();
+        float boundsHit = 0.0f;
+        if (!IntersectBounds(rayOrigin, rayDirection, node.bounds, boundsHit) || boundsHit > bestHit.distance) {
+            continue;
+        }
+
+        if (node.IsLeaf()) {
+            for (int i = 0; i < node.primitiveCount; ++i) {
+                const RenderPrimitiveRef& ref = refs[static_cast<std::size_t>(node.firstPrimitive + i)];
+                float hitDistance = 0.0f;
+                if (ref.type == RenderPrimitiveType::Sphere) {
+                    const RenderResolvedSphere sphere = ResolveSphere(compiledScene.scene.GetSphere(ref.index));
+                    if (!IntersectSphere(rayOrigin, rayDirection, sphere, hitDistance) || hitDistance >= bestHit.distance) {
+                        continue;
+                    }
+
+                    const Vec3 hitPoint = rayOrigin + rayDirection * hitDistance;
+                    bestHit.hit = true;
+                    bestHit.objectId = static_cast<Id>(sphere.objectId);
+                    bestHit.distance = hitDistance;
+                    bestHit.point = hitPoint;
+                    bestHit.normal = Normalize(hitPoint - FromRuntime(sphere.center));
+                } else {
+                    const RenderResolvedTriangle& triangle = compiledScene.scene.GetResolvedTriangle(ref.index);
+                    if (!IntersectTriangle(rayOrigin, rayDirection, triangle, hitDistance) || hitDistance >= bestHit.distance) {
+                        continue;
+                    }
+
+                    const Vec3 a = FromRuntime(triangle.a);
+                    const Vec3 b = FromRuntime(triangle.b);
+                    const Vec3 c = FromRuntime(triangle.c);
+                    bestHit.hit = true;
+                    bestHit.objectId = static_cast<Id>(triangle.meshInstanceId > 0 ? triangle.meshInstanceId : triangle.triangleId);
+                    bestHit.distance = hitDistance;
+                    bestHit.point = rayOrigin + rayDirection * hitDistance;
+                    bestHit.normal = Normalize(Cross(b - a, c - a));
+                }
+            }
+            continue;
+        }
+
+        if (node.leftChild >= 0) {
+            stack.push_back(node.leftChild);
+        }
+        if (node.rightChild >= 0) {
+            stack.push_back(node.rightChild);
+        }
+    }
+
+    if (!bestHit.hit) {
+        return false;
+    }
+
+    outHit = bestHit;
+    return true;
+}
+
 } // namespace
 
 void ViewportController::Reset() {
@@ -362,8 +527,8 @@ void ViewportController::Reset() {
     m_RightMouseStartX = 0.0f;
     m_RightMouseStartY = 0.0f;
     m_GizmoDragging = false;
-    m_HoveredAxis = -1;
-    m_ActiveAxis = -1;
+    m_HoveredAxisMask = 0;
+    m_ActiveAxisMask = 0;
     m_GizmoSelection = {};
     m_GizmoStartTransform = {};
     m_GizmoDragStartMouse = ImVec2(0.0f, 0.0f);
@@ -375,6 +540,7 @@ SceneChangeSet ViewportController::HandleInput(
     const ViewportInputFrame& input,
     const SceneSnapshot& snapshot,
     const CompiledScene& compiledScene,
+    RenderFoundation::Camera& viewportCamera,
     RenderFoundation::State& state,
     bool& openContextMenu) {
 
@@ -382,6 +548,18 @@ SceneChangeSet ViewportController::HandleInput(
     SceneChangeSet changeSet;
     if (!compiledScene.valid) {
         return changeSet;
+    }
+
+    if (!SelectionSupportsScale(state.GetSelection().type) &&
+        state.GetSettings().transformMode == TransformMode::Scale) {
+        state.GetSettings().transformMode = TransformMode::Translate;
+        changeSet = {
+            DirtyFlags::Display | DirtyFlags::Settings,
+            ResetClass::DisplayOnly,
+            state.GetSelection().type == SelectionType::Light
+                ? "Light selection uses translate/rotate only."
+                : "Camera selection uses translate/rotate only."
+        };
     }
 
     const bool wantsKeyboard = input.keyboardAvailable;
@@ -394,7 +572,7 @@ SceneChangeSet ViewportController::HandleInput(
             state.GetSettings().transformMode = TransformMode::Rotate;
             changeSet = { DirtyFlags::Display | DirtyFlags::Settings, ResetClass::DisplayOnly, "Transform mode set to rotate." };
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_R) && SelectionSupportsScale(state.GetSelection().type)) {
             state.GetSettings().transformMode = TransformMode::Scale;
             changeSet = { DirtyFlags::Display | DirtyFlags::Settings, ResetClass::DisplayOnly, "Transform mode set to scale." };
         }
@@ -424,7 +602,7 @@ SceneChangeSet ViewportController::HandleInput(
     }
 
     if (m_NavigationActive && input.rightDown) {
-        Camera& camera = state.GetCamera();
+        Camera& camera = viewportCamera;
         camera.yawDegrees += input.mouseDelta.x * 0.18f;
         camera.pitchDegrees = ClampFloat(camera.pitchDegrees - input.mouseDelta.y * 0.18f, -89.0f, 89.0f);
 
@@ -486,22 +664,24 @@ SceneChangeSet ViewportController::HandleInput(
     const bool hasSelectionTransform =
         ResolveSelectionTransform(state, selectionTransform) &&
         ResolveSelectionPivot(snapshot, compiledScene, state, selectionPivot) &&
-        BuildGizmoProjection(state.GetCamera(), input, selectionTransform, selectionPivot, state.GetSettings().transformSpace, projection);
+        BuildGizmoProjection(viewportCamera, input, selectionTransform, selectionPivot, state.GetSettings().transformSpace, projection);
 
-    m_HoveredAxis = hasSelectionTransform ? FindHoveredAxis(projection, input.mousePosition) : -1;
+    m_HoveredAxisMask = hasSelectionTransform
+        ? FindHoveredAxisMask(projection, input.mousePosition, state.GetSettings().transformMode)
+        : 0;
     if (!hasSelectionTransform) {
         m_GizmoDragging = false;
-        m_ActiveAxis = -1;
+        m_ActiveAxisMask = 0;
     }
 
     if (m_GizmoDragging) {
         const bool selectionStable =
             state.GetSelection().type == m_GizmoSelection.type &&
             state.GetSelection().id == m_GizmoSelection.id &&
-            m_ActiveAxis >= 0;
+            m_ActiveAxisMask != 0;
         if (!selectionStable || !input.leftDown) {
             m_GizmoDragging = false;
-            m_ActiveAxis = -1;
+            m_ActiveAxisMask = 0;
             return { DirtyFlags::Display, ResetClass::DisplayOnly, "Viewport gizmo drag completed." };
         }
 
@@ -516,17 +696,22 @@ SceneChangeSet ViewportController::HandleInput(
 
         switch (state.GetSettings().transformMode) {
             case TransformMode::Translate:
-                updatedTransform.translation =
-                    m_GizmoStartTransform.translation +
-                    GetTransformAxisVector(m_GizmoStartTransform, m_ActiveAxis, state.GetSettings().transformSpace) * worldUnits;
+                updatedTransform.translation = m_GizmoStartTransform.translation;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if ((m_ActiveAxisMask & AxisMask(axis)) != 0) {
+                        updatedTransform.translation =
+                            updatedTransform.translation +
+                            GetTransformAxisVector(m_GizmoStartTransform, axis, state.GetSettings().transformSpace) * worldUnits;
+                    }
+                }
                 break;
             case TransformMode::Rotate: {
                 const ImVec2 tangent(-m_GizmoAxisScreenDirection.y, m_GizmoAxisScreenDirection.x);
                 const float angleDelta =
                     (mouseDelta.x * tangent.x + mouseDelta.y * tangent.y) * kGizmoRotationSensitivity;
-                if (m_ActiveAxis == 0) {
+                if ((m_ActiveAxisMask & AxisMask(0)) != 0) {
                     updatedTransform.rotationDegrees.x += angleDelta;
-                } else if (m_ActiveAxis == 1) {
+                } else if ((m_ActiveAxisMask & AxisMask(1)) != 0) {
                     updatedTransform.rotationDegrees.y += angleDelta;
                 } else {
                     updatedTransform.rotationDegrees.z += angleDelta;
@@ -534,15 +719,22 @@ SceneChangeSet ViewportController::HandleInput(
                 break;
             }
             case TransformMode::Scale: {
+                if (!SelectionSupportsScale(state.GetSelection().type)) {
+                    break;
+                }
                 const float scaleDelta = worldUnits * kGizmoScaleSensitivity;
-                if (state.GetSettings().transformSpace == TransformSpace::World) {
+                if (m_ActiveAxisMask == (AxisMask(0) | AxisMask(1) | AxisMask(2))) {
                     updatedTransform.scale = updatedTransform.scale + Vec3 { scaleDelta, scaleDelta, scaleDelta };
-                } else if (m_ActiveAxis == 0) {
-                    updatedTransform.scale.x += scaleDelta;
-                } else if (m_ActiveAxis == 1) {
-                    updatedTransform.scale.y += scaleDelta;
                 } else {
-                    updatedTransform.scale.z += scaleDelta;
+                    if ((m_ActiveAxisMask & AxisMask(0)) != 0) {
+                        updatedTransform.scale.x += scaleDelta;
+                    }
+                    if ((m_ActiveAxisMask & AxisMask(1)) != 0) {
+                        updatedTransform.scale.y += scaleDelta;
+                    }
+                    if ((m_ActiveAxisMask & AxisMask(2)) != 0) {
+                        updatedTransform.scale.z += scaleDelta;
+                    }
                 }
                 updatedTransform.scale.x = std::max(0.05f, updatedTransform.scale.x);
                 updatedTransform.scale.y = std::max(0.05f, updatedTransform.scale.y);
@@ -561,19 +753,28 @@ SceneChangeSet ViewportController::HandleInput(
         return {};
     }
 
-    if (hasSelectionTransform && input.viewportHovered && input.leftClicked && m_HoveredAxis >= 0) {
-        const ImVec2 axisDelta(
-            projection.axisEndScreen[static_cast<std::size_t>(m_HoveredAxis)].x - projection.originScreen.x,
-            projection.axisEndScreen[static_cast<std::size_t>(m_HoveredAxis)].y - projection.originScreen.y);
+    if (hasSelectionTransform && input.viewportHovered && input.leftClicked && m_HoveredAxisMask != 0) {
+        ImVec2 axisDelta(0.0f, 0.0f);
+        float pixelsPerUnit = 0.0f;
+        int projectedAxisCount = 0;
+        for (int axis = 0; axis < 3; ++axis) {
+            if ((m_HoveredAxisMask & AxisMask(axis)) == 0 || !projection.axisVisible[axis]) {
+                continue;
+            }
+            axisDelta.x += projection.axisEndScreen[axis].x - projection.originScreen.x;
+            axisDelta.y += projection.axisEndScreen[axis].y - projection.originScreen.y;
+            pixelsPerUnit += projection.pixelsPerUnit[axis];
+            projectedAxisCount += 1;
+        }
         const float axisLength = std::sqrt(axisDelta.x * axisDelta.x + axisDelta.y * axisDelta.y);
-        if (axisLength > 1.0f) {
+        if (axisLength > 1.0f && projectedAxisCount > 0) {
             m_GizmoDragging = true;
-            m_ActiveAxis = m_HoveredAxis;
+            m_ActiveAxisMask = m_HoveredAxisMask;
             m_GizmoSelection = state.GetSelection();
             m_GizmoStartTransform = selectionTransform;
             m_GizmoDragStartMouse = input.mousePosition;
             m_GizmoAxisScreenDirection = ImVec2(axisDelta.x / axisLength, axisDelta.y / axisLength);
-            m_GizmoPixelsPerUnit = projection.pixelsPerUnit[static_cast<std::size_t>(m_HoveredAxis)];
+            m_GizmoPixelsPerUnit = pixelsPerUnit / static_cast<float>(projectedAxisCount);
             return {};
         }
     }
@@ -604,6 +805,7 @@ void ViewportController::DrawGizmo(
     const ViewportInputFrame& input,
     const SceneSnapshot& snapshot,
     const CompiledScene& compiledScene,
+    const RenderFoundation::Camera& viewportCamera,
     const RenderFoundation::State& state) const {
 
     if (!compiledScene.valid) {
@@ -615,7 +817,7 @@ void ViewportController::DrawGizmo(
     GizmoProjection projection {};
     if (!ResolveSelectionTransform(state, selectionTransform) ||
         !ResolveSelectionPivot(snapshot, compiledScene, state, selectionPivot) ||
-        !BuildGizmoProjection(state.GetCamera(), input, selectionTransform, selectionPivot, state.GetSettings().transformSpace, projection)) {
+        !BuildGizmoProjection(viewportCamera, input, selectionTransform, selectionPivot, state.GetSettings().transformSpace, projection)) {
         return;
     }
 
@@ -624,7 +826,10 @@ void ViewportController::DrawGizmo(
             continue;
         }
 
-        const bool emphasized = axis == m_HoveredAxis || axis == m_ActiveAxis;
+        const bool emphasized =
+            (m_HoveredAxisMask & AxisMask(axis)) != 0 ||
+            (m_ActiveAxisMask & AxisMask(axis)) != 0;
+        const ImU32 axisColor = GetAxisColor(axis, emphasized);
         const float thickness =
             state.GetSettings().transformMode == TransformMode::Rotate ? 4.5f :
             state.GetSettings().transformMode == TransformMode::Scale ? 5.0f :
@@ -632,12 +837,64 @@ void ViewportController::DrawGizmo(
         drawList->AddLine(
             projection.originScreen,
             projection.axisEndScreen[axis],
-            GetAxisColor(axis, emphasized),
+            axisColor,
             emphasized ? thickness + 1.0f : thickness);
-        drawList->AddCircleFilled(projection.axisEndScreen[axis], emphasized ? 5.5f : 4.5f, GetAxisColor(axis, true));
+
+        if (state.GetSettings().transformMode == TransformMode::Rotate) {
+            const float ringRadius = emphasized ? 9.5f : 8.0f;
+            drawList->AddCircle(projection.axisEndScreen[axis], ringRadius, axisColor, 28, emphasized ? 3.0f : 2.0f);
+            drawList->AddCircleFilled(projection.axisEndScreen[axis], emphasized ? 3.5f : 2.5f, IM_COL32(245, 245, 245, 235));
+        } else {
+            drawList->AddCircleFilled(projection.axisEndScreen[axis], emphasized ? 5.5f : 4.5f, GetAxisColor(axis, true));
+        }
     }
 
-    drawList->AddCircleFilled(projection.originScreen, 5.0f, IM_COL32(235, 235, 235, 235));
+    if (state.GetSettings().transformMode != TransformMode::Rotate) {
+        for (int fixedAxis = 0; fixedAxis < 3; ++fixedAxis) {
+            const int axisA = (fixedAxis + 1) % 3;
+            const int axisB = (fixedAxis + 2) % 3;
+            if (!projection.axisVisible[axisA] || !projection.axisVisible[axisB]) {
+                continue;
+            }
+
+            const ImVec2 deltaA(
+                projection.axisEndScreen[axisA].x - projection.originScreen.x,
+                projection.axisEndScreen[axisA].y - projection.originScreen.y);
+            const ImVec2 deltaB(
+                projection.axisEndScreen[axisB].x - projection.originScreen.x,
+                projection.axisEndScreen[axisB].y - projection.originScreen.y);
+            const float lengthA = std::sqrt(deltaA.x * deltaA.x + deltaA.y * deltaA.y);
+            const float lengthB = std::sqrt(deltaB.x * deltaB.x + deltaB.y * deltaB.y);
+            if (lengthA <= 1.0f || lengthB <= 1.0f) {
+                continue;
+            }
+
+            const ImVec2 dirA(deltaA.x / lengthA, deltaA.y / lengthA);
+            const ImVec2 dirB(deltaB.x / lengthB, deltaB.y / lengthB);
+            const ImVec2 corner0 = AddPoint(
+                projection.originScreen,
+                AddPoint(ScalePoint(dirA, kGizmoPlaneHandleSizePixels * 0.85f), ScalePoint(dirB, kGizmoPlaneHandleSizePixels * 0.85f)));
+            const ImVec2 cornerA = AddPoint(corner0, ScalePoint(dirA, kGizmoPlaneHandleSizePixels));
+            const ImVec2 cornerAB = AddPoint(cornerA, ScalePoint(dirB, kGizmoPlaneHandleSizePixels));
+            const ImVec2 cornerB = AddPoint(corner0, ScalePoint(dirB, kGizmoPlaneHandleSizePixels));
+            const int planeMask = AxisMask(axisA) | AxisMask(axisB);
+            const bool emphasized =
+                (m_HoveredAxisMask == planeMask) ||
+                (m_ActiveAxisMask == planeMask);
+            const ImU32 fill = emphasized ? IM_COL32(255, 238, 158, 70) : IM_COL32(255, 255, 255, 34);
+            const ImU32 outline = emphasized ? IM_COL32(255, 238, 158, 210) : IM_COL32(230, 230, 230, 120);
+            drawList->AddQuadFilled(corner0, cornerA, cornerAB, cornerB, fill);
+            drawList->AddQuad(corner0, cornerA, cornerAB, cornerB, outline, emphasized ? 2.2f : 1.2f);
+        }
+    }
+
+    const bool centerEmphasized =
+        m_HoveredAxisMask == (AxisMask(0) | AxisMask(1) | AxisMask(2)) ||
+        m_ActiveAxisMask == (AxisMask(0) | AxisMask(1) | AxisMask(2));
+    drawList->AddCircleFilled(
+        projection.originScreen,
+        centerEmphasized ? 7.5f : 5.0f,
+        centerEmphasized ? IM_COL32(255, 238, 158, 255) : IM_COL32(235, 235, 235, 235));
 }
 
 bool ViewportController::ResolveSelectionTransform(const RenderFoundation::State& state, RenderFoundation::Transform& outTransform) const {
@@ -656,6 +913,13 @@ bool ViewportController::ResolveSelectionTransform(const RenderFoundation::State
             return false;
         }
         outTransform = light->transform;
+        return true;
+    }
+    if (selection.type == SelectionType::Camera) {
+        const Camera& camera = state.GetCamera();
+        outTransform.translation = camera.position;
+        outTransform.rotationDegrees = { camera.pitchDegrees, camera.yawDegrees, 0.0f };
+        outTransform.scale = { 1.0f, 1.0f, 1.0f };
         return true;
     }
     return false;
@@ -684,6 +948,10 @@ bool ViewportController::ResolveSelectionPivot(
         }
         return false;
     }
+    if (selection.type == SelectionType::Camera) {
+        outPivot = state.GetCamera().position;
+        return true;
+    }
     (void)snapshot;
     (void)compiledScene;
     return false;
@@ -707,7 +975,33 @@ bool ViewportController::UpdateSelectionTransform(RenderFoundation::State& state
         light->transform = transform;
         return true;
     }
+    if (selection.type == SelectionType::Camera) {
+        Camera& camera = state.GetCamera();
+        camera.position = transform.translation;
+        camera.pitchDegrees = transform.rotationDegrees.x;
+        camera.yawDegrees = transform.rotationDegrees.y;
+        return true;
+    }
     return false;
+}
+
+bool ViewportController::TraceFirstPrimitiveHit(
+    const CompiledScene& compiledScene,
+    const RenderFoundation::Vec3& rayOrigin,
+    const RenderFoundation::Vec3& rayDirection,
+    RenderFoundation::Vec3& outHitPoint,
+    RenderFoundation::Vec3& outHitNormal,
+    float& outHitDistance) const {
+
+    PrimitiveTraceHit hit {};
+    if (!TraceNearestPrimitiveHit(compiledScene, rayOrigin, Normalize(rayDirection), hit)) {
+        return false;
+    }
+
+    outHitPoint = hit.point;
+    outHitNormal = hit.normal;
+    outHitDistance = hit.distance;
+    return true;
 }
 
 int ViewportController::PickObjectId(const ViewportInputFrame& input, const CompiledScene& compiledScene) const {
@@ -731,52 +1025,11 @@ int ViewportController::PickObjectId(const ViewportInputFrame& input, const Comp
     const Vec3 rayDirection = BuildCameraRayDirection(selectionCamera, input);
 
     PickHit bestHit {};
-    const std::vector<RenderBvhNode>& nodes = compiledScene.scene.GetBvhNodes();
-    const std::vector<RenderPrimitiveRef>& refs = compiledScene.scene.GetPrimitiveRefs();
-    if (!nodes.empty()) {
-        std::vector<int> stack;
-        stack.reserve(nodes.size());
-        stack.push_back(0);
-        while (!stack.empty()) {
-            const RenderBvhNode& node = nodes[static_cast<std::size_t>(stack.back())];
-            stack.pop_back();
-            float boundsHit = 0.0f;
-            if (!IntersectBounds(rayOrigin, rayDirection, node.bounds, boundsHit) || boundsHit > bestHit.distance) {
-                continue;
-            }
-
-            if (node.IsLeaf()) {
-                for (int i = 0; i < node.primitiveCount; ++i) {
-                    const RenderPrimitiveRef& ref = refs[static_cast<std::size_t>(node.firstPrimitive + i)];
-                    float hitDistance = 0.0f;
-                    if (ref.type == RenderPrimitiveType::Sphere) {
-                        const RenderResolvedSphere sphere = ResolveSphere(compiledScene.scene.GetSphere(ref.index));
-                        if (!IntersectSphere(rayOrigin, rayDirection, sphere, hitDistance) || hitDistance >= bestHit.distance) {
-                            continue;
-                        }
-                        bestHit.type = SelectionType::Primitive;
-                        bestHit.objectId = static_cast<Id>(sphere.objectId);
-                        bestHit.distance = hitDistance;
-                    } else {
-                        const RenderResolvedTriangle& triangle = compiledScene.scene.GetResolvedTriangle(ref.index);
-                        if (!IntersectTriangle(rayOrigin, rayDirection, triangle, hitDistance) || hitDistance >= bestHit.distance) {
-                            continue;
-                        }
-                        bestHit.type = SelectionType::Primitive;
-                        bestHit.objectId = static_cast<Id>(triangle.meshInstanceId > 0 ? triangle.meshInstanceId : triangle.triangleId);
-                        bestHit.distance = hitDistance;
-                    }
-                }
-                continue;
-            }
-
-            if (node.leftChild >= 0) {
-                stack.push_back(node.leftChild);
-            }
-            if (node.rightChild >= 0) {
-                stack.push_back(node.rightChild);
-            }
-        }
+    PrimitiveTraceHit primitiveHit {};
+    if (TraceNearestPrimitiveHit(compiledScene, rayOrigin, rayDirection, primitiveHit)) {
+        bestHit.type = SelectionType::Primitive;
+        bestHit.objectId = primitiveHit.objectId;
+        bestHit.distance = primitiveHit.distance;
     }
 
     for (int lightIndex = 0; lightIndex < compiledScene.scene.GetLightCount(); ++lightIndex) {

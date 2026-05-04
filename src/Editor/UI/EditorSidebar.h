@@ -1,9 +1,6 @@
 #pragma once
 
-#include "Tabs/LayersTab.h"
-#include "Tabs/CanvasTab.h"
-#include "Tabs/SelectedTab.h"
-#include "Tabs/PipelineTab.h"
+#include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 class EditorModule;
 
@@ -16,8 +13,5 @@ public:
     void Render(EditorModule* editor);
 
 private:
-    LayersTab m_LayersTab;
-    CanvasTab m_CanvasTab;
-    SelectedTab m_SelectedTab;
-    PipelineTab m_PipelineTab;
+    EditorNodeGraphUI m_NodeGraphUI;
 };

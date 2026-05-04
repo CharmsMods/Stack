@@ -53,6 +53,7 @@ struct SceneChangeSet {
 };
 
 struct ViewportInputFrame {
+    // This is the actual displayed render-image rect, not the full window child region.
     ImRect viewportRect {};
     ImVec2 mousePosition {};
     ImVec2 mouseDelta {};

@@ -4,6 +4,7 @@
 #include "RenderTab/Runtime/Geometry/RenderMesh.h"
 #include "RenderTab/Runtime/Geometry/RenderSceneGeometry.h"
 #include "RenderTab/Runtime/Materials/RenderMaterial.h"
+#include "RenderTab/Runtime/Debug/ValidationScenes.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -21,8 +22,53 @@ RenderFloat3 ToRuntime(const Vec3& value) {
     return MakeRenderFloat3(value.x, value.y, value.z);
 }
 
+Vec3 ToFoundation(const RenderFloat3& value) {
+    return { value.x, value.y, value.z };
+}
+
 RenderFloat2 ToRuntime(const Vec2& value) {
     return MakeRenderFloat2(value.x, value.y);
+}
+
+Material ToFoundationMaterial(const RenderMaterial& material, Id id) {
+    Material foundation;
+    foundation.id = id;
+    foundation.name = material.name.empty() ? "Material" : material.name;
+    foundation.importedSource = material.sourceAssetIndex >= 0;
+    foundation.sourceAssetIndex = material.sourceAssetIndex;
+    foundation.sourceMaterialName = material.sourceMaterialName;
+    switch (material.surfacePreset) {
+        case RenderSurfacePreset::Metal:
+            foundation.baseMaterial = BaseMaterial::Metal;
+            break;
+        case RenderSurfacePreset::Glass:
+            foundation.baseMaterial = BaseMaterial::Glass;
+            break;
+        case RenderSurfacePreset::Emissive:
+            foundation.baseMaterial = BaseMaterial::Emissive;
+            break;
+        case RenderSurfacePreset::Diffuse:
+        default:
+            foundation.baseMaterial = BaseMaterial::Diffuse;
+            break;
+    }
+    foundation.baseColor = ToFoundation(material.baseColor);
+    foundation.emissionColor = ToFoundation(material.emissionColor);
+    foundation.emissionStrength = material.emissionStrength;
+    foundation.roughness = material.roughness;
+    foundation.metallic = material.metallic;
+    foundation.transmission = material.transmission;
+    foundation.ior = material.ior;
+    foundation.thinWalled = material.thinWalled;
+    foundation.absorptionColor = ToFoundation(material.absorptionColor);
+    foundation.absorptionDistance = material.absorptionDistance;
+    foundation.transmissionRoughness = material.transmissionRoughness;
+    foundation.baseColorTexture = material.baseColorTexture;
+    foundation.metallicRoughnessTexture = material.metallicRoughnessTexture;
+    foundation.emissiveTexture = material.emissiveTexture;
+    foundation.normalTexture = material.normalTexture;
+    SyncMaterialLayersFromLegacy(foundation);
+    return foundation;
 }
 
 RenderTransform ToRuntimeTransform(const Transform& transform) {
@@ -64,6 +110,18 @@ RenderGizmoMode ToRuntimeGizmoMode(TransformMode mode) {
     }
 }
 
+RenderTerminationMode ToRuntimeTerminationMode(PathTraceTerminationMode mode) {
+    switch (mode) {
+        case PathTraceTerminationMode::BruteForce:
+            return RenderTerminationMode::BruteForce;
+        case PathTraceTerminationMode::Smart:
+            return RenderTerminationMode::Smart;
+        case PathTraceTerminationMode::Optimized:
+        default:
+            return RenderTerminationMode::Optimized;
+    }
+}
+
 RenderTransformSpace ToRuntimeTransformSpace(TransformSpace space) {
     return space == TransformSpace::Local ? RenderTransformSpace::Local : RenderTransformSpace::World;
 }
@@ -90,6 +148,8 @@ RenderLightType ToRuntimeLightType(LightType type) {
             return RenderLightType::Spot;
         case LightType::Directional:
             return RenderLightType::Sun;
+        case LightType::Laser:
+            return RenderLightType::Laser;
         case LightType::Point:
         default:
             return RenderLightType::Point;
@@ -99,6 +159,8 @@ RenderLightType ToRuntimeLightType(LightType type) {
 RenderMaterial CompileMaterial(const Material& material) {
     RenderMaterial runtime;
     runtime.name = material.name;
+    runtime.sourceAssetIndex = material.sourceAssetIndex;
+    runtime.sourceMaterialName = material.sourceMaterialName;
     runtime.surfacePreset = ToRuntimeSurfacePreset(material.baseMaterial);
     runtime.baseColor = ToRuntime(material.baseColor);
     runtime.emissionColor = ToRuntime(material.emissionColor);
@@ -111,6 +173,10 @@ RenderMaterial CompileMaterial(const Material& material) {
     runtime.absorptionColor = ToRuntime(material.absorptionColor);
     runtime.absorptionDistance = material.absorptionDistance;
     runtime.transmissionRoughness = material.transmissionRoughness;
+    runtime.baseColorTexture = material.baseColorTexture;
+    runtime.metallicRoughnessTexture = material.metallicRoughnessTexture;
+    runtime.emissiveTexture = material.emissiveTexture;
+    runtime.normalTexture = material.normalTexture;
     return runtime;
 }
 
@@ -143,6 +209,69 @@ int ResolveMaterialIndex(const std::unordered_map<Id, int>& materialIndices, Id 
     return it == materialIndices.end() ? 0 : it->second;
 }
 
+Vec3 MultiplyColor(const Vec3& a, const Vec3& b) {
+    return {
+        a.x * b.x,
+        a.y * b.y,
+        a.z * b.z
+    };
+}
+
+Vec3 LerpColor(const Vec3& a, const Vec3& b, float t) {
+    const float blend = std::clamp(t, 0.0f, 1.0f);
+    return {
+        a.x + (b.x - a.x) * blend,
+        a.y + (b.y - a.y) * blend,
+        a.z + (b.z - a.z) * blend
+    };
+}
+
+float LerpFloat(float a, float b, float t) {
+    const float blend = std::clamp(t, 0.0f, 1.0f);
+    return a + (b - a) * blend;
+}
+
+Material BlendImportedAndOverrideMaterial(const Material& importedMaterial, const Material& overrideMaterial, float blendFactor) {
+    const float blend = std::clamp(blendFactor, 0.0f, 1.0f);
+    Material blended = importedMaterial;
+    blended.id = 0;
+    blended.isTemplate = false;
+    blended.importedSource = importedMaterial.importedSource;
+    blended.name = importedMaterial.name + " + " + overrideMaterial.name;
+    blended.baseColor = Clamp01(LerpColor(importedMaterial.baseColor, overrideMaterial.baseColor, blend));
+    blended.emissionColor = Clamp01(LerpColor(importedMaterial.emissionColor, overrideMaterial.emissionColor, blend));
+    blended.emissionStrength = LerpFloat(importedMaterial.emissionStrength, overrideMaterial.emissionStrength, blend);
+    blended.roughness = std::clamp(LerpFloat(importedMaterial.roughness, overrideMaterial.roughness, blend), 0.0f, 1.0f);
+    blended.metallic = std::clamp(LerpFloat(importedMaterial.metallic, overrideMaterial.metallic, blend), 0.0f, 1.0f);
+    blended.transmission = std::clamp(LerpFloat(importedMaterial.transmission, overrideMaterial.transmission, blend), 0.0f, 1.0f);
+    blended.ior = std::max(1.0f, LerpFloat(importedMaterial.ior, overrideMaterial.ior, blend));
+    blended.thinWalled = blend >= 0.5f ? overrideMaterial.thinWalled : importedMaterial.thinWalled;
+    blended.absorptionColor = Clamp01(LerpColor(importedMaterial.absorptionColor, overrideMaterial.absorptionColor, blend));
+    blended.absorptionDistance = std::max(0.01f, LerpFloat(importedMaterial.absorptionDistance, overrideMaterial.absorptionDistance, blend));
+    blended.transmissionRoughness = std::clamp(LerpFloat(importedMaterial.transmissionRoughness, overrideMaterial.transmissionRoughness, blend), 0.0f, 1.0f);
+    blended.clearCoat = std::clamp(LerpFloat(importedMaterial.clearCoat, overrideMaterial.clearCoat, blend), 0.0f, 1.0f);
+    blended.thinFilm = std::max(0.0f, LerpFloat(importedMaterial.thinFilm, overrideMaterial.thinFilm, blend));
+    blended.subsurface = std::max(0.0f, LerpFloat(importedMaterial.subsurface, overrideMaterial.subsurface, blend));
+
+    if (blended.emissionStrength > 0.001f) {
+        blended.baseMaterial = BaseMaterial::Emissive;
+    } else if (blended.transmission > 0.05f) {
+        blended.baseMaterial = BaseMaterial::Glass;
+    } else if (blended.metallic > 0.5f) {
+        blended.baseMaterial = BaseMaterial::Metal;
+    } else {
+        blended.baseMaterial = BaseMaterial::Diffuse;
+    }
+
+    blended.baseColorTexture = importedMaterial.baseColorTexture;
+    blended.metallicRoughnessTexture = importedMaterial.metallicRoughnessTexture;
+    blended.emissiveTexture = importedMaterial.emissiveTexture;
+    blended.normalTexture = importedMaterial.normalTexture;
+    blended.layers.clear();
+    SyncMaterialLayersFromLegacy(blended);
+    return blended;
+}
+
 enum class PtThinWallPolicy : std::uint8_t {
     Solid = 0,
     ThinSheet = 1
@@ -151,19 +280,32 @@ enum class PtThinWallPolicy : std::uint8_t {
 struct PtMaterialKey {
     int authorMaterialIndex = 0;
     PtThinWallPolicy thinWallPolicy = PtThinWallPolicy::Solid;
+    std::uint32_t tintKey = 0x00ffffffu;
 
     bool operator==(const PtMaterialKey& other) const {
         return authorMaterialIndex == other.authorMaterialIndex &&
-            thinWallPolicy == other.thinWallPolicy;
+            thinWallPolicy == other.thinWallPolicy &&
+            tintKey == other.tintKey;
     }
 };
 
 struct PtMaterialKeyHash {
     std::size_t operator()(const PtMaterialKey& key) const {
-        return (static_cast<std::size_t>(key.authorMaterialIndex) << 1u) ^
-            static_cast<std::size_t>(key.thinWallPolicy);
+        return (static_cast<std::size_t>(key.authorMaterialIndex) << 17u) ^
+            (static_cast<std::size_t>(key.thinWallPolicy) << 24u) ^
+            static_cast<std::size_t>(key.tintKey);
     }
 };
+
+std::uint32_t PackTintKey(const Vec3& tint) {
+    const auto packChannel = [](float value) -> std::uint32_t {
+        return static_cast<std::uint32_t>(std::clamp(static_cast<int>(std::round(Clamp01(value) * 255.0f)), 0, 255));
+    };
+
+    return packChannel(tint.x) |
+        (packChannel(tint.y) << 8u) |
+        (packChannel(tint.z) << 16u);
+}
 
 RenderPathTrace::SpectralBasisCoefficients BuildSpectralBasis(const Vec3& rgb) {
     RenderPathTrace::SpectralBasisCoefficients coefficients;
@@ -208,12 +350,21 @@ std::uint64_t HashPodVector(std::uint64_t hash, const std::vector<T>& values) {
 std::uint64_t HashStructure(const SceneSnapshot& snapshot) {
     std::uint64_t hash = 1469598103934665603ull;
     hash = HashMix(hash, snapshot.cameraId);
+    hash = HashMix(hash, static_cast<std::uint64_t>(snapshot.importedAssets.size()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(snapshot.importedTextures.size()));
+    hash = HashMix(hash, static_cast<std::uint64_t>(snapshot.importedMeshes.size()));
     hash = HashMix(hash, static_cast<std::uint64_t>(snapshot.primitives.size()));
     hash = HashMix(hash, static_cast<std::uint64_t>(snapshot.lights.size()));
     hash = HashMix(hash, static_cast<std::uint64_t>(snapshot.materials.size()));
+    for (const RenderMeshDefinition& mesh : snapshot.importedMeshes) {
+        hash = HashMix(hash, static_cast<std::uint64_t>(mesh.sourceAssetIndex + 1));
+        hash = HashMix(hash, static_cast<std::uint64_t>(mesh.triangles.size()));
+    }
     for (const Primitive& primitive : snapshot.primitives) {
         hash = HashMix(hash, primitive.id);
         hash = HashMix(hash, static_cast<std::uint64_t>(primitive.type));
+        hash = HashMix(hash, static_cast<std::uint64_t>(primitive.meshIndex + 1));
+        hash = HashMix(hash, static_cast<std::uint64_t>(primitive.importedMaterialMode));
     }
     for (const Light& light : snapshot.lights) {
         hash = HashMix(hash, light.id);
@@ -222,6 +373,7 @@ std::uint64_t HashStructure(const SceneSnapshot& snapshot) {
     for (const Material& material : snapshot.materials) {
         hash = HashMix(hash, material.id);
         hash = HashMix(hash, static_cast<std::uint64_t>(material.baseMaterial));
+        hash = HashMix(hash, static_cast<std::uint64_t>(material.sourceAssetIndex + 1));
         hash = HashMix(hash, static_cast<std::uint64_t>(material.layers.size()));
         for (const Material::Layer& layer : material.layers) {
             hash = HashMix(hash, static_cast<std::uint64_t>(layer.type));
@@ -271,6 +423,10 @@ RenderPathTrace::GpuMaterial ToGpuMaterialHeader(
     gpu.layerInfo[1] = layerCount;
     gpu.layerInfo[2] = static_cast<int>(localFeatureMask);
     gpu.layerInfo[3] = 0;
+    gpu.textureRefs[0] = material.baseColorTexture.textureIndex;
+    gpu.textureRefs[1] = material.metallicRoughnessTexture.textureIndex;
+    gpu.textureRefs[2] = material.emissiveTexture.textureIndex;
+    gpu.textureRefs[3] = material.normalTexture.textureIndex;
     return gpu;
 }
 
@@ -311,6 +467,23 @@ Material BuildSpecializedPathTraceMaterial(const Material& material, PtThinWallP
 
     SyncLegacyMaterialFromLayers(specialized);
     return specialized;
+}
+
+void ApplyPathTraceTint(Material& material, const Vec3& tint) {
+    const Vec3 clampedTint = Clamp01(tint);
+    material.baseColor = Clamp01(MultiplyColor(material.baseColor, clampedTint));
+
+    if (material.layers.empty()) {
+        SyncMaterialLayersFromLegacy(material);
+    }
+
+    for (Material::Layer& layer : material.layers) {
+        if (IsBaseMaterialLayerType(layer.type)) {
+            layer.color = Clamp01(MultiplyColor(layer.color, clampedTint));
+        }
+    }
+
+    SyncLegacyMaterialFromLayers(material);
 }
 
 RenderPathTrace::PathTraceFeatureMask AccumulatePathTraceMaterialFeatures(
@@ -355,6 +528,7 @@ RenderPathTrace::PathTraceFeatureMask AccumulatePathTraceMaterialFeatures(
 int ResolvePathTraceMaterialIndex(
     int authorMaterialIndex,
     PtThinWallPolicy thinWallPolicy,
+    const Vec3& tint,
     const SceneSnapshot& snapshot,
     const RenderScene& scene,
     RenderPathTrace::CompiledPathTraceScene& pathTraceScene,
@@ -362,7 +536,7 @@ int ResolvePathTraceMaterialIndex(
 
     const int resolvedAuthorMaterialIndex =
         std::clamp(authorMaterialIndex, 0, std::max(scene.GetMaterialCount() - 1, 0));
-    const PtMaterialKey key { resolvedAuthorMaterialIndex, thinWallPolicy };
+    const PtMaterialKey key { resolvedAuthorMaterialIndex, thinWallPolicy, PackTintKey(tint) };
     const auto cached = materialIndexCache.find(key);
     if (cached != materialIndexCache.end()) {
         return cached->second;
@@ -372,6 +546,7 @@ int ResolvePathTraceMaterialIndex(
         resolvedAuthorMaterialIndex >= 0 && resolvedAuthorMaterialIndex < static_cast<int>(snapshot.materials.size())
             ? BuildSpecializedPathTraceMaterial(snapshot.materials[static_cast<std::size_t>(resolvedAuthorMaterialIndex)], thinWallPolicy)
             : Material {};
+    ApplyPathTraceTint(specializedMaterial, tint);
     const RenderMaterial runtimeMaterial = CompileMaterial(specializedMaterial);
     const RenderPathTrace::PathTraceFeatureMask localFeatureMask =
         AccumulatePathTraceMaterialFeatures(specializedMaterial, runtimeMaterial);
@@ -474,6 +649,14 @@ RenderPathTrace::GpuLight ToGpuLight(const RenderLight& light) {
     gpu.basis1[1] = up.y;
     gpu.basis1[2] = up.z;
     gpu.basis1[3] = light.intensity;
+    gpu.laserParams[0] = light.laserWavelengthNm;
+    gpu.laserParams[1] = light.laserLinewidthNm;
+    gpu.laserParams[2] = light.laserApertureRadius;
+    gpu.laserParams[3] = light.laserBeamWaistRadius;
+    gpu.laserInfo[0] = light.laserBeamQuality;
+    gpu.laserInfo[1] = light.range;
+    gpu.laserInfo[2] = 0.0f;
+    gpu.laserInfo[3] = 0.0f;
     return gpu;
 }
 
@@ -484,7 +667,32 @@ RenderPathTrace::GpuEnvironment BuildEnvironment(const SceneMetadata& metadata) 
     StoreCoefficients(environment.groundCoefficients, BuildSpectralBasis({ 0.05f, 0.06f, 0.08f }));
     environment.params[0] = metadata.environmentEnabled ? 1.0f : 0.0f;
     environment.params[1] = metadata.environmentIntensity;
+    StoreCoefficients(environment.fogColorCoefficients, BuildSpectralBasis({ metadata.fogColor.x, metadata.fogColor.y, metadata.fogColor.z }));
+    environment.fogParams[0] = metadata.fogEnabled ? 1.0f : 0.0f;
+    environment.fogParams[1] = metadata.fogDensity;
+    environment.fogParams[2] = metadata.fogAnisotropy;
+    environment.fogParams[3] = 1.0f;
     return environment;
+}
+
+float EstimateFogSceneScale(const RenderScene& scene) {
+    bool hasBounds = false;
+    RenderBounds bounds {};
+    for (const RenderPrimitiveRef& primitiveRef : scene.GetPrimitiveRefs()) {
+        if (!hasBounds) {
+            bounds = primitiveRef.bounds;
+            hasBounds = true;
+        } else {
+            bounds = UnionBounds(bounds, primitiveRef.bounds);
+        }
+    }
+
+    if (!hasBounds) {
+        return 10.0f;
+    }
+
+    const RenderFloat3 extent = BoundsExtent(bounds);
+    return std::max({ extent.x, extent.y, extent.z, 1.0f });
 }
 
 RenderPathTrace::CompiledPathTraceScene BuildPathTraceScene(
@@ -495,9 +703,10 @@ RenderPathTrace::CompiledPathTraceScene BuildPathTraceScene(
     pathTraceScene.metadata = snapshot.metadata;
     pathTraceScene.camera = snapshot.camera;
     pathTraceScene.structuralHash = HashStructure(snapshot);
-    pathTraceScene.environment = BuildEnvironment(snapshot.metadata);
 
     const RenderScene& scene = compiledScene.scene;
+    pathTraceScene.environment = BuildEnvironment(snapshot.metadata);
+    pathTraceScene.environment.fogParams[3] = EstimateFogSceneScale(scene);
     std::unordered_map<int, PrimitiveType> primitiveTypesByObjectId;
     primitiveTypesByObjectId.reserve(snapshot.primitives.size());
     for (const Primitive& primitive : snapshot.primitives) {
@@ -515,6 +724,7 @@ RenderPathTrace::CompiledPathTraceScene BuildPathTraceScene(
         sphere.materialIndex = ResolvePathTraceMaterialIndex(
             sphere.materialIndex,
             PtThinWallPolicy::Solid,
+            ToFoundation(sphere.albedoTint),
             snapshot,
             scene,
             pathTraceScene,
@@ -535,6 +745,7 @@ RenderPathTrace::CompiledPathTraceScene BuildPathTraceScene(
         triangle.materialIndex = ResolvePathTraceMaterialIndex(
             triangle.materialIndex,
             thinWallPolicy,
+            ToFoundation(triangle.albedoTint),
             snapshot,
             scene,
             pathTraceScene,
@@ -557,6 +768,8 @@ RenderPathTrace::CompiledPathTraceScene BuildPathTraceScene(
         const RenderLight& light = scene.GetLight(lightIndex);
         if (light.type == RenderLightType::RectArea) {
             pathTraceScene.featureMask |= RenderPathTrace::PathTraceFeatureMask::AreaLights;
+        } else if (light.type == RenderLightType::Laser) {
+            pathTraceScene.featureMask |= RenderPathTrace::PathTraceFeatureMask::LaserLight;
         }
         pathTraceScene.lights.push_back(ToGpuLight(light));
     }
@@ -564,11 +777,99 @@ RenderPathTrace::CompiledPathTraceScene BuildPathTraceScene(
     if (snapshot.metadata.environmentEnabled) {
         pathTraceScene.featureMask |= RenderPathTrace::PathTraceFeatureMask::Environment;
     }
+    if (snapshot.metadata.fogEnabled && snapshot.metadata.fogDensity > 0.0001f) {
+        pathTraceScene.featureMask |= RenderPathTrace::PathTraceFeatureMask::FogMedium;
+    }
     pathTraceScene.featureMask |= RenderPathTrace::PathTraceFeatureMask::ThinFilmDeferred;
 
     pathTraceScene.uploadHash = HashPathTraceUpload(pathTraceScene);
     pathTraceScene.valid = true;
     return pathTraceScene;
+}
+
+SceneSnapshot BuildValidationSceneSnapshot(
+    const RenderValidationSceneTemplate& sceneTemplate,
+    const RenderFoundation::Camera& camera) {
+
+    SceneSnapshot snapshot;
+    snapshot.cameraId = kCameraObjectId;
+    snapshot.camera = camera;
+    snapshot.metadata.label = sceneTemplate.label == nullptr || sceneTemplate.label[0] == '\0'
+        ? "Validation Scene"
+        : sceneTemplate.label;
+    snapshot.metadata.description = sceneTemplate.description == nullptr || sceneTemplate.description[0] == '\0'
+        ? "Validation scene preview."
+        : sceneTemplate.description;
+    snapshot.metadata.backgroundMode = static_cast<int>(sceneTemplate.defaultBackground);
+    snapshot.metadata.environmentEnabled = sceneTemplate.defaultEnvironmentEnabled;
+    snapshot.metadata.environmentIntensity = sceneTemplate.defaultEnvironmentIntensity;
+    snapshot.metadata.fogEnabled = sceneTemplate.defaultFogEnabled;
+    snapshot.metadata.fogColor = ToFoundation(sceneTemplate.defaultFogColor);
+    snapshot.metadata.fogDensity = sceneTemplate.defaultFogDensity;
+    snapshot.metadata.fogAnisotropy = sceneTemplate.defaultFogAnisotropy;
+    snapshot.materials.reserve(sceneTemplate.materials.size());
+    for (std::size_t index = 0; index < sceneTemplate.materials.size(); ++index) {
+        snapshot.materials.push_back(ToFoundationMaterial(sceneTemplate.materials[index], static_cast<Id>(index + 1)));
+    }
+    return snapshot;
+}
+
+bool CompileValidationSceneInternal(
+    const RenderValidationSceneTemplate& sceneTemplate,
+    const RenderFoundation::Camera& camera,
+    const RenderFoundation::Settings& settings,
+    CompiledScene& outCompiledScene) {
+
+    RenderScene runtimeScene;
+    runtimeScene.ApplySceneSnapshot(
+        sceneTemplate.label == nullptr ? std::string() : sceneTemplate.label,
+        sceneTemplate.description == nullptr ? std::string() : sceneTemplate.description,
+        sceneTemplate.defaultBackground,
+        sceneTemplate.defaultEnvironmentEnabled,
+        sceneTemplate.defaultEnvironmentIntensity,
+        sceneTemplate.defaultFogEnabled,
+        sceneTemplate.defaultFogColor,
+        sceneTemplate.defaultFogDensity,
+        sceneTemplate.defaultFogAnisotropy,
+        {},
+        {},
+        sceneTemplate.materials,
+        sceneTemplate.meshes,
+        sceneTemplate.meshInstances,
+        sceneTemplate.spheres,
+        sceneTemplate.triangles,
+        sceneTemplate.lights,
+        "Validation scene template loaded.");
+
+    SceneSnapshot snapshot = BuildValidationSceneSnapshot(sceneTemplate, camera);
+
+    outCompiledScene.scene = std::move(runtimeScene);
+    outCompiledScene.camera.ApplySnapshot(
+        ToRuntime(camera.position),
+        camera.yawDegrees,
+        camera.pitchDegrees,
+        camera.fieldOfViewDegrees,
+        camera.focusDistance,
+        camera.apertureRadius,
+        camera.exposure,
+        camera.whiteBalanceTemperature,
+        "Validation scene camera snapshot.");
+    outCompiledScene.settings.SetResolution(settings.resolutionX, settings.resolutionY);
+    outCompiledScene.settings.SetPreviewSampleTarget(settings.previewSampleTarget);
+    outCompiledScene.settings.SetAccumulationEnabled(settings.accumulationEnabled);
+    outCompiledScene.settings.SetIntegratorMode(ToRuntimeIntegratorMode(settings.viewMode));
+    outCompiledScene.settings.SetMaxBounceCount(settings.maxBounceCount);
+    outCompiledScene.settings.SetTerminationMode(ToRuntimeTerminationMode(settings.pathTraceTerminationMode));
+    outCompiledScene.settings.SetGizmoMode(ToRuntimeGizmoMode(settings.transformMode));
+    outCompiledScene.settings.SetTransformSpace(ToRuntimeTransformSpace(settings.transformSpace));
+    outCompiledScene.settings.SetFinalRenderResolution(settings.finalRender.resolutionX, settings.finalRender.resolutionY);
+    outCompiledScene.settings.SetFinalRenderSampleTarget(settings.finalRender.sampleTarget);
+    outCompiledScene.settings.SetFinalRenderMaxBounceCount(settings.finalRender.maxBounceCount);
+    outCompiledScene.settings.SetFinalRenderTerminationMode(ToRuntimeTerminationMode(settings.finalRender.terminationMode));
+    outCompiledScene.settings.SetFinalRenderOutputName(settings.finalRender.outputName);
+    outCompiledScene.pathTraceScene = BuildPathTraceScene(snapshot, outCompiledScene);
+    outCompiledScene.valid = outCompiledScene.pathTraceScene.valid;
+    return outCompiledScene.valid;
 }
 
 } // namespace
@@ -579,10 +880,22 @@ bool SceneCompiler::Compile(
     CompiledScene& outCompiledScene,
     std::string& errorMessage) const {
 
+    return Compile(snapshot, snapshot.camera, settings, outCompiledScene, errorMessage);
+}
+
+bool SceneCompiler::Compile(
+    const SceneSnapshot& snapshot,
+    const RenderFoundation::Camera& cameraOverride,
+    const RenderFoundation::Settings& settings,
+    CompiledScene& outCompiledScene,
+    std::string& errorMessage) const {
+
     errorMessage.clear();
 
-    std::vector<RenderImportedAsset> importedAssets;
-    std::vector<RenderImportedTexture> importedTextures;
+    SceneSnapshot pathTraceSnapshot = snapshot;
+    pathTraceSnapshot.camera = cameraOverride;
+    std::vector<RenderImportedAsset> importedAssets = snapshot.importedAssets;
+    std::vector<RenderImportedTexture> importedTextures = snapshot.importedTextures;
     std::vector<RenderMaterial> materials;
     std::vector<RenderMeshDefinition> meshes;
     std::vector<RenderMeshInstance> meshInstances;
@@ -597,12 +910,24 @@ bool SceneCompiler::Compile(
         materialIndices[snapshot.materials[index].id] = static_cast<int>(index);
     }
     if (materials.empty()) {
-        materials.push_back(BuildRenderMaterial("Fallback Diffuse", MakeRenderFloat3(0.8f, 0.8f, 0.8f)));
+        Material fallbackMaterial;
+        fallbackMaterial.name = "Warm Diffuse";
+        fallbackMaterial.baseMaterial = BaseMaterial::Diffuse;
+        fallbackMaterial.baseColor = { 0.86f, 0.78f, 0.64f };
+        SyncMaterialLayersFromLegacy(fallbackMaterial);
+        pathTraceSnapshot.materials.push_back(fallbackMaterial);
+        materials.push_back(CompileMaterial(fallbackMaterial));
     }
+
+    auto appendTransientMaterial = [&](const Material& material) {
+        pathTraceSnapshot.materials.push_back(material);
+        materials.push_back(CompileMaterial(material));
+        return static_cast<int>(materials.size()) - 1;
+    };
 
     spheres.reserve(snapshot.primitives.size());
     meshInstances.reserve(snapshot.primitives.size());
-    meshes.reserve(snapshot.primitives.size());
+    meshes.reserve(snapshot.primitives.size() + snapshot.importedMeshes.size());
     for (const Primitive& primitive : snapshot.primitives) {
         if (!primitive.visible) {
             continue;
@@ -617,8 +942,54 @@ bool SceneCompiler::Compile(
             sphere.localCenter = MakeRenderFloat3(0.0f, 0.0f, 0.0f);
             sphere.radius = 0.5f;
             sphere.materialIndex = materialIndex;
-            sphere.albedoTint = MakeRenderFloat3(1.0f, 1.0f, 1.0f);
+            sphere.albedoTint = ToRuntime(primitive.colorTint);
             spheres.push_back(sphere);
+            continue;
+        }
+
+        if (primitive.type == PrimitiveType::ImportedMesh) {
+            if (primitive.meshIndex < 0 || primitive.meshIndex >= static_cast<int>(snapshot.importedMeshes.size())) {
+                continue;
+            }
+
+            RenderMeshDefinition meshDefinition = snapshot.importedMeshes[static_cast<std::size_t>(primitive.meshIndex)];
+            if (primitive.importedMaterialMode == ImportedMaterialMode::OverrideOnly) {
+                for (RenderMeshTriangle& triangle : meshDefinition.triangles) {
+                    triangle.materialIndex = materialIndex;
+                }
+            } else if (primitive.importedMaterialMode == ImportedMaterialMode::Blend) {
+                std::unordered_map<int, int> blendedMaterialMap;
+                blendedMaterialMap.reserve(meshDefinition.triangles.size());
+                for (RenderMeshTriangle& triangle : meshDefinition.triangles) {
+                    const int sourceMaterialIndex = std::clamp(
+                        triangle.materialIndex,
+                        0,
+                        std::max(static_cast<int>(pathTraceSnapshot.materials.size()) - 1, 0));
+                    const auto cachedBlend = blendedMaterialMap.find(sourceMaterialIndex);
+                    if (cachedBlend != blendedMaterialMap.end()) {
+                        triangle.materialIndex = cachedBlend->second;
+                        continue;
+                    }
+
+                    const Material blendedMaterial = BlendImportedAndOverrideMaterial(
+                        pathTraceSnapshot.materials[static_cast<std::size_t>(sourceMaterialIndex)],
+                        pathTraceSnapshot.materials[static_cast<std::size_t>(std::clamp(materialIndex, 0, std::max(static_cast<int>(pathTraceSnapshot.materials.size()) - 1, 0)))],
+                        primitive.importedMaterialBlend);
+                    const int blendedMaterialIndex = appendTransientMaterial(blendedMaterial);
+                    blendedMaterialMap.emplace(sourceMaterialIndex, blendedMaterialIndex);
+                    triangle.materialIndex = blendedMaterialIndex;
+                }
+            }
+
+            meshes.push_back(std::move(meshDefinition));
+
+            RenderMeshInstance instance;
+            instance.id = static_cast<int>(primitive.id);
+            instance.name = primitive.name;
+            instance.meshIndex = static_cast<int>(meshes.size()) - 1;
+            instance.transform = ToRuntimeTransform(primitive.transform);
+            instance.colorTint = ToRuntime(primitive.colorTint);
+            meshInstances.push_back(instance);
             continue;
         }
 
@@ -633,7 +1004,7 @@ bool SceneCompiler::Compile(
         instance.name = primitive.name;
         instance.meshIndex = static_cast<int>(meshes.size()) - 1;
         instance.transform = ToRuntimeTransform(primitive.transform);
-        instance.colorTint = MakeRenderFloat3(1.0f, 1.0f, 1.0f);
+        instance.colorTint = ToRuntime(primitive.colorTint);
         meshInstances.push_back(instance);
     }
 
@@ -650,6 +1021,11 @@ bool SceneCompiler::Compile(
         runtime.range = light.range;
         runtime.innerConeDegrees = light.innerConeDegrees;
         runtime.outerConeDegrees = light.outerConeDegrees;
+        runtime.laserWavelengthNm = light.laserWavelengthNm;
+        runtime.laserLinewidthNm = light.laserLinewidthNm;
+        runtime.laserApertureRadius = light.laserApertureRadius;
+        runtime.laserBeamWaistRadius = light.laserBeamWaistRadius;
+        runtime.laserBeamQuality = light.laserBeamQuality;
         runtime.enabled = light.enabled;
         lights.push_back(runtime);
     }
@@ -675,13 +1051,14 @@ bool SceneCompiler::Compile(
         "Compiled foundation scene snapshot.");
 
     outCompiledScene.camera.ApplySnapshot(
-        ToRuntime(snapshot.camera.position),
-        snapshot.camera.yawDegrees,
-        snapshot.camera.pitchDegrees,
-        snapshot.camera.fieldOfViewDegrees,
-        snapshot.camera.focusDistance,
-        snapshot.camera.apertureRadius,
-        snapshot.camera.exposure,
+        ToRuntime(cameraOverride.position),
+        cameraOverride.yawDegrees,
+        cameraOverride.pitchDegrees,
+        cameraOverride.fieldOfViewDegrees,
+        cameraOverride.focusDistance,
+        cameraOverride.apertureRadius,
+        cameraOverride.exposure,
+        cameraOverride.whiteBalanceTemperature,
         "Compiled foundation camera snapshot.");
 
     outCompiledScene.settings.SetResolution(settings.resolutionX, settings.resolutionY);
@@ -689,14 +1066,32 @@ bool SceneCompiler::Compile(
     outCompiledScene.settings.SetAccumulationEnabled(settings.accumulationEnabled);
     outCompiledScene.settings.SetIntegratorMode(ToRuntimeIntegratorMode(settings.viewMode));
     outCompiledScene.settings.SetMaxBounceCount(settings.maxBounceCount);
+    outCompiledScene.settings.SetTerminationMode(ToRuntimeTerminationMode(settings.pathTraceTerminationMode));
     outCompiledScene.settings.SetGizmoMode(ToRuntimeGizmoMode(settings.transformMode));
     outCompiledScene.settings.SetTransformSpace(ToRuntimeTransformSpace(settings.transformSpace));
     outCompiledScene.settings.SetFinalRenderResolution(settings.finalRender.resolutionX, settings.finalRender.resolutionY);
     outCompiledScene.settings.SetFinalRenderSampleTarget(settings.finalRender.sampleTarget);
     outCompiledScene.settings.SetFinalRenderMaxBounceCount(settings.finalRender.maxBounceCount);
+    outCompiledScene.settings.SetFinalRenderTerminationMode(ToRuntimeTerminationMode(settings.finalRender.terminationMode));
     outCompiledScene.settings.SetFinalRenderOutputName(settings.finalRender.outputName);
-    outCompiledScene.pathTraceScene = BuildPathTraceScene(snapshot, outCompiledScene);
+    outCompiledScene.pathTraceScene = BuildPathTraceScene(pathTraceSnapshot, outCompiledScene);
     outCompiledScene.valid = outCompiledScene.pathTraceScene.valid;
+    return true;
+}
+
+bool SceneCompiler::CompileValidationScene(
+    const RenderValidationSceneTemplate& sceneTemplate,
+    const RenderFoundation::Camera& camera,
+    const RenderFoundation::Settings& settings,
+    CompiledScene& outCompiledScene,
+    std::string& errorMessage) const {
+
+    errorMessage.clear();
+    if (!CompileValidationSceneInternal(sceneTemplate, camera, settings, outCompiledScene)) {
+        errorMessage = "Failed to compile the validation scene.";
+        outCompiledScene.valid = false;
+        return false;
+    }
     return true;
 }
 

@@ -10,6 +10,8 @@
 
 #include <string>
 
+struct RenderValidationSceneTemplate;
+
 namespace RenderContracts {
 
 struct CompiledScene {
@@ -24,6 +26,20 @@ class SceneCompiler {
 public:
     bool Compile(
         const SceneSnapshot& snapshot,
+        const RenderFoundation::Settings& settings,
+        CompiledScene& outCompiledScene,
+        std::string& errorMessage) const;
+
+    bool Compile(
+        const SceneSnapshot& snapshot,
+        const RenderFoundation::Camera& cameraOverride,
+        const RenderFoundation::Settings& settings,
+        CompiledScene& outCompiledScene,
+        std::string& errorMessage) const;
+
+    bool CompileValidationScene(
+        const RenderValidationSceneTemplate& sceneTemplate,
+        const RenderFoundation::Camera& camera,
         const RenderFoundation::Settings& settings,
         CompiledScene& outCompiledScene,
         std::string& errorMessage) const;

@@ -78,13 +78,23 @@ bool RenderSettings::SetIntegratorMode(RenderIntegratorMode mode) {
 }
 
 bool RenderSettings::SetMaxBounceCount(int count) {
-    const int clampedCount = std::clamp(count, 1, 12);
+    const int clampedCount = std::clamp(count, 1, 512);
     if (m_MaxBounceCount == clampedCount) {
         return false;
     }
 
     m_MaxBounceCount = clampedCount;
     Touch("Path-trace bounce limit changed.");
+    return true;
+}
+
+bool RenderSettings::SetTerminationMode(RenderTerminationMode mode) {
+    if (m_TerminationMode == mode) {
+        return false;
+    }
+
+    m_TerminationMode = mode;
+    Touch("Path-trace termination mode changed.");
     return true;
 }
 
@@ -168,13 +178,23 @@ bool RenderSettings::SetFinalRenderSampleTarget(int target) {
 }
 
 bool RenderSettings::SetFinalRenderMaxBounceCount(int count) {
-    const int clampedCount = std::clamp(count, 1, 16);
+    const int clampedCount = std::clamp(count, 1, 512);
     if (m_FinalRenderSettings.maxBounceCount == clampedCount) {
         return false;
     }
 
     m_FinalRenderSettings.maxBounceCount = clampedCount;
     Touch("Final render bounce limit changed.");
+    return true;
+}
+
+bool RenderSettings::SetFinalRenderTerminationMode(RenderTerminationMode mode) {
+    if (m_FinalRenderSettings.terminationMode == mode) {
+        return false;
+    }
+
+    m_FinalRenderSettings.terminationMode = mode;
+    Touch("Final render termination mode changed.");
     return true;
 }
 

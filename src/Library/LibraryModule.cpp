@@ -4,6 +4,8 @@
 #include "Async/TaskSystem.h"
 #include "Composite/CompositeModule.h"
 #include "Editor/EditorModule.h"
+#include "Editor/LayerRegistry.h"
+#include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "RenderTab/RenderTab.h"
 #include "ProjectData.h"
 #include "Utils/FileDialogs.h"
@@ -59,24 +61,8 @@ std::string FormatKeyLabel(const std::string& key) {
 }
 
 std::string LayerDisplayName(const std::string& type) {
-    if (type == "Adjustments") return "Adjustments";
-    if (type == "ColorGrade") return "3-Way Color Grade";
-    if (type == "HDR") return "HDR Emulation";
-    if (type == "CropTransform") return "Crop / Rotate / Flip";
-    if (type == "Blur") return "Blur";
-    if (type == "TiltShiftBlur") return "Tilt-Shift Blur";
-    if (type == "Dither" || type == "Dithering") return "Dithering";
-    if (type == "Compression") return "Compression";
-    if (type == "CellShading" || type == "Cell") return "Cell Shading";
-    if (type == "Heatwave") return "Heatwave & Ripples";
-    if (type == "Palette" || type == "PaletteReconstructor") return "Palette Reconstructor";
-    if (type == "Edge" || type == "EdgeEffects") return "Edge Effects";
-    if (type == "AiryBloom" || type == "AiryDiskBloom") return "Airy Bloom";
-    if (type == "ImageBreaks") return "Image Breaks";
-    if (type == "Noise") return "Noise / Film Grain";
-    if (type == "Vignette") return "Vignette & Focus";
-    if (type == "ChromaticAberration") return "Chromatic Aberration";
-    if (type == "LensDistortion") return "Lens Distortion";
+    const std::string displayName = LayerRegistry::GetLibraryDisplayNameFromTypeId(type);
+    if (!displayName.empty()) return displayName;
     return FormatKeyLabel(type);
 }
 
@@ -293,6 +279,7 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
     m_CachedEditor = editor;
     m_CachedComposite = composite;
     m_CachedActiveTab = activeTab;
+    m_BlockLibraryGridContextMenuThisFrame = false;
 
     if (!m_PreviewProject && !m_PreviewAsset) {
         LibraryManager::Get().TickAutoRefresh();
@@ -416,11 +403,6 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
 
     ImGui::BeginChild("LibraryGrid", ImVec2(0, 0), false);
 
-    if (ImGui::BeginPopupContextWindow("LibraryGridContextMenu", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
-        RenderLibraryMenuOptions(importBusy, exportBusy);
-        ImGui::EndPopup();
-    }
-
     if (m_ShowAssets) {
         float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
         ImGuiStyle& style = ImGui::GetStyle();
@@ -471,6 +453,12 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
         if (visibleCount == 0) {
             ImGui::TextDisabled(m_SearchFilter[0] ? "No projects match the current search filter." : "No projects found in the library.");
         }
+    }
+
+    if (!m_BlockLibraryGridContextMenuThisFrame &&
+        ImGui::BeginPopupContextWindow("LibraryGridContextMenu", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+        RenderLibraryMenuOptions(importBusy, exportBusy);
+        ImGui::EndPopup();
     }
 
     ImGui::EndChild();
@@ -584,10 +572,13 @@ void LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
             m_SelectedProjects.clear();
             m_SelectedProjects.insert(project.fileName);
         }
-        ImGui::OpenPopup("ProjectCardContextMenu");
+        m_BlockLibraryGridContextMenuThisFrame = true;
+        const std::string popupId = std::string("ProjectCardContextMenu##") + project.fileName;
+        ImGui::OpenPopup(popupId.c_str());
     }
 
-    if (ImGui::BeginPopup("ProjectCardContextMenu")) {
+    const std::string popupId = std::string("ProjectCardContextMenu##") + project.fileName;
+    if (ImGui::BeginPopup(popupId.c_str())) {
         const bool multiple = m_SelectedProjects.size() > 1;
         if (!multiple) {
             if (project.projectKind == "editor" || project.projectKind.empty()) {
@@ -720,10 +711,13 @@ void LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
             m_SelectedAssets.clear();
             m_SelectedAssets.insert(asset.fileName);
         }
-        ImGui::OpenPopup("AssetCardContextMenu");
+        m_BlockLibraryGridContextMenuThisFrame = true;
+        const std::string popupId = std::string("AssetCardContextMenu##") + asset.fileName;
+        ImGui::OpenPopup(popupId.c_str());
     }
 
-    if (ImGui::BeginPopup("AssetCardContextMenu")) {
+    const std::string popupId = std::string("AssetCardContextMenu##") + asset.fileName;
+    if (ImGui::BeginPopup(popupId.c_str())) {
         if (ImGui::MenuItem("Load Selected into Composite", nullptr, false, !m_SelectedAssets.empty())) {
             for (const auto& fn : m_SelectedAssets) {
                 auto fullPath = LibraryManager::Get().GetAssetsPath() / fn;
@@ -998,19 +992,22 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, RenderTab* renderTa
         if (!latestAsset.empty()) {
             ImGui::TextWrapped("Latest Saved Asset: %s", latestAsset.c_str());
         }
-    } else if (!m_PreviewProject->pipelineData.is_array() || m_PreviewProject->pipelineData.empty()) {
-        ImGui::TextDisabled("This project currently has no saved editor layers.");
     } else {
-        for (std::size_t i = 0; i < m_PreviewProject->pipelineData.size(); ++i) {
-            const json& layer = m_PreviewProject->pipelineData[i];
-            const std::string type = layer.value("type", "Layer");
-            const std::string header = std::to_string(i + 1) + ". " + LayerDisplayName(type);
+        const json layerArray = EditorNodeGraph::ExtractLayerArray(m_PreviewProject->pipelineData);
+        if (!layerArray.is_array() || layerArray.empty()) {
+            ImGui::TextDisabled("This project currently has no saved editor layers.");
+        } else {
+            for (std::size_t i = 0; i < layerArray.size(); ++i) {
+                const json& layer = layerArray[i];
+                const std::string type = layer.value("type", "Layer");
+                const std::string header = std::to_string(i + 1) + ". " + LayerDisplayName(type);
 
-            ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_DefaultOpen;
-            if (ImGui::CollapsingHeader(header.c_str(), nodeFlags)) {
-                for (auto it = layer.begin(); it != layer.end(); ++it) {
-                    if (it.key() == "type") continue;
-                    ImGui::TextWrapped("%s: %s", FormatKeyLabel(it.key()).c_str(), FormatJsonValue(it.value()).c_str());
+                ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_DefaultOpen;
+                if (ImGui::CollapsingHeader(header.c_str(), nodeFlags)) {
+                    for (auto it = layer.begin(); it != layer.end(); ++it) {
+                        if (it.key() == "type") continue;
+                        ImGui::TextWrapped("%s: %s", FormatKeyLabel(it.key()).c_str(), FormatJsonValue(it.value()).c_str());
+                    }
                 }
             }
         }

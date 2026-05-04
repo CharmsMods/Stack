@@ -1,6 +1,7 @@
 #include "Composite/CompositeModule.h"
 
 #include "Editor/EditorModule.h"
+#include "Composite/EmbeddedCompositeFont.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
@@ -29,7 +30,7 @@ namespace {
 
 using json = StackBinaryFormat::json;
 
-constexpr int kCompositeFormatVersion = 4;
+constexpr int kCompositeFormatVersion = 5;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kCompositeToolbarHeight = 68.0f;
 constexpr float kCanvasContextDragThreshold = 6.0f;
@@ -67,8 +68,8 @@ layout(location = 0) out vec4 fragColor;
 uniform sampler2D uPrevTex;
 uniform sampler2D uLayerTex;
 uniform vec4 uWorldRect;
-uniform vec4 uLayerRect;
-uniform float uLayerRotation;
+uniform mat4 uWorldToLayer;
+uniform vec2 uLayerSize;
 uniform float uLayerOpacity;
 uniform int uFlipX;
 uniform int uFlipY;
@@ -218,23 +219,16 @@ vec4 compositeSourceOver(const vec4 dst, const vec4 src, const int mode) {
 }
 
 vec4 sampleLayer(const vec2 worldPoint) {
-    const float width = max(uLayerRect.z, 0.0001);
-    const float height = max(uLayerRect.w, 0.0001);
-    const float centerX = uLayerRect.x + width * 0.5;
-    const float centerY = uLayerRect.y + height * 0.5;
-    const float dx = worldPoint.x - centerX;
-    const float dy = worldPoint.y - centerY;
-    const float cosR = cos(uLayerRotation);
-    const float sinR = sin(uLayerRotation);
-    const float localX = dx * cosR + dy * sinR + width * 0.5;
-    const float localY = -dx * sinR + dy * cosR + height * 0.5;
+    const vec4 localPoint = uWorldToLayer * vec4(worldPoint, 0.0, 1.0);
+    const float width = max(uLayerSize.x, 0.0001);
+    const float height = max(uLayerSize.y, 0.0001);
 
-    if (localX < 0.0 || localX > width || localY < 0.0 || localY > height) {
+    if (localPoint.x < 0.0 || localPoint.x > width || localPoint.y < 0.0 || localPoint.y > height) {
         return vec4(0.0);
     }
 
-    float u = clamp(localX / width, 0.0, 1.0);
-    float v = clamp(localY / height, 0.0, 1.0);
+    float u = clamp(localPoint.x / width, 0.0, 1.0);
+    float v = clamp(localPoint.y / height, 0.0, 1.0);
     if (uFlipX != 0) {
         u = 1.0 - u;
     }
@@ -1068,47 +1062,126 @@ float LayerWorldHeight(const CompositeLayer& layer) {
     return LayerBaseHeight(layer) * std::max(0.0001f, layer.scaleY);
 }
 
-ImVec2 LayerCenterWorld(const CompositeLayer& layer) {
-    return ImVec2(layer.x + LayerWorldWidth(layer) * 0.5f, layer.y + LayerWorldHeight(layer) * 0.5f);
+struct AffineTransform2D {
+    float m00 = 1.0f;
+    float m01 = 0.0f;
+    float m02 = 0.0f;
+    float m10 = 0.0f;
+    float m11 = 1.0f;
+    float m12 = 0.0f;
+};
+
+AffineTransform2D IdentityTransform2D() {
+    return {};
 }
 
-ImVec2 LayerAxisX(const CompositeLayer& layer) {
-    return ImVec2(std::cos(layer.rotation), std::sin(layer.rotation));
-}
-
-ImVec2 LayerAxisY(const CompositeLayer& layer) {
-    return ImVec2(-std::sin(layer.rotation), std::cos(layer.rotation));
-}
-
-ImVec2 RotatePoint(const ImVec2& point, const ImVec2& pivot, const float radians) {
-    const float tx = point.x - pivot.x;
-    const float ty = point.y - pivot.y;
-    const float cosR = std::cos(radians);
-    const float sinR = std::sin(radians);
-    return ImVec2(
-        pivot.x + tx * cosR - ty * sinR,
-        pivot.y + tx * sinR + ty * cosR);
-}
-
-std::array<ImVec2, 4> ComputeLayerQuadWorld(const CompositeLayer& layer) {
-    const float width = LayerWorldWidth(layer);
-    const float height = LayerWorldHeight(layer);
-    const ImVec2 topLeft(layer.x, layer.y);
-    const ImVec2 topRight(layer.x + width, layer.y);
-    const ImVec2 bottomRight(layer.x + width, layer.y + height);
-    const ImVec2 bottomLeft(layer.x, layer.y + height);
-    const ImVec2 pivot(layer.x + width * 0.5f, layer.y + height * 0.5f);
-
+AffineTransform2D Multiply(const AffineTransform2D& a, const AffineTransform2D& b) {
     return {
-        RotatePoint(topLeft, pivot, layer.rotation),
-        RotatePoint(topRight, pivot, layer.rotation),
-        RotatePoint(bottomRight, pivot, layer.rotation),
-        RotatePoint(bottomLeft, pivot, layer.rotation)
+        a.m00 * b.m00 + a.m01 * b.m10,
+        a.m00 * b.m01 + a.m01 * b.m11,
+        a.m00 * b.m02 + a.m01 * b.m12 + a.m02,
+        a.m10 * b.m00 + a.m11 * b.m10,
+        a.m10 * b.m01 + a.m11 * b.m11,
+        a.m10 * b.m02 + a.m11 * b.m12 + a.m12
     };
 }
 
-FloatRect ComputeLayerBoundsWorld(const CompositeLayer& layer) {
-    const auto quad = ComputeLayerQuadWorld(layer);
+AffineTransform2D Inverse(const AffineTransform2D& matrix) {
+    const float determinant = matrix.m00 * matrix.m11 - matrix.m01 * matrix.m10;
+    if (std::abs(determinant) <= 1e-8f) {
+        return IdentityTransform2D();
+    }
+
+    const float inverseDeterminant = 1.0f / determinant;
+    AffineTransform2D inverse;
+    inverse.m00 = matrix.m11 * inverseDeterminant;
+    inverse.m01 = -matrix.m01 * inverseDeterminant;
+    inverse.m02 = (matrix.m01 * matrix.m12 - matrix.m11 * matrix.m02) * inverseDeterminant;
+    inverse.m10 = -matrix.m10 * inverseDeterminant;
+    inverse.m11 = matrix.m00 * inverseDeterminant;
+    inverse.m12 = (matrix.m10 * matrix.m02 - matrix.m00 * matrix.m12) * inverseDeterminant;
+    return inverse;
+}
+
+ImVec2 TransformPoint(const AffineTransform2D& matrix, const ImVec2& point) {
+    return {
+        matrix.m00 * point.x + matrix.m01 * point.y + matrix.m02,
+        matrix.m10 * point.x + matrix.m11 * point.y + matrix.m12
+    };
+}
+
+ImVec2 TransformVector(const AffineTransform2D& matrix, const ImVec2& vector) {
+    return {
+        matrix.m00 * vector.x + matrix.m01 * vector.y,
+        matrix.m10 * vector.x + matrix.m11 * vector.y
+    };
+}
+
+AffineTransform2D BuildLocalTransform(const CompositeLayer& layer) {
+    const float baseWidth = std::max(1.0f, LayerBaseWidth(layer));
+    const float baseHeight = std::max(1.0f, LayerBaseHeight(layer));
+    const float width = baseWidth * std::max(0.0001f, layer.scaleX);
+    const float height = baseHeight * std::max(0.0001f, layer.scaleY);
+    const float cosR = std::cos(layer.rotation);
+    const float sinR = std::sin(layer.rotation);
+
+    AffineTransform2D matrix;
+    matrix.m00 = cosR * std::max(0.0001f, layer.scaleX);
+    matrix.m01 = -sinR * std::max(0.0001f, layer.scaleY);
+    matrix.m10 = sinR * std::max(0.0001f, layer.scaleX);
+    matrix.m11 = cosR * std::max(0.0001f, layer.scaleY);
+    matrix.m02 = layer.x + width * 0.5f - matrix.m00 * baseWidth * 0.5f - matrix.m01 * baseHeight * 0.5f;
+    matrix.m12 = layer.y + height * 0.5f - matrix.m10 * baseWidth * 0.5f - matrix.m11 * baseHeight * 0.5f;
+    return matrix;
+}
+
+AffineTransform2D BuildWorldTransform(const std::vector<CompositeLayer>& layers, const CompositeLayer& layer) {
+    std::vector<const CompositeLayer*> chain;
+    chain.reserve(8);
+    std::unordered_set<std::string> visited;
+
+    const CompositeLayer* current = &layer;
+    while (current != nullptr) {
+        if (!visited.insert(current->id).second) {
+            break;
+        }
+        chain.push_back(current);
+        if (current->parentId.empty()) {
+            break;
+        }
+        current = FindLayerById(layers, current->parentId);
+    }
+
+    AffineTransform2D world = IdentityTransform2D();
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        world = Multiply(world, BuildLocalTransform(**it));
+    }
+
+    return world;
+}
+
+ImVec2 GetWorldCenter(const std::vector<CompositeLayer>& layers, const CompositeLayer& layer) {
+    const AffineTransform2D world = BuildWorldTransform(layers, layer);
+    const ImVec2 localCenter(
+        std::max(1.0f, LayerBaseWidth(layer)) * 0.5f,
+        std::max(1.0f, LayerBaseHeight(layer)) * 0.5f);
+    return TransformPoint(world, localCenter);
+}
+
+std::array<ImVec2, 4> ComputeLayerQuadWorld(const std::vector<CompositeLayer>& layers, const CompositeLayer& layer) {
+    const AffineTransform2D world = BuildWorldTransform(layers, layer);
+    const float width = std::max(1.0f, LayerBaseWidth(layer));
+    const float height = std::max(1.0f, LayerBaseHeight(layer));
+    return {
+        TransformPoint(world, ImVec2(0.0f, 0.0f)),
+        TransformPoint(world, ImVec2(width, 0.0f)),
+        TransformPoint(world, ImVec2(width, height)),
+        TransformPoint(world, ImVec2(0.0f, height))
+    };
+}
+
+FloatRect ComputeLayerBoundsWorld(const std::vector<CompositeLayer>& layers, const CompositeLayer& layer) {
+    const auto quad = ComputeLayerQuadWorld(layers, layer);
 
     float minX = std::numeric_limits<float>::max();
     float minY = std::numeric_limits<float>::max();
@@ -1123,6 +1196,164 @@ FloatRect ComputeLayerBoundsWorld(const CompositeLayer& layer) {
     }
 
     return { minX, minY, std::max(0.0f, maxX - minX), std::max(0.0f, maxY - minY) };
+}
+
+AffineTransform2D GetParentWorldTransform(const std::vector<CompositeLayer>& layers, const CompositeLayer& layer) {
+    if (layer.parentId.empty()) {
+        return IdentityTransform2D();
+    }
+
+    const CompositeLayer* parent = FindLayerById(layers, layer.parentId);
+    if (!parent) {
+        return IdentityTransform2D();
+    }
+
+    return BuildWorldTransform(layers, *parent);
+}
+
+std::array<ImVec2, 4> ComputeLayerQuadLocal(const CompositeLayer& layer) {
+    const AffineTransform2D local = BuildLocalTransform(layer);
+    const float width = std::max(1.0f, LayerBaseWidth(layer));
+    const float height = std::max(1.0f, LayerBaseHeight(layer));
+    return {
+        TransformPoint(local, ImVec2(0.0f, 0.0f)),
+        TransformPoint(local, ImVec2(width, 0.0f)),
+        TransformPoint(local, ImVec2(width, height)),
+        TransformPoint(local, ImVec2(0.0f, height))
+    };
+}
+
+ImVec2 LayerLocalCenter(const CompositeLayer& layer) {
+    return {
+        layer.x + LayerWorldWidth(layer) * 0.5f,
+        layer.y + LayerWorldHeight(layer) * 0.5f
+    };
+}
+
+ImVec2 LayerLocalAxisX(const CompositeLayer& layer) {
+    return {
+        std::cos(layer.rotation),
+        std::sin(layer.rotation)
+    };
+}
+
+ImVec2 LayerLocalAxisY(const CompositeLayer& layer) {
+    return {
+        -std::sin(layer.rotation),
+        std::cos(layer.rotation)
+    };
+}
+
+std::array<float, 16> AffineToGlMatrix4(const AffineTransform2D& matrix) {
+    return {
+        matrix.m00, matrix.m10, 0.0f, 0.0f,
+        matrix.m01, matrix.m11, 0.0f, 0.0f,
+        0.0f,       0.0f,       1.0f, 0.0f,
+        matrix.m02, matrix.m12, 0.0f, 1.0f
+    };
+}
+
+void ApplyAffineToLayerParameters(CompositeLayer& layer, const AffineTransform2D& matrix) {
+    layer.x = matrix.m02;
+    layer.y = matrix.m12;
+
+    const float scaleX = std::hypot(matrix.m00, matrix.m10);
+    const float scaleY = std::hypot(matrix.m01, matrix.m11);
+    layer.scaleX = std::max(0.0001f, scaleX);
+    layer.scaleY = std::max(0.0001f, scaleY);
+    layer.rotation = std::atan2(matrix.m10, matrix.m00);
+}
+
+bool WouldCreateParentCycle(
+    const std::vector<CompositeLayer>& layers,
+    const CompositeLayer& layer,
+    const std::string& proposedParentId) {
+
+    if (proposedParentId.empty()) {
+        return false;
+    }
+
+    if (proposedParentId == layer.id) {
+        return true;
+    }
+
+    std::unordered_set<std::string> visited;
+    std::string currentParentId = proposedParentId;
+    while (!currentParentId.empty()) {
+        if (currentParentId == layer.id) {
+            return true;
+        }
+        if (!visited.insert(currentParentId).second) {
+            return true;
+        }
+        const CompositeLayer* parent = FindLayerById(layers, currentParentId);
+        if (!parent) {
+            return false;
+        }
+        currentParentId = parent->parentId;
+    }
+
+    return false;
+}
+
+bool IsLayerDescendantOf(
+    const std::vector<CompositeLayer>& layers,
+    const std::string& candidateId,
+    const std::string& ancestorId) {
+
+    if (candidateId.empty() || ancestorId.empty() || candidateId == ancestorId) {
+        return false;
+    }
+
+    std::unordered_set<std::string> visited;
+    std::string currentId = candidateId;
+    while (!currentId.empty()) {
+        if (!visited.insert(currentId).second) {
+            return false;
+        }
+
+        const CompositeLayer* current = FindLayerById(layers, currentId);
+        if (!current) {
+            return false;
+        }
+
+        if (current->parentId == ancestorId) {
+            return true;
+        }
+
+        currentId = current->parentId;
+    }
+
+    return false;
+}
+
+bool SetLayerParentPreserveWorld(
+    std::vector<CompositeLayer>& layers,
+    CompositeLayer& layer,
+    const std::string& newParentId) {
+
+    if (layer.parentId == newParentId) {
+        return false;
+    }
+
+    if (WouldCreateParentCycle(layers, layer, newParentId)) {
+        return false;
+    }
+
+    const AffineTransform2D worldBefore = BuildWorldTransform(layers, layer);
+    layer.parentId = newParentId;
+    const AffineTransform2D parentWorld = GetParentWorldTransform(layers, layer);
+    const AffineTransform2D local = Multiply(Inverse(parentWorld), worldBefore);
+    ApplyAffineToLayerParameters(layer, local);
+    return true;
+}
+
+void DetachChildrenFromParent(std::vector<CompositeLayer>& layers, const std::string& parentId) {
+    for (CompositeLayer& layer : layers) {
+        if (layer.parentId == parentId) {
+            SetLayerParentPreserveWorld(layers, layer, std::string());
+        }
+    }
 }
 
 bool IsRectValid(const FloatRect& rect) {
@@ -1166,28 +1397,25 @@ ImVec2 ScreenToWorld(const ImVec2& canvasCenter, const float viewZoom, const flo
         (screenPoint.y - canvasCenter.y - viewPanY) / std::max(0.001f, viewZoom));
 }
 
-bool MapWorldToLayerUv(const CompositeLayer& layer, const float worldX, const float worldY, float& outU, float& outV) {
-    const float width = LayerWorldWidth(layer);
-    const float height = LayerWorldHeight(layer);
-    if (width <= 0.0f || height <= 0.0f) {
+bool MapWorldToLayerUv(
+    const std::vector<CompositeLayer>& layers,
+    const CompositeLayer& layer,
+    const float worldX,
+    const float worldY,
+    float& outU,
+    float& outV) {
+
+    const float width = std::max(1.0f, LayerBaseWidth(layer));
+    const float height = std::max(1.0f, LayerBaseHeight(layer));
+    const AffineTransform2D world = BuildWorldTransform(layers, layer);
+    const AffineTransform2D inverseWorld = Inverse(world);
+    const ImVec2 local = TransformPoint(inverseWorld, ImVec2(worldX, worldY));
+    if (local.x < 0.0f || local.x > width || local.y < 0.0f || local.y > height) {
         return false;
     }
 
-    const float centerX = layer.x + width * 0.5f;
-    const float centerY = layer.y + height * 0.5f;
-    const float dx = worldX - centerX;
-    const float dy = worldY - centerY;
-    const float cosR = std::cos(layer.rotation);
-    const float sinR = std::sin(layer.rotation);
-    const float localX = dx * cosR + dy * sinR + width * 0.5f;
-    const float localY = -dx * sinR + dy * cosR + height * 0.5f;
-
-    if (localX < 0.0f || localX > width || localY < 0.0f || localY > height) {
-        return false;
-    }
-
-    float u = localX / width;
-    float v = localY / height;
+    float u = local.x / width;
+    float v = local.y / height;
     if (layer.flipX) {
         u = 1.0f - u;
     }
@@ -1210,7 +1438,7 @@ CompositeLayer* FindTopMostVisibleLayerAtWorldPoint(std::vector<CompositeLayer>&
 
         float u = 0.0f;
         float v = 0.0f;
-        if (MapWorldToLayerUv(layer, worldX, worldY, u, v) && layer.z > bestZ) {
+        if (MapWorldToLayerUv(layers, layer, worldX, worldY, u, v) && layer.z > bestZ) {
             bestLayer = &layer;
             bestZ = layer.z;
         }
@@ -1421,7 +1649,10 @@ void CompositeSourceOver(float* dstRgba, const float srcRgba[4], const Composite
     dstRgba[3] = Clamp01(outAlpha);
 }
 
-bool ComputeAutoBounds(const std::vector<const CompositeLayer*>& layers, FloatRect& outBounds) {
+bool ComputeAutoBounds(
+    const std::vector<CompositeLayer>& allLayers,
+    const std::vector<const CompositeLayer*>& layers,
+    FloatRect& outBounds) {
     if (layers.empty()) {
         return false;
     }
@@ -1436,7 +1667,7 @@ bool ComputeAutoBounds(const std::vector<const CompositeLayer*>& layers, FloatRe
             continue;
         }
 
-        const FloatRect bounds = ComputeLayerBoundsWorld(*layer);
+        const FloatRect bounds = ComputeLayerBoundsWorld(allLayers, *layer);
         minX = std::min(minX, bounds.x);
         minY = std::min(minY, bounds.y);
         maxX = std::max(maxX, bounds.x + bounds.width);
@@ -1782,6 +2013,7 @@ void ReassignZFromTopOrder(const std::vector<CompositeLayer*>& topToBottomLayers
 }
 
 void RasterizeLayersToTopLeftRgba(
+    const std::vector<CompositeLayer>& allLayers,
     const std::vector<const CompositeLayer*>& layers,
     const FloatRect& worldBounds,
     const int outW,
@@ -1813,7 +2045,7 @@ void RasterizeLayersToTopLeftRgba(
             continue;
         }
 
-        const FloatRect layerBounds = ComputeLayerBoundsWorld(*layer);
+        const FloatRect layerBounds = ComputeLayerBoundsWorld(allLayers, *layer);
         const int minX = std::clamp(
             static_cast<int>(std::floor((layerBounds.x - worldBounds.x) / worldBounds.width * outW)) - 1,
             0,
@@ -1837,7 +2069,7 @@ void RasterizeLayersToTopLeftRgba(
                 const float worldX = worldBounds.x + (static_cast<float>(px) + 0.5f) / static_cast<float>(outW) * worldBounds.width;
                 float u = 0.0f;
                 float v = 0.0f;
-                if (!MapWorldToLayerUv(*layer, worldX, worldY, u, v)) {
+                if (!MapWorldToLayerUv(allLayers, *layer, worldX, worldY, u, v)) {
                     continue;
                 }
 
@@ -1910,6 +2142,12 @@ bool CompositeModule::EnsureDefaultTextFontLoaded() {
     }
 
     m_DefaultTextFontLoadAttempted = true;
+    m_DefaultTextFontBytes.assign(
+        EmbeddedCompositeFont::kRobotoMediumTtf,
+        EmbeddedCompositeFont::kRobotoMediumTtf + EmbeddedCompositeFont::kRobotoMediumTtfSize);
+    if (!m_DefaultTextFontBytes.empty()) {
+        return true;
+    }
     return ReadFileBytes(FindBundledCompositeFontPath(), m_DefaultTextFontBytes);
 }
 
@@ -2032,6 +2270,7 @@ CompositeSnapModePreset CompositeModule::GetSnapModePreset() const {
     if (m_SnapToObjects &&
         m_SnapToCenters &&
         m_SnapToCanvasCenter &&
+        !m_SnapToExportBounds &&
         !m_SnapToSpacing &&
         stepSnapsDisabled) {
         return CompositeSnapModePreset::ObjectOnly;
@@ -2040,6 +2279,7 @@ CompositeSnapModePreset CompositeModule::GetSnapModePreset() const {
     if (m_SnapToObjects &&
         m_SnapToCenters &&
         m_SnapToCanvasCenter &&
+        m_SnapToExportBounds &&
         m_SnapToSpacing &&
         m_GridSize > 0.0f &&
         m_RotateSnapStep > 0.0f &&
@@ -2074,6 +2314,7 @@ void CompositeModule::ApplySnapModePreset(const CompositeSnapModePreset preset) 
         m_SnapToObjects = true;
         m_SnapToCenters = true;
         m_SnapToCanvasCenter = true;
+        m_SnapToExportBounds = true;
         m_SnapToSpacing = true;
         m_GridSize = (m_LastNonZeroGridSize > 0.0f) ? m_LastNonZeroGridSize : 24.0f;
         m_RotateSnapStep = (m_LastNonZeroRotateSnapStep > 0.0f) ? m_LastNonZeroRotateSnapStep : 15.0f;
@@ -2084,6 +2325,7 @@ void CompositeModule::ApplySnapModePreset(const CompositeSnapModePreset preset) 
         m_SnapToObjects = true;
         m_SnapToCenters = true;
         m_SnapToCanvasCenter = true;
+        m_SnapToExportBounds = false;
         m_SnapToSpacing = false;
         m_GridSize = 0.0f;
         m_RotateSnapStep = 0.0f;
@@ -2192,6 +2434,7 @@ bool CompositeModule::EnsureStagePreviewTargets(const int width, const int heigh
 }
 
 void CompositeModule::RenderStagePreviewTexture(
+    const std::vector<CompositeLayer>& allLayers,
     const std::vector<const CompositeLayer*>& layers,
     const float viewX,
     const float viewY,
@@ -2240,13 +2483,15 @@ void CompositeModule::RenderStagePreviewTexture(
         glBindTexture(GL_TEXTURE_2D, layer->tex);
 
         glUniform4f(glGetUniformLocation(m_StagePreviewProgram, "uWorldRect"), viewX, viewY, viewWidth, viewHeight);
-        glUniform4f(
-            glGetUniformLocation(m_StagePreviewProgram, "uLayerRect"),
-            layer->x,
-            layer->y,
-            LayerWorldWidth(*layer),
-            LayerWorldHeight(*layer));
-        glUniform1f(glGetUniformLocation(m_StagePreviewProgram, "uLayerRotation"), layer->rotation);
+        const AffineTransform2D worldTransform = BuildWorldTransform(allLayers, *layer);
+        const AffineTransform2D inverseWorldTransform = Inverse(worldTransform);
+        const std::array<float, 16> glMatrix = AffineToGlMatrix4(inverseWorldTransform);
+
+        glUniformMatrix4fv(glGetUniformLocation(m_StagePreviewProgram, "uWorldToLayer"), 1, GL_FALSE, glMatrix.data());
+        glUniform2f(
+            glGetUniformLocation(m_StagePreviewProgram, "uLayerSize"),
+            std::max(1.0f, LayerBaseWidth(*layer)),
+            std::max(1.0f, LayerBaseHeight(*layer)));
         glUniform1f(glGetUniformLocation(m_StagePreviewProgram, "uLayerOpacity"), Clamp01(layer->opacity));
         glUniform1i(glGetUniformLocation(m_StagePreviewProgram, "uFlipX"), layer->flipX ? 1 : 0);
         glUniform1i(glGetUniformLocation(m_StagePreviewProgram, "uFlipY"), layer->flipY ? 1 : 0);
@@ -2293,6 +2538,7 @@ void CompositeModule::NewProject() {
     m_SnapToObjects = true;
     m_SnapToCenters = true;
     m_SnapToCanvasCenter = true;
+    m_SnapToExportBounds = false;
     m_SnapToSpacing = true;
     m_LimitProjectResolution = true;
     m_GridSize = 24.0f;
@@ -2630,6 +2876,7 @@ void CompositeModule::RemoveSelectedLayers() {
     }
 
     const std::string selectedId = m_SelectedId;
+    DetachChildrenFromParent(m_Layers, selectedId);
     m_Layers.erase(
         std::remove_if(
             m_Layers.begin(),
@@ -2744,7 +2991,7 @@ bool CompositeModule::BuildExportRaster(
             1,
             static_cast<int>(std::round(static_cast<float>(outW) / std::max(0.0001f, RectAspectRatio(worldBounds)))));
     } else {
-        if (!ComputeAutoBounds(layers, worldBounds)) {
+        if (!ComputeAutoBounds(m_Layers, layers, worldBounds)) {
             return false;
         }
 
@@ -2767,6 +3014,7 @@ bool CompositeModule::BuildExportRaster(
         : std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f };
 
     RasterizeLayersToTopLeftRgba(
+        m_Layers,
         layers,
         worldBounds,
         outW,
@@ -2818,6 +3066,7 @@ bool CompositeModule::ApplyLibraryProject(const StackBinaryFormat::ProjectDocume
     m_SnapToObjects = view.value("snapToObjects", true);
     m_SnapToCenters = view.value("snapToCenters", true);
     m_SnapToCanvasCenter = view.value("snapToCanvasCenter", true);
+    m_SnapToExportBounds = view.value("snapToExportBounds", false);
     m_SnapToSpacing = view.value("snapToSpacing", true);
     m_LastNonZeroGridSize = 24.0f;
     m_LastNonZeroRotateSnapStep = 15.0f;
@@ -2894,6 +3143,7 @@ bool CompositeModule::ApplyLibraryProject(const StackBinaryFormat::ProjectDocume
         layer.flipY = item.value("flipY", false);
         layer.blendMode = BlendModeFromToken(item.value("blendMode", std::string("normal")));
         layer.z = item.value("z", 0);
+        layer.parentId = item.value("parentId", std::string());
         layer.logicalW = item.value("logicalW", 0);
         layer.logicalH = item.value("logicalH", 0);
         if (item.contains("fillColor") && item["fillColor"].is_array() && item["fillColor"].size() >= 3) {
@@ -3007,6 +3257,7 @@ bool CompositeModule::BuildProjectDocumentForSave(const std::string& displayName
         layerJson["x"] = layer.x;
         layerJson["y"] = layer.y;
         layerJson["z"] = layer.z;
+        layerJson["parentId"] = layer.parentId;
         layerJson["scaleX"] = layer.scaleX;
         layerJson["scaleY"] = layer.scaleY;
         layerJson["preserveAspectRatio"] = layer.preserveAspectRatio;
@@ -3056,6 +3307,7 @@ bool CompositeModule::BuildProjectDocumentForSave(const std::string& displayName
     viewJson["snapToObjects"] = m_SnapToObjects;
     viewJson["snapToCenters"] = m_SnapToCenters;
     viewJson["snapToCanvasCenter"] = m_SnapToCanvasCenter;
+    viewJson["snapToExportBounds"] = m_SnapToExportBounds;
     viewJson["snapToSpacing"] = m_SnapToSpacing;
     viewJson["gridSize"] = m_GridSize;
     viewJson["rotateSnapStep"] = m_RotateSnapStep;
@@ -3182,7 +3434,7 @@ float CompositeModule::GetCurrentExportOutputAspectRatio() const {
         }
 
         FloatRect autoBounds;
-        if (ComputeAutoBounds(layers, autoBounds)) {
+        if (ComputeAutoBounds(m_Layers, layers, autoBounds)) {
             return RectAspectRatio(autoBounds);
         }
     }
@@ -3387,6 +3639,65 @@ void CompositeModule::RenderSelectedInspector(CompositeLayer* selectedLayer) {
     }
     ImGui::Separator();
 
+    ImGui::BeginDisabled(layerLocked);
+    ImGui::TextUnformatted("Grouping");
+    const CompositeLayer* currentParent = FindLayerById(m_Layers, selectedLayer->parentId);
+    const char* parentLabel = selectedLayer->parentId.empty()
+        ? "None"
+        : (currentParent ? currentParent->name.c_str() : "(Missing Parent)");
+    if (ImGui::BeginCombo("Parent", parentLabel)) {
+        if (ImGui::Selectable("None", selectedLayer->parentId.empty())) {
+            if (SetLayerParentPreserveWorld(m_Layers, *selectedLayer, std::string())) {
+                MarkDocumentDirty();
+            }
+        }
+
+        for (CompositeLayer& candidate : m_Layers) {
+            if (candidate.id == selectedLayer->id || WouldCreateParentCycle(m_Layers, *selectedLayer, candidate.id)) {
+                continue;
+            }
+
+            ImGui::PushID(candidate.id.c_str());
+            const bool candidateSelected = candidate.id == selectedLayer->parentId;
+            if (ImGui::Selectable(candidate.name.c_str(), candidateSelected)) {
+                if (SetLayerParentPreserveWorld(m_Layers, *selectedLayer, candidate.id)) {
+                    MarkDocumentDirty();
+                }
+            }
+            ImGui::PopID();
+        }
+
+        ImGui::EndCombo();
+    }
+
+    if (!selectedLayer->parentId.empty()) {
+        if (const CompositeLayer* parent = FindLayerById(m_Layers, selectedLayer->parentId)) {
+            ImGui::TextDisabled("Parented to: %s", parent->name.c_str());
+        } else {
+            ImGui::TextDisabled("Parented to: missing layer");
+        }
+
+        if (ImGui::Button("Detach Parent", ImVec2(-1, 0))) {
+            if (SetLayerParentPreserveWorld(m_Layers, *selectedLayer, std::string())) {
+                MarkDocumentDirty();
+            }
+        }
+    }
+
+    std::size_t childCount = 0;
+    for (const CompositeLayer& candidate : m_Layers) {
+        if (candidate.parentId == selectedLayer->id) {
+            ++childCount;
+        }
+    }
+    if (childCount > 0) {
+        ImGui::TextDisabled("Children: %zu", childCount);
+    }
+
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+
     ImGui::TextUnformatted("Transform");
     ImGui::BeginDisabled(layerLocked);
     bool changed = false;
@@ -3535,6 +3846,7 @@ void CompositeModule::RenderViewInspector() {
     snapChanged |= ImGui::Checkbox("Snap To Objects", &m_SnapToObjects);
     snapChanged |= ImGui::Checkbox("Snap To Centers", &m_SnapToCenters);
     snapChanged |= ImGui::Checkbox("Snap To Canvas Center", &m_SnapToCanvasCenter);
+    snapChanged |= ImGui::Checkbox("Snap To Export Bounds", &m_SnapToExportBounds);
     snapChanged |= ImGui::Checkbox("Snap To Spacing", &m_SnapToSpacing);
     ImGui::Separator();
     snapChanged |= ImGui::DragFloat("Grid Size", &m_GridSize, 1.0f, 0.0f, 512.0f, "%.0f px");
@@ -3812,6 +4124,7 @@ void CompositeModule::RenderStage() {
         if (!visibleLayers.empty()) {
             const FloatRect viewRect = ComputeViewWorldRect(canvasSize.x, canvasSize.y, m_ViewZoom, m_ViewPanX, m_ViewPanY);
             RenderStagePreviewTexture(
+                m_Layers,
                 visibleLayers,
                 viewRect.x,
                 viewRect.y,
@@ -3901,7 +4214,7 @@ void CompositeModule::RenderStage() {
     ImVec2 selectedScreenRightCenter {};
     ImVec2 selectedRotationHandle {};
     if (selectedLayer) {
-        selectedWorldQuad = ComputeLayerQuadWorld(*selectedLayer);
+        selectedWorldQuad = ComputeLayerQuadWorld(m_Layers, *selectedLayer);
         for (int index = 0; index < 4; ++index) {
             selectedScreenQuad[index] = WorldToScreen(canvasCenter, m_ViewZoom, m_ViewPanX, m_ViewPanY, selectedWorldQuad[index]);
         }
@@ -3918,9 +4231,22 @@ void CompositeModule::RenderStage() {
         selectedScreenRightCenter = ImVec2(
             (selectedScreenQuad[1].x + selectedScreenQuad[2].x) * 0.5f,
             (selectedScreenQuad[1].y + selectedScreenQuad[2].y) * 0.5f);
-        const float upX = -std::sin(selectedLayer->rotation);
-        const float upY = -std::cos(selectedLayer->rotation);
-        selectedRotationHandle = ImVec2(selectedScreenTopCenter.x + upX * 26.0f, selectedScreenTopCenter.y + upY * 26.0f);
+        const ImVec2 selectedWorldCenter(
+            (selectedWorldQuad[0].x + selectedWorldQuad[1].x + selectedWorldQuad[2].x + selectedWorldQuad[3].x) * 0.25f,
+            (selectedWorldQuad[0].y + selectedWorldQuad[1].y + selectedWorldQuad[2].y + selectedWorldQuad[3].y) * 0.25f);
+        ImVec2 rotationDirection(
+            selectedScreenTopCenter.x - WorldToScreen(canvasCenter, m_ViewZoom, m_ViewPanX, m_ViewPanY, selectedWorldCenter).x,
+            selectedScreenTopCenter.y - WorldToScreen(canvasCenter, m_ViewZoom, m_ViewPanX, m_ViewPanY, selectedWorldCenter).y);
+        const float rotationLength = std::hypot(rotationDirection.x, rotationDirection.y);
+        if (rotationLength > 1e-6f) {
+            rotationDirection.x /= rotationLength;
+            rotationDirection.y /= rotationLength;
+        } else {
+            rotationDirection = ImVec2(0.0f, -1.0f);
+        }
+        selectedRotationHandle = ImVec2(
+            selectedScreenTopCenter.x + rotationDirection.x * 26.0f,
+            selectedScreenTopCenter.y + rotationDirection.y * 26.0f);
 
         const ImU32 outlineColor = selectedLayer->locked ? IM_COL32(180, 180, 190, 255) : IM_COL32(255, 170, 0, 255);
         drawList->AddPolyline(selectedScreenQuad.data(), 4, outlineColor, true, 2.0f);
@@ -3973,6 +4299,12 @@ void CompositeModule::RenderStage() {
     };
 
     auto beginHandleInteraction = [&](CompositeLayer& layer, const HandleType handleType) {
+        const AffineTransform2D layerParentWorld = GetParentWorldTransform(m_Layers, layer);
+        const ImVec2 layerMouseLocal = TransformPoint(Inverse(layerParentWorld), mouseWorld);
+        const ImVec2 layerCenter = LayerLocalCenter(layer);
+        const ImVec2 layerAxisX = LayerLocalAxisX(layer);
+        const ImVec2 layerAxisY = LayerLocalAxisY(layer);
+
         m_ActiveHandle = handleType;
         m_StartScaleX = layer.scaleX;
         m_StartScaleY = layer.scaleY;
@@ -3981,50 +4313,45 @@ void CompositeModule::RenderStage() {
         m_StartY = layer.y;
         m_StartWidth = LayerWorldWidth(layer);
         m_StartHeight = LayerWorldHeight(layer);
-        const ImVec2 center = LayerCenterWorld(layer);
-        const ImVec2 axisX = LayerAxisX(layer);
-        const ImVec2 axisY = LayerAxisY(layer);
         const float halfW = m_StartWidth * 0.5f;
         const float halfH = m_StartHeight * 0.5f;
 
         switch (handleType) {
         case HandleType::ResizeTopLeft:
-            m_ResizeAnchorX = center.x + axisX.x * halfW + axisY.x * halfH;
-            m_ResizeAnchorY = center.y + axisX.y * halfW + axisY.y * halfH;
+            m_ResizeAnchorX = layerCenter.x + layerAxisX.x * halfW + layerAxisY.x * halfH;
+            m_ResizeAnchorY = layerCenter.y + layerAxisX.y * halfW + layerAxisY.y * halfH;
             break;
         case HandleType::ResizeTopRight:
-            m_ResizeAnchorX = center.x - axisX.x * halfW + axisY.x * halfH;
-            m_ResizeAnchorY = center.y - axisX.y * halfW + axisY.y * halfH;
+            m_ResizeAnchorX = layerCenter.x - layerAxisX.x * halfW + layerAxisY.x * halfH;
+            m_ResizeAnchorY = layerCenter.y - layerAxisX.y * halfW + layerAxisY.y * halfH;
             break;
         case HandleType::ResizeBottomRight:
-            m_ResizeAnchorX = center.x - axisX.x * halfW - axisY.x * halfH;
-            m_ResizeAnchorY = center.y - axisX.y * halfW - axisY.y * halfH;
+            m_ResizeAnchorX = layerCenter.x - layerAxisX.x * halfW - layerAxisY.x * halfH;
+            m_ResizeAnchorY = layerCenter.y - layerAxisX.y * halfW - layerAxisY.y * halfH;
             break;
         case HandleType::ResizeBottomLeft:
-            m_ResizeAnchorX = center.x + axisX.x * halfW - axisY.x * halfH;
-            m_ResizeAnchorY = center.y + axisX.y * halfW - axisY.y * halfH;
+            m_ResizeAnchorX = layerCenter.x + layerAxisX.x * halfW - layerAxisY.x * halfH;
+            m_ResizeAnchorY = layerCenter.y + layerAxisX.y * halfW - layerAxisY.y * halfH;
             break;
         case HandleType::ResizeLeft:
-            m_ResizeAnchorX = center.x + axisX.x * halfW;
-            m_ResizeAnchorY = center.y + axisX.y * halfW;
+            m_ResizeAnchorX = layerCenter.x + layerAxisX.x * halfW;
+            m_ResizeAnchorY = layerCenter.y + layerAxisX.y * halfW;
             break;
         case HandleType::ResizeRight:
-            m_ResizeAnchorX = center.x - axisX.x * halfW;
-            m_ResizeAnchorY = center.y - axisX.y * halfW;
+            m_ResizeAnchorX = layerCenter.x - layerAxisX.x * halfW;
+            m_ResizeAnchorY = layerCenter.y - layerAxisX.y * halfW;
             break;
         case HandleType::ResizeTop:
-            m_ResizeAnchorX = center.x + axisY.x * halfH;
-            m_ResizeAnchorY = center.y + axisY.y * halfH;
+            m_ResizeAnchorX = layerCenter.x + layerAxisY.x * halfH;
+            m_ResizeAnchorY = layerCenter.y + layerAxisY.y * halfH;
             break;
         case HandleType::ResizeBottom:
-            m_ResizeAnchorX = center.x - axisY.x * halfH;
-            m_ResizeAnchorY = center.y - axisY.y * halfH;
+            m_ResizeAnchorX = layerCenter.x - layerAxisY.x * halfH;
+            m_ResizeAnchorY = layerCenter.y - layerAxisY.y * halfH;
             break;
-        case HandleType::Rotate: {
-            const ImVec2 screenCenter = worldToScreen(center);
-            m_StartMouseAngle = std::atan2(mousePos.y - screenCenter.y, mousePos.x - screenCenter.x) - layer.rotation;
+        case HandleType::Rotate:
+            m_StartMouseAngle = std::atan2(layerMouseLocal.y - layerCenter.y, layerMouseLocal.x - layerCenter.x) - layer.rotation;
             break;
-        }
         case HandleType::Move:
         case HandleType::None:
         default:
@@ -4043,15 +4370,19 @@ void CompositeModule::RenderStage() {
         const float threshold = kSnapThresholdScreenPixels / std::max(0.001f, m_ViewZoom);
 
         for (const CompositeLayer& first : m_Layers) {
-            if (!first.visible || first.id == m_SelectedId) {
+            if (!first.visible || first.id == m_SelectedId || IsLayerDescendantOf(m_Layers, first.id, m_SelectedId)) {
                 continue;
             }
-            const FloatRect a = ComputeLayerBoundsWorld(first);
+            const FloatRect a = ComputeLayerBoundsWorld(m_Layers, first);
             for (const CompositeLayer& second : m_Layers) {
-                if (!second.visible || second.id == m_SelectedId || second.id == first.id) {
+                if (!second.visible ||
+                    second.id == m_SelectedId ||
+                    second.id == first.id ||
+                    IsLayerDescendantOf(m_Layers, second.id, m_SelectedId) ||
+                    IsLayerDescendantOf(m_Layers, second.id, first.id)) {
                     continue;
                 }
-                const FloatRect b = ComputeLayerBoundsWorld(second);
+                const FloatRect b = ComputeLayerBoundsWorld(m_Layers, second);
 
                 if (a.x + a.width <= movedBounds.x && movedBounds.x + movedBounds.width <= b.x) {
                     const float desiredX = (a.x + a.width + b.x - movedBounds.width) * 0.5f;
@@ -4076,20 +4407,25 @@ void CompositeModule::RenderStage() {
         }
     };
 
-    auto applyMoveSnapping = [&](const CompositeLayer& referenceLayer, float& targetX, float& targetY) {
+    auto applyMoveSnapping = [&](const CompositeLayer& referenceLayer, const AffineTransform2D& parentInverse, float& targetWorldX, float& targetWorldY) {
         if (!m_SnapEnabled) {
             return;
         }
 
         if (m_GridSize > 0.0f) {
-            targetX = std::round(targetX / m_GridSize) * m_GridSize;
-            targetY = std::round(targetY / m_GridSize) * m_GridSize;
+            targetWorldX = std::round(targetWorldX / m_GridSize) * m_GridSize;
+            targetWorldY = std::round(targetWorldY / m_GridSize) * m_GridSize;
         }
 
-        CompositeLayer temp = referenceLayer;
-        temp.x = targetX;
-        temp.y = targetY;
-        const FloatRect activeBounds = ComputeLayerBoundsWorld(temp);
+        auto buildActiveBounds = [&](const float worldX, const float worldY) {
+            CompositeLayer temp = referenceLayer;
+            const ImVec2 targetLocal = TransformPoint(parentInverse, ImVec2(worldX, worldY));
+            temp.x = targetLocal.x;
+            temp.y = targetLocal.y;
+            return ComputeLayerBoundsWorld(m_Layers, temp);
+        };
+
+        FloatRect activeBounds = buildActiveBounds(targetWorldX, targetWorldY);
         const float activeLeft = activeBounds.x;
         const float activeCenterX = activeBounds.x + activeBounds.width * 0.5f;
         const float activeRight = activeBounds.x + activeBounds.width;
@@ -4125,11 +4461,13 @@ void CompositeModule::RenderStage() {
         };
 
         for (const CompositeLayer& otherLayer : m_Layers) {
-            if (!otherLayer.visible || otherLayer.id == referenceLayer.id) {
+            if (!otherLayer.visible ||
+                otherLayer.id == referenceLayer.id ||
+                IsLayerDescendantOf(m_Layers, otherLayer.id, referenceLayer.id)) {
                 continue;
             }
 
-            const FloatRect otherBounds = ComputeLayerBoundsWorld(otherLayer);
+            const FloatRect otherBounds = ComputeLayerBoundsWorld(m_Layers, otherLayer);
             const float otherLeft = otherBounds.x;
             const float otherCenterX = otherBounds.x + otherBounds.width * 0.5f;
             const float otherRight = otherBounds.x + otherBounds.width;
@@ -4154,16 +4492,40 @@ void CompositeModule::RenderStage() {
             considerY(-activeCenterY, 0.0f, activeBounds.x, activeRight);
         }
 
+        if (m_SnapToExportBounds && m_ExportSettings.boundsMode == CompositeExportBoundsMode::Custom) {
+            const FloatRect exportBounds {
+                m_ExportSettings.customX,
+                m_ExportSettings.customY,
+                m_ExportSettings.customWidth,
+                m_ExportSettings.customHeight
+            };
+            if (IsRectValid(exportBounds)) {
+                const float exportLeft = exportBounds.x;
+                const float exportCenterX = exportBounds.x + exportBounds.width * 0.5f;
+                const float exportRight = exportBounds.x + exportBounds.width;
+                const float exportTop = exportBounds.y;
+                const float exportCenterY = exportBounds.y + exportBounds.height * 0.5f;
+                const float exportBottom = exportBounds.y + exportBounds.height;
+                considerX(exportLeft - activeLeft, exportLeft, std::min(activeBounds.y, exportBounds.y), std::max(activeBottom, exportBottom));
+                considerX(exportRight - activeRight, exportRight, std::min(activeBounds.y, exportBounds.y), std::max(activeBottom, exportBottom));
+                considerY(exportTop - activeTop, exportTop, std::min(activeBounds.x, exportBounds.x), std::max(activeRight, exportRight));
+                considerY(exportBottom - activeBottom, exportBottom, std::min(activeBounds.x, exportBounds.x), std::max(activeRight, exportRight));
+                considerX(exportCenterX - activeCenterX, exportCenterX, std::min(activeBounds.y, exportBounds.y), std::max(activeBottom, exportBottom));
+                considerY(exportCenterY - activeCenterY, exportCenterY, std::min(activeBounds.x, exportBounds.x), std::max(activeRight, exportRight));
+            }
+        }
+
         if (snappedX) {
-            targetX += bestDeltaX;
+            targetWorldX += bestDeltaX;
             addGuideWorld(bestXGuideA, bestXGuideB, IM_COL32(80, 200, 255, 255));
         }
         if (snappedY) {
-            targetY += bestDeltaY;
+            targetWorldY += bestDeltaY;
             addGuideWorld(bestYGuideA, bestYGuideB, IM_COL32(80, 200, 255, 255));
         }
 
-        addSpacingGuidesForMove(activeBounds, targetX, targetY);
+        activeBounds = buildActiveBounds(targetWorldX, targetWorldY);
+        addSpacingGuidesForMove(activeBounds, targetWorldX, targetWorldY);
     };
 
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
@@ -4283,8 +4645,12 @@ void CompositeModule::RenderStage() {
                 beginHandleInteraction(*selectedLayer, HandleType::ResizeBottom);
             } else if (!selectedLayer->preserveAspectRatio && distanceTo(selectedScreenLeftCenter) < threshold) {
                 beginHandleInteraction(*selectedLayer, HandleType::ResizeLeft);
-            } else if (MapWorldToLayerUv(*selectedLayer, mouseWorld.x, mouseWorld.y, m_StartMouseAngle, m_StartMouseDist)) {
-                beginHandleInteraction(*selectedLayer, HandleType::Move);
+            } else {
+                float hitU = 0.0f;
+                float hitV = 0.0f;
+                if (MapWorldToLayerUv(m_Layers, *selectedLayer, mouseWorld.x, mouseWorld.y, hitU, hitV)) {
+                    beginHandleInteraction(*selectedLayer, HandleType::Move);
+                }
             }
         }
 
@@ -4408,24 +4774,31 @@ void CompositeModule::RenderStage() {
             MarkDocumentDirty();
         }
     } else if (!m_MiddleMousePanActive && active && m_ActiveHandle != HandleType::None && selectedLayer && !selectedLayer->locked) {
+        const AffineTransform2D activeParentWorld = GetParentWorldTransform(m_Layers, *selectedLayer);
+        const AffineTransform2D activeParentInverse = Inverse(activeParentWorld);
+        const ImVec2 activeMouseLocal = TransformPoint(activeParentInverse, mouseWorld);
+        const ImVec2 activeLocalCenter = LayerLocalCenter(*selectedLayer);
         const float baseWidth = std::max(1.0f, LayerBaseWidth(*selectedLayer));
         const float baseHeight = std::max(1.0f, LayerBaseHeight(*selectedLayer));
-        const ImVec2 center = LayerCenterWorld(*selectedLayer);
-        const ImVec2 screenCenter = worldToScreen(center);
         bool changed = false;
 
         if (m_ActiveHandle == HandleType::Move) {
             const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-            float targetX = m_StartX + delta.x / std::max(0.001f, m_ViewZoom);
-            float targetY = m_StartY + delta.y / std::max(0.001f, m_ViewZoom);
-            applyMoveSnapping(*selectedLayer, targetX, targetY);
-            if (std::abs(targetX - selectedLayer->x) > 0.0001f || std::abs(targetY - selectedLayer->y) > 0.0001f) {
-                selectedLayer->x = targetX;
-                selectedLayer->y = targetY;
+            const ImVec2 worldDelta(
+                delta.x / std::max(0.001f, m_ViewZoom),
+                delta.y / std::max(0.001f, m_ViewZoom));
+            const ImVec2 startWorldTopLeft = TransformPoint(activeParentWorld, ImVec2(m_StartX, m_StartY));
+            float targetWorldX = startWorldTopLeft.x + worldDelta.x;
+            float targetWorldY = startWorldTopLeft.y + worldDelta.y;
+            applyMoveSnapping(*selectedLayer, activeParentInverse, targetWorldX, targetWorldY);
+            const ImVec2 targetLocal = TransformPoint(activeParentInverse, ImVec2(targetWorldX, targetWorldY));
+            if (std::abs(targetLocal.x - selectedLayer->x) > 0.0001f || std::abs(targetLocal.y - selectedLayer->y) > 0.0001f) {
+                selectedLayer->x = targetLocal.x;
+                selectedLayer->y = targetLocal.y;
                 changed = true;
             }
         } else if (m_ActiveHandle == HandleType::Rotate) {
-            float targetRotation = std::atan2(mousePos.y - screenCenter.y, mousePos.x - screenCenter.x) - m_StartMouseAngle;
+            float targetRotation = std::atan2(activeMouseLocal.y - activeLocalCenter.y, activeMouseLocal.x - activeLocalCenter.x) - m_StartMouseAngle;
             if (m_SnapEnabled && m_RotateSnapStep > 0.0f) {
                 float degrees = RadiansToDegrees(targetRotation);
                 degrees = std::round(degrees / m_RotateSnapStep) * m_RotateSnapStep;
@@ -4439,7 +4812,7 @@ void CompositeModule::RenderStage() {
             const ImVec2 anchor(m_ResizeAnchorX, m_ResizeAnchorY);
             const ImVec2 axisX(std::cos(m_StartRotation), std::sin(m_StartRotation));
             const ImVec2 axisY(-std::sin(m_StartRotation), std::cos(m_StartRotation));
-            const ImVec2 delta(mouseWorld.x - anchor.x, mouseWorld.y - anchor.y);
+            const ImVec2 delta(activeMouseLocal.x - anchor.x, activeMouseLocal.y - anchor.y);
             const float alongX = delta.x * axisX.x + delta.y * axisX.y;
             const float alongY = delta.x * axisY.x + delta.y * axisY.y;
             const bool preserveAspect = selectedLayer->preserveAspectRatio;

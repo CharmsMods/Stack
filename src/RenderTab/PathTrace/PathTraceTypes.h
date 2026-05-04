@@ -10,7 +10,7 @@
 namespace RenderPathTrace {
 
 inline constexpr int kSpectralSampleCount = 4;
-inline constexpr int kPathTraceDebugMaxBounces = 8;
+inline constexpr int kPathTraceDebugMaxBounces = 16;
 
 enum class PathTraceFeatureMask : std::uint32_t {
     None = 0,
@@ -22,7 +22,9 @@ enum class PathTraceFeatureMask : std::uint32_t {
     SpectralDielectricEta = 1u << 5,
     ClearCoatLayering = 1u << 6,
     PolishedFrostedLayering = 1u << 7,
-    ThinFilmDeferred = 1u << 8
+    ThinFilmDeferred = 1u << 8,
+    FogMedium = 1u << 9,
+    LaserLight = 1u << 10
 };
 
 inline PathTraceFeatureMask operator|(PathTraceFeatureMask left, PathTraceFeatureMask right) {
@@ -47,6 +49,7 @@ struct alignas(16) GpuMaterial {
     float params1[4] {};
     float params2[4] {};
     int layerInfo[4] {};
+    int textureRefs[4] {};
 };
 
 struct alignas(16) GpuMaterialLayer {
@@ -90,6 +93,8 @@ struct alignas(16) GpuLight {
     float params[4] {};
     float basis0[4] {};
     float basis1[4] {};
+    float laserParams[4] {};
+    float laserInfo[4] {};
 };
 
 struct alignas(16) GpuEnvironment {
@@ -97,6 +102,8 @@ struct alignas(16) GpuEnvironment {
     float horizonCoefficients[4] {};
     float groundCoefficients[4] {};
     float params[4] {};
+    float fogColorCoefficients[4] {};
+    float fogParams[4] {};
 };
 
 struct CompiledPathTraceScene {
@@ -129,6 +136,8 @@ struct PathTraceDebugBounce {
     int decision = 0;
     RenderFoundation::Vec3 geometricNormal {};
     RenderFoundation::Vec3 shadingNormal {};
+    std::array<float, 4> mediumInfo {};
+    std::array<float, 4> lightInfo {};
     RenderFoundation::Vec3 spawnedOrigin {};
     RenderFoundation::Vec3 spawnedDirection {};
 };

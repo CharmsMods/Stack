@@ -17,6 +17,7 @@ public:
     float GetFocusDistance() const { return m_FocusDistance; }
     float GetApertureRadius() const { return m_ApertureRadius; }
     float GetExposure() const { return m_Exposure; }
+    float GetWhiteBalanceTemperature() const { return m_WhiteBalanceTemperature; }
     std::uint64_t GetRevision() const { return m_Revision; }
     const std::string& GetLastChangeReason() const { return m_LastChangeReason; }
 
@@ -31,6 +32,7 @@ public:
     bool SetFocusDistance(float value);
     bool SetApertureRadius(float value);
     bool SetExposure(float value);
+    bool SetWhiteBalanceTemperature(float value);
     bool ResetToDefaultView(const std::string& reason = {});
     bool ApplySnapshot(
         const RenderFloat3& position,
@@ -40,6 +42,7 @@ public:
         float focusDistance,
         float apertureRadius,
         float exposure,
+        float whiteBalanceTemperature,
         const std::string& reason);
     bool ApplySnapshot(
         float yawDegrees,
@@ -48,6 +51,7 @@ public:
         float focusDistance,
         float apertureRadius,
         float exposure,
+        float whiteBalanceTemperature,
         const std::string& reason);
 
 private:
@@ -57,10 +61,11 @@ private:
     RenderFloat3 m_Position {};
     float m_YawDegrees = 18.0f;
     float m_PitchDegrees = -12.0f;
-    float m_FieldOfViewDegrees = 50.0f;
+    float m_FieldOfViewDegrees = 80.0f;
     float m_FocusDistance = 6.0f;
     float m_ApertureRadius = 0.0f;
     float m_Exposure = 1.0f;
+    float m_WhiteBalanceTemperature = 6500.0f;
     std::uint64_t m_Revision = 0;
     std::string m_LastChangeReason;
 };

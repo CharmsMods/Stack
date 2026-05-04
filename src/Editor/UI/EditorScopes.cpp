@@ -15,17 +15,16 @@ EditorScopes::~EditorScopes() {}
 
 void EditorScopes::Initialize() {}
 
-void EditorScopes::AnalyzePixels(EditorModule* editor) {
-    int w, h;
-    auto pixels = editor->GetPipeline().GetScopesPixels(w, h);
-    if (pixels.empty()) return;
-
-    // Reset data
+void EditorScopes::AnalyzePixels(const std::vector<unsigned char>& pixels, int w, int h) {
     std::fill(m_HistR.begin(), m_HistR.end(), 0.0f);
     std::fill(m_HistG.begin(), m_HistG.end(), 0.0f);
     std::fill(m_HistB.begin(), m_HistB.end(), 0.0f);
     std::fill(m_HistL.begin(), m_HistL.end(), 0.0f);
     m_VectorPoints.clear();
+    m_ParadeData.clear();
+    if (pixels.empty() || w <= 0 || h <= 0) {
+        return;
+    }
     
     // Parade Setup (1 bin per pixel column if small enough)
     m_ParadeData.assign(w, ParadeColumn{0});
@@ -79,39 +78,33 @@ void EditorScopes::AnalyzePixels(EditorModule* editor) {
     }
 }
 
-void EditorScopes::Render(EditorModule* editor) {
-    ImGui::Begin("Scopes Panel");
-
-    // Throttled analysis
+void EditorScopes::RenderScopeNode(EditorModule* editor, EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId) {
     m_UpdateTimer += ImGui::GetIO().DeltaTime;
-    if (m_UpdateTimer > m_UpdateInterval && editor->GetPipeline().HasSourceImage()) {
-        AnalyzePixels(editor);
+    if (m_UpdateTimer > m_UpdateInterval && sourceNodeId > 0) {
+        int w = 0;
+        int h = 0;
+        std::vector<unsigned char> pixels = editor->GetScopePixelsForNode(sourceNodeId, w, h);
+        AnalyzePixels(pixels, w, h);
         m_UpdateTimer = 0.0f;
     }
 
-    if (!editor->GetPipeline().HasSourceImage()) {
-        ImGui::TextDisabled("No image loaded for analysis.");
-        ImGui::End();
+    if (sourceNodeId <= 0) {
+        AnalyzePixels({}, 0, 0);
+        ImGui::TextDisabled("Connect an image or mask output.");
         return;
     }
 
-    if (ImGui::BeginTabBar("ScopeTabs")) {
-        if (ImGui::BeginTabItem("Histogram")) {
+    switch (scopeKind) {
+        case EditorNodeGraph::ScopeKind::Histogram:
             DrawHistogram();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Vectorscope")) {
+            break;
+        case EditorNodeGraph::ScopeKind::Vectorscope:
             DrawVectorscope();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("RGB Parade")) {
+            break;
+        case EditorNodeGraph::ScopeKind::RGBParade:
             DrawRGBParade();
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+            break;
     }
-
-    ImGui::End();
 }
 
 void EditorScopes::DrawHistogram() {

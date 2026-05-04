@@ -9,7 +9,8 @@ enum class RenderLightType {
     RectArea = 0,
     Point,
     Spot,
-    Sun
+    Sun,
+    Laser
 };
 
 struct RenderLight {
@@ -23,6 +24,11 @@ struct RenderLight {
     float range = 20.0f;
     float innerConeDegrees = 18.0f;
     float outerConeDegrees = 32.0f;
+    float laserWavelengthNm = 532.0f;
+    float laserLinewidthNm = 1.0f;
+    float laserApertureRadius = 0.01f;
+    float laserBeamWaistRadius = 0.002f;
+    float laserBeamQuality = 1.0f;
     bool enabled = true;
 };
 

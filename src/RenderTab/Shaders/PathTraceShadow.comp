@@ -20,5 +20,8 @@ void main() {
     }
 
     uint rayIndex = uint(shadowRay.meta.x);
+    if (FogEnabled()) {
+        shadowRay.contribution *= FogTransmittanceScalar(shadowRay.originMaxDistance.w);
+    }
     uRayStates[rayIndex].radiance += shadowRay.contribution;
 }

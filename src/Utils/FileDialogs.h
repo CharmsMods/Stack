@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace FileDialogs {
 
@@ -14,6 +15,9 @@ std::string OpenRenderGltfFileDialog(const char* title = "Import glTF Scene");
 std::string OpenWebProjectFileDialog(const char* title = "Import Web Project (.mns.json)");
 std::string OpenProjectFileDialog(const char* title = "Load Project (.stack/.comp)");
 std::string SaveProjectFileDialog(const char* title = "Save Project (.stack)", const char* defaultFileName = "project.stack");
+std::string OpenThemePresetFileDialog(const char* title = "Import Theme Preset");
+std::string SaveThemePresetFileDialog(const char* title = "Export Theme Preset", const char* defaultFileName = "theme_preset.stacktheme.json");
 std::string OpenFolderDialog(const char* title = "Select Folder");
+std::vector<std::string> OpenMultipleFilesDialog(const char* title = "Select Files", const char* filter = "All Files\0*.*\0");
 
 } // namespace FileDialogs

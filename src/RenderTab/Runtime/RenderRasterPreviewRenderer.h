@@ -25,6 +25,7 @@ public:
     int GetUploadedVertexCount() const { return m_UploadedVertexCount; }
     int GetUploadedMaterialCount() const { return m_UploadedMaterialCount; }
     int GetUploadedTextureCount() const { return m_UploadedTextureCount; }
+    double GetLastUploadMilliseconds() const { return m_LastUploadMilliseconds; }
     const std::string& GetLastError() const { return m_LastError; }
 
 private:
@@ -54,9 +55,11 @@ private:
     int m_TargetWidth = 0;
     int m_TargetHeight = 0;
     std::uint64_t m_UploadedSceneRevision = 0;
+    std::uint64_t m_UploadedSceneKey = 0;
     int m_UploadedVertexCount = 0;
     int m_UploadedMaterialCount = 0;
     int m_UploadedLightCount = 0;
     int m_UploadedTextureCount = 0;
+    double m_LastUploadMilliseconds = 0.0;
     std::string m_LastError;
 };

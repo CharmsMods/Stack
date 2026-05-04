@@ -19,6 +19,7 @@ public:
         const ViewportInputFrame& input,
         const SceneSnapshot& snapshot,
         const CompiledScene& compiledScene,
+        RenderFoundation::Camera& viewportCamera,
         RenderFoundation::State& state,
         bool& openContextMenu);
 
@@ -27,7 +28,16 @@ public:
         const ViewportInputFrame& input,
         const SceneSnapshot& snapshot,
         const CompiledScene& compiledScene,
+        const RenderFoundation::Camera& viewportCamera,
         const RenderFoundation::State& state) const;
+
+    bool TraceFirstPrimitiveHit(
+        const CompiledScene& compiledScene,
+        const RenderFoundation::Vec3& rayOrigin,
+        const RenderFoundation::Vec3& rayDirection,
+        RenderFoundation::Vec3& outHitPoint,
+        RenderFoundation::Vec3& outHitNormal,
+        float& outHitDistance) const;
 
     bool IsNavigationActive() const { return m_NavigationActive; }
 
@@ -50,8 +60,8 @@ private:
     float m_RightMouseStartX = 0.0f;
     float m_RightMouseStartY = 0.0f;
     bool m_GizmoDragging = false;
-    int m_HoveredAxis = -1;
-    int m_ActiveAxis = -1;
+    int m_HoveredAxisMask = 0;
+    int m_ActiveAxisMask = 0;
     RenderFoundation::Selection m_GizmoSelection {};
     RenderFoundation::Transform m_GizmoStartTransform {};
     ImVec2 m_GizmoDragStartMouse {};

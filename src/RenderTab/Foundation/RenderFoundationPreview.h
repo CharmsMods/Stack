@@ -14,7 +14,8 @@ enum class PreviewGlyph : std::uint8_t {
     LightPoint = 3,
     LightSpot = 4,
     LightArea = 5,
-    LightDirectional = 6
+    LightDirectional = 6,
+    LightLaser = 7
 };
 
 struct ProjectedElement {

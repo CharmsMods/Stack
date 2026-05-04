@@ -40,7 +40,19 @@ Desktop.ini
 node_modules/
 dist/
 
-# --- User Specified ---
-Current Plan Files and Documentation In Use/
-OLD/
+# --- Project Specific Excludes ---
+imgui.ini
+BUILDING.md
 build.bat
+build.cmd
+dev-shell.cmd
+
+# Folders to exclude from push
+/Current Plan Files and Documentation In Use/
+/UI research/
+/Documentation/
+/OLD/
+/Redefining Rendering/
+/Landing Page/
+/Library/
+/build_ninja_test/

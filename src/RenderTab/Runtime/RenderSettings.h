@@ -3,11 +3,19 @@
 #include <cstdint>
 #include <string>
 
+enum class RenderTerminationMode {
+    BruteForce = 0,
+    Optimized,
+    Smart
+};
+
+
 struct RenderFinalRenderSettings {
     int resolutionX = 1920;
     int resolutionY = 1080;
     int sampleTarget = 256;
     int maxBounceCount = 8;
+    RenderTerminationMode terminationMode = RenderTerminationMode::Smart;
     std::string outputName = "Final Render";
 };
 
@@ -55,6 +63,8 @@ enum class RenderDebugViewMode {
     BvhDepth
 };
 
+
+
 class RenderSettings {
 public:
     RenderSettings();
@@ -65,6 +75,7 @@ public:
     bool IsAccumulationEnabled() const { return m_AccumulationEnabled; }
     RenderIntegratorMode GetIntegratorMode() const { return m_IntegratorMode; }
     int GetMaxBounceCount() const { return m_MaxBounceCount; }
+    RenderTerminationMode GetTerminationMode() const { return m_TerminationMode; }
     RenderDisplayMode GetDisplayMode() const { return m_DisplayMode; }
     RenderTonemapMode GetTonemapMode() const { return m_TonemapMode; }
     RenderGizmoMode GetGizmoMode() const { return m_GizmoMode; }
@@ -75,6 +86,7 @@ public:
     int GetFinalRenderResolutionY() const { return m_FinalRenderSettings.resolutionY; }
     int GetFinalRenderSampleTarget() const { return m_FinalRenderSettings.sampleTarget; }
     int GetFinalRenderMaxBounceCount() const { return m_FinalRenderSettings.maxBounceCount; }
+    RenderTerminationMode GetFinalRenderTerminationMode() const { return m_FinalRenderSettings.terminationMode; }
     const std::string& GetFinalRenderOutputName() const { return m_FinalRenderSettings.outputName; }
     bool IsBvhTraversalEnabled() const { return m_UseBvhTraversal; }
     std::uint64_t GetRevision() const { return m_Revision; }
@@ -85,6 +97,7 @@ public:
     bool SetAccumulationEnabled(bool enabled);
     bool SetIntegratorMode(RenderIntegratorMode mode);
     bool SetMaxBounceCount(int count);
+    bool SetTerminationMode(RenderTerminationMode mode);
     bool SetDisplayMode(RenderDisplayMode mode);
     bool SetTonemapMode(RenderTonemapMode mode);
     bool SetGizmoMode(RenderGizmoMode mode);
@@ -93,6 +106,7 @@ public:
     bool SetFinalRenderResolution(int width, int height);
     bool SetFinalRenderSampleTarget(int target);
     bool SetFinalRenderMaxBounceCount(int count);
+    bool SetFinalRenderTerminationMode(RenderTerminationMode mode);
     bool SetFinalRenderOutputName(const std::string& outputName);
     bool SetBvhTraversalEnabled(bool enabled);
 
@@ -105,6 +119,7 @@ private:
     bool m_AccumulationEnabled = true;
     RenderIntegratorMode m_IntegratorMode = RenderIntegratorMode::RasterPreview;
     int m_MaxBounceCount = 4;
+    RenderTerminationMode m_TerminationMode = RenderTerminationMode::Optimized;
     RenderDisplayMode m_DisplayMode = RenderDisplayMode::Color;
     RenderTonemapMode m_TonemapMode = RenderTonemapMode::AcesFilm;
     RenderGizmoMode m_GizmoMode = RenderGizmoMode::Translate;

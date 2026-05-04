@@ -1,4 +1,5 @@
 #pragma once
+#include "Editor/NodeGraph/EditorNodeGraph.h"
 #include <vector>
 #include <memory>
 
@@ -10,10 +11,10 @@ public:
     ~EditorScopes();
 
     void Initialize();
-    void Render(EditorModule* editor);
+    void RenderScopeNode(EditorModule* editor, EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId);
 
 private:
-    void AnalyzePixels(EditorModule* editor);
+    void AnalyzePixels(const std::vector<unsigned char>& pixels, int w, int h);
     
     // UI Drawing Helpers
     void DrawHistogram();

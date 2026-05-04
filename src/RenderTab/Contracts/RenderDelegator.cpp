@@ -8,6 +8,30 @@
 
 namespace RenderContracts {
 
+RenderPathTrace::PathTraceRenderer& RenderDelegator::ResolvePathTraceRenderer(PathTraceTarget target) {
+    switch (target) {
+        case PathTraceTarget::CameraPreview:
+            return m_CameraPathTraceRenderer;
+        case PathTraceTarget::FinalRender:
+            return m_FinalPathTraceRenderer;
+        case PathTraceTarget::Viewport:
+        default:
+            return m_ViewportPathTraceRenderer;
+    }
+}
+
+const RenderPathTrace::PathTraceRenderer& RenderDelegator::ResolvePathTraceRenderer(PathTraceTarget target) const {
+    switch (target) {
+        case PathTraceTarget::CameraPreview:
+            return m_CameraPathTraceRenderer;
+        case PathTraceTarget::FinalRender:
+            return m_FinalPathTraceRenderer;
+        case PathTraceTarget::Viewport:
+        default:
+            return m_ViewportPathTraceRenderer;
+    }
+}
+
 RenderDelegator::~RenderDelegator() {
     Shutdown();
 }
@@ -30,12 +54,15 @@ bool RenderDelegator::RenderViewport(
     }
 
     if (settings.viewMode == RenderFoundation::ViewMode::PathTrace) {
-        return m_PathTraceRenderer.RenderFrame(
+        return m_ViewportPathTraceRenderer.RenderFrame(
+            RenderPathTrace::RenderSurfaceClass::Viewport,
             compiledScene.pathTraceScene,
+            compiledScene.scene,
             settings,
             accumulationManager,
             width,
             height,
+            true,
             outTextureId,
             errorMessage);
     }
@@ -69,7 +96,7 @@ bool RenderDelegator::CaptureViewportPixels(
     std::string& errorMessage) {
 
     if (settings.viewMode == RenderFoundation::ViewMode::PathTrace) {
-        return m_PathTraceRenderer.CaptureVisiblePixels(width, height, accumulationManager, outPixels, errorMessage);
+        return m_ViewportPathTraceRenderer.CaptureVisiblePixels(width, height, accumulationManager, outPixels, errorMessage);
     }
 
     unsigned int textureId = 0;
@@ -81,9 +108,77 @@ bool RenderDelegator::CaptureViewportPixels(
     return CaptureTexturePixels(textureId, width, height, outPixels, errorMessage);
 }
 
+bool RenderDelegator::RenderPathTraceTarget(
+    PathTraceTarget target,
+    const CompiledScene& compiledScene,
+    const RenderFoundation::Settings& settings,
+    AccumulationManager& accumulationManager,
+    int width,
+    int height,
+    bool allowNewSamples,
+    unsigned int& outTextureId,
+    std::string& errorMessage) {
+
+    errorMessage.clear();
+    outTextureId = 0;
+    if (!compiledScene.valid) {
+        errorMessage = "The render scene snapshot is not compiled.";
+        return false;
+    }
+
+    return ResolvePathTraceRenderer(target).RenderFrame(
+        target == PathTraceTarget::FinalRender
+            ? RenderPathTrace::RenderSurfaceClass::FinalRender
+            : (target == PathTraceTarget::CameraPreview
+                ? RenderPathTrace::RenderSurfaceClass::CameraPreview
+                : RenderPathTrace::RenderSurfaceClass::Viewport),
+        compiledScene.pathTraceScene,
+        compiledScene.scene,
+        settings,
+        accumulationManager,
+        width,
+        height,
+        allowNewSamples,
+        outTextureId,
+        errorMessage);
+}
+
+bool RenderDelegator::CapturePathTraceTargetPixels(
+    PathTraceTarget target,
+    int width,
+    int height,
+    const AccumulationManager& accumulationManager,
+    std::vector<unsigned char>& outPixels,
+    std::string& errorMessage) {
+
+    return ResolvePathTraceRenderer(target).CaptureVisiblePixels(width, height, accumulationManager, outPixels, errorMessage);
+}
+
+bool RenderDelegator::CapturePathTraceTargetLinearPixels(
+    PathTraceTarget target,
+    const RenderFoundation::Settings& settings,
+    int width,
+    int height,
+    const AccumulationManager& accumulationManager,
+    RenderPathTrace::LinearCaptureMode captureMode,
+    std::vector<float>& outPixels,
+    std::string& errorMessage) {
+
+    return ResolvePathTraceRenderer(target).CaptureLinearPixels(
+        settings,
+        width,
+        height,
+        accumulationManager,
+        captureMode,
+        outPixels,
+        errorMessage);
+}
+
 void RenderDelegator::Shutdown() {
     m_RasterPreviewRenderer.Shutdown();
-    m_PathTraceRenderer.Shutdown();
+    m_ViewportPathTraceRenderer.Shutdown();
+    m_CameraPathTraceRenderer.Shutdown();
+    m_FinalPathTraceRenderer.Shutdown();
 }
 
 bool RenderDelegator::CaptureTexturePixels(

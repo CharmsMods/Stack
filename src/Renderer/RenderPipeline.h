@@ -3,6 +3,7 @@
 #include "Renderer/GLHelpers.h"
 #include "Renderer/FullscreenQuad.h"
 #include "Editor/Layers/LayerBase.h"
+#include "Renderer/MaskRenderTypes.h"
 #include <vector>
 #include <memory>
 
@@ -20,9 +21,14 @@ public:
     // Load a source image from disk into the pipeline
     bool LoadSourceImage(const std::string& filepath);
     void LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch);
+    void Clear();
+    void ClearOutput();
+    void UploadOutputFromPixels(const unsigned char* data, int w, int h, int ch);
 
     // Execute the full layer stack sequentially (ping-pong rendering)
     void Execute(const std::vector<std::shared_ptr<LayerBase>>& layers);
+    void ExecuteMasked(const std::vector<RenderLayerStep>& steps, const std::vector<RenderMaskSource>& masks);
+    void ExecuteGraph(const RenderGraphSnapshot& graph);
 
     // Returns the final output texture ID for display in the ImGui viewport
     unsigned int GetOutputTexture() const { return m_OutputTexture; }
@@ -57,7 +63,23 @@ private:
     unsigned int m_PingFBO;
     unsigned int m_PongFBO;
     unsigned int m_OutputTexture;   // Points to whichever is the final result
+    unsigned int m_ExternalOutputTexture;
+    unsigned int m_MaskProgram;
+    unsigned int m_MaskBlendProgram;
+    unsigned int m_MixProgram;
+    unsigned int m_MaskUtilityProgram;
+    unsigned int m_ImageToMaskProgram;
+    unsigned int m_ImageGeneratorProgram;
     std::vector<unsigned char> m_SourcePixels;
 
     void CleanupFBOs();
+    void EnsureMaskPrograms();
+    void EnsureMixProgram();
+    void EnsureUtilityPrograms();
+    unsigned int GenerateMaskTexture(const RenderMaskSource& mask);
+    unsigned int GenerateImageTexture(const RenderGraphNode& node);
+    void RenderMaskUtility(unsigned int inputMask, const RenderGraphNode& node, unsigned int targetFBO);
+    void RenderImageToMask(unsigned int inputImage, const RenderGraphNode& node, unsigned int targetFBO);
+    void RenderMaskBlend(unsigned int originalTexture, unsigned int processedTexture, unsigned int maskTexture, unsigned int targetFBO);
+    void RenderMixBlend(unsigned int textureA, unsigned int textureB, unsigned int factorTexture, float factor, RenderMixBlendMode mode, unsigned int targetFBO);
 };

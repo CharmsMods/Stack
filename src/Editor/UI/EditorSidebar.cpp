@@ -8,10 +8,7 @@ EditorSidebar::EditorSidebar() {}
 EditorSidebar::~EditorSidebar() {}
 
 void EditorSidebar::Initialize() {
-    m_LayersTab.Initialize();
-    m_CanvasTab.Initialize();
-    m_SelectedTab.Initialize();
-    m_PipelineTab.Initialize();
+    m_NodeGraphUI.Initialize();
 }
 
 void EditorSidebar::Render(EditorModule* editor) {
@@ -33,29 +30,8 @@ void EditorSidebar::Render(EditorModule* editor) {
 
     ImGui::Separator();
 
-    if (ImGui::BeginTabBar("SidebarTabs")) {
-        if (ImGui::BeginTabItem("Layers")) {
-            m_LayersTab.Render(editor);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Canvas")) {
-            m_CanvasTab.Render(editor);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Selected")) {
-            m_SelectedTab.Render(editor);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Pipeline")) {
-            m_PipelineTab.Render(editor);
-            ImGui::EndTabItem();
-        }
-
-        ImGui::EndTabBar();
-    }
+    (void)editor->ConsumeSelectedTabFocusRequest();
+    m_NodeGraphUI.Render(editor);
 
     ImGui::End();
 }

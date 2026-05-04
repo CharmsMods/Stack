@@ -22,5 +22,7 @@ enum class RenderValidationSceneId {
     FrostedPanelStudy,
     FogBeamStudy,
     CornellBox,
+    CausticsStudy,
+    LaserBenchStudy,
     Custom
 };
