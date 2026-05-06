@@ -1,8 +1,30 @@
 #include "ImGuiExtras.h"
 #include <imgui_internal.h>
+#include <algorithm>
 #include <cmath>
 
 namespace ImGuiExtras {
+
+float AnimateTowards(float current, float target, float deltaTime, float speed) {
+    if (deltaTime <= 0.0f) {
+        return target;
+    }
+
+    const float factor = 1.0f - std::exp(-std::max(speed, 0.0f) * deltaTime);
+    current += (target - current) * factor;
+
+    if (std::abs(current - target) < 0.0005f) {
+        return target;
+    }
+
+    return current;
+}
+
+float EaseOutCubic(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    const float inverse = 1.0f - value;
+    return 1.0f - (inverse * inverse * inverse);
+}
 
 void DrawSpinner(const char* label, float radius, int thickness, ImU32 color) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -14,13 +36,14 @@ void DrawSpinner(const char* label, float radius, int thickness, ImU32 color) {
     const ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
 
     const float time = static_cast<float>(ImGui::GetTime());
+    const float pulse = 0.94f + (0.06f * std::sin(time * 2.35f));
     const float start = std::abs(std::sin(time * 1.8f)) * 6.0f;
     const float aMin = IM_PI * 2.0f * (start / 8.0f);
     const float aMax = IM_PI * 2.0f * ((start + 6.0f) / 8.0f);
     const ImVec2 center(bb.Min.x + radius, bb.Min.y + radius);
 
     window->DrawList->PathClear();
-    window->DrawList->PathArcTo(center, radius, aMin, aMax, 24);
+    window->DrawList->PathArcTo(center, radius * pulse, aMin, aMax, 24);
     window->DrawList->PathStroke(color, false, static_cast<float>(thickness));
 
     const ImVec2 textSize = ImGui::CalcTextSize(label);

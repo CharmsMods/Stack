@@ -224,7 +224,7 @@ void EditorViewport::Render(EditorModule* editor) {
     unsigned int sourceTex = pipeline.GetSourceTexture();
     if (currentFactor > 0.001f) {
         drawList->AddImage((ImTextureID)(intptr_t)sourceTex, imageMin, imageMax,
-                           ImVec2(0, 0), ImVec2(1, 1),
+                           ImVec2(0, 1), ImVec2(1, 0),
                            IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f)));
     }
 

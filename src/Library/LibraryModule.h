@@ -3,7 +3,15 @@
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
+
+struct LibraryCardMotionState {
+    float hover = 0.0f;
+    float selected = 0.0f;
+    float reveal = 1.0f;
+    int lastSeenFrame = 0;
+};
 
 class LibraryModule : public IAppModule {
 public:
@@ -22,8 +30,8 @@ public:
     const char* GetName() override { return "Library"; }
 
 private:
-    void RenderProjectCard(const struct ProjectEntry& project, class EditorModule* editor);
-    void RenderAssetCard(const struct AssetEntry& asset, class EditorModule* editor);
+    bool RenderProjectCard(const struct ProjectEntry& project, class EditorModule* editor);
+    bool RenderAssetCard(const struct AssetEntry& asset, class EditorModule* editor);
     void RenderPreviewPopup(
         class EditorModule* editor,
         class RenderTab* renderTab,
@@ -42,6 +50,7 @@ private:
     void RenderLibraryMenuOptions(bool importBusy, bool exportBusy);
     void RenderDeleteConfirmPopup();
     void SyncRenameBuffer();
+    void OpenAssetPreviewByFileName(const std::string& fileName);
     
     std::shared_ptr<struct ProjectEntry> m_PreviewProject = nullptr;
     std::shared_ptr<struct AssetEntry> m_PreviewAsset = nullptr;
@@ -53,9 +62,16 @@ private:
     float m_ConflictCompareSplit = 0.5f;
     float m_AssetConflictCompareSplit = 0.5f;
     float m_FilterPanelWidth = 220.0f;
+    float m_FilterPanelExpandedWidth = 220.0f;
+    bool m_FilterPanelCollapsed = false;
     std::string m_RenameTargetFileName;
     std::string m_PendingRenderProjectFileName;
     bool m_RenderLoadConfirmOpen = false;
+    float m_ProjectPreviewTransition = 0.0f;
+    bool m_ProjectPreviewClosing = false;
+    bool m_ProjectPreviewRefreshAfterClose = false;
+    float m_AssetPreviewTransition = 0.0f;
+    bool m_AssetPreviewClosing = false;
 
     enum class PendingLoadTarget { None, Editor, Composite };
     PendingLoadTarget m_PendingLoadTarget = PendingLoadTarget::None;
@@ -75,6 +91,12 @@ private:
     class CompositeModule* m_CachedComposite = nullptr;
     int* m_CachedActiveTab = nullptr;
 
+    float m_ImportStatusAlpha = 0.0f;
+    float m_ExportStatusAlpha = 0.0f;
+    float m_SaveStatusAlpha = 0.0f;
+    float m_LoadStatusAlpha = 0.0f;
+    float m_EmptyStateAlpha = 0.0f;
+
     // Multi-select state
     std::unordered_set<std::string> m_SelectedProjects;
     std::unordered_set<std::string> m_SelectedAssets;
@@ -90,4 +112,7 @@ private:
     std::unordered_set<std::string> m_ActiveTagFilters;
     bool m_FilterNoTag = false;
     char m_AddTagBuffer[128] = "";
+
+    std::unordered_map<std::string, LibraryCardMotionState> m_ProjectCardMotion;
+    std::unordered_map<std::string, LibraryCardMotionState> m_AssetCardMotion;
 };
