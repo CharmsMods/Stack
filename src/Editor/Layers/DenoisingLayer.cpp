@@ -1,6 +1,7 @@
 #include "DenoisingLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_DenoisingVert = R"(
 #version 130
@@ -133,14 +134,14 @@ void DenoisingLayer::Execute(unsigned int inputTexture, int width, int height, F
 
 void DenoisingLayer::RenderUI() {
     const char* modes[] = { "Non-Local Means", "Median", "Mean (Box)" };
-    ImGui::Combo("Algorithm", &m_Mode, modes, IM_ARRAYSIZE(modes));
+    ImGuiExtras::NodeCombo("Algorithm", "##Algorithm", &m_Mode, modes, IM_ARRAYSIZE(modes));
 
-    ImGui::SliderInt("Search Radius", &m_SearchRadius, 1, 15);
+    ImGuiExtras::NodeSliderInt("Search Radius", "##SearchRadius", &m_SearchRadius, 1, 15, "%d px");
     if (m_Mode == 0) {
-        ImGui::SliderInt("Patch Radius", &m_PatchRadius, 1, 5);
-        ImGui::SliderFloat("Filter Strength (h)", &m_H, 0.01f, 2.0f);
+        ImGuiExtras::NodeSliderInt("Patch Radius", "##PatchRadius", &m_PatchRadius, 1, 5, "%d px");
+        ImGuiExtras::NodeSliderFloat("Filter Strength", "##FilterStrength(h)", &m_H, 0.01f, 2.0f);
     }
-    ImGui::SliderFloat("Blend Strength", &m_Strength, 0.0f, 100.0f, "%.0f%%");
+    ImGuiExtras::NodeSliderFloat("Blend Strength", "##BlendStrength", &m_Strength, 0.0f, 100.0f, "%.0f %%");
 }
 
 json DenoisingLayer::Serialize() const {

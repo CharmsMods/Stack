@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_DitherVert = R"(
 #version 130
@@ -205,13 +206,13 @@ void DitherLayer::RenderUI() {
         "Interleaved Gradient"
     };
 
-    ImGui::Combo("Type", &m_Type, types, IM_ARRAYSIZE(types));
-    ImGui::SliderInt("Bit Depth", &m_BitDepth, 1, 8);
-    ImGui::SliderInt("Palette Size", &m_PaletteSize, 2, 256);
-    ImGui::SliderFloat("Strength", &m_Strength, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Scale", &m_Scale, 1.0f, 8.0f, "%.0f");
-    ImGui::Checkbox("Gamma Correct", &m_UseGamma);
-    ImGui::Checkbox("Use Layer Palette Bank", &m_UsePaletteBank);
+    ImGuiExtras::NodeCombo("Type", "##Type", &m_Type, types, IM_ARRAYSIZE(types));
+    ImGuiExtras::NodeSliderInt("Bit Depth", "##BitDepth", &m_BitDepth, 1, 8);
+    ImGuiExtras::NodeSliderInt("Palette Size", "##PaletteSize", &m_PaletteSize, 2, 256);
+    ImGuiExtras::NodeSliderFloat("Strength", "##Strength", &m_Strength, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Scale", "##Scale", &m_Scale, 1.0f, 8.0f, "%.0f");
+    ImGuiExtras::NodeCheckbox("Gamma Correct", "##GammaCorrect", &m_UseGamma);
+    ImGuiExtras::NodeCheckbox("Use Layer Palette Bank", "##UseLayerPaletteBank", &m_UsePaletteBank);
 
     if (m_UsePaletteBank && ImGui::TreeNode("Palette Bank")) {
         ImGui::TextDisabled("The web app uses a shared Studio palette. Native adapts that here to a layer-local palette bank.");
@@ -219,7 +220,9 @@ void DitherLayer::RenderUI() {
             float* color = &m_PaletteBank[index * 3];
             char label[32];
             snprintf(label, sizeof(label), "Color %d", index + 1);
-            ImGui::ColorEdit3(label, color);
+            char id[32];
+            snprintf(id, sizeof(id), "##PaletteColor%d", index + 1);
+            ImGuiExtras::NodeColorEdit3(label, id, color);
         }
         ImGui::TreePop();
     }

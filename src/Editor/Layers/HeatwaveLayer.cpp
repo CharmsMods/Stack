@@ -2,6 +2,7 @@
 
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_HeatwaveVert = R"(
 #version 130
@@ -81,10 +82,10 @@ void HeatwaveLayer::Execute(unsigned int inputTexture, int width, int height, Fu
 void HeatwaveLayer::RenderUI() {
     const char* directions[] = { "Vertical (Heat)", "Horizontal", "Radial (Ripple)" };
 
-    ImGui::SliderFloat("Intensity", &m_Intensity, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Phase", &m_Phase, 0.0f, 200.0f, "%.0f");
-    ImGui::SliderFloat("Scale", &m_Scale, 1.0f, 100.0f, "%.0f");
-    ImGui::Combo("Direction", &m_Direction, directions, IM_ARRAYSIZE(directions));
+    ImGuiExtras::NodeSliderFloat("Intensity", "##Intensity", &m_Intensity, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Phase", "##Phase", &m_Phase, 0.0f, 200.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Scale", "##Scale", &m_Scale, 1.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCombo("Direction", "##Direction", &m_Direction, directions, IM_ARRAYSIZE(directions));
 }
 
 json HeatwaveLayer::Serialize() const {

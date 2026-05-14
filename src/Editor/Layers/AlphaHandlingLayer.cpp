@@ -1,6 +1,7 @@
 #include "AlphaHandlingLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_AlphaVert = R"(
 #version 130
@@ -69,7 +70,7 @@ void AlphaHandlingLayer::ExecuteWithSource(unsigned int inputTexture, unsigned i
 void AlphaHandlingLayer::RenderUI() {
     const char* modes[] = { "Protect Transparent", "Protect Opaque" };
     int currentIdx = m_Mode - 1;
-    if (ImGui::Combo("Protection Mode", &currentIdx, modes, IM_ARRAYSIZE(modes))) {
+    if (ImGuiExtras::NodeCombo("Protection Mode", "##ProtectionMode", &currentIdx, modes, IM_ARRAYSIZE(modes))) {
         m_Mode = currentIdx + 1;
     }
 }

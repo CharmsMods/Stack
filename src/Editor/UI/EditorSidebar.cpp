@@ -12,26 +12,14 @@ void EditorSidebar::Initialize() {
 }
 
 void EditorSidebar::Render(EditorModule* editor) {
-    ImGui::Begin("Inspector Panel Sidebar");
-
-    const bool saveBusy = Async::IsBusy(LibraryManager::Get().GetSaveTaskState());
-    ImGui::BeginDisabled(saveBusy);
-    if (ImGui::Button(saveBusy ? "SAVING TO LIBRARY..." : "SAVE TO LIBRARY", ImVec2(-1, 0))) {
-        const std::string projectName = editor->GetCurrentProjectName().empty()
-            ? "New Project"
-            : editor->GetCurrentProjectName();
-        LibraryManager::Get().RequestSaveProject(projectName, editor, editor->GetCurrentProjectFileName());
+    const std::string& saveStatus = LibraryManager::Get().GetSaveStatusText();
+    if (!saveStatus.empty()) {
+        ImGui::TextDisabled("%s", saveStatus.c_str());
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    } else {
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
     }
-    ImGui::EndDisabled();
-
-    if (!LibraryManager::Get().GetSaveStatusText().empty()) {
-        ImGui::TextDisabled("%s", LibraryManager::Get().GetSaveStatusText().c_str());
-    }
-
-    ImGui::Separator();
 
     (void)editor->ConsumeSelectedTabFocusRequest();
     m_NodeGraphUI.Render(editor);
-
-    ImGui::End();
 }

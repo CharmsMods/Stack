@@ -1,6 +1,7 @@
 #include "HDRLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_HDRVert = R"(
 #version 130
@@ -63,8 +64,8 @@ void HDRLayer::Execute(unsigned int inputTexture, int width, int height, Fullscr
 }
 
 void HDRLayer::RenderUI() {
-    ImGui::SliderFloat("Tolerance", &m_Tolerance, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Amount", &m_Amount, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Tolerance", "##Tolerance", &m_Tolerance, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Amount", "##Amount", &m_Amount, 0.0f, 100.0f, "%.0f");
 }
 
 json HDRLayer::Serialize() const {

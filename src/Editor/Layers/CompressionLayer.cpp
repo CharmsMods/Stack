@@ -3,6 +3,7 @@
 #include "Renderer/FullscreenQuad.h"
 #include <algorithm>
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_CompressionVert = R"(
 #version 130
@@ -118,11 +119,11 @@ void CompressionLayer::Execute(unsigned int inputTexture, int width, int height,
 
 void CompressionLayer::RenderUI() {
     const char* methods[] = { "DCT Block", "Chroma Subsampling", "Wavelet" };
-    ImGui::Combo("Method", &m_Method, methods, IM_ARRAYSIZE(methods));
-    ImGui::SliderFloat("Quality", &m_Quality, 1.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Block Size", &m_BlockSize, 2.0f, 32.0f, "%.0f");
-    ImGui::SliderFloat("Blend", &m_Blend, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderInt("Iterations", &m_Iterations, 1, 20);
+    ImGuiExtras::NodeCombo("Method", "##Method", &m_Method, methods, IM_ARRAYSIZE(methods));
+    ImGuiExtras::NodeSliderFloat("Quality", "##Quality", &m_Quality, 1.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Block Size", "##BlockSize", &m_BlockSize, 2.0f, 32.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Blend", "##Blend", &m_Blend, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderInt("Iterations", "##Iterations", &m_Iterations, 1, 20);
     ImGui::TextDisabled("Native adapts repeated web passes here by folding iteration count into effect strength.");
 }
 

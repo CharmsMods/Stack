@@ -25,7 +25,9 @@ enum class RenderImageToMaskKind {
 
 enum class RenderImageGeneratorKind {
     SolidColor,
-    ColorGradient
+    ColorGradient,
+    Square,
+    Circle
 };
 
 struct RenderMaskSettings {

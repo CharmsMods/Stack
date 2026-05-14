@@ -9,6 +9,39 @@
 #include <unordered_map>
 #include <utility>
 
+namespace {
+
+constexpr std::size_t kFnvOffsetBasis = 1469598103934665603ull;
+constexpr std::size_t kFnvPrime = 1099511628211ull;
+
+inline void HashCombine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+}
+
+template <typename T>
+std::size_t HashValue(const T& value) {
+    return std::hash<T>{}(value);
+}
+
+std::size_t HashBytes(const unsigned char* data, std::size_t size) {
+    std::size_t hash = kFnvOffsetBasis;
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<std::size_t>(data[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+std::size_t HashBytes(const std::vector<unsigned char>& data) {
+    return HashBytes(data.data(), data.size());
+}
+
+std::size_t HashJson(const nlohmann::json& value) {
+    return HashValue(value.dump());
+}
+
+} // namespace
+
 RenderPipeline::RenderPipeline()
     : m_Width(0), m_Height(0),
       m_SourceChannels(4),
@@ -20,6 +53,7 @@ RenderPipeline::RenderPipeline()
 
 RenderPipeline::~RenderPipeline() {
     CleanupFBOs();
+    InvalidateGraphCaches();
     if (m_SourceTexture) glDeleteTextures(1, &m_SourceTexture);
     if (m_ExternalOutputTexture) glDeleteTextures(1, &m_ExternalOutputTexture);
     if (m_MaskProgram) glDeleteProgram(m_MaskProgram);
@@ -39,6 +73,20 @@ void RenderPipeline::CleanupFBOs() {
     if (m_PongFBO)     { glDeleteFramebuffers(1, &m_PongFBO);  m_PongFBO = 0; }
     if (m_PingTexture) { glDeleteTextures(1, &m_PingTexture); m_PingTexture = 0; }
     if (m_PongTexture) { glDeleteTextures(1, &m_PongTexture); m_PongTexture = 0; }
+}
+
+void RenderPipeline::DestroyGraphCache(std::unordered_map<int, CachedGraphTexture>& cache) {
+    for (auto& [nodeId, entry] : cache) {
+        if (entry.owned && entry.texture != 0 && entry.texture != m_SourceTexture && entry.texture != m_ExternalOutputTexture) {
+            glDeleteTextures(1, &entry.texture);
+        }
+    }
+    cache.clear();
+}
+
+void RenderPipeline::InvalidateGraphCaches() {
+    DestroyGraphCache(m_GraphImageCache);
+    DestroyGraphCache(m_GraphMaskCache);
 }
 
 void RenderPipeline::Resize(int width, int height) {
@@ -64,10 +112,12 @@ bool RenderPipeline::LoadSourceImage(const std::string& filepath) {
         return false;
     }
 
+    InvalidateGraphCaches();
     if (m_SourceTexture) glDeleteTextures(1, &m_SourceTexture);
     m_SourceTexture = GLHelpers::CreateTextureFromPixels(data, w, h, 4);
     m_SourceChannels = 4;
     m_SourcePixels.assign(data, data + (w * h * 4));
+    m_SourceFingerprint = HashBytes(m_SourcePixels);
     stbi_image_free(data);
 
     Resize(w, h);
@@ -77,13 +127,25 @@ bool RenderPipeline::LoadSourceImage(const std::string& filepath) {
 }
 
 void RenderPipeline::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch) {
+    const int clampedChannels = std::max(1, ch);
+    const std::size_t incomingSize = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * static_cast<std::size_t>(clampedChannels);
+    const std::size_t incomingFingerprint = (!data || incomingSize == 0) ? 0 : HashBytes(data, incomingSize);
+    if (m_SourceTexture != 0 &&
+        m_Width == w &&
+        m_Height == h &&
+        m_SourceChannels == ch &&
+        m_SourceFingerprint == incomingFingerprint &&
+        m_SourcePixels.size() == incomingSize) {
+        return;
+    }
+
+    InvalidateGraphCaches();
     if (m_SourceTexture) glDeleteTextures(1, &m_SourceTexture);
     m_SourceTexture = GLHelpers::CreateTextureFromPixels(data, w, h, ch);
     m_SourceChannels = ch;
-    const int clampedChannels = std::max(1, ch);
     m_SourcePixels.assign(data, data + (w * h * clampedChannels));
+    m_SourceFingerprint = incomingFingerprint;
     Resize(w, h);
-    ClearOutput();
 }
 
 void RenderPipeline::Clear() {
@@ -97,13 +159,19 @@ void RenderPipeline::Clear() {
     }
     m_OutputTexture = 0;
     m_SourcePixels.clear();
+    m_SourceFingerprint = 0;
     m_SourceChannels = 4;
     m_Width = 0;
     m_Height = 0;
     CleanupFBOs();
+    InvalidateGraphCaches();
 }
 
 void RenderPipeline::ClearOutput() {
+    if (m_ExternalOutputTexture) {
+        glDeleteTextures(1, &m_ExternalOutputTexture);
+        m_ExternalOutputTexture = 0;
+    }
     m_OutputTexture = 0;
 }
 
@@ -120,6 +188,54 @@ void RenderPipeline::UploadOutputFromPixels(const unsigned char* data, int w, in
     m_OutputTexture = m_ExternalOutputTexture;
     m_Width = w;
     m_Height = h;
+}
+
+void RenderPipeline::AdoptExternalOutputTexture(unsigned int texture, int w, int h) {
+    if (m_ExternalOutputTexture && m_ExternalOutputTexture != texture) {
+        glDeleteTextures(1, &m_ExternalOutputTexture);
+    }
+    m_ExternalOutputTexture = texture;
+    m_OutputTexture = texture;
+    m_Width = w;
+    m_Height = h;
+}
+
+unsigned int RenderPipeline::PublishSharedOutputTexture(int& outW, int& outH) {
+    outW = m_Width;
+    outH = m_Height;
+    if (m_OutputTexture == 0 || m_Width <= 0 || m_Height <= 0) {
+        return 0;
+    }
+
+    const unsigned int publishedTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    if (publishedTexture == 0) {
+        return 0;
+    }
+
+    GLint prevReadFBO = 0;
+    GLint prevDrawFBO = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
+
+    unsigned int srcFBO = 0;
+    unsigned int dstFBO = 0;
+    glGenFramebuffers(1, &srcFBO);
+    glGenFramebuffers(1, &dstFBO);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFBO);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_OutputTexture, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstFBO);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, publishedTexture, 0);
+    glBlitFramebuffer(
+        0, 0, m_Width, m_Height,
+        0, 0, m_Width, m_Height,
+        GL_COLOR_BUFFER_BIT,
+        GL_NEAREST);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFBO);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFBO);
+    glDeleteFramebuffers(1, &srcFBO);
+    glDeleteFramebuffers(1, &dstFBO);
+    return publishedTexture;
 }
 
 void RenderPipeline::Execute(const std::vector<std::shared_ptr<LayerBase>>& layers) {
@@ -499,6 +615,18 @@ void RenderPipeline::EnsureUtilityPrograms() {
                 FragColor = uColorA;
                 return;
             }
+            if (uKind == 2) {
+                vec2 centered = abs(vTexCoord - vec2(0.5)) / vec2(0.34, 0.34);
+                float mask = step(max(centered.x, centered.y), 1.0);
+                FragColor = vec4(uColorA.rgb, uColorA.a * mask);
+                return;
+            }
+            if (uKind == 3) {
+                float d = distance(vTexCoord, vec2(0.5));
+                float mask = 1.0 - smoothstep(0.33, 0.345, d);
+                FragColor = vec4(uColorA.rgb, uColorA.a * mask);
+                return;
+            }
             float radiansAngle = radians(uAngle);
             vec2 dir = vec2(cos(radiansAngle), sin(radiansAngle));
             float t = clamp(dot(vTexCoord - vec2(0.5), dir) + 0.5 + uOffset, 0.0, 1.0);
@@ -618,8 +746,10 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
     }
 
     std::unordered_map<int, const RenderGraphNode*> nodes;
+    std::set<int> activeNodeIds;
     for (const RenderGraphNode& node : graph.nodes) {
         nodes[node.nodeId] = &node;
+        activeNodeIds.insert(node.nodeId);
     }
 
     auto findInputLink = [&](int nodeId, const std::string& socketId) -> const RenderGraphLink* {
@@ -633,14 +763,36 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
 
     std::unordered_map<int, unsigned int> imageCache;
     std::unordered_map<int, unsigned int> maskCache;
-    std::vector<unsigned int> ownedTextures;
+    std::unordered_map<int, std::size_t> imageFingerprintCache;
+    std::unordered_map<int, std::size_t> maskFingerprintCache;
     std::set<int> visitingImages;
     std::set<int> visitingMasks;
+    std::set<int> fingerprintingImages;
+    std::set<int> fingerprintingMasks;
+
+    auto releaseCacheEntry = [&](std::unordered_map<int, CachedGraphTexture>& cache, int nodeId) {
+        auto it = cache.find(nodeId);
+        if (it == cache.end()) {
+            return;
+        }
+        if (it->second.owned && it->second.texture != 0 && it->second.texture != m_SourceTexture && it->second.texture != m_ExternalOutputTexture) {
+            glDeleteTextures(1, &it->second.texture);
+        }
+        cache.erase(it);
+    };
+
+    auto storeCacheEntry = [&](std::unordered_map<int, CachedGraphTexture>& cache, int nodeId, unsigned int texture, std::size_t fingerprint, bool owned) {
+        auto& entry = cache[nodeId];
+        if (entry.owned && entry.texture != 0 && entry.texture != texture && entry.texture != m_SourceTexture && entry.texture != m_ExternalOutputTexture) {
+            glDeleteTextures(1, &entry.texture);
+        }
+        entry.texture = texture;
+        entry.fingerprint = fingerprint;
+        entry.owned = owned;
+    };
 
     auto createTarget = [&]() {
-        unsigned int texture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
-        ownedTextures.push_back(texture);
-        return texture;
+        return GLHelpers::CreateEmptyTexture(m_Width, m_Height);
     };
 
     auto renderToTexture = [&](unsigned int texture, const std::function<void(unsigned int)>& renderFn) {
@@ -653,6 +805,137 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
 
     std::function<unsigned int(int)> evalMask;
     std::function<unsigned int(int)> evalImage;
+    std::function<std::size_t(int)> fingerprintMask;
+    std::function<std::size_t(int)> fingerprintImage;
+
+    fingerprintMask = [&](int nodeId) -> std::size_t {
+        auto cached = maskFingerprintCache.find(nodeId);
+        if (cached != maskFingerprintCache.end()) {
+            return cached->second;
+        }
+        if (fingerprintingMasks.count(nodeId)) {
+            return 0;
+        }
+        fingerprintingMasks.insert(nodeId);
+
+        const auto it = nodes.find(nodeId);
+        if (it == nodes.end()) {
+            fingerprintingMasks.erase(nodeId);
+            return 0;
+        }
+
+        const RenderGraphNode& node = *it->second;
+        std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
+        HashCombine(fingerprint, HashValue(node.nodeId));
+
+        if (node.kind == RenderGraphNodeKind::MaskGenerator) {
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.maskKind)));
+            HashCombine(fingerprint, HashValue(node.maskSettings.value));
+            HashCombine(fingerprint, HashValue(node.maskSettings.angle));
+            HashCombine(fingerprint, HashValue(node.maskSettings.offset));
+            HashCombine(fingerprint, HashValue(node.maskSettings.scale));
+            HashCombine(fingerprint, HashValue(node.maskSettings.centerX));
+            HashCombine(fingerprint, HashValue(node.maskSettings.centerY));
+            HashCombine(fingerprint, HashValue(node.maskSettings.radius));
+            HashCombine(fingerprint, HashValue(node.maskSettings.feather));
+            HashCombine(fingerprint, HashValue(node.maskSettings.invert));
+        } else if (node.kind == RenderGraphNodeKind::MaskUtility) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "maskIn");
+            HashCombine(fingerprint, input ? fingerprintMask(input->fromNodeId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.maskUtilityKind)));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.blackPoint));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.whitePoint));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.gamma));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.threshold));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.softness));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.invert));
+        } else if (node.kind == RenderGraphNodeKind::ImageToMask) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.imageToMaskKind)));
+            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.low));
+            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.high));
+            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.softness));
+            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.invert));
+        }
+
+        fingerprintingMasks.erase(nodeId);
+        maskFingerprintCache[nodeId] = fingerprint;
+        return fingerprint;
+    };
+
+    fingerprintImage = [&](int nodeId) -> std::size_t {
+        auto cached = imageFingerprintCache.find(nodeId);
+        if (cached != imageFingerprintCache.end()) {
+            return cached->second;
+        }
+        if (fingerprintingImages.count(nodeId)) {
+            return 0;
+        }
+        fingerprintingImages.insert(nodeId);
+
+        const auto it = nodes.find(nodeId);
+        if (it == nodes.end()) {
+            fingerprintingImages.erase(nodeId);
+            return 0;
+        }
+
+        const RenderGraphNode& node = *it->second;
+        std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
+        HashCombine(fingerprint, HashValue(node.nodeId));
+
+        if (node.kind == RenderGraphNodeKind::Image) {
+            if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
+                HashCombine(fingerprint, HashValue(node.image.width));
+                HashCombine(fingerprint, HashValue(node.image.height));
+                HashCombine(fingerprint, HashValue(node.image.channels));
+                HashCombine(fingerprint, HashBytes(node.image.pixels));
+            } else {
+                HashCombine(fingerprint, m_SourceFingerprint);
+                HashCombine(fingerprint, HashValue(m_Width));
+                HashCombine(fingerprint, HashValue(m_Height));
+                HashCombine(fingerprint, HashValue(m_SourceChannels));
+            }
+        } else if (node.kind == RenderGraphNodeKind::ImageGenerator) {
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.imageGeneratorKind)));
+            for (float channel : node.imageGeneratorSettings.colorA) {
+                HashCombine(fingerprint, HashValue(channel));
+            }
+            for (float channel : node.imageGeneratorSettings.colorB) {
+                HashCombine(fingerprint, HashValue(channel));
+            }
+            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.angle));
+            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.offset));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::Layer) {
+            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
+            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
+            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId) : 0);
+            HashCombine(fingerprint, maskLink ? fingerprintMask(maskLink->fromNodeId) : 0);
+            HashCombine(fingerprint, HashJson(node.layerJson));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::Mix) {
+            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
+            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
+            const RenderGraphLink* factorLink = findInputLink(node.nodeId, "factor");
+            HashCombine(fingerprint, inputA ? fingerprintImage(inputA->fromNodeId) : 0);
+            HashCombine(fingerprint, inputB ? fingerprintImage(inputB->fromNodeId) : 0);
+            HashCombine(fingerprint, factorLink ? fingerprintMask(factorLink->fromNodeId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.mixBlendMode)));
+            HashCombine(fingerprint, HashValue(node.mixFactor));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::Output) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId) : 0);
+        }
+
+        fingerprintingImages.erase(nodeId);
+        imageFingerprintCache[nodeId] = fingerprint;
+        return fingerprint;
+    };
 
     evalMask = [&](int nodeId) -> unsigned int {
         if (maskCache.count(nodeId)) {
@@ -669,16 +952,24 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         }
 
         const RenderGraphNode& node = *it->second;
+        const std::size_t fingerprint = fingerprintMask(nodeId);
+        if (const auto cached = m_GraphMaskCache.find(nodeId);
+            cached != m_GraphMaskCache.end() &&
+            cached->second.fingerprint == fingerprint &&
+            cached->second.texture != 0) {
+            maskCache[nodeId] = cached->second.texture;
+            return cached->second.texture;
+        }
+
         unsigned int result = 0;
+        bool resultOwned = false;
         if (node.kind == RenderGraphNodeKind::MaskGenerator) {
             RenderMaskSource mask;
             mask.nodeId = node.nodeId;
             mask.kind = node.maskKind;
             mask.settings = node.maskSettings;
             result = GenerateMaskTexture(mask);
-            if (result) {
-                ownedTextures.push_back(result);
-            }
+            resultOwned = result != 0;
         } else if (node.kind == RenderGraphNodeKind::MaskUtility) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "maskIn");
             const unsigned int inputMask = input ? evalMask(input->fromNodeId) : 0;
@@ -687,6 +978,7 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                 renderToTexture(result, [&](unsigned int fbo) {
                     RenderMaskUtility(inputMask, node, fbo);
                 });
+                resultOwned = result != 0;
             }
         } else if (node.kind == RenderGraphNodeKind::ImageToMask) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
@@ -696,10 +988,14 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                 renderToTexture(result, [&](unsigned int fbo) {
                     RenderImageToMask(inputImage, node, fbo);
                 });
+                resultOwned = result != 0;
             }
         }
         if (result) {
             maskCache[nodeId] = result;
+            storeCacheEntry(m_GraphMaskCache, nodeId, result, fingerprint, resultOwned);
+        } else {
+            releaseCacheEntry(m_GraphMaskCache, nodeId);
         }
         visitingMasks.erase(nodeId);
         return result;
@@ -721,19 +1017,27 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         }
 
         const RenderGraphNode& node = *it->second;
+        const std::size_t fingerprint = fingerprintImage(nodeId);
+        if (const auto cached = m_GraphImageCache.find(nodeId);
+            cached != m_GraphImageCache.end() &&
+            cached->second.fingerprint == fingerprint &&
+            cached->second.texture != 0) {
+            imageCache[nodeId] = cached->second.texture;
+            return cached->second.texture;
+        }
+
         unsigned int result = 0;
+        bool resultOwned = false;
         if (node.kind == RenderGraphNodeKind::Image) {
             if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
                 result = GLHelpers::CreateTextureFromPixels(node.image.pixels.data(), node.image.width, node.image.height, node.image.channels);
-                ownedTextures.push_back(result);
+                resultOwned = result != 0;
             } else {
                 result = m_SourceTexture;
             }
         } else if (node.kind == RenderGraphNodeKind::ImageGenerator) {
             result = GenerateImageTexture(node);
-            if (result) {
-                ownedTextures.push_back(result);
-            }
+            resultOwned = result != 0;
         } else if (node.kind == RenderGraphNodeKind::Layer) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
             const unsigned int inputTexture = input ? evalImage(input->fromNodeId) : 0;
@@ -748,6 +1052,7 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                         layer->ExecuteWithSource(inputTexture, m_SourceTexture, m_Width, m_Height, m_Quad);
                     });
                     result = processed;
+                    resultOwned = result != 0;
                     const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
                     const unsigned int maskTexture = maskLink ? evalMask(maskLink->fromNodeId) : 0;
                     if (maskTexture) {
@@ -755,7 +1060,11 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                         renderToTexture(blended, [&](unsigned int fbo) {
                             RenderMaskBlend(inputTexture, processed, maskTexture, fbo);
                         });
+                        if (processed != 0) {
+                            glDeleteTextures(1, &processed);
+                        }
                         result = blended;
+                        resultOwned = result != 0;
                     }
                 }
             }
@@ -771,6 +1080,7 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                 renderToTexture(result, [&](unsigned int fbo) {
                     RenderMixBlend(textureA, textureB, factorTexture, node.mixFactor, node.mixBlendMode, fbo);
                 });
+                resultOwned = result != 0;
             }
         } else if (node.kind == RenderGraphNodeKind::Output) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
@@ -779,6 +1089,9 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
 
         if (result) {
             imageCache[nodeId] = result;
+            storeCacheEntry(m_GraphImageCache, nodeId, result, fingerprint, resultOwned);
+        } else {
+            releaseCacheEntry(m_GraphImageCache, nodeId);
         }
         visitingImages.erase(nodeId);
         return result;
@@ -794,17 +1107,26 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
     } else {
         finalTexture = evalImage(graph.outputNodeId);
     }
-    if (finalTexture && finalTexture != m_SourceTexture) {
-        m_ExternalOutputTexture = finalTexture;
-        ownedTextures.erase(std::remove(ownedTextures.begin(), ownedTextures.end(), finalTexture), ownedTextures.end());
-        m_OutputTexture = m_ExternalOutputTexture;
-    } else {
-        m_OutputTexture = finalTexture ? finalTexture : 0;
-    }
+    m_OutputTexture = finalTexture ? finalTexture : 0;
 
-    for (unsigned int texture : ownedTextures) {
-        if (texture && texture != m_SourceTexture && texture != m_OutputTexture) {
-            glDeleteTextures(1, &texture);
+    for (auto it = m_GraphImageCache.begin(); it != m_GraphImageCache.end(); ) {
+        if (!activeNodeIds.count(it->first)) {
+            if (it->second.owned && it->second.texture != 0 && it->second.texture != m_SourceTexture && it->second.texture != m_ExternalOutputTexture) {
+                glDeleteTextures(1, &it->second.texture);
+            }
+            it = m_GraphImageCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_GraphMaskCache.begin(); it != m_GraphMaskCache.end(); ) {
+        if (!activeNodeIds.count(it->first)) {
+            if (it->second.owned && it->second.texture != 0 && it->second.texture != m_SourceTexture && it->second.texture != m_ExternalOutputTexture) {
+                glDeleteTextures(1, &it->second.texture);
+            }
+            it = m_GraphMaskCache.erase(it);
+        } else {
+            ++it;
         }
     }
 

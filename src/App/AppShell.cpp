@@ -15,6 +15,7 @@
 #include "ThirdParty/stb_image.h"
 #include "Renderer/GLHelpers.h"
 #include "Resources/EmbeddedSplash.h"
+#include "Resources/EmbeddedTabIcons.h"
 #include <thread>
 #include <chrono>
 
@@ -32,8 +33,28 @@ enum RootTabId {
 struct RootTabDescriptor {
     int id = -1;
     const char* label = "";
+    unsigned int iconTexture = 0;
     std::function<void()> renderBody;
 };
+
+unsigned int LoadEmbeddedPngTexture(const unsigned char* data, unsigned int size, const char* debugName) {
+    if (!data || size == 0) {
+        return 0;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
+    if (!pixels) {
+        std::cerr << "[AppShell] Failed to decode embedded " << debugName << " icon.\n";
+        return 0;
+    }
+
+    const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    return texture;
+}
 
 } // namespace
 
@@ -41,7 +62,16 @@ static void glfw_error_callback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << "\n";
 }
 
-AppShell::AppShell() : m_Window(nullptr), m_SplashWindow(nullptr), m_SplashTexture(0), m_IsRunning(false), m_FirstTimeLayout(true) {}
+AppShell::AppShell()
+    : m_Window(nullptr)
+    , m_SplashWindow(nullptr)
+    , m_SplashTexture(0)
+    , m_EditorTabTexture(0)
+    , m_LibraryTabTexture(0)
+    , m_RenderTabTexture(0)
+    , m_ProgramLogoTexture(0)
+    , m_IsRunning(false)
+    , m_FirstTimeLayout(true) {}
 
 AppShell::~AppShell() {
     Shutdown();
@@ -106,6 +136,23 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
 
     ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
     ImGui_ImplOpenGL3_Init("#version 430 core");
+
+    m_EditorTabTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::Editor_png_data,
+        EmbeddedTabIcons::Editor_png_size,
+        "Editor");
+    m_LibraryTabTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::Library_png_data,
+        EmbeddedTabIcons::Library_png_size,
+        "Library");
+    m_RenderTabTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::Render_png_data,
+        EmbeddedTabIcons::Render_png_size,
+        "Render");
+    m_ProgramLogoTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::CharmLogo_png_data,
+        EmbeddedTabIcons::CharmLogo_png_size,
+        "Charm logo");
 
     glfwSetWindowUserPointer(m_Window, this);
     glfwSetDropCallback(m_Window, OnFileDrop);
@@ -196,52 +243,91 @@ void AppShell::RenderUI() {
     ImGui::PopStyleVar(3);
 
     const std::vector<RootTabDescriptor> tabs = {
-        { RootTabLibrary, "Library", [this]() { m_Library.RenderUI(&m_Editor, &m_RenderTab, &m_Composite, &m_RequestedTab); } },
-        { RootTabEditor, "Editor", [this]() { m_Editor.RenderUI(); } },
-        { RootTabComposite, "Composite", [this]() { m_Composite.RenderUI(); } },
-        { RootTabRender, "Render", [this]() { m_RenderTab.RenderUI(); } },
-        { RootTabBundler, "Bundler", [this]() { m_Bundler.RenderUI(); } },
-        { RootTabSettings, "Settings", [this]() { m_Settings.RenderUI(); } }
+        { RootTabLibrary, "Library", m_LibraryTabTexture, [this]() { m_Library.RenderUI(&m_Editor, &m_RenderTab, &m_Composite, &m_RequestedTab); } },
+        { RootTabEditor, "Editor", m_EditorTabTexture, [this]() { m_Editor.RenderUI(); } },
+        { RootTabRender, "Render", m_RenderTabTexture, [this]() { m_RenderTab.RenderUI(); } },
+        { RootTabBundler, "Bundler", 0, [this]() { m_Bundler.RenderUI(); } },
+        { RootTabSettings, "Settings", 0, [this]() { m_Settings.RenderUI(); } }
     };
 
-    int selectedTab = -1;
-    if (ImGui::BeginTabBar("ProgramContextTabs", ImGuiTabBarFlags_None)) {
-        const int requestedTabAtFrameStart = m_RequestedTab;
-        for (const RootTabDescriptor& tab : tabs) {
-            const ImGuiTabItemFlags flags =
-                (requestedTabAtFrameStart == tab.id) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
-
-            if (ImGui::BeginTabItem(tab.label, nullptr, flags)) {
-                selectedTab = tab.id;
-                tab.renderBody();
-                ImGui::EndTabItem();
-            }
-        }
-
-        if (selectedTab == RootTabComposite && m_Composite.ConsumePendingOpenInEditorRequest()) {
-            if (m_Editor.GetPipeline().HasSourceImage()) {
-                m_ShowEditorSavePrompt = true;
-            } else {
-                RequestTabSwitch(RootTabEditor);
-            }
-        }
-
-        if (requestedTabAtFrameStart != -1 &&
-            m_RequestedTab == requestedTabAtFrameStart &&
-            selectedTab == requestedTabAtFrameStart) {
-            m_RequestedTab = -1;
-        }
-
-        ImGui::EndTabBar();
+    if (m_RequestedTab != -1 && m_RequestedTab != m_CurrentTabId) {
+        OnTabChanged(m_CurrentTabId, m_RequestedTab);
+        m_CurrentTabId = m_RequestedTab;
     }
+    m_RequestedTab = -1;
 
-    if (selectedTab != -1 && selectedTab != m_CurrentTabId) {
-        OnTabChanged(m_CurrentTabId, selectedTab);
-        m_CurrentTabId = selectedTab;
+    auto renderTabButton = [&](const RootTabDescriptor& tab, bool selected) {
+        const ImVec4 baseButton = selected
+            ? ImVec4(0.20f, 0.22f, 0.26f, 1.0f)
+            : ImVec4(0.12f, 0.13f, 0.15f, 1.0f);
+        const ImVec4 hoverButton = ImVec4(0.24f, 0.26f, 0.30f, 1.0f);
+        const ImVec4 activeButton = ImVec4(0.28f, 0.30f, 0.34f, 1.0f);
+        const ImVec4 selectedAccent = ImVec4(0.65f, 0.72f, 0.85f, 1.0f);
+        const ImU32 selectedAccentColor = ImGui::GetColorU32(selectedAccent);
+        const float tabHeight = 28.0f;
+
+        ImGui::PushID(tab.id);
+        ImGui::PushStyleColor(ImGuiCol_Button, baseButton);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hoverButton);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, activeButton);
+
+        bool clicked = false;
+        if (tab.iconTexture != 0) {
+            clicked = ImGui::ImageButton("##TabIcon", (ImTextureID)(intptr_t)tab.iconTexture, ImVec2(18.0f, 18.0f));
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", tab.label);
+            }
+        } else {
+            const float textWidth = ImGui::CalcTextSize(tab.label).x + 18.0f;
+            clicked = ImGui::Button(tab.label, ImVec2(textWidth, tabHeight));
+        }
+
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        if (selected) {
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(min.x, max.y - 2.0f), ImVec2(max.x, max.y), selectedAccentColor);
+        }
+
+        ImGui::PopStyleColor(3);
+        ImGui::PopID();
+        return clicked;
+    };
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
+    for (size_t i = 0; i < tabs.size(); ++i) {
+        const RootTabDescriptor& tab = tabs[i];
+        if (i > 0) {
+            ImGui::SameLine();
+        }
+        if (renderTabButton(tab, m_CurrentTabId == tab.id) && tab.id != m_CurrentTabId) {
+            OnTabChanged(m_CurrentTabId, tab.id);
+            m_CurrentTabId = tab.id;
+        }
+    }
+    ImGui::PopStyleVar();
+
+    if (m_ProgramLogoTexture != 0) {
+        constexpr float logoSize = 20.0f;
+        constexpr float logoRightPadding = 10.0f;
+        const float logoX = ImGui::GetWindowContentRegionMax().x - logoSize - logoRightPadding;
+        if (logoX > ImGui::GetCursorPosX()) {
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::SetCursorPosX(logoX);
+        }
+        const float logoY = ImGui::GetCursorPosY() + 3.0f;
+        ImGui::SetCursorPosY(logoY);
+        ImGui::Image((ImTextureID)(intptr_t)m_ProgramLogoTexture, ImVec2(logoSize, logoSize));
     }
 
     m_Library.RenderGlobalPopups();
     RenderEditorSavePrompts();
+
+    for (const RootTabDescriptor& tab : tabs) {
+        if (tab.id == m_CurrentTabId) {
+            tab.renderBody();
+            break;
+        }
+    }
 
     ImGui::End(); // End ModularStudioMain
 }
@@ -318,47 +404,9 @@ void AppShell::RenderEditorSavePrompts() {
 }
 
 void AppShell::OnTabChanged(int oldTab, int newTab) {
-    // 1. Leaving Composite, entering Editor
-    if (oldTab == RootTabComposite && newTab == RootTabEditor) {
-        CompositeLayer* selected = m_Composite.GetSelectedLayer();
-        if (selected && selected->kind == LayerKind::EditorProject && !selected->originalSourcePng.empty()) {
-            // Load this layer into the editor
-            EditorModule::LoadedProjectData data;
-            data.projectName = selected->name;
-            try {
-                data.pipelineData = nlohmann::json::parse(selected->embeddedProjectJson);
-            } catch (...) {
-                data.pipelineData = nlohmann::json::array();
-            }
-            
-            // Re-decode the ORIGINAL source image for high-fidelity editing
-            int sw = 0, sh = 0, sc = 4;
-            if (LibraryManager::DecodeImageBytes(selected->originalSourcePng, data.sourcePixels, sw, sh, sc)) {
-                data.width = sw;
-                data.height = sh;
-                data.channels = sc;
-                
-                if (m_Editor.ApplyLoadedProject(data)) {
-                    m_ActiveSyncLayerId = selected->id;
-                }
-            }
-        } else {
-            m_ActiveSyncLayerId = "";
-        }
-    }
-    // 2. Leaving Editor, entering Composite
-    else if (oldTab == RootTabEditor && newTab == RootTabComposite) {
-        if (!m_ActiveSyncLayerId.empty()) {
-            // Push Editor changes back to Composite
-            int rw = 0, rh = 0;
-            auto pixels = m_Editor.GetPipeline().GetOutputPixels(rw, rh);
-            if (!pixels.empty()) {
-                std::string pipelineJson = m_Editor.SerializePipeline().dump();
-                m_Composite.UpdateLayerData(m_ActiveSyncLayerId, pipelineJson, pixels, rw, rh);
-            }
-            m_ActiveSyncLayerId = "";
-        }
-    }
+    (void)oldTab;
+    (void)newTab;
+    m_ActiveSyncLayerId.clear();
 }
 
 void AppShell::Shutdown() {
@@ -366,6 +414,22 @@ void AppShell::Shutdown() {
 
     if (m_Appearance) {
         m_Appearance->Save();
+    }
+    if (m_EditorTabTexture) {
+        glDeleteTextures(1, &m_EditorTabTexture);
+        m_EditorTabTexture = 0;
+    }
+    if (m_LibraryTabTexture) {
+        glDeleteTextures(1, &m_LibraryTabTexture);
+        m_LibraryTabTexture = 0;
+    }
+    if (m_RenderTabTexture) {
+        glDeleteTextures(1, &m_RenderTabTexture);
+        m_RenderTabTexture = 0;
+    }
+    if (m_ProgramLogoTexture) {
+        glDeleteTextures(1, &m_ProgramLogoTexture);
+        m_ProgramLogoTexture = 0;
     }
     m_Settings.Shutdown();
     m_Bundler.Shutdown();
@@ -382,7 +446,7 @@ void AppShell::Shutdown() {
 }
 
 void AppShell::RequestTabSwitch(int tabId) {
-    m_RequestedTab = tabId;
+    m_RequestedTab = (tabId == RootTabComposite) ? RootTabEditor : tabId;
 }
 
 void AppShell::OnFileDrop(GLFWwindow* window, int count, const char** paths) {
@@ -410,7 +474,7 @@ void AppShell::HandleDrop(int count, const char** paths) {
         }
         
         // Pass a lambda to handle tab switching
-        LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, &m_Composite, [this](int tabId) {
+        LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, nullptr, [this](int tabId) {
             RequestTabSwitch(tabId);
         });
     }

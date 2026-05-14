@@ -1,6 +1,7 @@
 #include "TextOverlayLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_TextVert = R"(
 #version 130
@@ -91,12 +92,12 @@ void TextOverlayLayer::Execute(unsigned int inputTexture, int width, int height,
 void TextOverlayLayer::RenderUI() {
     ImGui::Text("Text Layer Placeholder");
     ImGui::TextDisabled("(Texture generation not yet implemented in C++)");
-    ImGui::SliderFloat("Position X", &m_PosX, -500.0f, 2000.0f);
-    ImGui::SliderFloat("Position Y", &m_PosY, -500.0f, 2000.0f);
-    ImGui::SliderFloat("Width", &m_SizeX, 1.0f, 1000.0f);
-    ImGui::SliderFloat("Height", &m_SizeY, 1.0f, 1000.0f);
-    ImGui::SliderFloat("Opacity", &m_Opacity, 0.0f, 1.0f);
-    ImGui::SliderFloat("Rotation", &m_Rotation, -180.0f, 180.0f);
+    ImGuiExtras::NodeSliderFloat("Position X", "##PositionX", &m_PosX, -500.0f, 2000.0f);
+    ImGuiExtras::NodeSliderFloat("Position Y", "##PositionY", &m_PosY, -500.0f, 2000.0f);
+    ImGuiExtras::NodeSliderFloat("Width", "##Width", &m_SizeX, 1.0f, 1000.0f);
+    ImGuiExtras::NodeSliderFloat("Height", "##Height", &m_SizeY, 1.0f, 1000.0f);
+    ImGuiExtras::NodeSliderFloat("Opacity", "##Opacity", &m_Opacity, 0.0f, 1.0f);
+    ImGuiExtras::NodeSliderFloat("Rotation", "##Rotation", &m_Rotation, -180.0f, 180.0f);
 }
 
 json TextOverlayLayer::Serialize() const {

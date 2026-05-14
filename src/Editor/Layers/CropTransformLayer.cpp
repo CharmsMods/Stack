@@ -2,6 +2,7 @@
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
 #include <cmath>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_CropVert = R"(
 #version 130
@@ -88,15 +89,14 @@ void CropTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     quad.Draw();
     glUseProgram(0);
 }
-
 void CropTransformLayer::RenderUI() {
-    ImGui::SliderFloat("Crop Left (%)",   &m_CropLeft,   0.0f, 50.0f, "%.1f");
-    ImGui::SliderFloat("Crop Right (%)",  &m_CropRight,  0.0f, 50.0f, "%.1f");
-    ImGui::SliderFloat("Crop Top (%)",    &m_CropTop,    0.0f, 50.0f, "%.1f");
-    ImGui::SliderFloat("Crop Bottom (%)", &m_CropBottom, 0.0f, 50.0f, "%.1f");
-    ImGui::SliderFloat("Rotation (deg)",  &m_Rotation,  -180.0f, 180.0f, "%.1f");
-    ImGui::Checkbox("Flip Horizontally", &m_FlipH);
-    ImGui::Checkbox("Flip Vertically",   &m_FlipV);
+    ImGuiExtras::NodeSliderFloat("Crop Left", "##CropLeft",   &m_CropLeft,   0.0f, 50.0f, "%.1f %%");
+    ImGuiExtras::NodeSliderFloat("Crop Right", "##CropRight",  &m_CropRight,  0.0f, 50.0f, "%.1f %%");
+    ImGuiExtras::NodeSliderFloat("Crop Top", "##CropTop",    &m_CropTop,    0.0f, 50.0f, "%.1f %%");
+    ImGuiExtras::NodeSliderFloat("Crop Bottom", "##CropBottom", &m_CropBottom, 0.0f, 50.0f, "%.1f %%");
+    ImGuiExtras::NodeSliderFloat("Rotation", "##Rotation",  &m_Rotation,  -180.0f, 180.0f, "%.1f deg");
+    ImGuiExtras::NodeCheckbox("Flip Horizontally", "##FlipHorizontally", &m_FlipH);
+    ImGuiExtras::NodeCheckbox("Flip Vertically", "##FlipVertically",   &m_FlipV);
 }
 
 json CropTransformLayer::Serialize() const {

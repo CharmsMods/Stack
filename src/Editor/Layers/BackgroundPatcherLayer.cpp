@@ -1,7 +1,9 @@
 #include "BackgroundPatcherLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include "Editor/EditorModule.h"
+#include <algorithm>
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_BgPatcherVert = R"(
 #version 130
@@ -38,10 +40,14 @@ uniform int uPatchEnabled;
 uniform vec2 uResolution;
 uniform int uShowDebugOverlay;
 
-float getMask(vec2 uv) {
+float getSelectionMask(vec2 uv) {
     vec3 sampleRgb = texture(uInputTex, uv).rgb;
     float dist = distance(sampleRgb, uTargetColor);
-    float selection = 1.0 - smoothstep(uTolerance, uTolerance + uSmoothing + 0.001, dist);
+    return 1.0 - smoothstep(uTolerance, uTolerance + uSmoothing + 0.001, dist);
+}
+
+float getMask(vec2 uv) {
+    float selection = getSelectionMask(uv);
 
     if (uUseFloodMask == 1) {
         float floodValue = texture(uFloodMask, vec2(uv.x, 1.0 - uv.y)).r;
@@ -63,6 +69,7 @@ void main() {
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
     vec4 color = texture(uInputTex, vUV);
 
+    float centerSelectionMask = getSelectionMask(vUV);
     float centerMask = getMask(vUV);
     float mask = centerMask;
 
@@ -95,16 +102,14 @@ void main() {
     if (uShowDebugOverlay == 1) {
         float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
         vec3 bw = vec3(luma);
-        if (mask > 0.001) {
-            if (centerMask > 0.001) {
-                // Within tolerance range => magenta at 50% over grayscale
-                FragColor = vec4(mix(bw, vec3(1.0, 0.0, 1.0), 0.5), 1.0);
+        if (removedAlpha > 0.001) {
+            if (centerSelectionMask > 0.001) {
+                FragColor = vec4(1.0, 0.0, 1.0, 1.0);
             } else {
-                // Outside tolerance but affected by edge bleed => cyan at 50% over grayscale
-                FragColor = vec4(mix(bw, vec3(0.0, 1.0, 1.0), 0.5), 1.0);
+                FragColor = vec4(0.0, 1.0, 1.0, 1.0);
             }
         } else {
-            FragColor = vec4(bw, color.a);
+            FragColor = vec4(bw, 1.0);
         }
         return;
     }
@@ -169,7 +174,8 @@ void BackgroundPatcherLayer::RenderUI(EditorModule* editor) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
     }
-    if (ImGui::Button(isPicking ? "Cancel Picking" : "Pick Color To Remove", ImVec2(160, 30))) {
+    const float pickerButtonWidth = std::max(160.0f, ImGui::GetContentRegionAvail().x);
+    if (ImGui::Button(isPicking ? "Cancel Picking" : "Pick Color To Remove", ImVec2(pickerButtonWidth, 30.0f))) {
         if (isPicking) {
             editor->SetPickingColor(false);
         } else {
@@ -184,14 +190,17 @@ void BackgroundPatcherLayer::RenderUI(EditorModule* editor) {
         ImGui::PopStyleColor(2);
     }
 
-    ImGui::SameLine();
-    ImGui::ColorEdit3("##TargetColor", m_TargetColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+    ImGuiExtras::NodeColorEdit3(
+        "Target Color",
+        "##TargetColor",
+        m_TargetColor,
+        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
 
     ImGui::Spacing();
     
     // Removed Area Opacity goes from 0-100. It translates to target alpha.
     float opacity = m_TargetAlpha * 100.0f;
-    if (ImGui::SliderFloat("Removed Area Opacity", &opacity, 0.0f, 100.0f, "%.0f")) {
+    if (ImGuiExtras::NodeSliderFloat("Removed Area Opacity", "##RemovedAreaOpacity", &opacity, 0.0f, 100.0f, "%.0f %%")) {
         m_TargetAlpha = opacity / 100.0f;
     }
 
@@ -203,7 +212,7 @@ void BackgroundPatcherLayer::RenderUI(EditorModule* editor) {
     ImGui::Spacing();
 
     float tol100 = m_Tolerance * 100.0f;
-    if (ImGui::SliderFloat("Color Tolerance", &tol100, 0.0f, 100.0f, "%.0f")) {
+    if (ImGuiExtras::NodeSliderFloat("Color Tolerance", "##ColorTolerance", &tol100, 0.0f, 100.0f, "%.0f %%")) {
         m_Tolerance = tol100 / 100.0f;
     }
 
@@ -227,20 +236,141 @@ void BackgroundPatcherLayer::RenderUI(EditorModule* editor) {
     ImGui::Spacing();
 
     float smoothing100 = m_Smoothing * 100.0f;
-    if (ImGui::SliderFloat("Edge Smoothing", &smoothing100, 0.0f, 100.0f, "%.0f")) {
+    if (ImGuiExtras::NodeSliderFloat("Edge Smoothing", "##EdgeSmoothing", &smoothing100, 0.0f, 100.0f, "%.0f %%")) {
         m_Smoothing = smoothing100 / 100.0f;
     }
 
-    ImGui::SliderFloat("Edge Shift (px)", &m_EdgeShift, -10.0f, 10.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Edge Shift", "##EdgeShift(px)", &m_EdgeShift, -10.0f, 10.0f, "%.0f px");
 
     float defringe100 = m_Defringe * 100.0f;
-    if (ImGui::SliderFloat("Defringe", &defringe100, 0.0f, 100.0f, "%.0f")) {
+    if (ImGuiExtras::NodeSliderFloat("Defringe", "##Defringe", &defringe100, 0.0f, 100.0f, "%.0f %%")) {
         m_Defringe = defringe100 / 100.0f;
     }
 
     ImGui::Spacing();
-    ImGui::Checkbox("Keep Selected Range Only", &m_KeepSelected);
-    ImGui::Checkbox("Removal Visualizer (Magenta=In Range, Cyan=Edge Bleed)", &m_ShowDebugOverlay);
+    ImGuiExtras::NodeCheckbox("Keep Selected Range", "##KeepSelectedRangeOnly", &m_KeepSelected);
+    ImGuiExtras::NodeCheckbox("Visualizer (Pink=In, Cyan=Edge)", "##RemovalVisualizer(Magenta=InRange,Cyan=EdgeBleed)", &m_ShowDebugOverlay);
+}
+
+void BackgroundPatcherLayer::RenderAdvancedEditor(EditorModule* editor) {
+    if (!editor) {
+        return;
+    }
+
+    const float leftWidth = 440.0f;
+    const float columnGap = 30.0f;
+    const float bodyHeight = std::max(200.0f, ImGui::GetContentRegionAvail().y);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(14.0f, 14.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    ImGui::BeginChild("BackgroundRemoverControls", ImVec2(leftWidth, bodyHeight), false);
+    const float controlWidth = std::max(260.0f, ImGui::GetContentRegionAvail().x - 4.0f);
+
+    ImGui::TextDisabled("Selection");
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+    const bool isPicking = editor->IsPickingColor();
+    if (isPicking) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.73f, 0.23f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.82f, 0.30f, 0.32f, 1.0f));
+    }
+    if (ImGui::Button(isPicking ? "Cancel Picking" : "Select Color", ImVec2(std::max(220.0f, ImGui::GetContentRegionAvail().x), 36.0f))) {
+        if (isPicking) {
+            editor->SetPickingColor(false);
+        } else {
+            editor->SetPickingColor(true, [this](float r, float g, float b) {
+                m_TargetColor[0] = r;
+                m_TargetColor[1] = g;
+                m_TargetColor[2] = b;
+            });
+        }
+    }
+    if (isPicking) {
+        ImGui::PopStyleColor(2);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGui::TextDisabled("Selected Color");
+    const float swatchWidth = std::max(160.0f, std::min(220.0f, ImGui::GetContentRegionAvail().x * 0.58f));
+    const float swatchHeight = 28.0f;
+    const ImVec2 swatchMin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##AdvancedTargetColorSwatch", ImVec2(swatchWidth, swatchHeight));
+    const ImVec2 swatchMax = ImGui::GetItemRectMax();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddRectFilled(
+        swatchMin,
+        swatchMax,
+        ImGui::ColorConvertFloat4ToU32(ImVec4(m_TargetColor[0], m_TargetColor[1], m_TargetColor[2], 1.0f)),
+        4.0f);
+    drawList->AddRect(swatchMin, swatchMax, IM_COL32(255, 255, 255, 26), 4.0f);
+    ImGui::SameLine(0.0f, 12.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled(
+        "R %.0f  G %.0f  B %.0f",
+        m_TargetColor[0] * 255.0f,
+        m_TargetColor[1] * 255.0f,
+        m_TargetColor[2] * 255.0f);
+
+    float opacity = m_TargetAlpha * 100.0f;
+    if (ImGuiExtras::NodeSliderFloat("Removed Area Opacity", "##AdvancedRemovedAreaOpacity", &opacity, 0.0f, 100.0f, "%.0f %%", controlWidth)) {
+        m_TargetAlpha = opacity / 100.0f;
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::TextDisabled("Tolerance & Edges");
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
+    float tolerancePercent = m_Tolerance * 100.0f;
+    if (ImGuiExtras::NodeSliderFloat("Color Tolerance", "##AdvancedColorTolerance", &tolerancePercent, 0.0f, 100.0f, "%.0f %%", controlWidth)) {
+        m_Tolerance = tolerancePercent / 100.0f;
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+    ImGui::TextDisabled("Removed Range");
+    const ImVec2 gradientMin = ImGui::GetCursorScreenPos();
+    const float gradientWidth = std::max(120.0f, ImGui::GetContentRegionAvail().x);
+    const float gradientHeight = 12.0f;
+    const ImU32 leftColor = ImGui::ColorConvertFloat4ToU32(ImVec4(m_TargetColor[0], m_TargetColor[1], m_TargetColor[2], 1.0f));
+    const ImU32 rightColor = ImGui::ColorConvertFloat4ToU32(ImVec4(m_TargetColor[0], m_TargetColor[1], m_TargetColor[2], 0.0f));
+    drawList->AddRectFilledMultiColor(
+        gradientMin,
+        ImVec2(gradientMin.x + gradientWidth, gradientMin.y + gradientHeight),
+        leftColor,
+        rightColor,
+        rightColor,
+        leftColor);
+    ImGui::Dummy(ImVec2(gradientWidth, gradientHeight + 10.0f));
+
+    float smoothingPercent = m_Smoothing * 100.0f;
+    if (ImGuiExtras::NodeSliderFloat("Edge Smoothing", "##AdvancedEdgeSmoothing", &smoothingPercent, 0.0f, 100.0f, "%.0f %%", controlWidth)) {
+        m_Smoothing = smoothingPercent / 100.0f;
+    }
+
+    ImGuiExtras::NodeSliderFloat("Edge Shift", "##AdvancedEdgeShift", &m_EdgeShift, -10.0f, 10.0f, "%.0f px", controlWidth);
+
+    float defringePercent = m_Defringe * 100.0f;
+    if (ImGuiExtras::NodeSliderFloat("Defringe", "##AdvancedDefringe", &defringePercent, 0.0f, 100.0f, "%.0f %%", controlWidth)) {
+        m_Defringe = defringePercent / 100.0f;
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::TextDisabled("Options");
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+    ImGuiExtras::NodeCheckbox("Keep Selected Range", "##AdvancedKeepSelectedRange", &m_KeepSelected, controlWidth);
+    ImGuiExtras::NodeCheckbox("Visualizer (Pink=In, Cyan=Edge)", "##AdvancedVisualizer", &m_ShowDebugOverlay, controlWidth);
+
+    ImGui::EndChild();
+
+    ImGui::SameLine(0.0f, columnGap);
+
+    ImGui::BeginChild("BackgroundRemoverPreviewPane", ImVec2(0.0f, bodyHeight), false);
+    ImGui::TextDisabled("Preview");
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    editor->RenderAdvancedEditorPreview("BackgroundRemoverPreview", ImVec2(0.0f, std::max(260.0f, ImGui::GetContentRegionAvail().y - 4.0f)), true);
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 json BackgroundPatcherLayer::Serialize() const {
@@ -253,6 +383,7 @@ json BackgroundPatcherLayer::Serialize() const {
     j["defringe"] = m_Defringe;
     j["edgeShift"] = m_EdgeShift;
     j["keepSelected"] = m_KeepSelected;
+    j["showDebugOverlay"] = m_ShowDebugOverlay;
     return j;
 }
 
@@ -269,4 +400,5 @@ void BackgroundPatcherLayer::Deserialize(const json& j) {
     if (j.contains("defringe")) m_Defringe = j["defringe"];
     if (j.contains("edgeShift")) m_EdgeShift = j["edgeShift"];
     if (j.contains("keepSelected")) m_KeepSelected = j["keepSelected"];
+    if (j.contains("showDebugOverlay")) m_ShowDebugOverlay = j["showDebugOverlay"];
 }

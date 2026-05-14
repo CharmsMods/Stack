@@ -35,6 +35,9 @@ public:
     // Draw ImGui controls for this layer's parameters (shown in the Selected tab)
     virtual void RenderUI() = 0;
     virtual void RenderUI(class EditorModule* editor) { RenderUI(); }
+    virtual bool SupportsAdvancedEditor() const { return false; }
+    virtual const char* GetAdvancedEditorTitle() const { return GetName(); }
+    virtual void RenderAdvancedEditor(class EditorModule* editor) { RenderUI(editor); }
 
     // Whether this layer is enabled and should be processed
     bool IsEnabled() const { return m_Enabled; }

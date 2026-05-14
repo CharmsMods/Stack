@@ -1,6 +1,7 @@
 #include "ChromaticAberrationLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_ChromaticAberrationVert = R"(
 #version 130
@@ -113,14 +114,14 @@ void ChromaticAberrationLayer::Execute(unsigned int inputTexture, int width, int
 }
 
 void ChromaticAberrationLayer::RenderUI() {
-    ImGui::SliderFloat("Amount", &m_Amount, 0.0f, 100.0f, "%.1f");
-    ImGui::SliderFloat("Edge Blur", &m_EdgeBlur, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Zoom Blur", &m_ZoomBlur, 0.0f, 100.0f, "%.0f");
-    ImGui::Checkbox("Link Falloff To Blur", &m_LinkFalloffToBlur);
-    ImGui::SliderFloat("Radius", &m_Radius, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Falloff", &m_Falloff, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Center X", &m_CenterX, 0.0f, 1.0f, "%.3f");
-    ImGui::SliderFloat("Center Y", &m_CenterY, 0.0f, 1.0f, "%.3f");
+    ImGuiExtras::NodeSliderFloat("Amount", "##Amount", &m_Amount, 0.0f, 100.0f, "%.1f");
+    ImGuiExtras::NodeSliderFloat("Edge Blur", "##EdgeBlur", &m_EdgeBlur, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Zoom Blur", "##ZoomBlur", &m_ZoomBlur, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCheckbox("Link Falloff To Blur", "##LinkFalloffToBlur", &m_LinkFalloffToBlur);
+    ImGuiExtras::NodeSliderFloat("Radius", "##Radius", &m_Radius, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Falloff", "##Falloff", &m_Falloff, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Center X", "##CenterX", &m_CenterX, 0.0f, 1.0f, "%.3f");
+    ImGuiExtras::NodeSliderFloat("Center Y", "##CenterY", &m_CenterY, 0.0f, 1.0f, "%.3f");
     if (ImGui::Button("Reset Center")) {
         m_CenterX = 0.5f;
         m_CenterY = 0.5f;

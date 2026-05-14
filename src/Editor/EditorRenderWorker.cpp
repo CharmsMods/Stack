@@ -1,6 +1,7 @@
 #include "EditorRenderWorker.h"
 
 #include "Editor/LayerRegistry.h"
+#include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLLoader.h"
 #include <GLFW/glfw3.h>
@@ -68,6 +69,8 @@ bool EditorRenderWorker::TryConsumeCompleted(Result& result) {
 void EditorRenderWorker::ThreadMain() {
     glfwMakeContextCurrent(m_WorkerWindow);
     LoadGLFunctions();
+    m_PersistentPipeline = std::make_unique<RenderPipeline>();
+    m_PersistentPipeline->Initialize();
 
     while (true) {
         Snapshot snapshot;
@@ -92,6 +95,7 @@ void EditorRenderWorker::ThreadMain() {
         }
     }
 
+    m_PersistentPipeline.reset();
     glfwMakeContextCurrent(nullptr);
 }
 
@@ -99,27 +103,157 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
     Result result;
     result.generation = snapshot.generation;
 
-    if (!snapshot.outputConnected) {
-        result.success = true;
-        return result;
-    }
-    if (snapshot.sourcePixels.empty() || snapshot.width <= 0 || snapshot.height <= 0) {
-        result.error = "No source image.";
-        return result;
-    }
-
     try {
-        RenderPipeline pipeline;
-        pipeline.Initialize();
+        if (!m_PersistentPipeline) {
+            m_PersistentPipeline = std::make_unique<RenderPipeline>();
+            m_PersistentPipeline->Initialize();
+        }
+        RenderPipeline& pipeline = *m_PersistentPipeline;
+
+        auto renderPreviewRequests = [&]() {
+            if (snapshot.previews.empty()) {
+                return;
+            }
+
+            result.previews.reserve(snapshot.previews.size());
+            for (const PreviewRequest& request : snapshot.previews) {
+                PreviewResult previewResult;
+                previewResult.previewNodeId = request.previewNodeId;
+                previewResult.dirtyGeneration = request.dirtyGeneration;
+
+                const unsigned char* sourceData = request.sourcePixels.empty() ? nullptr : request.sourcePixels.data();
+                int sourceWidth = request.width;
+                int sourceHeight = request.height;
+                int sourceChannels = request.channels;
+                if ((!sourceData || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
+                    const auto sourceIt = std::find_if(
+                        snapshot.graph.nodes.begin(),
+                        snapshot.graph.nodes.end(),
+                        [&request](const RenderGraphNode& node) { return node.nodeId == request.sourceNodeId; });
+                    if (sourceIt != snapshot.graph.nodes.end() &&
+                        sourceIt->kind == RenderGraphNodeKind::Image &&
+                        !sourceIt->image.pixels.empty() &&
+                        sourceIt->image.width > 0 &&
+                        sourceIt->image.height > 0) {
+                        sourceData = sourceIt->image.pixels.data();
+                        sourceWidth = sourceIt->image.width;
+                        sourceHeight = sourceIt->image.height;
+                        sourceChannels = std::max(1, sourceIt->image.channels);
+                    }
+                }
+                if (!sourceData || sourceWidth <= 0 || sourceHeight <= 0) {
+                    previewResult.error = "No source image.";
+                    result.previews.push_back(std::move(previewResult));
+                    continue;
+                }
+
+                pipeline.LoadSourceFromPixels(sourceData, sourceWidth, sourceHeight, sourceChannels);
+                RenderGraphSnapshot graph = snapshot.graph;
+                if (request.maskInput) {
+                    graph.outputNodeId = request.sourceNodeId;
+                } else {
+                    const int syntheticOutputId = -100000 - request.previewNodeId;
+                    RenderGraphNode outputNode;
+                    outputNode.nodeId = syntheticOutputId;
+                    outputNode.kind = RenderGraphNodeKind::Output;
+                    graph.nodes.push_back(std::move(outputNode));
+                    graph.links.push_back(RenderGraphLink{
+                        request.sourceNodeId,
+                        request.sourceSocketId,
+                        syntheticOutputId,
+                        EditorNodeGraph::kImageInputSocketId
+                    });
+                    graph.outputNodeId = syntheticOutputId;
+                }
+                pipeline.ExecuteGraph(graph);
+                previewResult.pixels = pipeline.GetScopesPixels(previewResult.width, previewResult.height);
+                previewResult.success = !previewResult.pixels.empty();
+                if (!previewResult.success) {
+                    previewResult.error = "Preview produced no pixels.";
+                }
+                result.previews.push_back(std::move(previewResult));
+            }
+        };
+
+        if (!snapshot.compositeOutputs.empty()) {
+            result.success = true;
+            result.compositeOutputs.reserve(snapshot.compositeOutputs.size());
+            for (const CompositeOutputRequest& request : snapshot.compositeOutputs) {
+                CompositeOutputResult outputResult;
+                outputResult.outputNodeId = request.outputNodeId;
+                outputResult.dirtyGeneration = request.dirtyGeneration;
+                outputResult.chainFingerprint = request.chainFingerprint;
+                const unsigned char* sourceData = request.sourcePixels.empty() ? nullptr : request.sourcePixels.data();
+                int sourceWidth = request.width;
+                int sourceHeight = request.height;
+                int sourceChannels = request.channels;
+                if ((!sourceData || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
+                    const auto sourceIt = std::find_if(
+                        snapshot.graph.nodes.begin(),
+                        snapshot.graph.nodes.end(),
+                        [&request](const RenderGraphNode& node) { return node.nodeId == request.sourceNodeId; });
+                    if (sourceIt != snapshot.graph.nodes.end() &&
+                        sourceIt->kind == RenderGraphNodeKind::Image &&
+                        !sourceIt->image.pixels.empty() &&
+                        sourceIt->image.width > 0 &&
+                        sourceIt->image.height > 0) {
+                        sourceData = sourceIt->image.pixels.data();
+                        sourceWidth = sourceIt->image.width;
+                        sourceHeight = sourceIt->image.height;
+                        sourceChannels = std::max(1, sourceIt->image.channels);
+                    }
+                }
+                if (!sourceData || sourceWidth <= 0 || sourceHeight <= 0) {
+                    outputResult.error = "No source image.";
+                    result.success = false;
+                    result.compositeOutputs.push_back(std::move(outputResult));
+                    continue;
+                }
+
+                pipeline.LoadSourceFromPixels(
+                    sourceData,
+                    sourceWidth,
+                    sourceHeight,
+                    sourceChannels);
+                RenderGraphSnapshot graph = snapshot.graph;
+                graph.outputNodeId = request.outputNodeId;
+                pipeline.ExecuteGraph(graph);
+                outputResult.pixels = pipeline.GetOutputPixels(outputResult.width, outputResult.height);
+                outputResult.success = !outputResult.pixels.empty();
+                if (!outputResult.success) {
+                    outputResult.error = "Render produced no pixels.";
+                    result.success = false;
+                }
+                result.compositeOutputs.push_back(std::move(outputResult));
+            }
+            renderPreviewRequests();
+            return result;
+        }
+
+        if (!snapshot.outputConnected) {
+            result.success = true;
+            renderPreviewRequests();
+            return result;
+        }
+        if (snapshot.sourcePixels.empty() || snapshot.width <= 0 || snapshot.height <= 0) {
+            result.error = "No source image.";
+            renderPreviewRequests();
+            return result;
+        }
         pipeline.LoadSourceFromPixels(snapshot.sourcePixels.data(), snapshot.width, snapshot.height, snapshot.channels);
 
         if (!snapshot.graph.nodes.empty()) {
             pipeline.ExecuteGraph(snapshot.graph);
-            result.pixels = pipeline.GetOutputPixels(result.width, result.height);
-            result.success = !result.pixels.empty();
+            result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
+            if (result.outputTexture.texture != 0) {
+                result.outputTexture.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                glFlush();
+            }
+            result.success = result.outputTexture.texture != 0;
             if (!result.success) {
                 result.error = "Render produced no pixels.";
             }
+            renderPreviewRequests();
             return result;
         }
 
@@ -154,11 +288,16 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         }
 
         pipeline.ExecuteMasked(steps, snapshot.masks);
-        result.pixels = pipeline.GetOutputPixels(result.width, result.height);
-        result.success = !result.pixels.empty();
+        result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
+        if (result.outputTexture.texture != 0) {
+            result.outputTexture.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glFlush();
+        }
+        result.success = result.outputTexture.texture != 0;
         if (!result.success) {
             result.error = "Render produced no pixels.";
         }
+        renderPreviewRequests();
     } catch (const std::exception& e) {
         result.error = e.what();
     } catch (...) {

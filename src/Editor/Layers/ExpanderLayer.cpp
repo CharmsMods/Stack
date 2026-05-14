@@ -1,6 +1,7 @@
 #include "ExpanderLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_ExpanderVert = R"(
 #version 130
@@ -67,10 +68,9 @@ void ExpanderLayer::Execute(unsigned int inputTexture, int width, int height, Fu
     quad.Draw();
     glUseProgram(0);
 }
-
 void ExpanderLayer::RenderUI() {
-    ImGui::SliderFloat("Padding Offset", &m_Padding, 0.0f, 500.0f, "%.0f px");
-    ImGui::ColorEdit4("Fill Color", m_FillColor);
+    ImGuiExtras::NodeSliderFloat("Padding", "##PaddingOffset", &m_Padding, 0.0f, 500.0f, "%.0f px");
+    ImGuiExtras::NodeColorEdit4("Fill Color", "##FillColor", m_FillColor);
 }
 
 json ExpanderLayer::Serialize() const {

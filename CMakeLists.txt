@@ -79,6 +79,13 @@ add_custom_target(BakeAssets
     VERBATIM
 )
 
+add_custom_target(BakeTabIcons
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_tab_icons.py"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Baking tab icons into C++..."
+    VERBATIM
+)
+
 # Automatically bake shaders into a header if they change
 add_custom_target(BakeShaders
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_shaders.py" "${CMAKE_BINARY_DIR}/generated/src/RenderTab/Shaders/EmbeddedShaders.h"
@@ -100,7 +107,7 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 )
 
 add_executable(${PROJECT_NAME} ${SRC_FILES})
-add_dependencies(${PROJECT_NAME} BakeAssets BakeShaders BakeFonts)
+add_dependencies(${PROJECT_NAME} BakeAssets BakeTabIcons BakeShaders BakeFonts)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_BINARY_DIR}/generated/src

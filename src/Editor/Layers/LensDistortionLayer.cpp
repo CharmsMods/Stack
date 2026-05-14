@@ -1,6 +1,7 @@
 #include "LensDistortionLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_LensDistortionVert = R"(
 #version 130
@@ -65,9 +66,9 @@ void LensDistortionLayer::Execute(unsigned int inputTexture, int width, int heig
 }
 
 void LensDistortionLayer::RenderUI() {
-    ImGui::SliderFloat("Distortion Amount", &m_Amount, -100.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Distortion Amount", "##DistortionAmount", &m_Amount, -100.0f, 100.0f, "%.0f");
     ImGui::TextDisabled("< Barrel (Fisheye) | Pincushion >");
-    ImGui::SliderFloat("Scale Base", &m_Scale, 50.0f, 150.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Scale Base", "##ScaleBase", &m_Scale, 50.0f, 150.0f, "%.0f");
 }
 
 json LensDistortionLayer::Serialize() const {

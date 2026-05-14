@@ -2,6 +2,7 @@
 
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_ImageBreaksVert = R"(
 #version 130
@@ -153,18 +154,18 @@ void ImageBreaksLayer::Execute(unsigned int inputTexture, int width, int height,
 }
 
 void ImageBreaksLayer::RenderUI() {
-    ImGui::SliderFloat("Columns", &m_Columns, 1.0f, 200.0f, "%.0f");
-    ImGui::SliderFloat("Rows", &m_Rows, 1.0f, 200.0f, "%.0f");
-    ImGui::SliderFloat("Horizontal Shift", &m_ShiftX, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Vertical Shift", &m_ShiftY, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Shift Edge Blur", &m_ShiftBlur, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Random Seed", &m_Seed, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Columns", "##Columns", &m_Columns, 1.0f, 200.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Rows", "##Rows", &m_Rows, 1.0f, 200.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Horizontal Shift", "##HorizontalShift", &m_ShiftX, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Vertical Shift", "##VerticalShift", &m_ShiftY, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Shift Edge Blur", "##ShiftEdgeBlur", &m_ShiftBlur, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Random Seed", "##RandomSeed", &m_Seed, 0.0f, 100.0f, "%.0f");
     ImGui::Separator();
     ImGui::TextDisabled("Square Block Displacements");
-    ImGui::SliderFloat("Square Density", &m_SquareDensity, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Grid Size", &m_GridSize, 1.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Square Distance", &m_SquareDistance, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Square Edge Blur", &m_SquareBlur, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Square Density", "##SquareDensity", &m_SquareDensity, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Grid Size", "##GridSize", &m_GridSize, 1.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Square Distance", "##SquareDistance", &m_SquareDistance, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Square Edge Blur", "##SquareEdgeBlur", &m_SquareBlur, 0.0f, 1.0f, "%.2f");
 }
 
 json ImageBreaksLayer::Serialize() const {

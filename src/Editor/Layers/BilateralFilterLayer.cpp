@@ -1,6 +1,7 @@
 #include "BilateralFilterLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_BilateralVert = R"(
 #version 130
@@ -101,15 +102,15 @@ void BilateralFilterLayer::Execute(unsigned int inputTexture, int width, int hei
 }
 
 void BilateralFilterLayer::RenderUI() {
-    ImGui::SliderInt("Radius", &m_Radius, 1, 30);
-    ImGui::SliderFloat("Color Sigma", &m_SigmaCol, 0.01f, 1.0f);
-    ImGui::SliderFloat("Spatial Sigma", &m_SigmaSpace, 0.5f, 15.0f);
-    
+    ImGuiExtras::NodeSliderInt("Radius", "##Radius", &m_Radius, 1, 30);
+    ImGuiExtras::NodeSliderFloat("Color Sigma", "##ColorSigma", &m_SigmaCol, 0.01f, 1.0f);
+    ImGuiExtras::NodeSliderFloat("Spatial Sigma", "##SpatialSigma", &m_SigmaSpace, 0.5f, 15.0f);
+
     const char* kernels[] = { "Gaussian", "Box" };
-    ImGui::Combo("Kernel", &m_Kernel, kernels, IM_ARRAYSIZE(kernels));
-    
+    ImGuiExtras::NodeCombo("Kernel", "##Kernel", &m_Kernel, kernels, IM_ARRAYSIZE(kernels));
+
     const char* modes[] = { "Luminance", "RGB" };
-    ImGui::Combo("Edge Mode", &m_EdgeMode, modes, IM_ARRAYSIZE(modes));
+    ImGuiExtras::NodeCombo("Edge Mode", "##EdgeMode", &m_EdgeMode, modes, IM_ARRAYSIZE(modes));
 }
 
 json BilateralFilterLayer::Serialize() const {

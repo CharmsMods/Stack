@@ -5,6 +5,63 @@
 
 namespace ImGuiExtras {
 
+namespace {
+
+NodeControlState g_NodeControlState;
+
+struct NodeControlLayout {
+    float startX = 0.0f;
+    float labelWidth = 0.0f;
+    float widgetWidth = 0.0f;
+    float valueWidth = 0.0f;
+    float spacing = 0.0f;
+    ImVec2 screenPos;
+};
+
+NodeControlLayout BuildNodeControlLayout(float controlWidth, bool includeValueLane) {
+    NodeControlLayout layout;
+    layout.startX = ImGui::GetCursorPosX();
+    layout.screenPos = ImGui::GetCursorScreenPos();
+    layout.spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+
+    float availableWidth = controlWidth > 0.0f ? controlWidth : ImGui::CalcItemWidth();
+    if (availableWidth <= 0.0f) {
+        availableWidth = 200.0f;
+    }
+
+    layout.labelWidth = std::min(120.0f, availableWidth * 0.45f);
+    layout.valueWidth = includeValueLane
+        ? std::min(58.0f, std::max(42.0f, availableWidth * 0.20f))
+        : 0.0f;
+    const float occupiedSpacing = includeValueLane ? (layout.spacing * 2.0f) : layout.spacing;
+    layout.widgetWidth = std::max(10.0f, availableWidth - layout.labelWidth - layout.valueWidth - occupiedSpacing);
+    return layout;
+}
+
+void RenderNodeControlLabel(const char* label, const NodeControlLayout& layout) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushClipRect(
+        layout.screenPos,
+        ImVec2(
+            layout.screenPos.x + layout.labelWidth,
+            layout.screenPos.y + ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2.0f),
+        true);
+    ImGui::TextDisabled("%s", label);
+    ImGui::PopClipRect();
+}
+
+void CaptureNodeControlItem(bool popupOpen = false) {
+    g_NodeControlState.hovered |= ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    g_NodeControlState.active |= ImGui::IsItemActive();
+    g_NodeControlState.edited |= ImGui::IsItemEdited();
+    g_NodeControlState.popupOpen |= popupOpen;
+    if (g_NodeControlState.hovered || g_NodeControlState.active || g_NodeControlState.edited || popupOpen) {
+        g_NodeControlState.id = ImGui::GetItemID();
+    }
+}
+
+} // namespace
+
 float AnimateTowards(float current, float target, float deltaTime, float speed) {
     if (deltaTime <= 0.0f) {
         return target;
@@ -81,6 +138,152 @@ void RenderBusyOverlay(const char* message) {
 
     ImGui::SetCursorScreenPos(centerPos);
     DrawSpinner(message, radius, 4, IM_COL32(255, 255, 255, 240));
+}
+
+void ResetNodeControlState() {
+    g_NodeControlState = {};
+}
+
+const NodeControlState& GetNodeControlState() {
+    return g_NodeControlState;
+}
+
+bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, float v_max, const char* format, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, true);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::SliderFloat("##track", v, v_min, v_max, "");
+    CaptureNodeControlItem();
+
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing + layout.widgetWidth + layout.spacing);
+    ImGui::AlignTextToFramePadding();
+    char valBuf[64];
+    snprintf(valBuf, sizeof(valBuf), format ? format : "%.2f", *v);
+    ImGui::TextUnformatted(valBuf);
+    
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_max, const char* format, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, true);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::SliderInt("##track", v, v_min, v_max, "");
+    CaptureNodeControlItem();
+
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing + layout.widgetWidth + layout.spacing);
+    ImGui::AlignTextToFramePadding();
+    char valBuf[64];
+    snprintf(valBuf, sizeof(valBuf), format ? format : "%d", *v);
+    ImGui::TextUnformatted(valBuf);
+    
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeCheckbox(const char* label, const char* id, bool* v, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, true);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    const bool changed = ImGui::Checkbox("##check", v);
+    CaptureNodeControlItem();
+
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing + layout.widgetWidth + layout.spacing);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(*v ? "On" : "Off");
+    
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeCombo(const char* label, const char* id, int* current_item, const char* const items[], int items_count, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, false);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::Combo("##combo", current_item, items, items_count);
+    CaptureNodeControlItem(ImGui::IsPopupOpen("##combo"));
+
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeColorEdit3(const char* label, const char* id, float color[3], ImGuiColorEditFlags flags, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, false);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::ColorEdit3("##color", color, flags | ImGuiColorEditFlags_NoLabel);
+    CaptureNodeControlItem(ImGui::IsPopupOpen("picker"));
+
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeColorEdit4(const char* label, const char* id, float color[4], ImGuiColorEditFlags flags, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, false);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::ColorEdit4("##color", color, flags | ImGuiColorEditFlags_NoLabel);
+    CaptureNodeControlItem(ImGui::IsPopupOpen("picker"));
+
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeInputFloat(const char* label, const char* id, float* v, float step, float step_fast, const char* format, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, false);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::InputFloat("##input", v, step, step_fast, format ? format : "%.3f");
+    CaptureNodeControlItem();
+
+    ImGui::PopID();
+    return changed;
+}
+
+bool NodeInputInt(const char* label, const char* id, int* v, int step, int step_fast, float controlWidth) {
+    ImGui::PushID(id);
+    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, false);
+
+    RenderNodeControlLabel(label, layout);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
+    ImGui::SetNextItemWidth(layout.widgetWidth);
+    const bool changed = ImGui::InputInt("##input", v, step, step_fast);
+    CaptureNodeControlItem();
+
+    ImGui::PopID();
+    return changed;
 }
 
 } // namespace ImGuiExtras

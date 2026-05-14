@@ -34,6 +34,10 @@ private:
     GLFWwindow* m_Window;
     GLFWwindow* m_SplashWindow;
     unsigned int m_SplashTexture = 0;
+    unsigned int m_EditorTabTexture = 0;
+    unsigned int m_LibraryTabTexture = 0;
+    unsigned int m_RenderTabTexture = 0;
+    unsigned int m_ProgramLogoTexture = 0;
     bool m_IsRunning;
     bool m_FirstTimeLayout;
     int m_RequestedTab = 0; // 0 = Library, 1 = Editor

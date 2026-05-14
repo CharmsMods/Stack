@@ -1,5 +1,6 @@
 #include "BlurLayer.h"
 #include "Renderer/FullscreenQuad.h"
+#include "Utils/ImGuiExtras.h"
 #include <imgui.h>
 
 static const char* s_BlurVert = R"(
@@ -74,10 +75,10 @@ void BlurLayer::Execute(unsigned int inputTexture, int width, int height, Fullsc
 }
 
 void BlurLayer::RenderUI() {
-    ImGui::SliderFloat("Blur Radius / Amount", &m_Amount, 0.5f, 16.0f, "%.1f");
-    
+    ImGuiExtras::NodeSliderFloat("Blur Radius / Amount", "##BlurAmount", &m_Amount, 0.5f, 16.0f, "%.1f");
+
     const char* types[] = { "Box Blur (Fast / Sharper)", "Gaussian (Smooth / Tapered)" };
-    ImGui::Combo("Blur Type", &m_Type, types, IM_ARRAYSIZE(types));
+    ImGuiExtras::NodeCombo("Blur Type", "##BlurType", &m_Type, types, IM_ARRAYSIZE(types));
 }
 
 json BlurLayer::Serialize() const {

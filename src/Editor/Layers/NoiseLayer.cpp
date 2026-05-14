@@ -1,6 +1,7 @@
 #include "NoiseLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_NoiseVert = R"(
 #version 130
@@ -232,7 +233,7 @@ void NoiseLayer::Execute(unsigned int inputTexture, int width, int height, Fulls
 }
 
 void NoiseLayer::RenderUI() {
-    ImGui::SliderFloat("Strength", &m_Strength, 0.0f, 150.0f, "%.1f");
+    ImGuiExtras::NodeSliderFloat("Strength", "##Strength", &m_Strength, 0.0f, 150.0f, "%.1f");
     
     const char* types[] = { "Color White", "Grayscale White", "Blend (Sat)", "Blue Noise", "Blue Noise (Color)", "Perlin (Cloudy)", "Worley (Cellular)", "Scanlines", "Speckle (Dust)", "Glitch", "Anisotropic (Fiber)", "Voronoi Mosaic", "Crosshatch" };
     int webIndices[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
@@ -240,23 +241,23 @@ void NoiseLayer::RenderUI() {
     int currentTypeIndex = 0;
     for(int i=0; i<13; i++) if(webIndices[i] == m_Type) currentTypeIndex = i;
 
-    if (ImGui::Combo("Noise Type", &currentTypeIndex, types, IM_ARRAYSIZE(types))) {
+    if (ImGuiExtras::NodeCombo("Noise Type", "##NoiseType", &currentTypeIndex, types, IM_ARRAYSIZE(types))) {
         m_Type = webIndices[currentTypeIndex];
     }
 
     const char* blendModes[] = { "Normal", "Overlay", "Screen", "Multiply", "Add", "Difference" };
-    ImGui::Combo("Blend Mode", &m_BlendMode, blendModes, IM_ARRAYSIZE(blendModes));
+    ImGuiExtras::NodeCombo("Blend Mode", "##BlendMode", &m_BlendMode, blendModes, IM_ARRAYSIZE(blendModes));
 
-    ImGui::SliderFloat("Blurriness", &m_Blurriness, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Sat Strength", &m_SatStrength, 0.0f, 4.0f, "%.2f");
-    ImGui::SliderFloat("Sat Impact", &m_SatImpact, -100.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Scale", &m_Scale, 1.0f, 20.0f, "%.1f");
-    ImGui::SliderFloat("Opacity", &m_Opacity, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Blurriness", "##Blurriness", &m_Blurriness, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Sat Strength", "##SatStrength", &m_SatStrength, 0.0f, 4.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Sat Impact", "##SatImpact", &m_SatImpact, -100.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Scale", "##Scale", &m_Scale, 1.0f, 20.0f, "%.1f");
+    ImGuiExtras::NodeSliderFloat("Opacity", "##Opacity", &m_Opacity, 0.0f, 1.0f, "%.2f");
     
     if (ImGui::TreeNode("Advanced (Internal Params)")) {
-        ImGui::SliderFloat("Param A", &m_ParamA, 0.0f, 1.0f);
-        ImGui::SliderFloat("Param B", &m_ParamB, 0.0f, 1.0f);
-        ImGui::SliderFloat("Param C", &m_ParamC, 0.0f, 1.0f);
+        ImGuiExtras::NodeSliderFloat("Param A", "##ParamA", &m_ParamA, 0.0f, 1.0f);
+        ImGuiExtras::NodeSliderFloat("Param B", "##ParamB", &m_ParamB, 0.0f, 1.0f);
+        ImGuiExtras::NodeSliderFloat("Param C", "##ParamC", &m_ParamC, 0.0f, 1.0f);
         ImGui::TreePop();
     }
     

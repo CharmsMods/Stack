@@ -79,19 +79,39 @@ void EditorScopes::AnalyzePixels(const std::vector<unsigned char>& pixels, int w
 }
 
 void EditorScopes::RenderScopeNode(EditorModule* editor, EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId) {
-    m_UpdateTimer += ImGui::GetIO().DeltaTime;
-    if (m_UpdateTimer > m_UpdateInterval && sourceNodeId > 0) {
+    if (sourceNodeId > 0) {
+        const std::uint64_t scopeRevision = editor ? editor->GetScopeNodeRevision(sourceNodeId) : 0;
+        if (scopeRevision != m_LastScopeRevision || sourceNodeId != m_LastScopeNodeId) {
+            m_LastScopeRevision = scopeRevision;
+            m_LastScopeNodeId = sourceNodeId;
+            m_LastWidth = 0;
+            m_LastHeight = 0;
+            int w = 0;
+            int h = 0;
+            std::vector<unsigned char> pixels = editor->GetScopePixelsForNode(sourceNodeId, w, h);
+            AnalyzePixels(pixels, w, h);
+            m_LastWidth = w;
+            m_LastHeight = h;
+        }
+    }
+
+    if (sourceNodeId <= 0) {
+        m_LastScopeRevision = 0;
+        m_LastScopeNodeId = -1;
+        m_LastWidth = 0;
+        m_LastHeight = 0;
+        AnalyzePixels({}, 0, 0);
+        ImGui::TextDisabled("Connect an image or mask output.");
+        return;
+    }
+
+    if (m_LastWidth <= 0 || m_LastHeight <= 0) {
         int w = 0;
         int h = 0;
         std::vector<unsigned char> pixels = editor->GetScopePixelsForNode(sourceNodeId, w, h);
         AnalyzePixels(pixels, w, h);
-        m_UpdateTimer = 0.0f;
-    }
-
-    if (sourceNodeId <= 0) {
-        AnalyzePixels({}, 0, 0);
-        ImGui::TextDisabled("Connect an image or mask output.");
-        return;
+        m_LastWidth = w;
+        m_LastHeight = h;
     }
 
     switch (scopeKind) {

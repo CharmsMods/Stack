@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Editor/LayerRegistry.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,8 @@ enum class NodeKind {
     Image,
     Layer,
     Output,
+    Composite,
+    ExportBoundsSettings,
     Scope,
     MaskGenerator,
     Mix,
@@ -61,7 +64,9 @@ enum class ImageToMaskKind {
 
 enum class ImageGeneratorKind {
     SolidColor,
-    ColorGradient
+    ColorGradient,
+    Square,
+    Circle
 };
 
 enum class MixBlendMode {
@@ -143,7 +148,7 @@ struct Node {
     int id = 0;
     NodeKind kind = NodeKind::Layer;
     int layerIndex = -1;
-    LayerType layerType = LayerType::Adjustments;
+    LayerType layerType = LayerType::Brightness;
     std::string typeId;
     std::string title;
     Vec2 position;
@@ -167,6 +172,13 @@ struct Link {
     std::string fromSocketId;
     int toNodeId = 0;
     std::string toSocketId;
+};
+
+struct CompletedChainInfo {
+    int outputNodeId = -1;
+    int terminalNodeId = -1;
+    int sourceNodeId = -1;
+    std::vector<int> nodeIds;
 };
 
 enum class LinkRole {
@@ -195,6 +207,9 @@ public:
     Node* AddImageGeneratorNode(ImageGeneratorKind generatorKind, Vec2 position);
     Node* AddMixNode(Vec2 position);
     Node* AddPreviewNode(Vec2 position);
+    Node* AddOutputNode(Vec2 position, bool makePrimary = false);
+    Node* AddCompositeNode(Vec2 position);
+    Node* AddExportBoundsSettingsNode(Vec2 position);
     Node* EnsureOutputNode();
     void RemoveLayerNode(int layerIndex);
 
@@ -233,6 +248,14 @@ public:
     int GetActiveImageNodeId() const { return m_ActiveImageNodeId; }
     void SetActiveImageNodeId(int nodeId) { m_ActiveImageNodeId = nodeId; }
     bool IsOutputConnected() const;
+    std::vector<int> GetOutputNodeIds() const;
+    std::vector<int> GetConnectedOutputNodeIds() const;
+    std::vector<CompletedChainInfo> GetCompletedChains() const;
+    std::vector<int> GetDownstreamRenderNodeIds(int nodeId) const;
+    std::vector<int> GetDownstreamOutputNodeIds(int nodeId) const;
+    int FindAdjacentMainChainNodeId(int nodeId, int direction) const;
+    int ResolvePreviewOutputNodeId() const;
+    std::uint64_t GetStructureRevision() const { return m_StructureRevision; }
 
     int GetOutputNodeId() const { return m_OutputNodeId; }
     void SetOutputNodeId(int nodeId) { m_OutputNodeId = nodeId; }
@@ -242,7 +265,9 @@ public:
     void AutoLayout();
     ValidationResult Validate() const;
     std::vector<int> GetRenderLayerNodePath() const;
+    std::vector<int> GetRenderLayerNodePath(int outputNodeId) const;
     std::vector<int> GetRenderLayerIndexPath() const;
+    std::vector<int> GetRenderLayerIndexPath(int outputNodeId) const;
     LinkRole GetLinkRole(const Link& link) const;
     bool IsRenderChainNode(const Node& node) const;
     std::vector<SocketDefinition> GetSockets(const Node& node, bool visibleOnly = false) const;
@@ -257,6 +282,7 @@ public:
 
 private:
     int AllocateNodeId();
+    void TouchStructure();
     Vec2 DefaultLayerPosition(int layerIndex) const;
     bool WouldCreateCycle(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) const;
     void RemoveRenderLinksForNodeInput(int nodeId, const std::string& socketId);
@@ -264,6 +290,7 @@ private:
     void RemoveScopeLinksForNodeInput(int nodeId, const std::string& socketId);
     void RemoveLinksForNodeInput(int nodeId, const std::string& socketId);
     void ActivateImageNode(int nodeId);
+    void RefreshPrimaryOutputNode();
 
     std::vector<Node> m_Nodes;
     std::vector<Link> m_Links;
@@ -274,6 +301,9 @@ private:
     bool m_HasSelectedLink = false;
     int m_ActiveImageNodeId = -1;
     int m_OutputNodeId = -1;
+    mutable std::uint64_t m_StructureRevision = 1;
+    mutable std::uint64_t m_CompletedChainsCacheRevision = 0;
+    mutable std::vector<CompletedChainInfo> m_CompletedChainsCache;
 };
 
 } // namespace EditorNodeGraph

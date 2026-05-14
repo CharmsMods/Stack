@@ -30,6 +30,10 @@ bool DecodePngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& pa
         return false;
     }
 
+    // The editor stores image-node pixels in the same bottom-left-oriented layout
+    // used by the render pipeline's GL uploads. Keep saved image payloads aligned
+    // with fresh imports so reopening a project cannot flip the source image.
+    stbi_set_flip_vertically_on_load_thread(1);
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -53,6 +57,8 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Image: return "Image";
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
+        case NodeKind::Composite: return "Composite";
+        case NodeKind::ExportBoundsSettings: return "ExportBoundsSettings";
         case NodeKind::Scope: return "Scope";
         case NodeKind::MaskGenerator: return "MaskGenerator";
         case NodeKind::Mix: return "Mix";
@@ -115,12 +121,16 @@ std::string ImageGeneratorKindToString(ImageGeneratorKind kind) {
     switch (kind) {
         case ImageGeneratorKind::SolidColor: return "SolidColor";
         case ImageGeneratorKind::ColorGradient: return "ColorGradient";
+        case ImageGeneratorKind::Square: return "Square";
+        case ImageGeneratorKind::Circle: return "Circle";
     }
     return "SolidColor";
 }
 
 ImageGeneratorKind ImageGeneratorKindFromString(const std::string& value) {
     if (value == "ColorGradient" || value == "Color Gradient") return ImageGeneratorKind::ColorGradient;
+    if (value == "Square") return ImageGeneratorKind::Square;
+    if (value == "Circle") return ImageGeneratorKind::Circle;
     return ImageGeneratorKind::SolidColor;
 }
 
@@ -266,11 +276,12 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
     root["layers"] = layerArray.is_array() ? layerArray : nlohmann::json::array();
 
     nlohmann::json graphJson = nlohmann::json::object();
-    graphJson["version"] = 2;
+    graphJson["version"] = 3;
     graphJson["nextNodeId"] = graph.GetNextNodeId();
     graphJson["selectedNodeId"] = graph.GetSelectedNodeId();
     graphJson["activeImageNodeId"] = graph.GetActiveImageNodeId();
     graphJson["outputNodeId"] = graph.GetOutputNodeId();
+    graphJson["outputNodeIds"] = graph.GetOutputNodeIds();
 
     nlohmann::json nodesJson = nlohmann::json::array();
     for (const Node& node : graph.GetNodes()) {
@@ -382,7 +393,12 @@ void DeserializeGraphPayload(
         } else if (kind == "Output") {
             node.kind = NodeKind::Output;
             if (node.title.empty()) node.title = "Output";
-            graph.SetOutputNodeId(node.id);
+        } else if (kind == "Composite") {
+            node.kind = NodeKind::Composite;
+            if (node.title.empty()) node.title = "Composite";
+        } else if (kind == "ExportBoundsSettings") {
+            node.kind = NodeKind::ExportBoundsSettings;
+            if (node.title.empty()) node.title = "Export Bounds";
         } else if (kind == "Scope") {
             node.kind = NodeKind::Scope;
             node.scopeKind = ScopeKindFromString(item.value("scopeKind", std::string("Histogram")));
@@ -430,7 +446,12 @@ void DeserializeGraphPayload(
             node.imageGeneratorKind = ImageGeneratorKindFromString(item.value("imageGeneratorKind", std::string("SolidColor")));
             node.imageGeneratorSettings = DeserializeImageGeneratorSettings(item.value("imageGeneratorSettings", nlohmann::json::object()));
             if (node.title.empty()) {
-                node.title = node.imageGeneratorKind == ImageGeneratorKind::SolidColor ? "Solid Color Image" : "Color Gradient Image";
+                switch (node.imageGeneratorKind) {
+                    case ImageGeneratorKind::SolidColor: node.title = "Solid Color Image"; break;
+                    case ImageGeneratorKind::ColorGradient: node.title = "Color Gradient Image"; break;
+                    case ImageGeneratorKind::Square: node.title = "Square"; break;
+                    case ImageGeneratorKind::Circle: node.title = "Circle"; break;
+                }
             }
         } else {
             node.kind = NodeKind::Layer;
@@ -445,6 +466,25 @@ void DeserializeGraphPayload(
 
         maxNodeId = std::max(maxNodeId, node.id);
         graph.GetNodes().push_back(std::move(node));
+    }
+
+    const nlohmann::json outputNodeIdsJson = graphJson.value("outputNodeIds", nlohmann::json::array());
+    if (outputNodeIdsJson.is_array()) {
+        for (const nlohmann::json& outputIdJson : outputNodeIdsJson) {
+            const int outputId = outputIdJson.is_number_integer() ? outputIdJson.get<int>() : -1;
+            const Node* outputNode = graph.FindNode(outputId);
+            if (outputNode && outputNode->kind == NodeKind::Output) {
+                graph.SetOutputNodeId(outputId);
+                break;
+            }
+        }
+    }
+    if (graph.GetOutputNodeId() <= 0) {
+        const int legacyOutputNodeId = graphJson.value("outputNodeId", -1);
+        const Node* outputNode = graph.FindNode(legacyOutputNodeId);
+        if (outputNode && outputNode->kind == NodeKind::Output) {
+            graph.SetOutputNodeId(legacyOutputNodeId);
+        }
     }
 
     graph.SetNextNodeId(std::max(maxNodeId + 1, graphJson.value("nextNodeId", maxNodeId + 1)));

@@ -1,6 +1,7 @@
 #include "ColorGradeLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_ColorGradeVert = R"(
 #version 130
@@ -86,10 +87,10 @@ void ColorGradeLayer::RenderUI() {
         ImGuiColorEditFlags_DisplayRGB |
         ImGuiColorEditFlags_PickerHueWheel;
 
-    ImGui::SliderFloat("Strength", &m_Strength, 0.0f, 100.0f, "%.0f");
-    ImGui::ColorEdit3("Shadows", m_Shadows, flags);
-    ImGui::ColorEdit3("Midtones", m_Midtones, flags);
-    ImGui::ColorEdit3("Highlights", m_Highlights, flags);
+    ImGuiExtras::NodeSliderFloat("Strength", "##Strength", &m_Strength, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeColorEdit3("Shadows", "##Shadows", m_Shadows, flags);
+    ImGuiExtras::NodeColorEdit3("Midtones", "##Midtones", m_Midtones, flags);
+    ImGuiExtras::NodeColorEdit3("Highlights", "##Highlights", m_Highlights, flags);
 }
 
 json ColorGradeLayer::Serialize() const {

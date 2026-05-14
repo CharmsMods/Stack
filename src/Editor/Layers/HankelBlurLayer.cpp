@@ -1,6 +1,7 @@
 #include "HankelBlurLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_HankelVert = R"(
 #version 130
@@ -100,9 +101,9 @@ void HankelBlurLayer::Execute(unsigned int inputTexture, int width, int height, 
 }
 
 void HankelBlurLayer::RenderUI() {
-    ImGui::SliderFloat("Blur Radius", &m_Radius, 0.0f, 30.0f, "%.1f");
-    ImGui::SliderFloat("Quality (Samples)", &m_Quality, 2.0f, 16.0f, "%.0f");
-    ImGui::SliderFloat("Intensity", &m_Intensity, 0.0f, 1.0f);
+    ImGuiExtras::NodeSliderFloat("Blur Radius", "##BlurRadius", &m_Radius, 0.0f, 30.0f, "%.1f px");
+    ImGuiExtras::NodeSliderFloat("Quality", "##Quality", &m_Quality, 2.0f, 16.0f, "%.0f smpl");
+    ImGuiExtras::NodeSliderFloat("Intensity", "##Intensity", &m_Intensity, 0.0f, 1.0f, "%.2f");
 }
 
 json HankelBlurLayer::Serialize() const {

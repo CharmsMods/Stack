@@ -1,6 +1,7 @@
 #include "VignetteLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_VigVert = R"(
 #version 130
@@ -64,10 +65,10 @@ void VignetteLayer::Execute(unsigned int inputTexture, int width, int height, Fu
 }
 
 void VignetteLayer::RenderUI() {
-    ImGui::SliderFloat("Intensity", &m_Intensity, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Radius",    &m_Radius,    0.0f, 1.5f, "%.2f");
-    ImGui::SliderFloat("Softness",  &m_Softness,  0.0f, 1.0f, "%.2f");
-    ImGui::ColorEdit3("Color",      m_Color);
+    ImGuiExtras::NodeSliderFloat("Intensity", "##Intensity", &m_Intensity, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Radius", "##Radius",    &m_Radius,    0.0f, 1.5f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Softness", "##Softness",  &m_Softness,  0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeColorEdit3("Color", "##Color", m_Color);
 }
 
 json VignetteLayer::Serialize() const {

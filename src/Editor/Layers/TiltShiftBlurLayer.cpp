@@ -3,6 +3,7 @@
 #include "Renderer/FullscreenQuad.h"
 #include <algorithm>
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_TiltShiftBlurVert = R"(
 #version 130
@@ -147,14 +148,14 @@ void TiltShiftBlurLayer::Execute(unsigned int inputTexture, int width, int heigh
 
 void TiltShiftBlurLayer::RenderUI() {
     const char* blurTypes[] = { "Gaussian", "Box", "Motion" };
-    ImGui::Combo("Blur Filter Type", &m_BlurType, blurTypes, IM_ARRAYSIZE(blurTypes));
-    ImGui::SliderFloat("Blur Strength", &m_BlurStrength, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Focus Radius", &m_FocusRadius, 0.0f, 150.0f, "%.0f");
-    ImGui::SliderFloat("Focus Falloff Transition", &m_Transition, 1.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCombo("Blur Filter", "##BlurFilterType", &m_BlurType, blurTypes, IM_ARRAYSIZE(blurTypes));
+    ImGuiExtras::NodeSliderFloat("Blur Strength", "##BlurStrength", &m_BlurStrength, 0.0f, 100.0f, "%.0f %%");
+    ImGuiExtras::NodeSliderFloat("Focus Radius", "##FocusRadius", &m_FocusRadius, 0.0f, 150.0f, "%.0f px");
+    ImGuiExtras::NodeSliderFloat("Focus Falloff", "##FocusFalloffTransition", &m_Transition, 1.0f, 100.0f, "%.0f px");
     ImGui::Separator();
     ImGui::TextDisabled("Web focus-pin editing is adapted here to direct position sliders.");
-    ImGui::SliderFloat("Focus X", &m_CenterX, 0.0f, 1.0f, "%.3f");
-    ImGui::SliderFloat("Focus Y", &m_CenterY, 0.0f, 1.0f, "%.3f");
+    ImGuiExtras::NodeSliderFloat("Focus X", "##FocusX", &m_CenterX, 0.0f, 1.0f, "%.3f");
+    ImGuiExtras::NodeSliderFloat("Focus Y", "##FocusY", &m_CenterY, 0.0f, 1.0f, "%.3f");
     if (ImGui::Button("Center Focus")) {
         m_CenterX = 0.5f;
         m_CenterY = 0.5f;

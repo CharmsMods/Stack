@@ -1,6 +1,7 @@
 #include "AdjustmentsLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline GLSL sources (equivalent of adjust.frag + vs-quad.vert)
@@ -104,12 +105,12 @@ void AdjustmentsLayer::Execute(unsigned int inputTexture, int width, int height,
 }
 
 void AdjustmentsLayer::RenderUI() {
-    ImGui::SliderFloat("Brightness", &m_Brightness, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Contrast", &m_Contrast, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Saturation", &m_Saturation, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Warmth", &m_Warmth, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Sharpening", &m_Sharpening, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Sharpen Threshold", &m_SharpenThreshold, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Brightness", "##Brightness", &m_Brightness, -1.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Contrast", "##Contrast", &m_Contrast, -1.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Saturation", "##Saturation", &m_Saturation, -1.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Warmth", "##Warmth", &m_Warmth, -1.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Sharpening", "##Sharpening", &m_Sharpening, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Sharpen Threshold", "##SharpenThreshold", &m_SharpenThreshold, 0.0f, 1.0f, "%.2f");
 }
 
 json AdjustmentsLayer::Serialize() const {

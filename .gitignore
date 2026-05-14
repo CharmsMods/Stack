@@ -1,18 +1,19 @@
-# --- C++ / CMake ---
-build/
-bin/
-out/
-CMakeFiles/
-CMakeCache.txt
+# Build outputs and generated project files
+/build/
+/build_*/
+/bin/
+/out/
+/install/
+/CMakeFiles/
+/CMakeCache.txt
+/*.sln
+/*.vcxproj
+/*.vcxproj.filters
+/*.vcxproj.user
 *.cmake
-install/
 
-# --- Visual Studio ---
-.vs/
-*.sln
-*.vcxproj
-*.vcxproj.filters
-*.vcxproj.user
+# Visual Studio and compiler artifacts
+/.vs/
 *.suo
 *.db
 *.opendb
@@ -29,30 +30,27 @@ install/
 *.dll
 *.exp
 
-# --- System / OS ---
-.DS_Store
-Thumbs.db
-Desktop.ini
+# Local app/user data
+/Library/
+*.stack
+StackSettings.json
+StackStartup.log
+imgui.ini
 
-# --- Other ---
+# Local-only notes, old plans, and migration scratch space
+/_local_archive/
+/OLD/
+migrate*.ps1
+migrate*.py
+tools/migrate*.py
+
+# Logs, temp files, package outputs
 *.log
 *.tmp
 node_modules/
 dist/
 
-# --- Project Specific Excludes ---
-imgui.ini
-BUILDING.md
-build.bat
-build.cmd
-dev-shell.cmd
-
-# Folders to exclude from push
-/Current Plan Files and Documentation In Use/
-/UI research/
-/Documentation/
-/OLD/
-/Redefining Rendering/
-/Landing Page/
-/Library/
-/build_ninja_test/
+# System files
+.DS_Store
+Thumbs.db
+Desktop.ini

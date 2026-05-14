@@ -4,6 +4,8 @@
 #include "Renderer/FullscreenQuad.h"
 #include "Editor/Layers/LayerBase.h"
 #include "Renderer/MaskRenderTypes.h"
+#include <cstddef>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 
@@ -24,6 +26,8 @@ public:
     void Clear();
     void ClearOutput();
     void UploadOutputFromPixels(const unsigned char* data, int w, int h, int ch);
+    void AdoptExternalOutputTexture(unsigned int texture, int w, int h);
+    unsigned int PublishSharedOutputTexture(int& outW, int& outH);
 
     // Execute the full layer stack sequentially (ping-pong rendering)
     void Execute(const std::vector<std::shared_ptr<LayerBase>>& layers);
@@ -51,6 +55,12 @@ public:
     FullscreenQuad& GetQuad() { return m_Quad; }
 
 private:
+    struct CachedGraphTexture {
+        unsigned int texture = 0;
+        std::size_t fingerprint = 0;
+        bool owned = false;
+    };
+
     FullscreenQuad m_Quad;
 
     int m_Width;
@@ -71,8 +81,13 @@ private:
     unsigned int m_ImageToMaskProgram;
     unsigned int m_ImageGeneratorProgram;
     std::vector<unsigned char> m_SourcePixels;
+    std::size_t m_SourceFingerprint = 0;
+    std::unordered_map<int, CachedGraphTexture> m_GraphImageCache;
+    std::unordered_map<int, CachedGraphTexture> m_GraphMaskCache;
 
     void CleanupFBOs();
+    void DestroyGraphCache(std::unordered_map<int, CachedGraphTexture>& cache);
+    void InvalidateGraphCaches();
     void EnsureMaskPrograms();
     void EnsureMixProgram();
     void EnsureUtilityPrograms();

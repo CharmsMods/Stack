@@ -1,6 +1,7 @@
 #include "HalftoningLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_HalftoneVert = R"(
 #version 130
@@ -130,18 +131,18 @@ void HalftoningLayer::Execute(unsigned int inputTexture, int width, int height, 
 }
 
 void HalftoningLayer::RenderUI() {
-    ImGui::SliderFloat("Cell Size", &m_Size, 1.0f, 20.0f, "%.1f");
-    ImGui::SliderFloat("Intensity", &m_Intensity, 0.0f, 1.0f);
-    ImGui::SliderFloat("Sharpness", &m_Sharpness, 0.0f, 1.0f);
+    ImGuiExtras::NodeSliderFloat("Cell Size", "##CellSize", &m_Size, 1.0f, 20.0f, "%.1f");
+    ImGuiExtras::NodeSliderFloat("Intensity", "##Intensity", &m_Intensity, 0.0f, 1.0f);
+    ImGuiExtras::NodeSliderFloat("Sharpness", "##Sharpness", &m_Sharpness, 0.0f, 1.0f);
     
     const char* patterns[] = { "Circles", "Lines", "Cross", "Diamond" };
-    ImGui::Combo("Pattern", &m_Pattern, patterns, IM_ARRAYSIZE(patterns));
+    ImGuiExtras::NodeCombo("Pattern", "##Pattern", &m_Pattern, patterns, IM_ARRAYSIZE(patterns));
     
     const char* modes[] = { "Luminance", "RGB Dots", "CMY Dots", "CMYK Dots" };
-    ImGui::Combo("Color Mode", &m_ColorMode, modes, IM_ARRAYSIZE(modes));
+    ImGuiExtras::NodeCombo("Color Mode", "##ColorMode", &m_ColorMode, modes, IM_ARRAYSIZE(modes));
     
-    ImGui::Checkbox("Grayscale Output", &m_Gray);
-    ImGui::Checkbox("Invert Pattern", &m_Invert);
+    ImGuiExtras::NodeCheckbox("Grayscale Output", "##GrayscaleOutput", &m_Gray);
+    ImGuiExtras::NodeCheckbox("Invert Pattern", "##InvertPattern", &m_Invert);
 }
 
 json HalftoningLayer::Serialize() const {

@@ -13,6 +13,14 @@ struct LibraryCardMotionState {
     int lastSeenFrame = 0;
 };
 
+struct LibraryPreviewLaunchRect {
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    bool valid = false;
+};
+
 class LibraryModule : public IAppModule {
 public:
     LibraryModule();
@@ -96,6 +104,11 @@ private:
     float m_SaveStatusAlpha = 0.0f;
     float m_LoadStatusAlpha = 0.0f;
     float m_EmptyStateAlpha = 0.0f;
+    float m_FilterSplitterHover = 0.0f;
+    float m_ProjectPreviewMenuHover = 0.0f;
+    LibraryPreviewLaunchRect m_ProjectPreviewLaunchRect;
+    float m_AssetPreviewMenuHover = 0.0f;
+    LibraryPreviewLaunchRect m_AssetPreviewLaunchRect;
 
     // Multi-select state
     std::unordered_set<std::string> m_SelectedProjects;

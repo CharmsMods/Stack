@@ -1,6 +1,7 @@
 #include "CorruptionLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_CorruptionVert = R"(
 #version 130
@@ -80,8 +81,8 @@ void CorruptionLayer::Execute(unsigned int inputTexture, int width, int height, 
 
 void CorruptionLayer::RenderUI() {
     const char* algos[] = { "JPEG Blocks", "Pixelation", "Color Bleed" };
-    ImGui::Combo("Algorithm", &m_Algorithm, algos, IM_ARRAYSIZE(algos));
-    ImGui::SliderFloat("Quality Scale", &m_ResScale, 1.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCombo("Algorithm", "##Algorithm", &m_Algorithm, algos, IM_ARRAYSIZE(algos));
+    ImGuiExtras::NodeSliderFloat("Quality Scale", "##QualityScale", &m_ResScale, 1.0f, 100.0f, "%.0f");
 }
 
 json CorruptionLayer::Serialize() const {

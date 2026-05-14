@@ -1,7 +1,7 @@
 #include "CellShadingLayer.h"
-
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_CellShadingVert = R"(
 #version 130
@@ -176,17 +176,17 @@ void CellShadingLayer::RenderUI() {
     const char* bandMaps[] = { "Linear", "Smooth", "Hard" };
     const char* edgeMethods[] = { "Sobel", "Roberts Cross", "Laplacian" };
 
-    ImGui::SliderInt("Shading Levels", &m_Levels, 2, 12);
-    ImGui::SliderFloat("Contrast Bias", &m_Bias, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Gamma", &m_Gamma, 0.1f, 3.0f, "%.2f");
-    ImGui::Combo("Quantization Mode", &m_QuantMode, quantModes, IM_ARRAYSIZE(quantModes));
-    ImGui::Combo("Band Mapping", &m_BandMap, bandMaps, IM_ARRAYSIZE(bandMaps));
+    ImGuiExtras::NodeSliderInt("Shading Levels", "##ShadingLevels", &m_Levels, 2, 12);
+    ImGuiExtras::NodeSliderFloat("Contrast Bias", "##ContrastBias", &m_Bias, -1.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Gamma", "##Gamma", &m_Gamma, 0.1f, 3.0f, "%.2f");
+    ImGuiExtras::NodeCombo("Quantization Mode", "##QuantizationMode", &m_QuantMode, quantModes, IM_ARRAYSIZE(quantModes));
+    ImGuiExtras::NodeCombo("Band Mapping", "##BandMapping", &m_BandMap, bandMaps, IM_ARRAYSIZE(bandMaps));
     ImGui::Separator();
-    ImGui::Combo("Edge Method", &m_EdgeMethod, edgeMethods, IM_ARRAYSIZE(edgeMethods));
-    ImGui::SliderFloat("Edge Strength", &m_EdgeStrength, 0.0f, 200.0f, "%.0f");
-    ImGui::SliderFloat("Edge Thickness", &m_EdgeThickness, 0.5f, 5.0f, "%.1f");
-    ImGui::SliderFloat("Color Preserve", &m_ColorPreserve, 0.0f, 100.0f, "%.0f");
-    ImGui::Checkbox("Show Edges", &m_ShowEdges);
+    ImGuiExtras::NodeCombo("Edge Method", "##EdgeMethod", &m_EdgeMethod, edgeMethods, IM_ARRAYSIZE(edgeMethods));
+    ImGuiExtras::NodeSliderFloat("Edge Strength", "##EdgeStrength", &m_EdgeStrength, 0.0f, 200.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Edge Thickness", "##EdgeThickness", &m_EdgeThickness, 0.5f, 5.0f, "%.1f");
+    ImGuiExtras::NodeSliderFloat("Color Preserve", "##ColorPreserve", &m_ColorPreserve, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCheckbox("Show Edges", "##ShowEdges", &m_ShowEdges);
 }
 
 json CellShadingLayer::Serialize() const {

@@ -1,5 +1,6 @@
 #pragma once
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include <cstdint>
 #include <vector>
 #include <memory>
 
@@ -36,8 +37,6 @@ private:
 
     int m_LastWidth = 0;
     int m_LastHeight = 0;
-    
-    // Throttling
-    float m_UpdateTimer = 0.0f;
-    const float m_UpdateInterval = 0.05f; // ~20fps analysis
+    std::uint64_t m_LastScopeRevision = 0;
+    int m_LastScopeNodeId = -1;
 };

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_PaletteVert = R"(
 #version 130
@@ -143,24 +144,23 @@ void PaletteReconstructorLayer::Execute(unsigned int inputTexture, int width, in
 void PaletteReconstructorLayer::RenderUI() {
     const char* smoothingTypes[] = { "Box", "Gaussian" };
 
-    ImGui::SliderFloat("Global Blend", &m_Blend, 0.0f, 100.0f, "%.0f");
-    ImGui::Combo("Smoothing Type", &m_SmoothingType, smoothingTypes, IM_ARRAYSIZE(smoothingTypes));
-    ImGui::SliderFloat("Palette Smoothing", &m_Smoothing, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Global Blend", "##GlobalBlend", &m_Blend, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCombo("Smoothing Type", "##SmoothingType", &m_SmoothingType, smoothingTypes, IM_ARRAYSIZE(smoothingTypes));
+    ImGuiExtras::NodeSliderFloat("Palette Smoothing", "##PaletteSmoothing", &m_Smoothing, 0.0f, 100.0f, "%.0f");
     ImGui::TextDisabled("Native adapts the web app's shared palette/extraction flow into a layer-local palette bank here.");
     ImGui::Text("Palette Colors: %d / %d", m_PaletteCount, kMaxPaletteColors);
 
-    if (ImGui::Button("Reset Default Palette")) {
+    const float actionButtonWidth = std::max(120.0f, ImGui::GetContentRegionAvail().x);
+    if (ImGui::Button("Reset Default Palette", ImVec2(actionButtonWidth, 0.0f))) {
         ResetDefaultPalette();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Randomize Palette")) {
+    if (ImGui::Button("Randomize Palette", ImVec2(actionButtonWidth, 0.0f))) {
         for (int index = 0; index < kMaxPaletteColors * 3; ++index) {
             m_Palette[index] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
         }
     }
-    ImGui::SameLine();
     ImGui::BeginDisabled(m_PaletteCount >= kMaxPaletteColors);
-    if (ImGui::Button("Add Color")) {
+    if (ImGui::Button("Add Color", ImVec2(actionButtonWidth, 0.0f))) {
         const int baseIndex = m_PaletteCount * 3;
         m_Palette[baseIndex + 0] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
         m_Palette[baseIndex + 1] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
@@ -174,10 +174,10 @@ void PaletteReconstructorLayer::RenderUI() {
             char label[32];
             snprintf(label, sizeof(label), "Color %d", index + 1);
             ImGui::PushID(index);
-            ImGui::ColorEdit3(label, &m_Palette[index * 3]);
-            ImGui::SameLine();
+            ImGuiExtras::NodeColorEdit3(label, "##PaletteColor", &m_Palette[index * 3]);
             ImGui::BeginDisabled(m_PaletteCount <= 2);
-            if (ImGui::Button("Remove")) {
+            const float removeButtonWidth = std::max(96.0f, ImGui::GetContentRegionAvail().x);
+            if (ImGui::Button("Remove", ImVec2(removeButtonWidth, 0.0f))) {
                 for (int moveIndex = index; moveIndex < m_PaletteCount - 1; ++moveIndex) {
                     m_Palette[moveIndex * 3 + 0] = m_Palette[(moveIndex + 1) * 3 + 0];
                     m_Palette[moveIndex * 3 + 1] = m_Palette[(moveIndex + 1) * 3 + 1];

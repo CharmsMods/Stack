@@ -2,6 +2,7 @@
 
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_EdgeVert = R"(
 #version 130
@@ -133,17 +134,17 @@ void EdgeEffectsLayer::Execute(unsigned int inputTexture, int width, int height,
 void EdgeEffectsLayer::RenderUI() {
     const char* modes[] = { "Edge Overlay", "Saturation Mask" };
 
-    ImGui::SliderFloat("Blend", &m_Blend, 0.0f, 100.0f, "%.0f");
-    ImGui::Combo("Mode", &m_Mode, modes, IM_ARRAYSIZE(modes));
-    ImGui::SliderFloat("Strength", &m_Strength, 0.0f, 1000.0f, "%.0f");
-    ImGui::SliderFloat("Tolerance", &m_Tolerance, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Blend", "##Blend", &m_Blend, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeCombo("Mode", "##Mode", &m_Mode, modes, IM_ARRAYSIZE(modes));
+    ImGuiExtras::NodeSliderFloat("Strength", "##Strength", &m_Strength, 0.0f, 1000.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Tolerance", "##Tolerance", &m_Tolerance, 0.0f, 100.0f, "%.0f");
 
     if (m_Mode == 1) {
         ImGui::Separator();
-        ImGui::SliderFloat("Foreground Sat", &m_ForegroundSaturation, 0.0f, 200.0f, "%.0f");
-        ImGui::SliderFloat("Background Sat", &m_BackgroundSaturation, 0.0f, 200.0f, "%.0f");
-        ImGui::SliderFloat("Bloom Spread", &m_BloomSpread, 0.0f, 50.0f, "%.0f");
-        ImGui::SliderFloat("Bloom Smoothness", &m_BloomSmoothness, 0.0f, 100.0f, "%.0f");
+        ImGuiExtras::NodeSliderFloat("Foreground Sat", "##ForegroundSat", &m_ForegroundSaturation, 0.0f, 200.0f, "%.0f");
+        ImGuiExtras::NodeSliderFloat("Background Sat", "##BackgroundSat", &m_BackgroundSaturation, 0.0f, 200.0f, "%.0f");
+        ImGuiExtras::NodeSliderFloat("Bloom Spread", "##BloomSpread", &m_BloomSpread, 0.0f, 50.0f, "%.0f");
+        ImGuiExtras::NodeSliderFloat("Bloom Smoothness", "##BloomSmoothness", &m_BloomSmoothness, 0.0f, 100.0f, "%.0f");
     }
 }
 

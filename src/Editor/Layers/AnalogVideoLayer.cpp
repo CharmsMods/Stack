@@ -1,6 +1,7 @@
 #include "AnalogVideoLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 #include <cmath>
 #include <GLFW/glfw3.h>
 
@@ -93,10 +94,10 @@ void AnalogVideoLayer::Execute(unsigned int inputTexture, int width, int height,
 }
 
 void AnalogVideoLayer::RenderUI() {
-    ImGui::SliderFloat("Tape Wobble", &m_Wobble, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Color Bleed", &m_Bleed, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("CRT Curve", &m_Curve, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Scanline Noise", &m_Noise, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Tape Wobble", "##TapeWobble", &m_Wobble, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Color Bleed", "##ColorBleed", &m_Bleed, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("CRT Curve", "##CRTCurve", &m_Curve, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Scanline Noise", "##ScanlineNoise", &m_Noise, 0.0f, 100.0f, "%.0f");
 }
 
 json AnalogVideoLayer::Serialize() const {

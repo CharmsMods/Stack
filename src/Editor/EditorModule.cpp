@@ -3,6 +3,7 @@
 #include "Async/TaskSystem.h"
 #include "NodeGraph/EditorNodeGraphSerializer.h"
 #include "Library/LibraryManager.h"
+#include "Renderer/GLHelpers.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include "ThirdParty/stb_image.h"
@@ -17,6 +18,9 @@
 
 namespace {
 
+namespace StackFormat = StackBinaryFormat;
+
+constexpr ImVec4 kEditorWorkspaceBaseColor = ImVec4(0.016f, 0.231f, 0.274f, 1.0f);
 struct DecodedImageData {
     std::vector<unsigned char> pixels;
     int width = 0;
@@ -61,12 +65,110 @@ std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixe
     return pngBytes;
 }
 
+std::string SanitizeProjectFileStem(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (unsigned char ch : value) {
+        if (std::isalnum(ch) || ch == '_' || ch == '-') {
+            result.push_back(static_cast<char>(ch));
+        } else if (std::isspace(ch)) {
+            result.push_back('_');
+        }
+    }
+
+    while (!result.empty() && result.front() == '_') {
+        result.erase(result.begin());
+    }
+    while (!result.empty() && result.back() == '_') {
+        result.pop_back();
+    }
+    return result.empty() ? std::string("project") : result;
+}
+
+void ResizeNearestRgba(
+    const std::vector<unsigned char>& srcPixels,
+    int srcW,
+    int srcH,
+    int dstW,
+    int dstH,
+    std::vector<unsigned char>& dstPixels) {
+    dstPixels.assign(static_cast<size_t>(dstW * dstH * 4), 0);
+    if (srcPixels.empty() || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
+        return;
+    }
+
+    for (int y = 0; y < dstH; ++y) {
+        const int srcY = std::clamp(static_cast<int>((static_cast<float>(y) / static_cast<float>(dstH)) * srcH), 0, srcH - 1);
+        for (int x = 0; x < dstW; ++x) {
+            const int srcX = std::clamp(static_cast<int>((static_cast<float>(x) / static_cast<float>(dstW)) * srcW), 0, srcW - 1);
+            const size_t dstIndex = static_cast<size_t>((y * dstW + x) * 4);
+            const size_t srcIndex = static_cast<size_t>((srcY * srcW + srcX) * 4);
+            dstPixels[dstIndex + 0] = srcPixels[srcIndex + 0];
+            dstPixels[dstIndex + 1] = srcPixels[srcIndex + 1];
+            dstPixels[dstIndex + 2] = srcPixels[srcIndex + 2];
+            dstPixels[dstIndex + 3] = srcPixels[srcIndex + 3];
+        }
+    }
+}
+
+std::vector<unsigned char> BuildThumbnailBytes(
+    const std::vector<unsigned char>& rgbaPixels,
+    int width,
+    int height) {
+    if (rgbaPixels.empty() || width <= 0 || height <= 0) {
+        return {};
+    }
+
+    constexpr int kMaxEdge = 320;
+    if (width <= kMaxEdge && height <= kMaxEdge) {
+        return EncodePngBytes(rgbaPixels, width, height, 4);
+    }
+
+    const float scale = static_cast<float>(kMaxEdge) / static_cast<float>(std::max(width, height));
+    const int thumbW = std::max(1, static_cast<int>(std::floor(static_cast<float>(width) * scale)));
+    const int thumbH = std::max(1, static_cast<int>(std::floor(static_cast<float>(height) * scale)));
+    std::vector<unsigned char> thumbPixels;
+    ResizeNearestRgba(rgbaPixels, width, height, thumbW, thumbH, thumbPixels);
+    return EncodePngBytes(thumbPixels, thumbW, thumbH, 4);
+}
+
+std::string BuildTimestampString() {
+    std::time_t now = std::time(nullptr);
+    std::tm timeInfo{};
+#ifdef _WIN32
+    localtime_s(&timeInfo, &now);
+#else
+    timeInfo = *std::localtime(&now);
+#endif
+    char buffer[64];
+    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeInfo) == 0) {
+        return {};
+    }
+    return std::string(buffer);
+}
+
 std::string FileNameFromPath(const std::string& path) {
     try {
         return std::filesystem::path(path).filename().string();
     } catch (...) {
         return path.empty() ? std::string("Image") : path;
     }
+}
+
+std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
+    if (width <= 0 || height <= 0) {
+        return {};
+    }
+    return std::vector<unsigned char>(static_cast<size_t>(width * height * 4), 0);
+}
+
+template <typename T>
+std::size_t HashValue(const T& value) {
+    return std::hash<T>{}(value);
+}
+
+void HashCombine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
 }
 
 RenderMaskGeneratorKind ToRenderMaskKind(EditorNodeGraph::MaskGeneratorKind kind) {
@@ -124,6 +226,8 @@ RenderImageGeneratorKind ToRenderImageGeneratorKind(EditorNodeGraph::ImageGenera
     switch (kind) {
         case EditorNodeGraph::ImageGeneratorKind::SolidColor: return RenderImageGeneratorKind::SolidColor;
         case EditorNodeGraph::ImageGeneratorKind::ColorGradient: return RenderImageGeneratorKind::ColorGradient;
+        case EditorNodeGraph::ImageGeneratorKind::Square: return RenderImageGeneratorKind::Square;
+        case EditorNodeGraph::ImageGeneratorKind::Circle: return RenderImageGeneratorKind::Circle;
     }
     return RenderImageGeneratorKind::SolidColor;
 }
@@ -253,7 +357,9 @@ std::vector<unsigned char> GenerateMaskPreviewPixels(const EditorNodeGraph::Node
 
 EditorModule::EditorModule() {}
 
-EditorModule::~EditorModule() {}
+EditorModule::~EditorModule() {
+    ClearCompositeSceneTextures();
+}
 
 void EditorModule::Initialize(GLFWwindow* sharedWindow) {
     std::vector<std::string> registryErrors;
@@ -264,6 +370,8 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow) {
     }
 
     m_Pipeline.Initialize();
+    m_CompositePreviewPipeline.Initialize();
+    m_AdvancedNodeEditor.Initialize();
     m_Sidebar.Initialize();
     m_Viewport.Initialize();
     m_Scopes.Initialize();
@@ -271,7 +379,10 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow) {
 
     m_Layers.clear();
     m_SelectedLayerIndex = -1;
+    m_AdvancedEditorOpen = false;
+    m_AdvancedEditorNodeId = -1;
     m_NodeGraph.ResetFromLayers(0, false);
+    ClearCompositeRuntimeState();
     MarkRenderDirty();
 }
 
@@ -317,6 +428,11 @@ void EditorModule::AddLayerNodeAt(LayerType type, EditorNodeGraph::Vec2 graphPos
 
 void EditorModule::RemoveLayer(int index) {
     if (index >= 0 && index < static_cast<int>(m_Layers.size())) {
+        if (const EditorNodeGraph::Node* boundNode = GetActiveAdvancedEditorNode()) {
+            if (boundNode->kind == EditorNodeGraph::NodeKind::Layer && boundNode->layerIndex == index) {
+                CloseAdvancedEditor();
+            }
+        }
         // TODO: Promote this to an undoable editor command when command history lands.
         m_Layers.erase(m_Layers.begin() + index);
         m_NodeGraph.RemoveLayerNode(index);
@@ -378,6 +494,199 @@ void EditorModule::SelectGraphNode(int nodeId) {
     } else {
         SelectLayer(-1);
     }
+}
+
+bool EditorModule::LayerSupportsAdvancedEditor(int layerIndex) const {
+    return layerIndex >= 0 &&
+        layerIndex < static_cast<int>(m_Layers.size()) &&
+        m_Layers[layerIndex] &&
+        m_Layers[layerIndex]->SupportsAdvancedEditor();
+}
+
+bool EditorModule::NodeSupportsAdvancedEditor(int nodeId) const {
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    return node &&
+        node->kind == EditorNodeGraph::NodeKind::Layer &&
+        LayerSupportsAdvancedEditor(node->layerIndex);
+}
+
+void EditorModule::OpenAdvancedEditorForNode(int nodeId) {
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer || !LayerSupportsAdvancedEditor(node->layerIndex)) {
+        return;
+    }
+    SelectGraphNode(nodeId);
+    m_AdvancedEditorNodeId = nodeId;
+    m_AdvancedEditorOpen = true;
+    if (m_NodeGraph.FindNode(nodeId)) {
+        m_NodeGraph.FindNode(nodeId)->expanded = false;
+    }
+    SetPickingColor(false);
+}
+
+void EditorModule::CloseAdvancedEditor() {
+    m_AdvancedEditorOpen = false;
+    m_AdvancedEditorNodeId = -1;
+    SetPickingColor(false);
+}
+
+LayerBase* EditorModule::GetActiveAdvancedEditorLayer() {
+    EditorNodeGraph::Node* node = GetActiveAdvancedEditorNode();
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer) {
+        return nullptr;
+    }
+    return node->layerIndex >= 0 && node->layerIndex < static_cast<int>(m_Layers.size())
+        ? m_Layers[node->layerIndex].get()
+        : nullptr;
+}
+
+const LayerBase* EditorModule::GetActiveAdvancedEditorLayer() const {
+    const EditorNodeGraph::Node* node = GetActiveAdvancedEditorNode();
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer) {
+        return nullptr;
+    }
+    return node->layerIndex >= 0 && node->layerIndex < static_cast<int>(m_Layers.size())
+        ? m_Layers[node->layerIndex].get()
+        : nullptr;
+}
+
+EditorNodeGraph::Node* EditorModule::GetActiveAdvancedEditorNode() {
+    if (!m_AdvancedEditorOpen || m_AdvancedEditorNodeId <= 0) {
+        return nullptr;
+    }
+    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(m_AdvancedEditorNodeId);
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer || !LayerSupportsAdvancedEditor(node->layerIndex)) {
+        return nullptr;
+    }
+    return node;
+}
+
+const EditorNodeGraph::Node* EditorModule::GetActiveAdvancedEditorNode() const {
+    if (!m_AdvancedEditorOpen || m_AdvancedEditorNodeId <= 0) {
+        return nullptr;
+    }
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(m_AdvancedEditorNodeId);
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer || !LayerSupportsAdvancedEditor(node->layerIndex)) {
+        return nullptr;
+    }
+    return node;
+}
+
+void EditorModule::RenderAdvancedEditorOverlay(const ImVec2& workspacePos, const ImVec2& workspaceSize) {
+    if (m_AdvancedEditorOpen && (!GetActiveAdvancedEditorNode() || !GetActiveAdvancedEditorLayer())) {
+        CloseAdvancedEditor();
+    }
+    m_AdvancedNodeEditor.Render(this, workspacePos, workspaceSize);
+}
+
+void EditorModule::RenderAdvancedEditorPreview(const char* id, const ImVec2& desiredSize, bool allowColorPicking) {
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const ImVec2 regionSize(
+        std::max(220.0f, desiredSize.x > 0.0f ? std::min(desiredSize.x, available.x) : available.x),
+        std::max(180.0f, desiredSize.y > 0.0f ? desiredSize.y : available.y));
+
+    ImGui::PushID(id ? id : "AdvancedEditorPreview");
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
+    ImGui::BeginChild("PreviewRegion", regionSize, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const ImVec2 childMin = ImGui::GetCursorScreenPos();
+    const ImVec2 childAvail = ImGui::GetContentRegionAvail();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    const bool hasOutput = m_Pipeline.HasSourceImage() && m_NodeGraph.IsOutputConnected() && m_Pipeline.GetOutputTexture() != 0;
+    if (!hasOutput) {
+        const char* message = IsEditorRenderBusy()
+            ? "Rendering preview..."
+            : (m_NodeGraph.GetActiveImageNodeId() > 0
+                ? "Connect the graph to the output to preview it here."
+                : "Load an image and connect the graph to the output.");
+        const ImVec2 textSize = ImGui::CalcTextSize(message);
+        drawList->AddText(
+            ImVec2(childMin.x + std::max(16.0f, (childAvail.x - textSize.x) * 0.5f),
+                   childMin.y + std::max(24.0f, (childAvail.y - textSize.y) * 0.32f)),
+            IM_COL32(185, 194, 201, 220),
+            message);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+        return;
+    }
+
+    const int imgW = std::max(1, m_Pipeline.GetCanvasWidth());
+    const int imgH = std::max(1, m_Pipeline.GetCanvasHeight());
+    const float fitScale = std::min(childAvail.x / static_cast<float>(imgW), childAvail.y / static_cast<float>(imgH));
+    const float displayScale = std::max(0.01f, fitScale);
+    const ImVec2 imageSize(imgW * displayScale, imgH * displayScale);
+    const ImVec2 imagePos(
+        childMin.x + std::max(0.0f, (childAvail.x - imageSize.x) * 0.5f),
+        childMin.y + std::max(0.0f, (childAvail.y - imageSize.y) * 0.5f));
+    drawList->AddImage(
+        (ImTextureID)(intptr_t)m_Pipeline.GetOutputTexture(),
+        imagePos,
+        ImVec2(imagePos.x + imageSize.x, imagePos.y + imageSize.y),
+        ImVec2(0.0f, 1.0f),
+        ImVec2(1.0f, 0.0f));
+
+    if (allowColorPicking && IsPickingColor()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        const ImVec2 mouse = ImGui::GetMousePos();
+        const bool overImage =
+            mouse.x >= imagePos.x &&
+            mouse.x <= imagePos.x + imageSize.x &&
+            mouse.y >= imagePos.y &&
+            mouse.y <= imagePos.y + imageSize.y;
+        if (overImage) {
+            drawList->AddRectFilled(
+                imagePos,
+                ImVec2(imagePos.x + imageSize.x, imagePos.y + imageSize.y),
+                IM_COL32(255, 255, 255, 12));
+            drawList->AddText(
+                ImVec2(imagePos.x + 12.0f, imagePos.y + 12.0f),
+                IM_COL32(255, 255, 255, 220),
+                "Click to sample color");
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                const float u = std::clamp((mouse.x - imagePos.x) / std::max(1.0f, imageSize.x), 0.0f, 1.0f);
+                const float v = std::clamp((mouse.y - imagePos.y) / std::max(1.0f, imageSize.y), 0.0f, 1.0f);
+                const int px = std::clamp(static_cast<int>(u * static_cast<float>(imgW)), 0, imgW - 1);
+                const int py = std::clamp(static_cast<int>(v * static_cast<float>(imgH)), 0, imgH - 1);
+                const auto& sourcePixels = m_Pipeline.GetSourcePixelsRaw();
+                const int channels = std::max(1, m_Pipeline.GetSourceChannels());
+                const int flippedY = imgH - 1 - py;
+                const size_t pixelIndex = static_cast<size_t>(flippedY * imgW + px) * static_cast<size_t>(channels);
+                if (pixelIndex + 2 < sourcePixels.size()) {
+                    OnColorPicked(
+                        sourcePixels[pixelIndex + 0] / 255.0f,
+                        sourcePixels[pixelIndex + 1] / 255.0f,
+                        sourcePixels[pixelIndex + 2] / 255.0f);
+                }
+            }
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::PopID();
+}
+
+bool EditorModule::SelectAdjacentMainChainNode(int direction) {
+    if (direction == 0) {
+        return false;
+    }
+
+    const int selectedNodeId = m_NodeGraph.GetSelectedNodeId();
+    if (selectedNodeId <= 0) {
+        return false;
+    }
+
+    const int adjacentNodeId = m_NodeGraph.FindAdjacentMainChainNodeId(selectedNodeId, direction);
+    if (adjacentNodeId <= 0 || adjacentNodeId == selectedNodeId) {
+        return false;
+    }
+
+    SelectGraphNode(adjacentNodeId);
+    return true;
 }
 
 void EditorModule::ApplyGraphLayerOrder() {
@@ -551,8 +860,13 @@ bool EditorModule::DeleteSelectedGraphLink() {
 
 bool EditorModule::RemoveGraphNode(int nodeId) {
     EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    if (!node || node->kind == EditorNodeGraph::NodeKind::Output) {
+    if (!node) {
         return false;
+    }
+
+    ClearGraphAutoFocusIfTrackedNode(nodeId);
+    if (m_AdvancedEditorOpen && m_AdvancedEditorNodeId == nodeId) {
+        CloseAdvancedEditor();
     }
 
     if (node->kind == EditorNodeGraph::NodeKind::Layer) {
@@ -638,6 +952,13 @@ void EditorModule::AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     }
 }
 
+void EditorModule::AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    if (EditorNodeGraph::Node* node = m_NodeGraph.AddOutputNode(graphPosition)) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty();
+    }
+}
+
 void EditorModule::AutoLayoutGraph() {
     m_NodeGraph.AutoLayout();
 }
@@ -646,38 +967,6 @@ void EditorModule::DisconnectGraphOutput() {
     m_NodeGraph.DisconnectOutput();
     m_Pipeline.ClearOutput();
     MarkRenderDirty();
-}
-
-void EditorModule::SetGraphDropTargetRect(float minX, float minY, float maxX, float maxY) {
-    m_GraphDropMinX = minX;
-    m_GraphDropMinY = minY;
-    m_GraphDropMaxX = maxX;
-    m_GraphDropMaxY = maxY;
-}
-
-void EditorModule::SetGraphViewTransform(float originX, float originY, float panX, float panY, float zoom) {
-    m_GraphViewOriginX = originX;
-    m_GraphViewOriginY = originY;
-    m_GraphViewPanX = panX;
-    m_GraphViewPanY = panY;
-    m_GraphViewZoom = std::max(0.01f, zoom);
-}
-
-bool EditorModule::IsScreenPointOverGraph(float x, float y) const {
-    return x >= m_GraphDropMinX && x <= m_GraphDropMaxX && y >= m_GraphDropMinY && y <= m_GraphDropMaxY;
-}
-
-bool EditorModule::HandleGraphFileDrop(const std::string& path, float screenX, float screenY) {
-    if (!IsScreenPointOverGraph(screenX, screenY)) {
-        return false;
-    }
-
-    const float safeZoom = std::max(0.01f, m_GraphViewZoom);
-    const EditorNodeGraph::Vec2 graphPosition{
-        (screenX - m_GraphViewOriginX - m_GraphViewPanX) / safeZoom - 40.0f,
-        (screenY - m_GraphViewOriginY - m_GraphViewPanY) / safeZoom - 40.0f
-    };
-    return AddImageNodeFromFile(path, graphPosition);
 }
 
 void EditorModule::RefreshGraphLayerMetadata() {
@@ -700,178 +989,6 @@ void EditorModule::RefreshGraphLayerMetadata() {
             node->title = m_Layers[i]->GetDefaultName();
         }
     }
-}
-
-std::vector<unsigned char> EditorModule::GetScopePixelsForNode(int nodeId, int& outW, int& outH) {
-    outW = 0;
-    outH = 0;
-
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    if (!node) {
-        return {};
-    }
-
-    if (!IsImageOutputNode(node->kind) && !IsMaskOutputNode(node->kind)) {
-        return {};
-    }
-
-    std::vector<unsigned char> sourcePixels;
-    int sourceW = 0;
-    int sourceH = 0;
-    int sourceCh = 4;
-    if (node->kind == EditorNodeGraph::NodeKind::Image && !node->image.pixels.empty() &&
-        node->image.width > 0 && node->image.height > 0) {
-        sourcePixels = node->image.pixels;
-        sourceW = node->image.width;
-        sourceH = node->image.height;
-        sourceCh = std::max(1, node->image.channels);
-    } else {
-        sourcePixels = m_Pipeline.GetSourcePixelsRaw();
-        sourceW = m_Pipeline.GetCanvasWidth();
-        sourceH = m_Pipeline.GetCanvasHeight();
-        sourceCh = std::max(1, m_Pipeline.GetSourceChannels());
-    }
-    if (sourcePixels.empty()) {
-        for (const EditorNodeGraph::Node& graphNode : m_NodeGraph.GetNodes()) {
-            if (graphNode.kind == EditorNodeGraph::NodeKind::Image && !graphNode.image.pixels.empty() &&
-                graphNode.image.width > 0 && graphNode.image.height > 0) {
-                sourcePixels = graphNode.image.pixels;
-                sourceW = graphNode.image.width;
-                sourceH = graphNode.image.height;
-                sourceCh = std::max(1, graphNode.image.channels);
-                break;
-            }
-        }
-    }
-    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
-        sourceW = 256;
-        sourceH = 256;
-        sourceCh = 4;
-        sourcePixels.assign(static_cast<size_t>(sourceW * sourceH * sourceCh), 0);
-        for (size_t i = 3; i < sourcePixels.size(); i += 4) {
-            sourcePixels[i] = 255;
-        }
-    }
-
-    RenderGraphSnapshot snapshot = BuildGraphSnapshot();
-    if (IsMaskOutputNode(node->kind) || node->kind == EditorNodeGraph::NodeKind::Output) {
-        snapshot.outputNodeId = nodeId;
-    } else {
-        const int syntheticOutputId = -200000 - nodeId;
-        RenderGraphNode outputNode;
-        outputNode.nodeId = syntheticOutputId;
-        outputNode.kind = RenderGraphNodeKind::Output;
-        snapshot.nodes.push_back(std::move(outputNode));
-        snapshot.links.push_back(RenderGraphLink{
-            nodeId,
-            EditorNodeGraph::kImageOutputSocketId,
-            syntheticOutputId,
-            EditorNodeGraph::kImageInputSocketId
-        });
-        snapshot.outputNodeId = syntheticOutputId;
-    }
-
-    RenderPipeline scopePipeline;
-    scopePipeline.Initialize();
-    scopePipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, sourceCh);
-    scopePipeline.ExecuteGraph(snapshot);
-    return scopePipeline.GetScopesPixels(outW, outH);
-}
-
-std::vector<unsigned char> EditorModule::GetPreviewPixelsForNode(int nodeId, int& outW, int& outH) {
-    outW = 0;
-    outH = 0;
-
-    const EditorNodeGraph::Node* previewNode = m_NodeGraph.FindNode(nodeId);
-    if (!previewNode || previewNode->kind != EditorNodeGraph::NodeKind::Preview) {
-        return {};
-    }
-
-    const EditorNodeGraph::Link* input = m_NodeGraph.FindAnyInputLink(nodeId, EditorNodeGraph::kPreviewInputSocketId);
-    if (!input) {
-        return {};
-    }
-
-    EditorNodeGraph::SocketDefinition sourceSocket;
-    if (!m_NodeGraph.FindSocket(input->fromNodeId, input->fromSocketId, &sourceSocket)) {
-        return {};
-    }
-
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(input->fromNodeId);
-    if (!sourceNode) {
-        return {};
-    }
-
-    if (sourceSocket.type != EditorNodeGraph::SocketType::Image &&
-        sourceSocket.type != EditorNodeGraph::SocketType::Mask) {
-        return {};
-    }
-
-    std::vector<unsigned char> sourcePixels;
-    int sourceW = 0;
-    int sourceH = 0;
-    int sourceCh = 4;
-    if (sourceNode->kind == EditorNodeGraph::NodeKind::Image && !sourceNode->image.pixels.empty() &&
-        sourceNode->image.width > 0 && sourceNode->image.height > 0) {
-        sourcePixels = sourceNode->image.pixels;
-        sourceW = sourceNode->image.width;
-        sourceH = sourceNode->image.height;
-        sourceCh = std::max(1, sourceNode->image.channels);
-    } else {
-        sourcePixels = m_Pipeline.GetSourcePixelsRaw();
-        sourceW = m_Pipeline.GetCanvasWidth();
-        sourceH = m_Pipeline.GetCanvasHeight();
-        sourceCh = std::max(1, m_Pipeline.GetSourceChannels());
-    }
-    if (sourcePixels.empty()) {
-        for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-            if (node.kind == EditorNodeGraph::NodeKind::Image && !node.image.pixels.empty() &&
-                node.image.width > 0 && node.image.height > 0) {
-                sourcePixels = node.image.pixels;
-                sourceW = node.image.width;
-                sourceH = node.image.height;
-                sourceCh = std::max(1, node.image.channels);
-                break;
-            }
-        }
-    }
-    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
-        sourceW = 256;
-        sourceH = 256;
-        sourceCh = 4;
-        sourcePixels.assign(static_cast<size_t>(sourceW * sourceH * sourceCh), 0);
-        for (size_t i = 3; i < sourcePixels.size(); i += 4) {
-            sourcePixels[i] = 255;
-        }
-    }
-
-    RenderGraphSnapshot snapshot = BuildGraphSnapshot();
-    const int syntheticOutputId = -100000 - nodeId;
-    if (sourceSocket.type == EditorNodeGraph::SocketType::Mask) {
-        snapshot.outputNodeId = input->fromNodeId;
-    } else {
-        RenderGraphNode outputNode;
-        outputNode.nodeId = syntheticOutputId;
-        outputNode.kind = RenderGraphNodeKind::Output;
-        snapshot.nodes.push_back(std::move(outputNode));
-        snapshot.links.push_back(RenderGraphLink{
-            input->fromNodeId,
-            input->fromSocketId,
-            syntheticOutputId,
-            EditorNodeGraph::kImageInputSocketId
-        });
-        snapshot.outputNodeId = syntheticOutputId;
-    }
-
-    RenderPipeline previewPipeline;
-    previewPipeline.Initialize();
-    previewPipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, std::max(1, sourceCh));
-    previewPipeline.ExecuteGraph(snapshot);
-    return previewPipeline.GetScopesPixels(outW, outH);
-}
-
-void EditorModule::RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId) {
-    m_Scopes.RenderScopeNode(this, scopeKind, sourceNodeId);
 }
 
 std::vector<std::shared_ptr<LayerBase>> EditorModule::BuildGraphRenderLayers() const {
@@ -935,7 +1052,7 @@ std::vector<RenderMaskSource> EditorModule::BuildGraphRenderMasks() const {
 
 RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
     RenderGraphSnapshot snapshot;
-    snapshot.outputNodeId = m_NodeGraph.GetOutputNodeId();
+    snapshot.outputNodeId = m_NodeGraph.ResolvePreviewOutputNodeId();
 
     for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
         RenderGraphNode renderNode;
@@ -982,6 +1099,8 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
                 renderNode.mixBlendMode = ToRenderMixBlendMode(node.mixBlendMode);
                 renderNode.mixFactor = node.mixFactor;
                 break;
+            case EditorNodeGraph::NodeKind::Composite:
+            case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             case EditorNodeGraph::NodeKind::Scope:
             case EditorNodeGraph::NodeKind::Preview:
                 continue;
@@ -1003,428 +1122,471 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
     return snapshot;
 }
 
-void EditorModule::MarkRenderDirty() {
-    m_RenderDirty = true;
-    m_LastRenderDirtyTime = ImGui::GetTime();
-}
 
-EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t generation) const {
-    EditorRenderWorker::Snapshot snapshot;
-    snapshot.generation = generation;
-    snapshot.outputConnected = m_NodeGraph.IsOutputConnected();
-    snapshot.sourcePixels = m_Pipeline.GetSourcePixelsRaw();
-    snapshot.width = m_Pipeline.GetCanvasWidth();
-    snapshot.height = m_Pipeline.GetCanvasHeight();
-    snapshot.channels = m_Pipeline.GetSourceChannels();
-    snapshot.graph = BuildGraphSnapshot();
-    snapshot.masks = BuildGraphRenderMasks();
-    for (const RenderLayerStep& step : BuildGraphRenderSteps()) {
-        if (step.layer) {
-            nlohmann::json item = nlohmann::json::object();
-            item["layer"] = step.layer->Serialize();
-            item["maskNodeId"] = step.maskNodeId;
-            snapshot.layerSteps.push_back(std::move(item));
-            snapshot.layers.push_back(step.layer->Serialize());
-        }
-    }
-    return snapshot;
-}
+void EditorModule::EnterSingleOutputPreviewMode() {
+    ClearCompositeTransientInteractionState();
+    m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+    m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+    m_CompositeExportBoundsEditMode = false;
+    m_Viewport.ResetSinglePreviewState();
+    m_HoverFade = 0.0f;
 
-std::string EditorModule::BuildRenderSignature() const {
-    nlohmann::json signature = nlohmann::json::object();
-    signature["connected"] = m_NodeGraph.IsOutputConnected();
-    signature["activeImage"] = m_NodeGraph.GetActiveImageNodeId();
-    signature["sourceW"] = m_Pipeline.GetCanvasWidth();
-    signature["sourceH"] = m_Pipeline.GetCanvasHeight();
-    signature["sourceSize"] = m_Pipeline.GetSourcePixelsRaw().size();
-    signature["steps"] = nlohmann::json::array();
-    for (const RenderLayerStep& step : BuildGraphRenderSteps()) {
-        if (step.layer) {
-            signature["steps"].push_back({
-                { "layer", step.layer->Serialize() },
-                { "maskNodeId", step.maskNodeId }
-            });
-        }
+    const int previewOutputNodeId = m_NodeGraph.ResolvePreviewOutputNodeId();
+    if (previewOutputNodeId <= 0) {
+        m_Pipeline.ClearOutput();
+        MarkRenderDirty();
+        return;
     }
-    signature["masks"] = nlohmann::json::array();
-    for (const RenderMaskSource& mask : BuildGraphRenderMasks()) {
-        signature["masks"].push_back({
-            { "nodeId", mask.nodeId },
-            { "kind", static_cast<int>(mask.kind) },
-            { "value", mask.settings.value },
-            { "angle", mask.settings.angle },
-            { "offset", mask.settings.offset },
-            { "scale", mask.settings.scale },
-            { "centerX", mask.settings.centerX },
-            { "centerY", mask.settings.centerY },
-            { "radius", mask.settings.radius },
-            { "feather", mask.settings.feather },
-            { "invert", mask.settings.invert }
+
+    RefreshCompletedChainCacheIfNeeded();
+    const auto chainIt = std::find_if(
+        m_CachedCompletedChains.begin(),
+        m_CachedCompletedChains.end(),
+        [previewOutputNodeId](const CachedCompositeChainState& chain) {
+            return chain.info.outputNodeId == previewOutputNodeId;
         });
+    if (chainIt == m_CachedCompletedChains.end()) {
+        MarkRenderDirty();
+        return;
     }
-    signature["graphNodes"] = nlohmann::json::array();
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::Scope ||
-            node.kind == EditorNodeGraph::NodeKind::Preview) {
-            continue;
-        }
-        nlohmann::json item = {
-            { "id", node.id },
-            { "kind", static_cast<int>(node.kind) },
-            { "layerIndex", node.layerIndex },
-            { "mixMode", static_cast<int>(node.mixBlendMode) },
-            { "mixFactor", node.mixFactor },
-            { "maskKind", static_cast<int>(node.maskKind) },
-            { "maskValue", node.maskSettings.value },
-            { "maskAngle", node.maskSettings.angle },
-            { "maskOffset", node.maskSettings.offset },
-            { "maskScale", node.maskSettings.scale },
-            { "maskCenterX", node.maskSettings.centerX },
-            { "maskCenterY", node.maskSettings.centerY },
-            { "maskRadius", node.maskSettings.radius },
-            { "maskFeather", node.maskSettings.feather },
-            { "maskInvert", node.maskSettings.invert },
-            { "maskUtilityKind", static_cast<int>(node.maskUtilityKind) },
-            { "utilityBlack", node.maskUtilitySettings.blackPoint },
-            { "utilityWhite", node.maskUtilitySettings.whitePoint },
-            { "utilityGamma", node.maskUtilitySettings.gamma },
-            { "utilityThreshold", node.maskUtilitySettings.threshold },
-            { "utilitySoftness", node.maskUtilitySettings.softness },
-            { "utilityInvert", node.maskUtilitySettings.invert },
-            { "imageToMaskKind", static_cast<int>(node.imageToMaskKind) },
-            { "lumLow", node.imageToMaskSettings.low },
-            { "lumHigh", node.imageToMaskSettings.high },
-            { "lumSoftness", node.imageToMaskSettings.softness },
-            { "lumInvert", node.imageToMaskSettings.invert },
-            { "imageGeneratorKind", static_cast<int>(node.imageGeneratorKind) },
-            { "imageGeneratorAngle", node.imageGeneratorSettings.angle },
-            { "imageGeneratorOffset", node.imageGeneratorSettings.offset }
-        };
-        nlohmann::json colorA = nlohmann::json::array();
-        nlohmann::json colorB = nlohmann::json::array();
-        for (int i = 0; i < 4; ++i) {
-            colorA.push_back(node.imageGeneratorSettings.colorA[i]);
-            colorB.push_back(node.imageGeneratorSettings.colorB[i]);
-        }
-        item["imageGeneratorColorA"] = std::move(colorA);
-        item["imageGeneratorColorB"] = std::move(colorB);
-        if (node.kind == EditorNodeGraph::NodeKind::Image) {
-            item["imageSize"] = node.image.pixels.size();
-            item["imageW"] = node.image.width;
-            item["imageH"] = node.image.height;
-        }
-        signature["graphNodes"].push_back(std::move(item));
-    }
-    signature["graphLinks"] = nlohmann::json::array();
-    for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
-        if (m_NodeGraph.GetLinkRole(link) == EditorNodeGraph::LinkRole::Scope) {
-            continue;
-        }
-        signature["graphLinks"].push_back({
-            { "from", link.fromNodeId },
-            { "fromSocket", link.fromSocketId },
-            { "to", link.toNodeId },
-            { "toSocket", link.toSocketId }
-        });
-    }
-    return signature.dump();
-}
 
-void EditorModule::ConsumeRenderWorkerResults() {
-    EditorRenderWorker::Result result;
-    while (m_RenderWorker.TryConsumeCompleted(result)) {
-        if (result.generation < m_RenderGeneration) {
-            continue;
-        }
-        m_RenderPending = false;
-        if (result.success && !result.pixels.empty()) {
-            m_Pipeline.UploadOutputFromPixels(result.pixels.data(), result.width, result.height, 4);
-            m_LastCompletedRenderGeneration = result.generation;
-        } else if (!m_NodeGraph.IsOutputConnected()) {
-            m_Pipeline.ClearOutput();
-        }
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
+    if (sourceNode &&
+        sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
+        !sourceNode->image.pixels.empty() &&
+        sourceNode->image.width > 0 &&
+        sourceNode->image.height > 0) {
+        LoadSourceFromPixels(
+            sourceNode->image.pixels.data(),
+            sourceNode->image.width,
+            sourceNode->image.height,
+            sourceNode->image.channels);
+        return;
     }
-}
 
-void EditorModule::SubmitRenderIfReady() {
-    const std::string signature = BuildRenderSignature();
-    if (signature != m_LastRenderSignature) {
-        m_LastRenderSignature = signature;
+    int outW = 0;
+    int outH = 0;
+    (void)GetCompositePixelsForOutputNode(previewOutputNodeId, outW, outH);
+    if (outW > 0 && outH > 0) {
+        const std::vector<unsigned char> transparentPixels = BuildTransparentPixels(outW, outH);
+        LoadSourceFromPixels(transparentPixels.data(), outW, outH, 4);
+    } else {
         MarkRenderDirty();
     }
+}
 
-    if (!m_RenderDirty || m_RenderPending) {
+void EditorModule::HandleViewportModeTransition(ViewportMode previousMode, ViewportMode currentMode) {
+    if (previousMode == currentMode) {
         return;
     }
-    if (ImGui::GetTime() - m_LastRenderDirtyTime < 0.02) {
+    if (previousMode == ViewportMode::CompositeCanvas && currentMode == ViewportMode::SingleOutputPreview) {
+        EnterSingleOutputPreviewMode();
+    } else if (previousMode == ViewportMode::SingleOutputPreview && currentMode == ViewportMode::CompositeCanvas) {
+        m_HoverFade = 0.0f;
+        ClearCompositeTransientInteractionState();
+    }
+    m_LastViewportMode = currentMode;
+}
+
+std::size_t EditorModule::BuildCompositeChainFingerprint(const EditorNodeGraph::CompletedChainInfo& chain) const {
+    std::size_t fingerprint = HashValue(chain.outputNodeId);
+    HashCombine(fingerprint, HashValue(chain.terminalNodeId));
+    HashCombine(fingerprint, HashValue(chain.sourceNodeId));
+    for (int nodeId : chain.nodeIds) {
+        HashCombine(fingerprint, HashValue(nodeId));
+        const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+        if (!node) {
+            continue;
+        }
+        HashCombine(fingerprint, HashValue(static_cast<int>(node->kind)));
+        switch (node->kind) {
+            case EditorNodeGraph::NodeKind::Image:
+                HashCombine(fingerprint, HashValue(node->image.width));
+                HashCombine(fingerprint, HashValue(node->image.height));
+                HashCombine(fingerprint, HashValue(node->image.channels));
+                HashCombine(fingerprint, HashValue(node->title));
+                break;
+            case EditorNodeGraph::NodeKind::Layer:
+                if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(m_Layers.size()) && m_Layers[node->layerIndex]) {
+                    HashCombine(fingerprint, HashValue(m_Layers[node->layerIndex]->Serialize().dump()));
+                }
+                break;
+            case EditorNodeGraph::NodeKind::Mix:
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->mixBlendMode)));
+                HashCombine(fingerprint, HashValue(node->mixFactor));
+                break;
+            case EditorNodeGraph::NodeKind::ImageGenerator:
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->imageGeneratorKind)));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.angle));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.offset));
+                for (float channel : node->imageGeneratorSettings.colorA) {
+                    HashCombine(fingerprint, HashValue(channel));
+                }
+                for (float channel : node->imageGeneratorSettings.colorB) {
+                    HashCombine(fingerprint, HashValue(channel));
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return fingerprint;
+}
+
+std::string EditorModule::BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const {
+    if (chain.outputNodeId <= 0) {
+        return "Output";
+    }
+
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chain.sourceNodeId);
+    const EditorNodeGraph::Node* outputNode = m_NodeGraph.FindNode(chain.outputNodeId);
+    const std::string sourceLabel = sourceNode && !sourceNode->title.empty()
+        ? sourceNode->title
+        : ("Source " + std::to_string(chain.sourceNodeId));
+    const std::string outputLabel = outputNode && !outputNode->title.empty()
+        ? outputNode->title
+        : ("Output " + std::to_string(chain.outputNodeId));
+    return sourceLabel + " -> " + outputLabel;
+}
+
+std::string EditorModule::BuildCompositeChainLabel(int outputNodeId) const {
+    RefreshCompletedChainCacheIfNeeded();
+    auto chainIt = std::find_if(
+        m_CachedCompletedChains.begin(),
+        m_CachedCompletedChains.end(),
+        [outputNodeId](const CachedCompositeChainState& chain) { return chain.info.outputNodeId == outputNodeId; });
+    if (chainIt == m_CachedCompletedChains.end()) {
+        return "Output " + std::to_string(outputNodeId);
+    }
+    return chainIt->label.empty() ? BuildCompositeChainLabel(chainIt->info) : chainIt->label;
+}
+
+bool EditorModule::HasCompositeNode() const {
+    return std::any_of(
+        m_NodeGraph.GetNodes().begin(),
+        m_NodeGraph.GetNodes().end(),
+        [](const EditorNodeGraph::Node& node) { return node.kind == EditorNodeGraph::NodeKind::Composite; });
+}
+
+void EditorModule::EnsureCompositeNode() {
+    if (HasCompositeNode()) {
         return;
     }
 
-    ++m_RenderGeneration;
-    m_RenderDirty = false;
-    if (!m_NodeGraph.IsOutputConnected()) {
-        m_Pipeline.ClearOutput();
-        m_RenderPending = false;
+    float anchorX = 300.0f;
+    float anchorY = 280.0f;
+    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::Output) {
+            anchorX = std::max(anchorX, node.position.x - 240.0f);
+            anchorY = std::max(anchorY, node.position.y + 180.0f);
+        }
+    }
+    m_NodeGraph.AddCompositeNode(EditorNodeGraph::Vec2{ anchorX, anchorY });
+}
+
+bool EditorModule::HasExportBoundsSettingsNode() const {
+    return std::any_of(
+        m_NodeGraph.GetNodes().begin(),
+        m_NodeGraph.GetNodes().end(),
+        [](const EditorNodeGraph::Node& node) { return node.kind == EditorNodeGraph::NodeKind::ExportBoundsSettings; });
+}
+
+void EditorModule::EnsureExportBoundsSettingsNode() {
+    if (HasExportBoundsSettingsNode()) {
         return;
     }
 
-    if (m_RenderWorkerAvailable) {
-        m_RenderPending = true;
-        m_RenderWorker.Submit(BuildRenderSnapshot(m_RenderGeneration));
-    } else {
-        m_Pipeline.ExecuteGraph(BuildGraphSnapshot());
-        m_LastCompletedRenderGeneration = m_RenderGeneration;
+    float anchorX = 620.0f;
+    float anchorY = 320.0f;
+    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::Composite) {
+            anchorX = node.position.x + 320.0f;
+            anchorY = node.position.y;
+            break;
+        }
+        if (node.kind == EditorNodeGraph::NodeKind::Output) {
+            anchorX = std::max(anchorX, node.position.x + 220.0f);
+            anchorY = std::max(anchorY, node.position.y + 100.0f);
+        }
     }
+    m_NodeGraph.AddExportBoundsSettingsNode(EditorNodeGraph::Vec2{ anchorX, anchorY });
 }
 
 void EditorModule::RenderUI() {
     ConsumeRenderWorkerResults();
-
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
                            | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, GetWorkspaceBaseColor());
     ImGui::BeginChild("StackEditorWorkspace", ImVec2(0, 0), false, flags);
-    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 
-    ImGuiID editorDockId = ImGui::GetID("EditorDockSpace");
-    ImGui::DockSpace(editorDockId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
+    const ImVec2 workspacePos = ImGui::GetCursorScreenPos();
+    const ImVec2 workspaceSize = ImGui::GetContentRegionAvail();
+    const bool advancedEditorOpen = IsAdvancedEditorOpen();
+    const ImVec4 workspaceColor = GetWorkspaceBaseColor();
+    const ImU32 workspaceColorU32 = ImGui::ColorConvertFloat4ToU32(workspaceColor);
+    const ViewportMode viewportMode = GetViewportMode();
+    HandleViewportModeTransition(m_LastViewportMode, viewportMode);
+    const bool compositeViewportMode = viewportMode == ViewportMode::CompositeCanvas;
+    EnsureCompositeSceneState(m_LastCompositeCanvasSize);
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        workspacePos,
+        ImVec2(workspacePos.x + workspaceSize.x, workspacePos.y + workspaceSize.y),
+        workspaceColorU32);
+    const float splitGap = 32.0f;
+    const float minLeftWidth = 260.0f;
+    const float minRightWidth = 420.0f;
+    const float maxLeftWidth = std::max(minLeftWidth, workspaceSize.x - minRightWidth - splitGap);
+    if (m_LeftPaneWidth <= 0.0f && !compositeViewportMode) {
+        m_LeftPaneWidth = std::clamp(workspaceSize.x * (2.0f / 3.0f), minLeftWidth, maxLeftWidth);
+    } else if (!compositeViewportMode) {
+        m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, minLeftWidth, maxLeftWidth);
+    }
+    if (!advancedEditorOpen && CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+        TogglePartialSplitTargets(workspaceSize.x, minLeftWidth, maxLeftWidth, compositeViewportMode);
+    }
+    if (compositeViewportMode) {
+        if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::GraphOnly && !m_DraggingSplitHandle && !m_SplitAutoAnimating) {
+            m_LeftPaneWidth = workspaceSize.x;
+        } else if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::ViewportOnly && !m_DraggingSplitHandle && !m_SplitAutoAnimating) {
+            m_LeftPaneWidth = 0.0f;
+        } else if (!m_DraggingSplitHandle && !m_SplitAutoAnimating) {
+            m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, minLeftWidth, maxLeftWidth);
+        } else {
+            m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, 0.0f, workspaceSize.x);
+        }
+    }
+    const float effectiveSplitGap = compositeViewportMode
+        ? splitGap * std::clamp(
+            std::min(m_LeftPaneWidth, std::max(0.0f, workspaceSize.x - m_LeftPaneWidth)) / std::max(1.0f, splitGap),
+            0.0f,
+            1.0f)
+        : splitGap;
 
-    static bool first = true;
-    if (first) {
-        first = false;
-        ImGui::DockBuilderRemoveNode(editorDockId);
-        ImGui::DockBuilderAddNode(editorDockId, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(editorDockId, ImGui::GetWindowSize());
-
-        ImGuiID left = 0;
-        ImGuiID main = editorDockId;
-        left = ImGui::DockBuilderSplitNode(main, ImGuiDir_Left, 0.25f, nullptr, &main);
-
-        ImGui::DockBuilderDockWindow("Inspector Panel Sidebar", left);
-        ImGui::DockBuilderDockWindow("Canvas Viewport", main);
-        ImGui::DockBuilderFinish(editorDockId);
+    const float handleRadius = 7.0f;
+    const ImVec2 handleCenter(
+        std::clamp(
+            workspacePos.x + m_LeftPaneWidth + (effectiveSplitGap * 0.5f),
+            workspacePos.x + handleRadius + 2.0f,
+            workspacePos.x + workspaceSize.x - handleRadius - 2.0f),
+        workspacePos.y + 14.0f);
+    bool handleHovered = false;
+    if (m_SplitAutoAnimating) {
+        const float t = static_cast<float>(std::clamp((ImGui::GetTime() - m_SplitAutoAnimStartTime) / 0.2, 0.0, 1.0));
+        const float eased = 1.0f - std::pow(1.0f - t, 3.0f);
+        m_LeftPaneWidth = m_SplitAutoAnimFrom + (m_SplitAutoAnimTo - m_SplitAutoAnimFrom) * eased;
+        if (t >= 1.0f) {
+            m_SplitAutoAnimating = false;
+            if (compositeViewportMode) {
+                m_CompositeEdgeSnapMode = m_SplitAutoAnimSnapMode;
+            }
+        }
     }
 
-    m_Sidebar.Render(this);
-    m_Viewport.Render(this);
+    ImDrawList* rootDrawList = ImGui::GetForegroundDrawList();
+    const ImU32 handleFill = (m_DraggingSplitHandle || m_SplitHandlePressed)
+        ? IM_COL32(92, 178, 255, 230)
+        : (handleHovered ? IM_COL32(72, 148, 214, 214) : IM_COL32(52, 92, 120, 188));
+    rootDrawList->AddCircleFilled(handleCenter, handleRadius, handleFill, 32);
+
+    const float paneHeight = std::max(0.0f, workspaceSize.y);
+    const float rightWidth = std::max(0.0f, workspaceSize.x - m_LeftPaneWidth - effectiveSplitGap);
+
+    if (m_LeftPaneWidth > 1.0f) {
+        ImGui::SetCursorScreenPos(workspacePos);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 16.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, workspaceColor);
+        ImGui::BeginChild("EditorGraphPane", ImVec2(m_LeftPaneWidth, paneHeight), false,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        m_Sidebar.Render(this);
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
+
+    ImVec2 viewportPaneMin(workspacePos.x + m_LeftPaneWidth + effectiveSplitGap, workspacePos.y);
+    ImVec2 viewportPaneMax(viewportPaneMin.x + rightWidth, workspacePos.y + paneHeight);
+    bool viewportPaneRendered = false;
+    if (rightWidth > 1.0f) {
+        ImGui::SetCursorScreenPos(ImVec2(workspacePos.x + m_LeftPaneWidth + effectiveSplitGap, workspacePos.y));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 16.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, workspaceColor);
+        ImGui::BeginChild("EditorViewportPane", ImVec2(rightWidth, paneHeight), false,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        m_Viewport.Render(this);
+        ImGui::EndChild();
+        viewportPaneMin = ImGui::GetItemRectMin();
+        viewportPaneMax = ImGui::GetItemRectMax();
+        viewportPaneRendered = true;
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
+
+    ImVec2 handleOverlayPos(handleCenter.x - 12.0f, handleCenter.y - 12.0f);
+    ImVec2 handleOverlaySize(24.0f, 24.0f);
+    if (compositeViewportMode && (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::ViewportOnly || m_LeftPaneWidth <= 2.0f)) {
+        handleOverlayPos = ImVec2(workspacePos.x, workspacePos.y + 2.0f);
+        handleOverlaySize = ImVec2(28.0f, std::min(38.0f, std::max(24.0f, paneHeight)));
+    } else if (compositeViewportMode && (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::GraphOnly || m_LeftPaneWidth >= workspaceSize.x - 2.0f)) {
+        handleOverlayPos = ImVec2(workspacePos.x + workspaceSize.x - 28.0f, workspacePos.y + 2.0f);
+        handleOverlaySize = ImVec2(28.0f, std::min(38.0f, std::max(24.0f, paneHeight)));
+    }
+
+    ImGui::SetCursorScreenPos(handleOverlayPos);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    ImGui::BeginChild("EditorSplitHandleOverlay", handleOverlaySize, false,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::SetCursorScreenPos(ImVec2(handleCenter.x - 10.0f, handleCenter.y - 10.0f));
+    ImGui::InvisibleButton("EditorSplitHandle", ImVec2(20.0f, 20.0f));
+    handleHovered = ImGui::IsItemHovered();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+
+    if (handleHovered || m_DraggingSplitHandle || m_SplitHandlePressed) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (!advancedEditorOpen && handleHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        m_SplitHandlePressed = true;
+        m_SplitHandleMoved = false;
+        m_SplitAutoAnimating = false;
+    }
+    if (!advancedEditorOpen && m_SplitHandlePressed && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) > 2.0f) {
+            m_DraggingSplitHandle = true;
+            m_SplitHandleMoved = true;
+            if (compositeViewportMode) {
+                m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+                m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+            }
+        }
+    }
+
+    const bool viewportPaneHovered = ImGui::IsMouseHoveringRect(viewportPaneMin, viewportPaneMax);
+    const bool viewportSplitDragAllowed = !advancedEditorOpen && viewportPaneHovered && !IsPickingColor() && !compositeViewportMode;
+    if ((viewportSplitDragAllowed || m_DraggingSplitHandle) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (viewportSplitDragAllowed && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        m_DraggingSplitHandle = true;
+    }
+    if (advancedEditorOpen) {
+        m_DraggingSplitHandle = false;
+        m_SplitHandlePressed = false;
+        m_SplitHandleMoved = false;
+    } else if (m_DraggingSplitHandle) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (compositeViewportMode) {
+                m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+                m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+                m_LeftPaneWidth = std::clamp(m_LeftPaneWidth + ImGui::GetIO().MouseDelta.x, 0.0f, workspaceSize.x);
+            } else {
+                m_LeftPaneWidth = std::clamp(m_LeftPaneWidth + ImGui::GetIO().MouseDelta.x, minLeftWidth, maxLeftWidth);
+            }
+        } else {
+            m_DraggingSplitHandle = false;
+        }
+    }
+    if (m_SplitHandlePressed && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (!m_SplitHandleMoved) {
+            const float leftTarget = compositeViewportMode ? 0.0f : minLeftWidth;
+            const float rightTarget = compositeViewportMode ? workspaceSize.x : maxLeftWidth;
+            const float centerThreshold = workspaceSize.x * 0.5f;
+            const float currentCenter = m_LeftPaneWidth + effectiveSplitGap * 0.5f;
+            m_SplitAutoAnimFrom = m_LeftPaneWidth;
+            if (compositeViewportMode && m_LeftPaneWidth <= 2.0f) {
+                m_SplitAutoAnimTo = rightTarget;
+                m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::GraphOnly;
+            } else if (compositeViewportMode && m_LeftPaneWidth >= workspaceSize.x - 2.0f) {
+                m_SplitAutoAnimTo = leftTarget;
+                m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::ViewportOnly;
+            } else {
+                m_SplitAutoAnimTo = currentCenter < centerThreshold ? leftTarget : rightTarget;
+                if (compositeViewportMode) {
+                    m_SplitAutoAnimSnapMode = m_SplitAutoAnimTo <= 0.0f
+                        ? CompositeEdgeSnapMode::ViewportOnly
+                        : CompositeEdgeSnapMode::GraphOnly;
+                } else {
+                    m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+                }
+            }
+            m_SplitAutoAnimStartTime = ImGui::GetTime();
+            m_SplitAutoAnimating = true;
+        }
+        m_SplitHandlePressed = false;
+        m_SplitHandleMoved = false;
+    }
+
+    RenderAdvancedEditorOverlay(workspacePos, workspaceSize);
+
     SubmitRenderIfReady();
 
     if (IsSourceLoadBusy()) {
         ImGuiExtras::RenderBusyOverlay("Loading source image...");
     } else if (IsExportBusy()) {
-        ImGuiExtras::RenderBusyOverlay("Exporting image...");
-    } else if (Async::IsBusy(LibraryManager::Get().GetSaveTaskState())) {
-        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetSaveStatusText().c_str());
+        ImGuiExtras::RenderBusyOverlay(GetExportStatusText().empty() ? "Exporting..." : GetExportStatusText().c_str());
     }
 
     ImGui::EndChild();
 }
 
-nlohmann::json EditorModule::SerializePipeline() {
-    json serialized = json::array();
-    for (auto& layer : m_Layers) {
-        serialized.push_back(layer->Serialize());
-    }
-    return EditorNodeGraph::SerializeGraphPayload(serialized, m_NodeGraph);
+EditorModule::ViewportMode EditorModule::GetViewportMode() const {
+    RefreshCompletedChainCacheIfNeeded();
+    return GetCompletedChainCount() >= 2
+        ? ViewportMode::CompositeCanvas
+        : ViewportMode::SingleOutputPreview;
 }
 
-void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
-    m_Layers.clear();
-    const nlohmann::json layers = EditorNodeGraph::ExtractLayerArray(serialized);
-    if (!layers.is_array()) return;
-
-    for (const auto& layerData : layers) {
-        std::string type = layerData.value("type", "");
-        std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(type);
-
-        if (newLayer) {
-            newLayer->InitializeGL();
-            newLayer->Deserialize(layerData);
-            m_Layers.push_back(newLayer);
-        }
-    }
-
-    m_SelectedLayerIndex = m_Layers.empty() ? -1 : 0;
-    int sourceWidth = 0;
-    int sourceHeight = 0;
-    const std::vector<unsigned char>& sourcePixels = m_Pipeline.GetSourcePixelsRaw();
-    if (!sourcePixels.empty()) {
-        sourceWidth = m_Pipeline.GetCanvasWidth();
-        sourceHeight = m_Pipeline.GetCanvasHeight();
-    }
-
-    EditorNodeGraph::DeserializeGraphPayload(
-        serialized,
-        m_NodeGraph,
-        static_cast<int>(m_Layers.size()),
-        sourcePixels,
-        sourceWidth,
-        sourceHeight,
-        m_Pipeline.GetSourceChannels());
-    RefreshGraphLayerMetadata();
-
-    const int activeImageNodeId = m_NodeGraph.GetActiveImageNodeId();
-    if (activeImageNodeId > 0) {
-        if (EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(activeImageNodeId)) {
-            if (imageNode->kind == EditorNodeGraph::NodeKind::Image && !imageNode->image.pixels.empty()) {
-                LoadSourceFromPixels(imageNode->image.pixels.data(), imageNode->image.width, imageNode->image.height, imageNode->image.channels);
-            }
-        }
-        ApplyGraphLayerOrder();
-    } else {
-        m_Pipeline.ClearOutput();
-    }
-    MarkRenderDirty();
+int EditorModule::GetCompletedChainCount() const {
+    RefreshCompletedChainCacheIfNeeded();
+    return static_cast<int>(m_CachedCompletedChains.size());
 }
 
-void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch) {
-    m_Pipeline.LoadSourceFromPixels(data, w, h, ch);
-    MarkRenderDirty();
+int EditorModule::GetConnectedOutputCount() const {
+    RefreshCompletedChainCacheIfNeeded();
+    return m_CachedConnectedOutputCount;
 }
 
-bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
-    if (projectData.sourcePixels.empty() || projectData.width <= 0 || projectData.height <= 0) {
-        return false;
+std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
+    const EditorNodeGraph::Link* input =
+        m_NodeGraph.FindAnyInputLink(previewNodeId, EditorNodeGraph::kPreviewInputSocketId);
+    if (!input) {
+        return 0;
     }
-
-    LoadSourceFromPixels(projectData.sourcePixels.data(), projectData.width, projectData.height, projectData.channels);
-    DeserializePipeline(projectData.pipelineData);
-    SetCurrentProjectName(projectData.projectName);
-    SetCurrentProjectFileName(projectData.projectFileName);
-    return true;
+    return std::max<std::uint64_t>(1, GetNodeDirtyGeneration(input->fromNodeId));
 }
 
-void EditorModule::RequestLoadSourceImage(const std::string& path) {
-    if (path.empty()) {
-        return;
-    }
-
-    ++m_SourceLoadGeneration;
-    const std::uint64_t generation = m_SourceLoadGeneration;
-    m_SourceLoadTaskState = Async::TaskState::Queued;
-    m_SourceLoadStatusText = "Loading source image in the background...";
-
-    Async::TaskSystem::Get().Submit([this, generation, path]() {
-        DecodedImageData decoded;
-        const bool success = DecodeImageFromFile(path, decoded);
-
-        Async::TaskSystem::Get().PostToMain([this, generation, path, decoded = std::move(decoded), success]() mutable {
-            if (generation != m_SourceLoadGeneration) {
-                return;
-            }
-
-            if (!success || decoded.pixels.empty()) {
-                m_SourceLoadTaskState = Async::TaskState::Failed;
-                m_SourceLoadStatusText = "Failed to load the selected source image.";
-                return;
-            }
-
-            m_SourceLoadTaskState = Async::TaskState::Applying;
-            m_SourceLoadStatusText = "Applying source image to the editor...";
-
-            LoadSourceFromPixels(decoded.pixels.data(), decoded.width, decoded.height, decoded.channels);
-            EditorNodeGraph::ImagePayload payload;
-            payload.label = FileNameFromPath(path);
-            payload.sourcePath = path;
-            payload.width = decoded.width;
-            payload.height = decoded.height;
-            payload.channels = decoded.channels;
-            payload.pngBytes = EncodePngBytes(decoded.pixels, decoded.width, decoded.height, decoded.channels);
-            payload.pixels = std::move(decoded.pixels);
-
-            EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
-            if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image) {
-                m_NodeGraph.ResetFromLayers(static_cast<int>(m_Layers.size()), true);
-                imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
-            } else if (!m_NodeGraph.IsOutputConnected()) {
-                m_NodeGraph.RebuildLinks();
-            }
-
-            if (imageNode) {
-                imageNode->title = payload.label.empty() ? "Image" : payload.label;
-                imageNode->image = std::move(payload);
-                m_NodeGraph.SetActiveImageNodeId(imageNode->id);
-            }
-            SetCurrentProjectName("");
-            SetCurrentProjectFileName("");
-
-            m_SourceLoadTaskState = Async::TaskState::Idle;
-            m_SourceLoadStatusText = "Source image loaded.";
-        });
-    });
+const EditorModule::GraphPreviewPixels* EditorModule::GetCachedPreviewPixelsForNode(int previewNodeId) const {
+    const auto it = m_PreviewPixelCache.find(previewNodeId);
+    return it != m_PreviewPixelCache.end() ? &it->second : nullptr;
 }
 
-bool EditorModule::ExportImage(const std::string& path) {
-    return RequestExportImage(path);
+std::uint64_t EditorModule::GetScopeNodeRevision(int sourceNodeId) const {
+    if (sourceNodeId <= 0) {
+        m_ScopeDisplayedRevisions[sourceNodeId] = 0;
+        return 0;
+    }
+
+    const std::uint64_t desiredRevision = GetNodeDirtyGeneration(sourceNodeId);
+    std::uint64_t& displayedRevision = m_ScopeDisplayedRevisions[sourceNodeId];
+    if (CanRefreshPreviewLikeNodes() && !HasPendingPreviewRefreshes()) {
+        displayedRevision = desiredRevision;
+    }
+    return displayedRevision;
 }
 
-bool EditorModule::RequestExportImage(const std::string& path) {
-    if (path.empty() || !m_Pipeline.HasSourceImage()) {
-        return false;
-    }
+ImVec4 EditorModule::GetWorkspaceBaseColor() const {
+    return kEditorWorkspaceBaseColor;
+}
 
-    if (Async::IsBusy(m_ExportTaskState)) {
-        return false;
-    }
-
-    m_ExportTaskState = Async::TaskState::Applying;
-    m_ExportStatusText = "Capturing the rendered image...";
-
-    m_Pipeline.ExecuteGraph(BuildGraphSnapshot());
-
-    int width = 0;
-    int height = 0;
-    auto pixels = m_Pipeline.GetOutputPixels(width, height);
-    if (pixels.empty()) {
-        m_ExportTaskState = Async::TaskState::Failed;
-        m_ExportStatusText = "Failed to capture the rendered image.";
-        return false;
-    }
-
-    if (!m_CurrentProjectName.empty()) {
-        LibraryManager::Get().RequestSaveProject(m_CurrentProjectName, this, m_CurrentProjectFileName);
-    }
-
-    ++m_ExportGeneration;
-    const std::uint64_t generation = m_ExportGeneration;
-    m_ExportTaskState = Async::TaskState::Running;
-    m_ExportStatusText = "Writing PNG export in the background...";
-
-    Async::TaskSystem::Get().Submit([this, generation, path, width, height, pixels = std::move(pixels)]() mutable {
-        bool success = false;
-
-        try {
-            const std::filesystem::path destination(path);
-            if (destination.has_parent_path()) {
-                std::filesystem::create_directories(destination.parent_path());
-            }
-
-            success = stbi_write_png(
-                destination.string().c_str(),
-                width,
-                height,
-                4,
-                pixels.data(),
-                width * 4) != 0;
-        } catch (...) {
-            success = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this, generation, success]() {
-            if (generation != m_ExportGeneration) {
-                return;
-            }
-
-            if (success) {
-                m_ExportTaskState = Async::TaskState::Idle;
-                m_ExportStatusText = "Rendered image exported.";
-            } else {
-                m_ExportTaskState = Async::TaskState::Failed;
-                m_ExportStatusText = "Failed to write the exported PNG.";
-            }
-        });
-    });
-
-    return true;
+bool EditorModule::CanConsumeEditorCommandKeys() const {
+    return !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
 }

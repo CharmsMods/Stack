@@ -264,11 +264,12 @@ bool IsSupportedAssetExtension(const std::filesystem::path& path) {
 
 bool IsSupportedProjectExtension(const std::filesystem::path& path) {
     const std::string extension = path.extension().string();
-    return extension == ".stack" || extension == ".comp";
+    return extension == ".stack";
 }
 
 std::string DefaultProjectExtensionForKind(const std::string& projectKind) {
-    return projectKind == StackFormat::kCompositeProjectKind ? ".comp" : ".stack";
+    (void)projectKind;
+    return ".stack";
 }
 
 std::string EnsureProjectFileNameForKind(
@@ -279,8 +280,6 @@ std::string EnsureProjectFileNameForKind(
     std::filesystem::path resolved = fileName.empty() ? std::filesystem::path(fallbackStem) : std::filesystem::path(fileName);
     if (!IsSupportedProjectExtension(resolved)) {
         resolved = resolved.stem().string() + DefaultProjectExtensionForKind(projectKind);
-    } else if (projectKind == StackFormat::kCompositeProjectKind && resolved.extension() != ".comp") {
-        resolved = resolved.stem().string() + ".comp";
     }
 
     return resolved.filename().string();
@@ -2880,6 +2879,12 @@ void LibraryManager::RequestImportAndLoad(
             return;
         }
 
+        if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
+            m_ImportStatusText = "Legacy standalone composite projects are no longer supported.";
+            m_ImportTaskState = Async::TaskState::Failed;
+            return;
+        }
+
         // 2. Check for collision
         const std::string fileName = EnsureProjectFileNameForKind(
             path.filename().string(),
@@ -2941,23 +2946,15 @@ void LibraryManager::RequestImportAndLoad(
         m_LastLibrarySignature = 0;
         RefreshLibrary();
 
-        if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
-            StackFormat::ProjectLoadOptions fullLoad { true, true, true };
-            StackFormat::ProjectDocument fullDocument;
-            if (StackFormat::ReadProjectFile(path, fullDocument, fullLoad)) {
-                MirrorCompositeEmbeddedAssets(fullDocument);
-            }
-        }
-
         if (document.metadata.projectKind == StackFormat::kRenderProjectKind) {
             if (onTabSwitchRequested) onTabSwitchRequested(3);
             RequestLoadRenderProjectFromPath(m_LibraryPath / fileName, renderTab);
-        } else if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
-            if (composite && onTabSwitchRequested) onTabSwitchRequested(2);
-            if (composite) {
-                RequestLoadCompositeProjectFromPath(m_LibraryPath / fileName, composite);
-            }
         } else {
+            if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
+                m_ImportStatusText = "Legacy standalone composite projects are no longer supported.";
+                m_ImportTaskState = Async::TaskState::Failed;
+                return;
+            }
             if (onTabSwitchRequested) onTabSwitchRequested(1);
             RequestLoadProjectFromPath(m_LibraryPath / fileName, editor);
         }

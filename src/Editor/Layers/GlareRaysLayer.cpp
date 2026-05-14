@@ -1,6 +1,7 @@
 #include "GlareRaysLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_GlareRaysVert = R"(
 #version 130
@@ -90,10 +91,10 @@ void GlareRaysLayer::Execute(unsigned int inputTexture, int width, int height, F
 }
 
 void GlareRaysLayer::RenderUI() {
-    ImGui::SliderFloat("Intensity", &m_Intensity, 0.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Ray Count", &m_Rays, 2.0f, 12.0f, "%.0f");
-    ImGui::SliderFloat("Ray Length", &m_Length, 1.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Ray Softness", &m_Blur, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Intensity", "##Intensity", &m_Intensity, 0.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Ray Count", "##RayCount", &m_Rays, 2.0f, 12.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Ray Length", "##RayLength", &m_Length, 1.0f, 100.0f, "%.0f");
+    ImGuiExtras::NodeSliderFloat("Ray Softness", "##RaySoftness", &m_Blur, 0.0f, 100.0f, "%.0f");
 }
 
 json GlareRaysLayer::Serialize() const {

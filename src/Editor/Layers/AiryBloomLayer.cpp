@@ -2,6 +2,7 @@
 
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
+#include "Utils/ImGuiExtras.h"
 
 static const char* s_AiryBloomVert = R"(
 #version 130
@@ -119,11 +120,11 @@ void AiryBloomLayer::Execute(unsigned int inputTexture, int width, int height, F
 }
 
 void AiryBloomLayer::RenderUI() {
-    ImGui::SliderFloat("Intensity", &m_Intensity, 0.0f, 2.0f, "%.2f");
-    ImGui::SliderFloat("Aperture", &m_Aperture, 1.0f, 50.0f, "%.1f");
-    ImGui::SliderFloat("Threshold", &m_Threshold, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Threshold Fade", &m_ThresholdFade, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Cutoff", &m_Cutoff, 0.01f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Intensity", "##Intensity", &m_Intensity, 0.0f, 2.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Aperture", "##Aperture", &m_Aperture, 1.0f, 50.0f, "%.1f");
+    ImGuiExtras::NodeSliderFloat("Threshold", "##Threshold", &m_Threshold, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Threshold Fade", "##ThresholdFade", &m_ThresholdFade, 0.0f, 1.0f, "%.2f");
+    ImGuiExtras::NodeSliderFloat("Cutoff", "##Cutoff", &m_Cutoff, 0.01f, 1.0f, "%.2f");
     ImGui::TextDisabled("Native ports the core airy bloom pass here; the web layer's optional mask gates still need the future native mask system.");
 }
 
