@@ -27,7 +27,8 @@ enum class RenderImageGeneratorKind {
     SolidColor,
     ColorGradient,
     Square,
-    Circle
+    Circle,
+    Text
 };
 
 struct RenderMaskSettings {
@@ -63,6 +64,8 @@ struct RenderImageGeneratorSettings {
     float colorB[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     float angle = 0.0f;
     float offset = 0.0f;
+    std::string text = "Text";
+    float fontSize = 96.0f;
 };
 
 struct RenderMaskSource {

@@ -50,9 +50,19 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             if (canDeleteNode && ImGui::MenuItem("Delete Node")) {
                 editor->RemoveGraphNode(node->id);
             }
-            if (node->kind == EditorNodeGraph::NodeKind::Layer && editor->LayerSupportsAdvancedEditor(node->layerIndex)) {
-                if (ImGui::MenuItem("Open Editor")) {
-                    editor->OpenAdvancedEditorForNode(node->id);
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+                if (!editor->GetNodeGraph().IsNodeSelected(node->id)) {
+                    editor->GetNodeGraph().SelectNode(node->id, false);
+                }
+                DuplicateSelectedNodes(editor);
+            }
+            if (node->kind == EditorNodeGraph::NodeKind::Layer && editor->LayerUsesRichNodeSurface(node->layerIndex)) {
+                if (ImGui::MenuItem(node->expanded ? "Collapse Controls" : "Expand Controls")) {
+                    node->expanded = !node->expanded;
+                    if (!node->expanded) {
+                        editor->CancelCanvasTool();
+                        editor->ClearGraphAutoFocusIfTrackedNode(node->id);
+                    }
                 }
             } else if (ImGui::MenuItem(node->expanded ? "Collapse" : "Expand")) {
                 node->expanded = !node->expanded;
@@ -86,6 +96,10 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
     const bool canSaveProject = editor && editor->GetPipeline().HasSourceImage();
     const bool saveBusy = Async::IsBusy(LibraryManager::Get().GetSaveTaskState());
     const bool exportBusy = editor && editor->IsExportBusy();
+    if (ImGui::MenuItem("New Project")) {
+        editor->RequestNewProject();
+    }
+    ImGui::Separator();
     if (ImGui::BeginMenu("Save...")) {
         ImGui::BeginDisabled(!canSaveProject || saveBusy);
         if (ImGui::MenuItem("To Library")) {
@@ -178,6 +192,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             }
             if (ImGui::MenuItem("Circle")) {
                 editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::Circle, m_ContextGraphPos);
+            }
+            if (ImGui::MenuItem("Text")) {
+                editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::Text, m_ContextGraphPos);
             }
             ImGui::EndMenu();
         }

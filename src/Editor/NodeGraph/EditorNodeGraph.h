@@ -2,6 +2,7 @@
 
 #include "Editor/LayerRegistry.h"
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -66,7 +67,8 @@ enum class ImageGeneratorKind {
     SolidColor,
     ColorGradient,
     Square,
-    Circle
+    Circle,
+    Text
 };
 
 enum class MixBlendMode {
@@ -142,6 +144,8 @@ struct ImageGeneratorSettings {
     float colorB[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     float angle = 0.0f;
     float offset = 0.0f;
+    std::string text = "Text";
+    float fontSize = 96.0f;
 };
 
 struct Node {
@@ -228,6 +232,11 @@ public:
     bool IsNodeSelected(int nodeId) const;
     void ClearSelection();
     void SelectNodesInRect(Vec2 min, Vec2 max, bool additive = false);
+    void SelectNodesInRect(
+        Vec2 min,
+        Vec2 max,
+        const std::function<Vec2(const Node&)>& sizeResolver,
+        bool additive = false);
     const std::vector<int>& GetSelectedNodeIds() const { return m_SelectedNodeIds; }
     void SelectLink(int fromNodeId, int toNodeId);
     void SelectLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId);

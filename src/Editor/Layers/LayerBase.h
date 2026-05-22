@@ -5,6 +5,42 @@
 using json = nlohmann::json;
 
 class FullscreenQuad;
+class EditorModule;
+
+enum class NodeSurfacePresentation {
+    CompactInline,
+    RichExpandedSurface
+};
+
+enum class NodeSurfaceDensity {
+    Normal,
+    Dense,
+    UltraDense
+};
+
+struct NodeSurfaceSpec {
+    NodeSurfacePresentation presentation = NodeSurfacePresentation::CompactInline;
+    NodeSurfaceDensity density = NodeSurfaceDensity::Normal;
+    float preferredWidth = 334.0f;
+    float maxWidth = 420.0f;
+    bool usesCanvasTool = false;
+};
+
+struct NodeSurfaceContext {
+    int nodeId = -1;
+    float availableWidth = 0.0f;
+    float safeContentWidth = 0.0f;
+    float logicalAvailableWidth = 0.0f;
+    float logicalSafeContentWidth = 0.0f;
+    float layoutScale = 1.0f;
+    float contentScale = 1.0f;
+    float itemGap = 0.0f;
+    float sectionGap = 0.0f;
+    bool focused = false;
+    NodeSurfaceDensity density = NodeSurfaceDensity::Normal;
+    bool canvasToolActive = false;
+    const char* canvasToolStatusText = nullptr;
+};
 
 // Abstract base class for all rendering layers in the sequential pipeline.
 // Each layer receives the previous layer's output texture and renders into the target FBO.
@@ -34,10 +70,12 @@ public:
 
     // Draw ImGui controls for this layer's parameters (shown in the Selected tab)
     virtual void RenderUI() = 0;
-    virtual void RenderUI(class EditorModule* editor) { RenderUI(); }
-    virtual bool SupportsAdvancedEditor() const { return false; }
-    virtual const char* GetAdvancedEditorTitle() const { return GetName(); }
-    virtual void RenderAdvancedEditor(class EditorModule* editor) { RenderUI(editor); }
+    virtual void RenderUI(EditorModule* editor) { RenderUI(); }
+    virtual NodeSurfaceSpec GetNodeSurfaceSpec() const { return {}; }
+    virtual void RenderExpandedNodeSurface(EditorModule* editor, const NodeSurfaceContext& context) {
+        (void)context;
+        RenderUI(editor);
+    }
 
     // Whether this layer is enabled and should be processed
     bool IsEnabled() const { return m_Enabled; }

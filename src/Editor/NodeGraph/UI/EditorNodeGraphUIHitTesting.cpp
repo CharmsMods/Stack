@@ -1,4 +1,5 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
+#include "Editor/EditorModule.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +11,7 @@ ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
 }
 
 float NodeUiScaleFromZoom(float zoom) {
-    return std::clamp(zoom, 0.16f, 2.5f);
+    return zoom;
 }
 
 float PinRadiusForZoom(float zoom) {
@@ -63,9 +64,24 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::OutputPinScreenPos(const EditorNodeGrap
 EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
     const float hitRadius = std::max(12.0f, PinRadiusForZoom(m_Zoom) + 8.0f);
     const float hitRadiusSq = hitRadius * hitRadius;
-    const auto& nodes = graph.GetNodes();
-    for (auto nodeIt = nodes.rbegin(); nodeIt != nodes.rend(); ++nodeIt) {
-        const EditorNodeGraph::Node& node = *nodeIt;
+    std::vector<const EditorNodeGraph::Node*> orderedNodes;
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        orderedNodes.push_back(&node);
+    }
+    std::sort(orderedNodes.begin(), orderedNodes.end(), [&](const EditorNodeGraph::Node* a, const EditorNodeGraph::Node* b) {
+        const bool richA = a->kind == EditorNodeGraph::NodeKind::Layer && a->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(a->layerIndex);
+        const bool richB = b->kind == EditorNodeGraph::NodeKind::Layer && b->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(b->layerIndex);
+        if (richA != richB) {
+            return richA > richB;
+        }
+        const auto itA = m_NodeFrontOrder.find(a->id);
+        const auto itB = m_NodeFrontOrder.find(b->id);
+        const std::uint64_t stampA = itA != m_NodeFrontOrder.end() ? itA->second : 0;
+        const std::uint64_t stampB = itB != m_NodeFrontOrder.end() ? itB->second : 0;
+        return stampA > stampB;
+    });
+    for (const EditorNodeGraph::Node* nodePtr : orderedNodes) {
+        const EditorNodeGraph::Node& node = *nodePtr;
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
                 continue;
@@ -84,9 +100,24 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
 EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
     const float hitRadius = std::max(12.0f, PinRadiusForZoom(m_Zoom) + 8.0f);
     const float hitRadiusSq = hitRadius * hitRadius;
-    const auto& nodes = graph.GetNodes();
-    for (auto nodeIt = nodes.rbegin(); nodeIt != nodes.rend(); ++nodeIt) {
-        const EditorNodeGraph::Node& node = *nodeIt;
+    std::vector<const EditorNodeGraph::Node*> orderedNodes;
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        orderedNodes.push_back(&node);
+    }
+    std::sort(orderedNodes.begin(), orderedNodes.end(), [&](const EditorNodeGraph::Node* a, const EditorNodeGraph::Node* b) {
+        const bool richA = a->kind == EditorNodeGraph::NodeKind::Layer && a->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(a->layerIndex);
+        const bool richB = b->kind == EditorNodeGraph::NodeKind::Layer && b->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(b->layerIndex);
+        if (richA != richB) {
+            return richA > richB;
+        }
+        const auto itA = m_NodeFrontOrder.find(a->id);
+        const auto itB = m_NodeFrontOrder.find(b->id);
+        const std::uint64_t stampA = itA != m_NodeFrontOrder.end() ? itA->second : 0;
+        const std::uint64_t stampB = itB != m_NodeFrontOrder.end() ? itB->second : 0;
+        return stampA > stampB;
+    });
+    for (const EditorNodeGraph::Node* nodePtr : orderedNodes) {
+        const EditorNodeGraph::Node& node = *nodePtr;
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
                 continue;
@@ -103,20 +134,35 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
 }
 
 int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
-    const auto& nodes = graph.GetNodes();
-    for (auto it = nodes.rbegin(); it != nodes.rend(); ++it) {
-        if (const NodeLayoutCache* cache = FindNodeLayoutCache(it->id)) {
+    std::vector<const EditorNodeGraph::Node*> orderedNodes;
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        orderedNodes.push_back(&node);
+    }
+    std::sort(orderedNodes.begin(), orderedNodes.end(), [&](const EditorNodeGraph::Node* a, const EditorNodeGraph::Node* b) {
+        const bool richA = a->kind == EditorNodeGraph::NodeKind::Layer && a->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(a->layerIndex);
+        const bool richB = b->kind == EditorNodeGraph::NodeKind::Layer && b->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(b->layerIndex);
+        if (richA != richB) {
+            return richA > richB;
+        }
+        const auto itA = m_NodeFrontOrder.find(a->id);
+        const auto itB = m_NodeFrontOrder.find(b->id);
+        const std::uint64_t stampA = itA != m_NodeFrontOrder.end() ? itA->second : 0;
+        const std::uint64_t stampB = itB != m_NodeFrontOrder.end() ? itB->second : 0;
+        return stampA > stampB;
+    });
+    for (const EditorNodeGraph::Node* node : orderedNodes) {
+        if (const NodeLayoutCache* cache = FindNodeLayoutCache(node->id)) {
             if (cache->frameRect.Contains(ToImVec2(screenPos))) {
-                return it->id;
+                return node->id;
             }
             continue;
         }
 
-        const EditorNodeGraph::Vec2 pos = GraphToScreen(it->position);
-        const EditorNodeGraph::Vec2 size = NodeScreenSize(*it);
+        const EditorNodeGraph::Vec2 pos = GraphToScreen(node->position);
+        const EditorNodeGraph::Vec2 size = NodeScreenSize(*node);
         if (screenPos.x >= pos.x && screenPos.x <= pos.x + size.x &&
             screenPos.y >= pos.y && screenPos.y <= pos.y + size.y) {
-            return it->id;
+            return node->id;
         }
     }
     return -1;

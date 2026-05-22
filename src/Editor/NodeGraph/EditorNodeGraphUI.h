@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EditorNodeGraph.h"
+#include "ThirdParty/json.hpp"
 #include <imgui.h>
 #include <cstdint>
 #include <map>
@@ -106,6 +107,8 @@ private:
     NodeLayoutCache BuildNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) const;
     void RefreshNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node);
     const NodeLayoutCache* FindNodeLayoutCache(int nodeId) const;
+    std::vector<int> GetNodeRenderOrder(const EditorNodeGraph::Graph& graph);
+    void TouchNodeFront(int nodeId);
     const SocketAnchor* FindSocketAnchor(
         const NodeLayoutCache& cache,
         const std::string& socketId,
@@ -164,7 +167,19 @@ private:
     std::map<int, unsigned int> m_GraphPreviewTextures;
     std::map<int, std::uint64_t> m_GraphPreviewRevisions;
     std::map<int, ImVec2> m_GraphPreviewSizes;
+    std::map<int, std::uint64_t> m_NodeFrontOrder;
     std::map<int, NodeLayoutCache> m_NodeLayoutCache;
     mutable std::map<int, float> m_NodeMeasuredBaseHeights;
     mutable std::map<int, bool> m_NodeContentOverflow;
+    std::uint64_t m_NodeFrontOrderCounter = 1;
+    EditorModule* m_ActiveEditor = nullptr;
+    int m_PushedSourceNodeId = -1;
+    float m_PushDistance = 0.0f;
+    std::vector<int> m_PushedNodeIds;
+
+    void CopySelectedNodes(EditorModule* editor);
+    void PasteNodes(EditorModule* editor);
+    void DuplicateSelectedNodes(EditorModule* editor);
+    nlohmann::json m_Clipboard;
+    int m_ClipboardPasteCount = 0;
 };

@@ -39,7 +39,7 @@ bool ContainsCaseInsensitive(const std::string& haystack, const std::string& nee
 }
 
 float NodeUiScaleFromZoom(float zoom) {
-    return std::clamp(zoom, 0.16f, 2.5f);
+    return zoom;
 }
 
 constexpr float kGraphPositionLimit = 20000.0f;
@@ -418,6 +418,28 @@ NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
     return metrics;
 }
 
+void ApplyLayerSurfaceMetrics(const EditorModule* editor, const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics) {
+    if (!editor || node.kind != EditorNodeGraph::NodeKind::Layer) {
+        return;
+    }
+    const NodeSurfaceSpec spec = editor->GetLayerNodeSurfaceSpec(node.layerIndex);
+    if (spec.presentation != NodeSurfacePresentation::RichExpandedSurface) {
+        return;
+    }
+
+    const float minWidth = 300.0f;
+    const float maxWidth = std::max(minWidth, std::max(spec.preferredWidth, spec.maxWidth));
+    metrics.width = std::clamp(spec.preferredWidth, minWidth, maxWidth);
+    metrics.contentLaneWidth = std::max(180.0f, metrics.width - 78.0f);
+    metrics.minExpandedHeight = spec.density == NodeSurfaceDensity::UltraDense ? 188.0f : 204.0f;
+    metrics.sectionGap = spec.density == NodeSurfaceDensity::UltraDense ? 7.0f : 8.0f;
+    metrics.itemGap = spec.density == NodeSurfaceDensity::UltraDense ? 5.0f : 6.0f;
+    metrics.rowHeight = spec.density == NodeSurfaceDensity::UltraDense ? 20.0f : 22.0f;
+    metrics.sliderHeight = spec.density == NodeSurfaceDensity::UltraDense ? 16.0f : 18.0f;
+    metrics.colorRowHeight = spec.density == NodeSurfaceDensity::UltraDense ? 22.0f : 24.0f;
+    metrics.checkboxHeight = spec.density == NodeSurfaceDensity::UltraDense ? 16.0f : 18.0f;
+}
+
 float PinRadiusForZoom(float zoom) {
     return std::max(1.8f, 5.3f * NodeUiScaleFromZoom(zoom));
 }
@@ -505,6 +527,10 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
                 node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Square ||
                 node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Circle) {
                 return headerBlock + sectionGap + row + gap + colorRow + bottomPadding;
+            }
+            if (node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Text) {
+                const float textBlock = row * 4.2f;
+                return headerBlock + sectionGap + row + gap + textBlock + gap + colorRow + gap + row + gap + sliderRow + bottomPadding;
             }
             return headerBlock + sectionGap + row + gap + colorRow + gap + colorRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
         case EditorNodeGraph::NodeKind::Mix:
@@ -639,6 +665,7 @@ const char* ImageGeneratorLabel(EditorNodeGraph::ImageGeneratorKind kind) {
         case EditorNodeGraph::ImageGeneratorKind::ColorGradient: return "Color Gradient Image";
         case EditorNodeGraph::ImageGeneratorKind::Square: return "Square";
         case EditorNodeGraph::ImageGeneratorKind::Circle: return "Circle";
+        case EditorNodeGraph::ImageGeneratorKind::Text: return "Text";
     }
     return "Generated Image";
 }
@@ -708,7 +735,11 @@ EditorNodeGraphUI::GraphMouseOwner EditorNodeGraphUI::ResolveMouseOwner(
                 cache->contentRect.Contains(mouse) ||
                 (cache->contentUsedRect.IsValid() && cache->contentUsedRect.Contains(mouse));
             const ImGuiContext* context = ImGui::GetCurrentContext();
-            const bool overRealWidget = context && (context->HoveredId != 0 || context->ActiveId != 0);
+            const ImGuiIO& io = ImGui::GetIO();
+            const bool overRealWidget = (context && (context->HoveredId != 0 || context->ActiveId != 0)) ||
+                io.WantCaptureMouse ||
+                ImGui::IsAnyItemHovered() ||
+                ImGui::IsAnyItemActive();
             if (overContent && overRealWidget) {
                 return GraphMouseOwner::NodeContent;
             }
@@ -724,6 +755,7 @@ EditorNodeGraphUI::GraphMouseOwner EditorNodeGraphUI::ResolveMouseOwner(
 }
 
 void EditorNodeGraphUI::Render(EditorModule* editor) {
+    m_ActiveEditor = editor;
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
     m_NodeContentActive = false;
     m_NodeContentHovered = false;
@@ -751,18 +783,45 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     editor->SetGraphDropTargetRect(canvasMin.x, canvasMin.y, canvasMax.x, canvasMax.y);
     editor->SetGraphViewTransform(canvasMin.x, canvasMin.y, m_Pan.x, m_Pan.y, m_Zoom);
     const bool graphHovered = IsGraphCanvasHovered();
-    for (EditorNodeGraph::Node& node : graph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::Layer && editor->LayerSupportsAdvancedEditor(node.layerIndex)) {
-            node.expanded = false;
-        }
-    }
     if ((graphHovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) &&
-        !editor->IsAdvancedEditorOpen() &&
         !m_NodeBrowserOpen &&
         editor->CanConsumeEditorCommandKeys() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
-        OpenNodeBrowser(NodeBrowserMode::GeneralAdd, ScreenToGraph(ToGraphVec2(ImGui::GetMousePos())));
+        const std::vector<int>& selectedIds = graph.GetSelectedNodeIds();
+        if (selectedIds.size() == 1) {
+            int selectedNodeId = selectedIds.front();
+            if (const EditorNodeGraph::Node* selectedNode = graph.FindNode(selectedNodeId)) {
+                // Clear any existing push state just in case
+                m_PushedSourceNodeId = -1;
+                m_PushDistance = 0.0f;
+                m_PushedNodeIds.clear();
+
+                // Push downstream nodes in the chain
+                std::vector<int> downstreamIds = graph.GetDownstreamRenderNodeIds(selectedNodeId);
+                m_PushDistance = 340.0f;
+                m_PushedSourceNodeId = selectedNodeId;
+                for (int id : downstreamIds) {
+                    if (id != selectedNodeId) {
+                        if (EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
+                            dsNode->position.x += m_PushDistance;
+                            m_PushedNodeIds.push_back(id);
+                        }
+                    }
+                }
+                // Refresh node layouts immediately so rendering aligns perfectly on the next draw call
+                for (int id : m_PushedNodeIds) {
+                    if (const EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
+                        RefreshNodeLayoutCache(graph, *dsNode);
+                    }
+                }
+                
+                EditorNodeGraph::Vec2 spawnPos = { selectedNode->position.x + m_PushDistance, selectedNode->position.y };
+                OpenNodeBrowser(NodeBrowserMode::GeneralAdd, spawnPos);
+            }
+        } else {
+            OpenNodeBrowser(NodeBrowserMode::GeneralAdd, ScreenToGraph(ToGraphVec2(ImGui::GetMousePos())));
+        }
     }
     if (graphHovered && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && ImGui::GetIO().MouseWheel != 0.0f) {
         editor->CancelGraphAutoFocusTracking();
@@ -797,8 +856,11 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     ImDrawListSplitter graphSplitter;
     graphSplitter.Split(drawList, 2);
     graphSplitter.SetCurrentChannel(drawList, 1);
-    for (EditorNodeGraph::Node& node : graph.GetNodes()) {
-        RenderNode(editor, node);
+    const std::vector<int> nodeRenderOrder = GetNodeRenderOrder(graph);
+    for (int nodeId : nodeRenderOrder) {
+        if (EditorNodeGraph::Node* node = graph.FindNode(nodeId)) {
+            RenderNode(editor, *node);
+        }
     }
     graphSplitter.SetCurrentChannel(drawList, 0);
     RenderLinks(graph);
@@ -839,15 +901,17 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node) const {
     const NodeLayoutMetrics metrics = MetricsForNode(node);
+    NodeLayoutMetrics adjustedMetrics = metrics;
+    ApplyLayerSurfaceMetrics(m_ActiveEditor, node, adjustedMetrics);
     const float uiScale = NodeUiScaleFromZoom(m_Zoom);
     const float pinRadius = PinRadiusForZoom(m_Zoom);
-    const float headerInsetX = metrics.headerInsetX * uiScale;
-    const float headerInsetY = metrics.headerInsetY * uiScale;
-    const float bodyInsetBottom = metrics.bodyInsetBottom * uiScale;
-    const float sectionGap = metrics.sectionGap * uiScale;
+    const float headerInsetX = adjustedMetrics.headerInsetX * uiScale;
+    const float headerInsetY = adjustedMetrics.headerInsetY * uiScale;
+    const float bodyInsetBottom = adjustedMetrics.bodyInsetBottom * uiScale;
+    const float sectionGap = adjustedMetrics.sectionGap * uiScale;
     const float laneInset = std::max(
         14.0f * uiScale,
-        ((metrics.width - metrics.contentLaneWidth) * 0.5f - metrics.headerInsetX) * uiScale);
+        ((adjustedMetrics.width - adjustedMetrics.contentLaneWidth) * 0.5f - adjustedMetrics.headerInsetX) * uiScale);
 
     const EditorNodeGraph::Vec2 safePosition = ClampGraphPosition(node.position);
     const EditorNodeGraph::Vec2 nodeScreenPos = GraphToScreen(safePosition);
@@ -856,8 +920,8 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     const ImVec2 frameMax(frameMin.x + nodeSize.x, frameMin.y + nodeSize.y);
 
     const bool showKindLabel = ShouldShowKindLabel(node);
-    const float kindLabelBlock = showKindLabel ? (metrics.kindLabelHeight * uiScale) + (2.0f * uiScale) : 0.0f;
-    const float titleBlock = metrics.titleHeight * uiScale;
+    const float kindLabelBlock = showKindLabel ? (adjustedMetrics.kindLabelHeight * uiScale) + (2.0f * uiScale) : 0.0f;
+    const float titleBlock = adjustedMetrics.titleHeight * uiScale;
     const float headerVisualHeight = headerInsetY + kindLabelBlock + titleBlock;
     const float expandedHeaderHeight = headerVisualHeight + std::max(6.0f, sectionGap * 0.65f);
     const float collapsedHeaderHeight = std::max(headerVisualHeight + (headerInsetY * 0.45f), frameMax.y - frameMin.y);
@@ -931,6 +995,41 @@ const EditorNodeGraphUI::NodeLayoutCache* EditorNodeGraphUI::FindNodeLayoutCache
     return it != m_NodeLayoutCache.end() ? &it->second : nullptr;
 }
 
+std::vector<int> EditorNodeGraphUI::GetNodeRenderOrder(const EditorNodeGraph::Graph& graph) {
+    std::vector<int> order;
+    order.reserve(graph.GetNodes().size());
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        order.push_back(node.id);
+        if (m_NodeFrontOrder.find(node.id) == m_NodeFrontOrder.end()) {
+            m_NodeFrontOrder[node.id] = m_NodeFrontOrderCounter++;
+        }
+    }
+
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        const EditorNodeGraph::Node* nodeA = graph.FindNode(a);
+        const EditorNodeGraph::Node* nodeB = graph.FindNode(b);
+        if (!nodeA || !nodeB) {
+            return a < b;
+        }
+        const bool richA = nodeA->kind == EditorNodeGraph::NodeKind::Layer && nodeA->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(nodeA->layerIndex);
+        const bool richB = nodeB->kind == EditorNodeGraph::NodeKind::Layer && nodeB->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(nodeB->layerIndex);
+        if (richA != richB) {
+            return !richA;
+        }
+        const std::uint64_t stampA = m_NodeFrontOrder[a];
+        const std::uint64_t stampB = m_NodeFrontOrder[b];
+        return stampA < stampB;
+    });
+    return order;
+}
+
+void EditorNodeGraphUI::TouchNodeFront(int nodeId) {
+    if (nodeId <= 0) {
+        return;
+    }
+    m_NodeFrontOrder[nodeId] = m_NodeFrontOrderCounter++;
+}
+
 const EditorNodeGraphUI::SocketAnchor* EditorNodeGraphUI::FindSocketAnchor(
     const NodeLayoutCache& cache,
     const std::string& socketId,
@@ -965,7 +1064,8 @@ bool EditorNodeGraphUI::IsPointInNodeDraggableRegion(int nodeId, const ImVec2& p
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& node) const {
-    const NodeLayoutMetrics metrics = MetricsForNode(node);
+    NodeLayoutMetrics metrics = MetricsForNode(node);
+    ApplyLayerSurfaceMetrics(m_ActiveEditor, node, metrics);
     const float measuredLayerHeight = [&]() -> float {
         const auto it = m_NodeMeasuredBaseHeights.find(node.id);
         return it != m_NodeMeasuredBaseHeights.end() ? it->second : 0.0f;
@@ -985,7 +1085,8 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& n
 
 void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& node) {
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    const NodeLayoutMetrics metrics = MetricsForNode(node);
+    NodeLayoutMetrics metrics = MetricsForNode(node);
+    ApplyLayerSurfaceMetrics(editor, node, metrics);
     const NodeFamilyStyle& familyStyle = StyleForFamily(FamilyForNode(node));
     if (!FindNodeLayoutCache(node.id)) {
         RefreshNodeLayoutCache(graph, node);
@@ -1000,13 +1101,25 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     const bool selected = graph.IsNodeSelected(node.id);
     const bool expanded = node.expanded;
     const float uiScale = NodeUiScaleFromZoom(m_Zoom);
+    const bool richExpandedSurface = node.kind == EditorNodeGraph::NodeKind::Layer && editor->LayerUsesRichNodeSurface(node.layerIndex);
+    const NodeSurfaceSpec nodeSurfaceSpec = node.kind == EditorNodeGraph::NodeKind::Layer
+        ? editor->GetLayerNodeSurfaceSpec(node.layerIndex)
+        : NodeSurfaceSpec{};
+    const float densityScale = richExpandedSurface
+        ? (nodeSurfaceSpec.density == NodeSurfaceDensity::UltraDense ? 0.72f : 0.82f)
+        : 1.0f;
+    const float contentScale = uiScale * densityScale;
     const float controlWidth = std::max(24.0f, layout->contentRect.max.x - layout->contentRect.min.x);
+    const float safeContentWidth = std::max(20.0f, controlWidth - std::max(2.0f, 4.0f * uiScale));
+    const float logicalControlWidth = controlWidth / std::max(0.001f, uiScale);
+    const float logicalSafeContentWidth = safeContentWidth / std::max(0.001f, uiScale);
     const ImVec2 previewSize = NodePreviewSizeForScale(metrics, uiScale);
     const float pinRadius = PinRadiusForZoom(m_Zoom);
     const float frameRounding = std::max(4.0f, 8.0f * uiScale);
     const float borderThickness = selected ? std::max(1.4f, 2.0f * uiScale) : std::max(0.95f, 1.15f * uiScale);
     const float headerY = metrics.headerInsetY * uiScale;
     const float sectionGap = metrics.sectionGap * uiScale;
+    const float itemGap = metrics.itemGap * uiScale;
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const ImVec4 fillColor = expanded
@@ -1120,12 +1233,12 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         ImGui::ColorConvertFloat4ToU32(familyStyle.text),
         displayTitle.c_str());
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::max(2.0f, 6.0f * uiScale), std::max(1.0f, 2.5f * uiScale)));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(std::max(2.0f, metrics.itemGap * uiScale * 0.75f), std::max(2.0f, metrics.itemGap * uiScale * 0.58f)));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(std::max(2.0f, 4.0f * uiScale), std::max(1.0f, 2.0f * uiScale)));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(2.0f, 5.0f * uiScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::max(2.0f, 6.0f * uiScale * densityScale), std::max(1.0f, 2.5f * uiScale * densityScale)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(std::max(2.0f, metrics.itemGap * uiScale * 0.75f * densityScale), std::max(2.0f, metrics.itemGap * uiScale * 0.58f * densityScale)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(std::max(2.0f, 4.0f * uiScale * densityScale), std::max(1.0f, 2.0f * uiScale * densityScale)));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(2.0f, 5.0f * uiScale * densityScale));
     ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 999.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, std::max(2.5f, 6.5f * uiScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, std::max(2.5f, 6.5f * uiScale * densityScale));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(0.8f, 1.0f * uiScale));
     ImGui::PushStyleColor(ImGuiCol_Text, familyStyle.text);
     ImGui::PushStyleColor(ImGuiCol_TextDisabled, textMuted);
@@ -1151,7 +1264,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     }
 
     ImGui::SetCursorScreenPos(layout->contentRect.min);
-    ImGui::SetWindowFontScale(uiScale);
+    ImGui::SetWindowFontScale(contentScale);
     ImGui::PushItemWidth(controlWidth);
     ImGuiExtras::ResetNodeControlState();
     ImGui::BeginGroup();
@@ -1188,7 +1301,27 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         auto& layers = editor->GetLayers();
         if (node.layerIndex >= 0 && node.layerIndex < static_cast<int>(layers.size())) {
             const nlohmann::json before = layers[node.layerIndex]->Serialize();
-            layers[node.layerIndex]->RenderUI(editor);
+            if (richExpandedSurface) {
+                NodeSurfaceContext surfaceContext;
+                surfaceContext.nodeId = node.id;
+                surfaceContext.availableWidth = controlWidth;
+                surfaceContext.safeContentWidth = safeContentWidth;
+                surfaceContext.logicalAvailableWidth = logicalControlWidth;
+                surfaceContext.logicalSafeContentWidth = logicalSafeContentWidth;
+                surfaceContext.layoutScale = uiScale;
+                surfaceContext.contentScale = contentScale;
+                surfaceContext.itemGap = itemGap;
+                surfaceContext.sectionGap = sectionGap;
+                surfaceContext.focused = selected;
+                surfaceContext.density = nodeSurfaceSpec.density;
+                surfaceContext.canvasToolActive = editor->GetCanvasToolOwnerNodeId() == node.id;
+                surfaceContext.canvasToolStatusText = editor->GetCanvasToolStatusText().empty()
+                    ? nullptr
+                    : editor->GetCanvasToolStatusText().c_str();
+                layers[node.layerIndex]->RenderExpandedNodeSurface(editor, surfaceContext);
+            } else {
+                layers[node.layerIndex]->RenderUI(editor);
+            }
             const nlohmann::json after = layers[node.layerIndex]->Serialize();
             if (before != after) {
                 editor->MarkRenderDirty(node.id);
@@ -1498,8 +1631,16 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::ImageGenerator) {
         bool changed = false;
-        changed |= ImGuiExtras::NodeColorEdit4("A", "##GeneratorColorA", node.imageGeneratorSettings.colorA, ImGuiColorEditFlags_NoInputs, controlWidth);
-        captureIfActive();
+        if (node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Text) {
+            changed |= ImGuiExtras::NodeTextMultiline("Text", "##GeneratorText", node.imageGeneratorSettings.text, controlWidth, 4);
+            captureIfActive();
+            changed |= ImGuiExtras::NodeColorEdit4("Color", "##GeneratorColorA", node.imageGeneratorSettings.colorA, ImGuiColorEditFlags_NoInputs, controlWidth);
+            captureIfActive();
+            changed |= renderSlider("Size", "##GeneratorFontSize", &node.imageGeneratorSettings.fontSize, 16.0f, 192.0f);
+        } else {
+            changed |= ImGuiExtras::NodeColorEdit4("A", "##GeneratorColorA", node.imageGeneratorSettings.colorA, ImGuiColorEditFlags_NoInputs, controlWidth);
+            captureIfActive();
+        }
         if (node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::ColorGradient) {
             changed |= ImGuiExtras::NodeColorEdit4("B", "##GeneratorColorB", node.imageGeneratorSettings.colorB, ImGuiColorEditFlags_NoInputs, controlWidth);
             captureIfActive();
@@ -1626,16 +1767,6 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
 }
 
 void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph) {
-    if (editor->IsAdvancedEditorOpen()) {
-        m_NodeContentActive = false;
-        m_NodeContentHovered = false;
-        m_GraphInteractionBlocked = true;
-        m_MouseOwner = GraphMouseOwner::Popup;
-        m_DragNodeId = -1;
-        m_BoxSelecting = false;
-        return;
-    }
-
     const bool graphHovered = IsGraphCanvasHovered();
     const EditorNodeGraph::Vec2 mouse = ToGraphVec2(ImGui::GetMousePos());
     const SocketHit hoveredInput = graphHovered ? FindInputPinAt(graph, mouse) : SocketHit{};
@@ -1677,10 +1808,12 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     }
 
     if (m_MouseOwner == GraphMouseOwner::OutputPin && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        TouchNodeFront(m_HoveredOutputNodeId);
         m_DragOutputNodeId = m_HoveredOutputNodeId;
         m_DragOutputSocketId = m_HoveredOutputSocketId;
     }
     if (m_MouseOwner == GraphMouseOwner::InputPin && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        TouchNodeFront(m_HoveredInputNodeId);
         m_DragInputNodeId = m_HoveredInputNodeId;
         m_DragInputSocketId = m_HoveredInputSocketId;
     }
@@ -1698,6 +1831,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         } else if (ownerIsNode && hoveredNodeId > 0) {
             m_ContextTarget = ContextTarget::Node;
             m_ContextNodeId = hoveredNodeId;
+            TouchNodeFront(hoveredNodeId);
             if (!editor->GetNodeGraph().IsNodeSelected(hoveredNodeId)) {
                 editor->SelectGraphNode(hoveredNodeId);
             }
@@ -1804,10 +1938,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     if (m_MouseOwner == GraphMouseOwner::NodeHeader && hoveredNodeId > 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
         if (node) {
-            if (node->kind == EditorNodeGraph::NodeKind::Layer && editor->LayerSupportsAdvancedEditor(node->layerIndex)) {
-                editor->OpenAdvancedEditorForNode(node->id);
-                return;
-            }
+            TouchNodeFront(node->id);
             const bool expanding = !node->expanded;
             node->expanded = !node->expanded;
             editor->SelectGraphNode(node->id);
@@ -1841,27 +1972,20 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             if (!additiveSelect) {
                 mutableGraph.ClearSelection();
             }
-            const float left = std::min(m_BoxSelectStart.x, m_BoxSelectCurrent.x);
-            const float right = std::max(m_BoxSelectStart.x, m_BoxSelectCurrent.x);
-            const float top = std::min(m_BoxSelectStart.y, m_BoxSelectCurrent.y);
-            const float bottom = std::max(m_BoxSelectStart.y, m_BoxSelectCurrent.y);
-            for (const EditorNodeGraph::Node& node : mutableGraph.GetNodes()) {
-                const EditorNodeGraph::Vec2 size = NodeSize(node);
-                const bool overlaps =
-                    node.position.x <= right &&
-                    node.position.x + size.x >= left &&
-                    node.position.y <= bottom &&
-                    node.position.y + size.y >= top;
-                if (overlaps && !mutableGraph.IsNodeSelected(node.id)) {
-                    mutableGraph.SelectNode(node.id, true);
-                }
-            }
+            mutableGraph.SelectNodesInRect(
+                m_BoxSelectStart,
+                m_BoxSelectCurrent,
+                [this](const EditorNodeGraph::Node& node) {
+                    return NodeSize(node);
+                },
+                true);
             m_BoxSelecting = false;
         }
         return;
     }
 
     if (ownerIsNode && hoveredNodeId > 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        TouchNodeFront(hoveredNodeId);
         if (!editor->GetNodeGraph().IsNodeSelected(hoveredNodeId)) {
             editor->GetNodeGraph().SelectNode(hoveredNodeId, additiveSelect);
             const EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
@@ -1907,6 +2031,21 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             m_StatusMessage = "Link deleted.";
         } else if (editor->DeleteSelectedGraphNodes()) {
             m_StatusMessage = "Node deleted.";
+        }
+    }
+
+    if (editor->CanConsumeEditorCommandKeys() &&
+        graphWindowFocused &&
+        !anyPopupOpen &&
+        !m_NodeBrowserOpen) {
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+            CopySelectedNodes(editor);
+        }
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
+            PasteNodes(editor);
+        }
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+            DuplicateSelectedNodes(editor);
         }
     }
 }
@@ -2008,3 +2147,313 @@ void EditorNodeGraphUI::RenderInteractionDebugOverlay(
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
+
+#include "ThirdParty/stb_image.h"
+#include "Editor/LayerRegistry.h"
+
+namespace {
+
+nlohmann::json SerializeMaskSettings(const EditorNodeGraph::MaskGeneratorSettings& settings) {
+    return {
+        { "value", settings.value },
+        { "angle", settings.angle },
+        { "offset", settings.offset },
+        { "scale", settings.scale },
+        { "centerX", settings.centerX },
+        { "centerY", settings.centerY },
+        { "radius", settings.radius },
+        { "feather", settings.feather },
+        { "invert", settings.invert }
+    };
+}
+
+EditorNodeGraph::MaskGeneratorSettings DeserializeMaskSettings(const nlohmann::json& value) {
+    EditorNodeGraph::MaskGeneratorSettings settings;
+    if (!value.is_object()) return settings;
+    settings.value = value.value("value", settings.value);
+    settings.angle = value.value("angle", settings.angle);
+    settings.offset = value.value("offset", settings.offset);
+    settings.scale = value.value("scale", settings.scale);
+    settings.centerX = value.value("centerX", settings.centerX);
+    settings.centerY = value.value("centerY", settings.centerY);
+    settings.radius = value.value("radius", settings.radius);
+    settings.feather = value.value("feather", settings.feather);
+    settings.invert = value.value("invert", settings.invert);
+    return settings;
+}
+
+nlohmann::json SerializeMaskUtilitySettings(const EditorNodeGraph::MaskUtilitySettings& settings) {
+    return {
+        { "blackPoint", settings.blackPoint },
+        { "whitePoint", settings.whitePoint },
+        { "gamma", settings.gamma },
+        { "threshold", settings.threshold },
+        { "softness", settings.softness },
+        { "invert", settings.invert }
+    };
+}
+
+EditorNodeGraph::MaskUtilitySettings DeserializeMaskUtilitySettings(const nlohmann::json& value) {
+    EditorNodeGraph::MaskUtilitySettings settings;
+    if (!value.is_object()) return settings;
+    settings.blackPoint = value.value("blackPoint", settings.blackPoint);
+    settings.whitePoint = value.value("whitePoint", settings.whitePoint);
+    settings.gamma = value.value("gamma", settings.gamma);
+    settings.threshold = value.value("threshold", settings.threshold);
+    settings.softness = value.value("softness", settings.softness);
+    settings.invert = value.value("invert", settings.invert);
+    return settings;
+}
+
+nlohmann::json SerializeImageToMaskSettings(const EditorNodeGraph::ImageToMaskSettings& settings) {
+    return {
+        { "low", settings.low },
+        { "high", settings.high },
+        { "softness", settings.softness },
+        { "invert", settings.invert }
+    };
+}
+
+EditorNodeGraph::ImageToMaskSettings DeserializeImageToMaskSettings(const nlohmann::json& value) {
+    EditorNodeGraph::ImageToMaskSettings settings;
+    if (!value.is_object()) return settings;
+    settings.low = value.value("low", settings.low);
+    settings.high = value.value("high", settings.high);
+    settings.softness = value.value("softness", settings.softness);
+    settings.invert = value.value("invert", settings.invert);
+    return settings;
+}
+
+nlohmann::json SerializeImageGeneratorSettings(const EditorNodeGraph::ImageGeneratorSettings& settings) {
+    return {
+        { "colorA", { settings.colorA[0], settings.colorA[1], settings.colorA[2], settings.colorA[3] } },
+        { "colorB", { settings.colorB[0], settings.colorB[1], settings.colorB[2], settings.colorB[3] } },
+        { "angle", settings.angle },
+        { "offset", settings.offset },
+        { "text", settings.text },
+        { "fontSize", settings.fontSize }
+    };
+}
+
+EditorNodeGraph::ImageGeneratorSettings DeserializeImageGeneratorSettings(const nlohmann::json& value) {
+    EditorNodeGraph::ImageGeneratorSettings settings;
+    if (!value.is_object()) return settings;
+    const nlohmann::json colorA = value.value("colorA", nlohmann::json::array());
+    const nlohmann::json colorB = value.value("colorB", nlohmann::json::array());
+    for (int i = 0; i < 4; ++i) {
+        if (colorA.is_array() && static_cast<int>(colorA.size()) > i) settings.colorA[i] = colorA[i].get<float>();
+        if (colorB.is_array() && static_cast<int>(colorB.size()) > i) settings.colorB[i] = colorB[i].get<float>();
+    }
+    settings.angle = value.value("angle", settings.angle);
+    settings.offset = value.value("offset", settings.offset);
+    settings.text = value.value("text", settings.text);
+    settings.fontSize = value.value("fontSize", settings.fontSize);
+    return settings;
+}
+
+bool DecodePngBytesClipboard(const std::vector<unsigned char>& pngBytes, EditorNodeGraph::ImagePayload& payload) {
+    if (pngBytes.empty()) {
+        return false;
+    }
+    stbi_set_flip_vertically_on_load_thread(1);
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(pngBytes.data(), static_cast<int>(pngBytes.size()), &width, &height, &channels, 4);
+    if (!pixels || width <= 0 || height <= 0) {
+        if (pixels) stbi_image_free(pixels);
+        return false;
+    }
+    payload.pngBytes = pngBytes;
+    payload.pixels.assign(pixels, pixels + (width * height * 4));
+    payload.width = width;
+    payload.height = height;
+    payload.channels = 4;
+    stbi_image_free(pixels);
+    return true;
+}
+
+} // namespace
+
+void EditorNodeGraphUI::CopySelectedNodes(EditorModule* editor) {
+    if (!editor) return;
+
+    m_Clipboard = nlohmann::json::object();
+    m_ClipboardPasteCount = 0;
+
+    const auto& selectedNodeIds = editor->GetNodeGraph().GetSelectedNodeIds();
+    if (selectedNodeIds.empty()) {
+        return;
+    }
+
+    nlohmann::json nodesJson = nlohmann::json::array();
+    for (int nodeId : selectedNodeIds) {
+        const auto* node = editor->GetNodeGraph().FindNode(nodeId);
+        if (!node) continue;
+
+        nlohmann::json item = nlohmann::json::object();
+        item["id"] = node->id;
+        item["kind"] = static_cast<int>(node->kind);
+        item["layerIndex"] = node->layerIndex;
+        item["layerType"] = static_cast<int>(node->layerType);
+        item["typeId"] = node->typeId;
+        item["title"] = node->title;
+        item["x"] = node->position.x;
+        item["y"] = node->position.y;
+        item["expanded"] = node->expanded;
+        item["scopeKind"] = static_cast<int>(node->scopeKind);
+        item["maskKind"] = static_cast<int>(node->maskKind);
+        item["maskSettings"] = SerializeMaskSettings(node->maskSettings);
+        item["maskUtilityKind"] = static_cast<int>(node->maskUtilityKind);
+        item["maskUtilitySettings"] = SerializeMaskUtilitySettings(node->maskUtilitySettings);
+        item["imageToMaskKind"] = static_cast<int>(node->imageToMaskKind);
+        item["imageToMaskSettings"] = SerializeImageToMaskSettings(node->imageToMaskSettings);
+        item["imageGeneratorKind"] = static_cast<int>(node->imageGeneratorKind);
+        item["imageGeneratorSettings"] = SerializeImageGeneratorSettings(node->imageGeneratorSettings);
+        item["mixBlendMode"] = static_cast<int>(node->mixBlendMode);
+        item["mixFactor"] = node->mixFactor;
+
+        if (node->kind == EditorNodeGraph::NodeKind::Image) {
+            item["label"] = node->image.label;
+            item["sourcePath"] = node->image.sourcePath;
+            item["width"] = node->image.width;
+            item["height"] = node->image.height;
+            item["channels"] = node->image.channels;
+            item["pngBytes"] = nlohmann::json::binary(node->image.pngBytes);
+        } else if (node->kind == EditorNodeGraph::NodeKind::Layer) {
+            const auto& layers = editor->GetLayers();
+            if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(layers.size())) {
+                item["layerData"] = layers[node->layerIndex]->Serialize();
+            }
+        }
+
+        nodesJson.push_back(item);
+    }
+    m_Clipboard["nodes"] = nodesJson;
+
+    nlohmann::json linksJson = nlohmann::json::array();
+    for (const auto& link : editor->GetNodeGraph().GetLinks()) {
+        bool fromSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), link.fromNodeId) != selectedNodeIds.end();
+        bool toSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), link.toNodeId) != selectedNodeIds.end();
+        if (fromSelected && toSelected) {
+            nlohmann::json linkItem = nlohmann::json::object();
+            linkItem["fromNodeId"] = link.fromNodeId;
+            linkItem["fromSocketId"] = link.fromSocketId;
+            linkItem["toNodeId"] = link.toNodeId;
+            linkItem["toSocketId"] = link.toSocketId;
+            linksJson.push_back(linkItem);
+        }
+    }
+    m_Clipboard["links"] = linksJson;
+}
+
+void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
+    if (!editor || m_Clipboard.empty() || !m_Clipboard.contains("nodes")) {
+        return;
+    }
+
+    m_ClipboardPasteCount++;
+    float offsetX = m_ClipboardPasteCount * 40.0f;
+    float offsetY = m_ClipboardPasteCount * 40.0f;
+
+    auto& graph = editor->GetNodeGraph();
+    std::map<int, int> oldIdToNewId;
+    std::vector<int> newlyPastedNodeIds;
+
+    const auto& nodesJson = m_Clipboard["nodes"];
+    for (const auto& item : nodesJson) {
+        if (!item.is_object()) continue;
+
+        int oldId = item.value("id", 0);
+        EditorNodeGraph::NodeKind kind = static_cast<EditorNodeGraph::NodeKind>(item.value("kind", 0));
+
+        EditorNodeGraph::Node node;
+        node.id = graph.GetNextNodeId();
+        graph.SetNextNodeId(node.id + 1);
+        node.kind = kind;
+        node.layerIndex = -1;
+        node.layerType = static_cast<LayerType>(item.value("layerType", 0));
+        node.typeId = item.value("typeId", "");
+        node.title = item.value("title", "");
+        node.position.x = item.value("x", 0.0f) + offsetX;
+        node.position.y = item.value("y", 0.0f) + offsetY;
+        node.expanded = item.value("expanded", false);
+        node.scopeKind = static_cast<EditorNodeGraph::ScopeKind>(item.value("scopeKind", 0));
+        node.maskKind = static_cast<EditorNodeGraph::MaskGeneratorKind>(item.value("maskKind", 0));
+        node.maskSettings = DeserializeMaskSettings(item.value("maskSettings", nlohmann::json::object()));
+        node.maskUtilityKind = static_cast<EditorNodeGraph::MaskUtilityKind>(item.value("maskUtilityKind", 0));
+        node.maskUtilitySettings = DeserializeMaskUtilitySettings(item.value("maskUtilitySettings", nlohmann::json::object()));
+        node.imageToMaskKind = static_cast<EditorNodeGraph::ImageToMaskKind>(item.value("imageToMaskKind", 0));
+        node.imageToMaskSettings = DeserializeImageToMaskSettings(item.value("imageToMaskSettings", nlohmann::json::object()));
+        node.imageGeneratorKind = static_cast<EditorNodeGraph::ImageGeneratorKind>(item.value("imageGeneratorKind", 0));
+        node.imageGeneratorSettings = DeserializeImageGeneratorSettings(item.value("imageGeneratorSettings", nlohmann::json::object()));
+        node.mixBlendMode = static_cast<EditorNodeGraph::MixBlendMode>(item.value("mixBlendMode", 0));
+        node.mixFactor = item.value("mixFactor", 0.5f);
+
+        if (kind == EditorNodeGraph::NodeKind::Image) {
+            node.image.label = item.value("label", "");
+            node.image.sourcePath = item.value("sourcePath", "");
+            node.image.width = item.value("width", 0);
+            node.image.height = item.value("height", 0);
+            node.image.channels = item.value("channels", 4);
+            if (item.contains("pngBytes")) {
+                const auto& bin = item["pngBytes"];
+                if (bin.is_binary()) {
+                    const auto& binaryValue = bin.get_binary();
+                    std::vector<unsigned char> pngBytes(binaryValue.begin(), binaryValue.end());
+                    DecodePngBytesClipboard(pngBytes, node.image);
+                }
+            }
+        } else if (kind == EditorNodeGraph::NodeKind::Layer) {
+            std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(node.typeId);
+            if (newLayer) {
+                newLayer->InitializeGL();
+                if (item.contains("layerData")) {
+                    newLayer->Deserialize(item["layerData"]);
+                }
+                auto& layers = editor->GetLayers();
+                node.layerIndex = static_cast<int>(layers.size());
+                layers.push_back(newLayer);
+            }
+        }
+
+        EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+        graph.GetNodes().push_back(node);
+        oldIdToNewId[oldId] = node.id;
+        newlyPastedNodeIds.push_back(node.id);
+    }
+
+    if (m_Clipboard.contains("links")) {
+        const auto& linksJson = m_Clipboard["links"];
+        for (const auto& linkItem : linksJson) {
+            if (!linkItem.is_object()) continue;
+
+            int fromNodeId = linkItem.value("fromNodeId", 0);
+            std::string fromSocketId = linkItem.value("fromSocketId", "");
+            int toNodeId = linkItem.value("toNodeId", 0);
+            std::string toSocketId = linkItem.value("toSocketId", "");
+
+            if (oldIdToNewId.count(fromNodeId) && oldIdToNewId.count(toNodeId)) {
+                int newFromNodeId = oldIdToNewId[fromNodeId];
+                int newToNodeId = oldIdToNewId[toNodeId];
+                graph.TryConnectSockets(newFromNodeId, fromSocketId, newToNodeId, toSocketId);
+            }
+        }
+    }
+
+    editor->RefreshGraphLayerMetadata();
+
+    graph.ClearSelection();
+    for (int newId : newlyPastedNodeIds) {
+        graph.SelectNode(newId, true);
+    }
+
+    editor->MarkRenderDirty();
+}
+
+void EditorNodeGraphUI::DuplicateSelectedNodes(EditorModule* editor) {
+    if (!editor) return;
+    CopySelectedNodes(editor);
+    PasteNodes(editor);
+}
+

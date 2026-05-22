@@ -39,15 +39,14 @@ The script repairs common local `PATH` issues, closes a running `Stack.exe` if n
 Expected output:
 
 ```text
-build_codex\bin\Release\Stack.exe
-build_codex\portable\Stack.exe
+build\Stack.exe
 ```
 
 You can also use standard CMake commands from a healthy developer shell:
 
 ```powershell
-cmake -S . -B build_codex
-cmake --build build_codex --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
 ## Generated Files
@@ -57,7 +56,7 @@ Some headers are generated from source assets:
 - `src/App/Resources/EmbeddedSplash.h` from `Assets/Splash/splash_banner.png`
 - `src/App/Resources/EmbeddedTabIcons.h` from `Icons/*.png`
 - `src/Composite/EmbeddedCompositeFont.h` from `Assets/Fonts/Roboto-Medium.ttf`
-- `build_codex/generated/src/RenderTab/Shaders/EmbeddedShaders.h` from shader files
+- `build/generated/src/RenderTab/Shaders/EmbeddedShaders.h` from shader files
 
 The generated headers that live under `src/` are committed when the source includes require them. Build-directory generated files remain ignored.
 

@@ -14,6 +14,19 @@ Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeI
     return link;
 }
 
+Vec2 DefaultSelectionSize(const Node& node) {
+    return node.kind == NodeKind::Layer && node.expanded
+        ? Vec2{ 334.0f, 520.0f }
+        : (node.kind == NodeKind::Image ? Vec2{ 232.0f, 128.0f }
+        : (node.kind == NodeKind::Scope ? Vec2{ 300.0f, 270.0f }
+        : (node.kind == NodeKind::MaskGenerator ? Vec2{ 270.0f, 246.0f }
+        : (node.kind == NodeKind::Mix ? Vec2{ 250.0f, 170.0f }
+        : (node.kind == NodeKind::Preview ? Vec2{ 266.0f, 196.0f }
+        : (node.kind == NodeKind::Composite ? Vec2{ 286.0f, 360.0f }
+        : (node.kind == NodeKind::ExportBoundsSettings ? Vec2{ 318.0f, 404.0f }
+        : Vec2{ 232.0f, 82.0f })))))));
+}
+
 } // namespace
 
 void Graph::SelectNode(int nodeId, bool additive) {
@@ -48,6 +61,14 @@ void Graph::ClearSelection() {
 }
 
 void Graph::SelectNodesInRect(Vec2 min, Vec2 max, bool additive) {
+    SelectNodesInRect(min, max, DefaultSelectionSize, additive);
+}
+
+void Graph::SelectNodesInRect(
+    Vec2 min,
+    Vec2 max,
+    const std::function<Vec2(const Node&)>& sizeResolver,
+    bool additive) {
     if (!additive) {
         m_SelectedNodeIds.clear();
     }
@@ -59,16 +80,7 @@ void Graph::SelectNodesInRect(Vec2 min, Vec2 max, bool additive) {
     const float bottom = std::max(min.y, max.y);
 
     for (const Node& node : m_Nodes) {
-        const Vec2 size = node.kind == NodeKind::Layer && node.expanded
-            ? Vec2{ 334.0f, 520.0f }
-            : (node.kind == NodeKind::Image ? Vec2{ 232.0f, 128.0f }
-            : (node.kind == NodeKind::Scope ? Vec2{ 300.0f, 270.0f }
-            : (node.kind == NodeKind::MaskGenerator ? Vec2{ 270.0f, 246.0f }
-            : (node.kind == NodeKind::Mix ? Vec2{ 250.0f, 170.0f }
-            : (node.kind == NodeKind::Preview ? Vec2{ 266.0f, 196.0f }
-            : (node.kind == NodeKind::Composite ? Vec2{ 286.0f, 360.0f }
-            : (node.kind == NodeKind::ExportBoundsSettings ? Vec2{ 318.0f, 404.0f }
-            : Vec2{ 232.0f, 82.0f })))))));
+        const Vec2 size = sizeResolver ? sizeResolver(node) : DefaultSelectionSize(node);
         const bool overlaps =
             node.position.x <= right &&
             node.position.x + size.x >= left &&

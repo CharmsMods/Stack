@@ -1,5 +1,6 @@
 #include "EditorNodeGraphSerializer.h"
 
+#include "Library/LibraryManager.h"
 #include "ThirdParty/stb_image.h"
 #include "ThirdParty/stb_image_write.h"
 #include <algorithm>
@@ -23,6 +24,20 @@ std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& pixels, i
     const int safeChannels = std::max(1, channels);
     stbi_write_png_to_func(PngWriteCallback, &pngBytes, width, height, safeChannels, pixels.data(), width * safeChannels);
     return pngBytes;
+}
+
+std::vector<unsigned char> EncodePngForImageStorage(
+    const std::vector<unsigned char>& bottomLeftPixels,
+    int width,
+    int height,
+    int channels) {
+    if (bottomLeftPixels.empty() || width <= 0 || height <= 0) {
+        return {};
+    }
+
+    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
+    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
+    return EncodePng(topLeftPixels, width, height, channels);
 }
 
 bool DecodePngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& payload) {
@@ -123,6 +138,7 @@ std::string ImageGeneratorKindToString(ImageGeneratorKind kind) {
         case ImageGeneratorKind::ColorGradient: return "ColorGradient";
         case ImageGeneratorKind::Square: return "Square";
         case ImageGeneratorKind::Circle: return "Circle";
+        case ImageGeneratorKind::Text: return "Text";
     }
     return "SolidColor";
 }
@@ -131,6 +147,7 @@ ImageGeneratorKind ImageGeneratorKindFromString(const std::string& value) {
     if (value == "ColorGradient" || value == "Color Gradient") return ImageGeneratorKind::ColorGradient;
     if (value == "Square") return ImageGeneratorKind::Square;
     if (value == "Circle") return ImageGeneratorKind::Circle;
+    if (value == "Text") return ImageGeneratorKind::Text;
     return ImageGeneratorKind::SolidColor;
 }
 
@@ -181,7 +198,9 @@ nlohmann::json SerializeImageGeneratorSettings(const ImageGeneratorSettings& set
         { "colorA", { settings.colorA[0], settings.colorA[1], settings.colorA[2], settings.colorA[3] } },
         { "colorB", { settings.colorB[0], settings.colorB[1], settings.colorB[2], settings.colorB[3] } },
         { "angle", settings.angle },
-        { "offset", settings.offset }
+        { "offset", settings.offset },
+        { "text", settings.text },
+        { "fontSize", settings.fontSize }
     };
 }
 
@@ -196,6 +215,8 @@ ImageGeneratorSettings DeserializeImageGeneratorSettings(const nlohmann::json& v
     }
     settings.angle = value.value("angle", settings.angle);
     settings.offset = value.value("offset", settings.offset);
+    settings.text = value.value("text", settings.text);
+    settings.fontSize = value.value("fontSize", settings.fontSize);
     return settings;
 }
 
@@ -357,7 +378,7 @@ void DeserializeGraphPayload(
                 imageNode->image.height = fallbackSourceHeight;
                 imageNode->image.channels = std::max(1, fallbackSourceChannels);
                 imageNode->image.pixels = fallbackSourcePixels;
-                imageNode->image.pngBytes = EncodePng(
+                imageNode->image.pngBytes = EncodePngForImageStorage(
                     fallbackSourcePixels,
                     fallbackSourceWidth,
                     fallbackSourceHeight,
@@ -451,6 +472,7 @@ void DeserializeGraphPayload(
                     case ImageGeneratorKind::ColorGradient: node.title = "Color Gradient Image"; break;
                     case ImageGeneratorKind::Square: node.title = "Square"; break;
                     case ImageGeneratorKind::Circle: node.title = "Circle"; break;
+                    case ImageGeneratorKind::Text: node.title = "Text"; break;
                 }
             }
         } else {

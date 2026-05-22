@@ -25,15 +25,13 @@ The script:
 
 - closes a running `Stack.exe` so linking can succeed
 - repairs common local `PATH` issues before invoking tools
-- configures `build_codex` if needed
-- builds the Release target in `build_codex`
-- stages a portable executable
+- configures `build` if needed
+- builds the Release target in `build`
 
-Expected outputs:
+Expected output:
 
 ```text
-build_codex\bin\Release\Stack.exe
-build_codex\portable\Stack.exe
+build\Stack.exe
 ```
 
 ## Standard CMake Build
@@ -41,8 +39,8 @@ build_codex\portable\Stack.exe
 From a healthy developer shell where `cmake` and `python` are on `PATH`:
 
 ```powershell
-cmake -S . -B build_codex
-cmake --build build_codex --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
 ## Developer Shell Helper

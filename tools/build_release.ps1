@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
-    $BuildDir = Join-Path $Root "build_codex"
+    $BuildDir = Join-Path $Root "build"
 }
 
 & (Join-Path $Root "tools\use_fixed_env.ps1")

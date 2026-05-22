@@ -1,7 +1,10 @@
 #include "ColorGradeLayer.h"
+#include "Editor/EditorModule.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
 #include "Utils/ImGuiExtras.h"
+#include <algorithm>
+#include <cmath>
 
 static const char* s_ColorGradeVert = R"(
 #version 130
@@ -91,6 +94,104 @@ void ColorGradeLayer::RenderUI() {
     ImGuiExtras::NodeColorEdit3("Shadows", "##Shadows", m_Shadows, flags);
     ImGuiExtras::NodeColorEdit3("Midtones", "##Midtones", m_Midtones, flags);
     ImGuiExtras::NodeColorEdit3("Highlights", "##Highlights", m_Highlights, flags);
+}
+
+NodeSurfaceSpec ColorGradeLayer::GetNodeSurfaceSpec() const {
+    NodeSurfaceSpec spec;
+    spec.presentation = NodeSurfacePresentation::RichExpandedSurface;
+    spec.density = NodeSurfaceDensity::Dense;
+    spec.preferredWidth = 448.0f;
+    spec.maxWidth = 500.0f;
+    spec.usesCanvasTool = false;
+    return spec;
+}
+
+void ColorGradeLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeSurfaceContext& context) {
+    if (!editor) {
+        return;
+    }
+
+    auto toneIsNeutral = [](const float color[3]) {
+        return std::abs(color[0] - 1.0f) < 0.0005f &&
+            std::abs(color[1] - 1.0f) < 0.0005f &&
+            std::abs(color[2] - 1.0f) < 0.0005f;
+    };
+    auto resetTone = [](float color[3]) {
+        color[0] = 1.0f;
+        color[1] = 1.0f;
+        color[2] = 1.0f;
+    };
+
+    const float layoutScale = std::max(0.001f, context.layoutScale);
+    const float totalWidth = std::max(120.0f, context.safeContentWidth);
+    const float logicalWidth = std::max(120.0f, context.logicalSafeContentWidth);
+    const float itemGap = std::max(2.0f, context.itemGap);
+    const float sectionGap = std::max(2.0f, context.sectionGap);
+    const float inlineGap = 12.0f * layoutScale;
+    const float footerGap = 10.0f * layoutScale;
+    const float resetButtonWidth = 88.0f * layoutScale;
+    const float wheelGap = 12.0f * layoutScale;
+
+    ImGuiExtras::RichSectionLabel("Tone Balance");
+    ImGui::SameLine(0.0f, footerGap);
+    if (ImGuiExtras::RichFullWidthButton("Reset All", resetButtonWidth)) {
+        m_Strength = 100.0f;
+        resetTone(m_Shadows);
+        resetTone(m_Midtones);
+        resetTone(m_Highlights);
+    }
+    ImGui::Dummy(ImVec2(0.0f, std::max(1.0f, itemGap * 0.35f)));
+    ImGui::TextDisabled("Pure white keeps a tonal range neutral.");
+    if (context.focused) {
+        ImGui::SameLine(0.0f, footerGap);
+        ImGui::TextDisabled("Focused");
+    }
+    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+
+    ImGuiExtras::RichSectionLabel("Strength", std::max(1.0f, itemGap * 0.35f));
+    const float valueLaneWidth = 62.0f * layoutScale;
+    const float sliderWidth = std::max(48.0f, totalWidth - valueLaneWidth - inlineGap);
+    ImGui::SetNextItemWidth(sliderWidth);
+    ImGui::SliderFloat("##ColorGradeStrength", &m_Strength, 0.0f, 100.0f, "");
+    ImGui::SameLine(0.0f, inlineGap);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("%.0f%%", m_Strength);
+
+    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+    ImGuiExtras::RichSectionLabel("Tonal Ranges", std::max(1.0f, itemGap * 0.5f));
+
+    const int wheelColumns = logicalWidth >= 280.0f ? 2 : 1;
+    const float wheelWidth = wheelColumns > 1
+        ? (totalWidth - wheelGap * static_cast<float>(wheelColumns - 1)) / static_cast<float>(wheelColumns)
+        : totalWidth;
+
+    struct ToneSlot {
+        const char* label;
+        float* color;
+    };
+    ToneSlot tones[] = {
+        { "Shadows", m_Shadows },
+        { "Midtones", m_Midtones },
+        { "Highlights", m_Highlights }
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        if (i > 0 && (i % wheelColumns) != 0) {
+            ImGui::SameLine(0.0f, wheelGap);
+        } else if (i > 0) {
+            ImGui::Dummy(ImVec2(0.0f, sectionGap));
+        }
+
+        ImGui::BeginGroup();
+        ImGuiExtras::GradeWheel3(tones[i].label, tones[i].label, tones[i].color, wheelWidth);
+        ImGui::Dummy(ImVec2(0.0f, std::max(1.0f, itemGap * 0.25f)));
+        if (toneIsNeutral(tones[i].color)) {
+            ImGui::TextDisabled("Neutral");
+        } else {
+            ImGui::TextDisabled("Active tint");
+        }
+        ImGui::EndGroup();
+    }
 }
 
 json ColorGradeLayer::Serialize() const {

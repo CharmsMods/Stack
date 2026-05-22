@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 using namespace EditorViewportHelpers;
 
@@ -44,7 +45,7 @@ void EditorViewport::Initialize() {
 void EditorViewport::Render(EditorModule* editor) {
     auto& pipeline = editor->GetPipeline();
     const bool compositeMode = editor->IsCompositeViewportMode();
-    const bool inputBlocked = editor->IsAdvancedEditorOpen();
+    const bool inputBlocked = false;
 
     if (compositeMode) {
         const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -728,9 +729,9 @@ void EditorViewport::Render(EditorModule* editor) {
             if (ImGui::MenuItem("Add Circle")) {
                 editor->AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind::Circle);
             }
-            ImGui::BeginDisabled();
-            ImGui::MenuItem("Add Text (Coming Soon)", nullptr, false, false);
-            ImGui::EndDisabled();
+            if (ImGui::MenuItem("Add Text")) {
+                editor->AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind::Text);
+            }
             ImGui::EndPopup();
         }
 
@@ -1045,6 +1046,13 @@ void EditorViewport::Render(EditorModule* editor) {
                 fg->AddRect(ImVec2(centerX + 1, centerY + 1),
                             ImVec2(centerX + cellSize - 1, centerY + cellSize - 1),
                             IM_COL32(0, 0, 0, 255), 0.0f, 0, 1.0f);
+                const std::string& statusText = editor->GetCanvasToolStatusText();
+                if (!statusText.empty()) {
+                    fg->AddText(
+                        ImVec2(magPos.x, magPos.y - 22.0f),
+                        IM_COL32(230, 236, 242, 230),
+                        statusText.c_str());
+                }
             }
         }
     }

@@ -2,7 +2,7 @@
 setlocal
 
 set "ROOT=%~dp0."
-set "BUILD_DIR=%~dp0build_codex"
+set "BUILD_DIR=%~dp0build"
 set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 set "BUILD_SCRIPT=%~dp0tools\build_release.ps1"
 
@@ -21,4 +21,4 @@ exit /b %BUILD_EXIT%
 )
 
 echo Build complete!
-echo Portable bundle: %BUILD_DIR%\portable\Stack.exe
+echo Executable: %BUILD_DIR%\Stack.exe

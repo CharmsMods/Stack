@@ -46,6 +46,7 @@ const char* ImageGeneratorTitle(EditorNodeGraph::ImageGeneratorKind kind) {
         case EditorNodeGraph::ImageGeneratorKind::ColorGradient: return "Color Gradient Image";
         case EditorNodeGraph::ImageGeneratorKind::Square: return "Square";
         case EditorNodeGraph::ImageGeneratorKind::Circle: return "Circle";
+        case EditorNodeGraph::ImageGeneratorKind::Text: return "Text";
     }
     return "Generated Image";
 }
@@ -232,6 +233,7 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::ColorGradient), "Color Gradient Image", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Square), "Square", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Circle), "Circle", "Texture / Generate" });
+    entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Text), "Text", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::Mix, 0, "Blend", "Composite" });
     return entries;
 }

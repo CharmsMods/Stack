@@ -34,7 +34,7 @@ void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
     const EditorNodeGraph::Vec2 mouseScreen = ToGraphVec2(ImGui::GetMousePos());
     const EditorNodeGraph::Vec2 before = ScreenToGraph(mouseScreen);
     const float oldZoom = m_Zoom;
-    m_Zoom = std::clamp(m_Zoom * (wheel > 0.0f ? 1.12f : 1.0f / 1.12f), 0.16f, 2.5f);
+    m_Zoom = std::clamp(m_Zoom * (wheel > 0.0f ? 1.12f : 1.0f / 1.12f), 0.16f, 4.5f);
     if (std::abs(m_Zoom - oldZoom) < 0.0001f) {
         return;
     }

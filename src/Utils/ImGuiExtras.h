@@ -1,6 +1,7 @@
 #pragma once
 
 #include <imgui.h>
+#include <string>
 
 namespace ImGuiExtras {
     struct NodeControlState {
@@ -17,6 +18,16 @@ namespace ImGuiExtras {
     void RenderBusyOverlay(const char* message);
     void ResetNodeControlState();
     const NodeControlState& GetNodeControlState();
+    void RichSectionLabel(const char* label, float spacingAfter = 0.0f);
+    bool RichFullWidthButton(const char* label, float width, float height = 0.0f);
+    void RichColorSwatchRow(
+        const char* swatchId,
+        const float color[3],
+        float swatchWidth,
+        float swatchHeight,
+        const char* valueText,
+        float totalWidth,
+        float spacing = 0.0f);
 
     // Node UI Helpers
     bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, float v_max, const char* format = "%.2f", float controlWidth = 0.0f);
@@ -27,4 +38,6 @@ namespace ImGuiExtras {
     bool NodeColorEdit4(const char* label, const char* id, float color[4], ImGuiColorEditFlags flags = 0, float controlWidth = 0.0f);
     bool NodeInputFloat(const char* label, const char* id, float* v, float step = 0.0f, float step_fast = 0.0f, const char* format = "%.3f", float controlWidth = 0.0f);
     bool NodeInputInt(const char* label, const char* id, int* v, int step = 1, int step_fast = 100, float controlWidth = 0.0f);
+    bool NodeTextMultiline(const char* label, const char* id, std::string& value, float controlWidth = 0.0f, int lineCount = 4);
+    bool GradeWheel3(const char* label, const char* id, float color[3], float width = 0.0f);
 }

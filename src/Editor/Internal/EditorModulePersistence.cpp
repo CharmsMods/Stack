@@ -57,6 +57,20 @@ std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixe
     return encoded;
 }
 
+std::vector<unsigned char> EncodePngBytesForImageStorage(
+    const std::vector<unsigned char>& bottomLeftPixels,
+    int width,
+    int height,
+    int channels) {
+    if (bottomLeftPixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
+        return {};
+    }
+
+    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
+    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
+    return EncodePngBytes(topLeftPixels, width, height, channels);
+}
+
 std::string FileNameFromPath(const std::string& path) {
     if (path.empty()) {
         return {};
@@ -242,7 +256,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             payload.width = decoded.width;
             payload.height = decoded.height;
             payload.channels = decoded.channels;
-            payload.pngBytes = EncodePngBytes(decoded.pixels, decoded.width, decoded.height, decoded.channels);
+            payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
             payload.pixels = std::move(decoded.pixels);
 
             EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());

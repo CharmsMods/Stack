@@ -1,10 +1,10 @@
 #pragma once
 
 #include "Async/TaskState.h"
+#include "Layers/LayerBase.h"
 #include "LayerRegistry.h"
 #include "EditorRenderWorker.h"
 #include "NodeGraph/EditorNodeGraph.h"
-#include "UI/EditorAdvancedNodeEditor.h"
 #include "UI/EditorSidebar.h"
 #include "UI/EditorViewport.h"
 #include "Renderer/RenderPipeline.h"
@@ -30,6 +30,12 @@ public:
     enum class ViewportMode {
         SingleOutputPreview,
         CompositeCanvas
+    };
+
+    enum class CanvasToolKind {
+        None,
+        PickColor,
+        AdjustAberrationCenter
     };
 
     enum class CompositeExportBoundsMode {
@@ -121,6 +127,8 @@ public:
         std::size_t cachedChainFingerprint = 0;
         std::uint64_t requestedRenderRevision = 0;
         std::size_t requestedChainFingerprint = 0;
+        int requestedRasterWidth = 0;
+        int requestedRasterHeight = 0;
     };
 
     struct GraphPreviewPixels {
@@ -169,18 +177,10 @@ public:
     void SelectLayer(int index);
     void SelectGraphNode(int nodeId);
     bool SelectAdjacentMainChainNode(int direction);
-    bool LayerSupportsAdvancedEditor(int layerIndex) const;
-    bool NodeSupportsAdvancedEditor(int nodeId) const;
-    void OpenAdvancedEditorForNode(int nodeId);
-    void CloseAdvancedEditor();
-    bool IsAdvancedEditorOpen() const { return m_AdvancedEditorOpen; }
-    int GetAdvancedEditorNodeId() const { return m_AdvancedEditorNodeId; }
-    LayerBase* GetActiveAdvancedEditorLayer();
-    const LayerBase* GetActiveAdvancedEditorLayer() const;
-    EditorNodeGraph::Node* GetActiveAdvancedEditorNode();
-    const EditorNodeGraph::Node* GetActiveAdvancedEditorNode() const;
-    void RenderAdvancedEditorOverlay(const ImVec2& workspacePos, const ImVec2& workspaceSize);
-    void RenderAdvancedEditorPreview(const char* id, const ImVec2& desiredSize, bool allowColorPicking);
+    bool LayerUsesRichNodeSurface(int layerIndex) const;
+    bool NodeUsesRichNodeSurface(int nodeId) const;
+    NodeSurfaceSpec GetLayerNodeSurfaceSpec(int layerIndex) const;
+    NodeSurfaceSpec GetNodeSurfaceSpec(int nodeId) const;
 
     EditorNodeGraph::Graph& GetNodeGraph() { return m_NodeGraph; }
     const EditorNodeGraph::Graph& GetNodeGraph() const { return m_NodeGraph; }
@@ -222,6 +222,7 @@ public:
     void ClearGraphAutoFocusIfTrackedNode(int nodeId);
     bool IsScreenPointOverGraph(float x, float y) const;
     bool HandleGraphFileDrop(const std::string& path, float screenX, float screenY);
+    bool HandleGraphFileDrop(const std::vector<std::string>& paths, float screenX, float screenY);
     std::vector<unsigned char> GetScopePixelsForNode(int nodeId, int& outW, int& outH);
     std::vector<unsigned char> GetPreviewPixelsForNode(int nodeId, int& outW, int& outH);
     void RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId);
@@ -264,23 +265,40 @@ public:
 
     bool IsRenderOnlyUpToActive() const { return m_RenderOnlyUpToActive; }
     void SetRenderOnlyUpToActive(bool b) { m_RenderOnlyUpToActive = b; }
+    void RequestNewProject();
+    bool HasProjectContent() const;
 
     Async::TaskState GetSourceLoadTaskState() const { return m_SourceLoadTaskState; }
     const std::string& GetSourceLoadStatusText() const { return m_SourceLoadStatusText; }
     bool IsSourceLoadBusy() const { return Async::IsBusy(m_SourceLoadTaskState); }
+    Async::TaskState GetGraphDropImportTaskState() const { return m_GraphDropImportTaskState; }
+    const std::string& GetGraphDropImportStatusText() const { return m_GraphDropImportStatusText; }
+    bool IsGraphDropImportBusy() const { return Async::IsBusy(m_GraphDropImportTaskState); }
 
     Async::TaskState GetExportTaskState() const { return m_ExportTaskState; }
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
     bool IsExportBusy() const { return Async::IsBusy(m_ExportTaskState); }
 
+    CanvasToolKind GetCanvasToolKind() const { return m_CanvasToolKind; }
+    int GetCanvasToolOwnerNodeId() const { return m_CanvasToolOwnerNodeId; }
+    const std::string& GetCanvasToolStatusText() const { return m_CanvasToolStatusText; }
+    bool HasActiveCanvasTool() const { return m_CanvasToolKind != CanvasToolKind::None; }
+    bool IsCanvasToolActiveForNode(int nodeId, CanvasToolKind kind) const {
+        return m_CanvasToolKind == kind && m_CanvasToolOwnerNodeId == nodeId;
+    }
+    void BeginCanvasColorPick(int ownerNodeId, const std::string& statusText, std::function<void(float, float, float)> callback);
+    void CancelCanvasTool();
+    void OnCanvasColorPicked(float r, float g, float b);
     bool IsPickingColor() const { return m_IsPickingColor; }
     void SetPickingColor(bool picking, std::function<void(float, float, float)> callback = nullptr) {
-        m_IsPickingColor = picking;
-        m_ColorPickerCallback = callback;
+        if (picking) {
+            BeginCanvasColorPick(-1, "Click canvas to sample color", std::move(callback));
+        } else {
+            CancelCanvasTool();
+        }
     }
     void OnColorPicked(float r, float g, float b) {
-        if (m_ColorPickerCallback) m_ColorPickerCallback(r, g, b);
-        m_IsPickingColor = false;
+        OnCanvasColorPicked(r, g, b);
     }
     ImVec4 GetWorkspaceBaseColor() const;
     bool CanConsumeEditorCommandKeys() const;
@@ -341,15 +359,20 @@ public:
     void UseCompositeViewAsExportBounds(const ImVec2& canvasSize);
     bool BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     void ClampCompositeViewPanToContent(const ImVec2& canvasSize);
+    void RefreshGraphLayerMetadata();
 
 private:
+    struct PendingGraphDropImportRequest {
+        std::vector<std::string> paths;
+        EditorNodeGraph::Vec2 sourcePosition;
+    };
+
     struct CachedCompositeChainState {
         EditorNodeGraph::CompletedChainInfo info;
         std::size_t fingerprint = 0;
         std::string label;
     };
 
-    EditorAdvancedNodeEditor m_AdvancedNodeEditor;
     EditorSidebar m_Sidebar;
     EditorViewport m_Viewport;
     EditorScopes m_Scopes;
@@ -359,8 +382,6 @@ private:
 
     std::vector<std::shared_ptr<LayerBase>> m_Layers;
     int m_SelectedLayerIndex = -1;
-    bool m_AdvancedEditorOpen = false;
-    int m_AdvancedEditorNodeId = -1;
     bool m_FocusSelectedTabNextRender = false;
     float m_HoverFade = 0.0f;
     bool m_RenderOnlyUpToActive = false;
@@ -396,11 +417,20 @@ private:
     std::uint64_t m_SourceLoadGeneration = 0;
     Async::TaskState m_SourceLoadTaskState = Async::TaskState::Idle;
     std::string m_SourceLoadStatusText;
+    std::uint64_t m_GraphDropImportGeneration = 0;
+    Async::TaskState m_GraphDropImportTaskState = Async::TaskState::Idle;
+    std::string m_GraphDropImportStatusText;
+    std::vector<PendingGraphDropImportRequest> m_PendingGraphDropImports;
 
     std::uint64_t m_ExportGeneration = 0;
     Async::TaskState m_ExportTaskState = Async::TaskState::Idle;
     std::string m_ExportStatusText;
+    bool m_ShowNewProjectPrompt = false;
+    bool m_ShowNewProjectDiscardConfirm = false;
 
+    CanvasToolKind m_CanvasToolKind = CanvasToolKind::None;
+    int m_CanvasToolOwnerNodeId = -1;
+    std::string m_CanvasToolStatusText;
     bool m_IsPickingColor = false;
     std::function<void(float, float, float)> m_ColorPickerCallback;
     bool m_RenderWorkerAvailable = false;
@@ -471,7 +501,6 @@ private:
     std::unordered_map<int, std::uint64_t> m_PreviewRequestedGenerations;
     std::unordered_map<int, std::uint64_t> m_PreviewCompletedGenerations;
 
-    void RefreshGraphLayerMetadata();
     void ApplyGraphLayerOrder();
     std::vector<std::shared_ptr<LayerBase>> BuildGraphRenderLayers() const;
     std::vector<RenderLayerStep> BuildGraphRenderSteps() const;
@@ -502,10 +531,18 @@ private:
     void EnterSingleOutputPreviewMode();
     void ClearCompositeTransientInteractionState();
     void TogglePartialSplitTargets(float workspaceWidth, float minLeftWidth, float maxLeftWidth, bool compositeViewportMode);
+    bool AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
+    bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
     bool AddGraphImageChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
+    bool AddGraphImageChainFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 sourcePosition);
     void MoveCompositeOutputToFront(int outputNodeId);
     std::pair<EditorNodeGraph::Vec2, EditorNodeGraph::Vec2> BuildCompositeChainPlacement() const;
     std::size_t BuildCompositeChainFingerprint(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(int outputNodeId) const;
+    bool CompletedChainSourceUsesScalableGenerator(int outputNodeId) const;
+    bool CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const;
+    void ResetToBlankProject();
+    void RenderProjectLifecyclePopups();
 };

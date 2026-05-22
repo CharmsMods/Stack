@@ -228,6 +228,21 @@ void EditorNodeGraphUI::OpenNodeBrowser(NodeBrowserMode mode, const EditorNodeGr
 }
 
 void EditorNodeGraphUI::CloseNodeBrowser() {
+    if (m_NodeBrowserOpen && m_PushedSourceNodeId > 0) {
+        if (m_ActiveEditor) {
+            EditorNodeGraph::Graph& graph = m_ActiveEditor->GetNodeGraph();
+            for (int id : m_PushedNodeIds) {
+                if (EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
+                    dsNode->position.x -= m_PushDistance;
+                    RefreshNodeLayoutCache(graph, *dsNode);
+                }
+            }
+        }
+    }
+    m_PushedSourceNodeId = -1;
+    m_PushDistance = 0.0f;
+    m_PushedNodeIds.clear();
+
     m_NodeBrowserOpen = false;
     m_NodeBrowserFocusSearch = false;
     m_NodeBrowserDragFromNodeId = -1;
@@ -378,6 +393,11 @@ void EditorNodeGraphUI::RenderNodeBrowser(EditorModule* editor) {
 
             const int newNodeId = AddNodeFromBrowserEntry(editor, *activatedEntry, m_NodeBrowserGraphPos);
             if (newNodeId > 0) {
+                // Clear the push state to commit the positions of all downstream nodes
+                m_PushedSourceNodeId = -1;
+                m_PushDistance = 0.0f;
+                m_PushedNodeIds.clear();
+
                 if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput) {
                     ConnectOutputToBestInput(editor, m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId, newNodeId);
                 } else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput) {

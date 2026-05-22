@@ -16,6 +16,9 @@
 #include "Renderer/GLHelpers.h"
 #include "Resources/EmbeddedSplash.h"
 #include "Resources/EmbeddedTabIcons.h"
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <thread>
 #include <chrono>
 
@@ -36,6 +39,24 @@ struct RootTabDescriptor {
     unsigned int iconTexture = 0;
     std::function<void()> renderBody;
 };
+
+bool IsSupportedDroppedImagePath(const std::string& path) {
+    std::string extension;
+    try {
+        extension = std::filesystem::path(path).extension().string();
+    } catch (...) {
+        return false;
+    }
+
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return extension == ".png" ||
+           extension == ".jpg" ||
+           extension == ".jpeg" ||
+           extension == ".bmp" ||
+           extension == ".tga";
+}
 
 unsigned int LoadEmbeddedPngTexture(const unsigned char* data, unsigned int size, const char* debugName) {
     if (!data || size == 0) {
@@ -465,15 +486,33 @@ void AppShell::HandleDrop(int count, const char** paths) {
         glfwGetCursorPos(m_Window, &cursorX, &cursorY);
     }
 
-    for (int i = 0; i < count; ++i) {
-        std::string path = paths[i];
-
-        if (m_CurrentTabId == RootTabEditor &&
-            m_Editor.HandleGraphFileDrop(path, static_cast<float>(cursorX), static_cast<float>(cursorY))) {
-            continue;
+    if (m_CurrentTabId == RootTabEditor) {
+        std::vector<std::string> graphImagePaths;
+        graphImagePaths.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            const std::string path = paths[i] ? paths[i] : "";
+            if (IsSupportedDroppedImagePath(path)) {
+                graphImagePaths.push_back(path);
+            }
         }
-        
-        // Pass a lambda to handle tab switching
+
+        if (!graphImagePaths.empty() &&
+            m_Editor.HandleGraphFileDrop(graphImagePaths, static_cast<float>(cursorX), static_cast<float>(cursorY))) {
+            for (int i = 0; i < count; ++i) {
+                const std::string path = paths[i] ? paths[i] : "";
+                if (IsSupportedDroppedImagePath(path)) {
+                    continue;
+                }
+                LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, nullptr, [this](int tabId) {
+                    RequestTabSwitch(tabId);
+                });
+            }
+            return;
+        }
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const std::string path = paths[i] ? paths[i] : "";
         LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, nullptr, [this](int tabId) {
             RequestTabSwitch(tabId);
         });

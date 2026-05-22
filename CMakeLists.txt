@@ -5,8 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Ensure folders for outputs are nicely mapped
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Ensure folders for outputs are nicely mapped directly to the build folder
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
 if (MSVC)
     # Use the static MSVC runtime so the portable build does not require a separate VC++ redistributable.
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -129,10 +131,4 @@ elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
 
-set(STACK_PORTABLE_DIR "${CMAKE_BINARY_DIR}/portable")
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${STACK_PORTABLE_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${STACK_PORTABLE_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:${PROJECT_NAME}>" "${STACK_PORTABLE_DIR}/"
-    COMMAND "${CMAKE_COMMAND}" -E echo "Portable bundle staged at: ${STACK_PORTABLE_DIR}"
-)
+

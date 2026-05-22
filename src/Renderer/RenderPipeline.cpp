@@ -1,11 +1,18 @@
 #include "RenderPipeline.h"
+#include "Composite/EmbeddedCompositeFont.h"
 #include "Editor/LayerRegistry.h"
 #include "ThirdParty/stb_image.h"
+#include <imstb_truetype.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <iterator>
+#include <limits>
 #include <functional>
 #include <iostream>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -38,6 +45,336 @@ std::size_t HashBytes(const std::vector<unsigned char>& data) {
 
 std::size_t HashJson(const nlohmann::json& value) {
     return HashValue(value.dump());
+}
+
+float Clamp01(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+std::vector<int> Utf8ToCodepoints(const std::string& text) {
+    std::vector<int> codepoints;
+    codepoints.reserve(text.size());
+
+    for (std::size_t index = 0; index < text.size();) {
+        const unsigned char lead = static_cast<unsigned char>(text[index]);
+        if (lead < 0x80) {
+            codepoints.push_back(static_cast<int>(lead));
+            ++index;
+            continue;
+        }
+
+        int codepoint = 0;
+        std::size_t count = 0;
+        if ((lead & 0xE0u) == 0xC0u) {
+            codepoint = lead & 0x1Fu;
+            count = 2;
+        } else if ((lead & 0xF0u) == 0xE0u) {
+            codepoint = lead & 0x0Fu;
+            count = 3;
+        } else if ((lead & 0xF8u) == 0xF0u) {
+            codepoint = lead & 0x07u;
+            count = 4;
+        } else {
+            codepoints.push_back('?');
+            ++index;
+            continue;
+        }
+
+        if (index + count > text.size()) {
+            codepoints.push_back('?');
+            break;
+        }
+
+        bool valid = true;
+        for (std::size_t offset = 1; offset < count; ++offset) {
+            const unsigned char continuation = static_cast<unsigned char>(text[index + offset]);
+            if ((continuation & 0xC0u) != 0x80u) {
+                valid = false;
+                break;
+            }
+            codepoint = (codepoint << 6) | static_cast<int>(continuation & 0x3Fu);
+        }
+
+        codepoints.push_back(valid ? codepoint : '?');
+        index += valid ? count : 1;
+    }
+
+    return codepoints;
+}
+
+const std::vector<unsigned char>& DefaultGeneratorTextFontBytes() {
+    static const std::vector<unsigned char> kFontBytes(
+        std::begin(EmbeddedCompositeFont::kRobotoMediumTtf),
+        std::end(EmbeddedCompositeFont::kRobotoMediumTtf));
+    return kFontBytes;
+}
+
+bool BuildTextRgba(
+    const std::vector<unsigned char>& fontBytes,
+    const std::string& text,
+    float fontSize,
+    const std::array<float, 4>& color,
+    const float stretchX,
+    const float stretchY,
+    std::vector<uint8_t>& outPixels,
+    int& outWidth,
+    int& outHeight) {
+    outPixels.clear();
+    outWidth = 0;
+    outHeight = 0;
+    if (fontBytes.empty()) {
+        return false;
+    }
+
+    stbtt_fontinfo fontInfo {};
+    if (!stbtt_InitFont(&fontInfo, fontBytes.data(), 0)) {
+        return false;
+    }
+
+    struct GlyphPlacement {
+        int codepoint = 0;
+        float penX = 0.0f;
+        float baselineY = 0.0f;
+    };
+
+    const std::vector<int> codepoints = Utf8ToCodepoints(text.empty() ? std::string("Text") : text);
+    const uint8_t r = static_cast<uint8_t>(std::round(Clamp01(color[0]) * 255.0f));
+    const uint8_t g = static_cast<uint8_t>(std::round(Clamp01(color[1]) * 255.0f));
+    const uint8_t b = static_cast<uint8_t>(std::round(Clamp01(color[2]) * 255.0f));
+    const float baseAlpha = Clamp01(color[3]);
+    const int textureLimit = 8192;
+    const float requestedStretchX = std::max(0.01f, stretchX);
+    const float requestedStretchY = std::max(0.01f, stretchY);
+    float requestedPixelSize = std::max(1.0f, fontSize);
+
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        const float pixelSize = std::max(1.0f, requestedPixelSize);
+        const float baseScale = stbtt_ScaleForPixelHeight(&fontInfo, pixelSize);
+        const float scaleX = baseScale * requestedStretchX;
+        const float scaleY = baseScale * requestedStretchY;
+        int ascent = 0;
+        int descent = 0;
+        int lineGap = 0;
+        stbtt_GetFontVMetrics(&fontInfo, &ascent, &descent, &lineGap);
+        const float lineAdvance = std::max(1.0f, (ascent - descent + lineGap) * scaleY);
+        const float baseline = ascent * scaleY;
+
+        std::vector<GlyphPlacement> placements;
+        placements.reserve(codepoints.size());
+
+        float penX = 0.0f;
+        float penY = baseline;
+        float maxLineWidth = 0.0f;
+        float minX = std::numeric_limits<float>::max();
+        float minY = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float maxY = std::numeric_limits<float>::lowest();
+        int previousCodepoint = 0;
+
+        for (int codepoint : codepoints) {
+            if (codepoint == '\r') {
+                continue;
+            }
+            if (codepoint == '\n') {
+                maxLineWidth = std::max(maxLineWidth, penX);
+                penX = 0.0f;
+                penY += lineAdvance;
+                previousCodepoint = 0;
+                continue;
+            }
+
+            if (previousCodepoint != 0) {
+                penX += stbtt_GetCodepointKernAdvance(&fontInfo, previousCodepoint, codepoint) * scaleX;
+            }
+
+            placements.push_back({ codepoint, penX, penY });
+
+            int x0 = 0;
+            int y0 = 0;
+            int x1 = 0;
+            int y1 = 0;
+            stbtt_GetCodepointBitmapBox(&fontInfo, codepoint, scaleX, scaleY, &x0, &y0, &x1, &y1);
+            minX = std::min(minX, penX + static_cast<float>(x0));
+            minY = std::min(minY, penY + static_cast<float>(y0));
+            maxX = std::max(maxX, penX + static_cast<float>(x1));
+            maxY = std::max(maxY, penY + static_cast<float>(y1));
+
+            int advance = 0;
+            int leftSideBearing = 0;
+            stbtt_GetCodepointHMetrics(&fontInfo, codepoint, &advance, &leftSideBearing);
+            penX += advance * scaleX;
+            maxLineWidth = std::max(maxLineWidth, penX);
+            previousCodepoint = codepoint;
+        }
+
+        const float padding = std::max(2.0f, pixelSize * 0.18f);
+        const bool hasVisibleBounds = minX <= maxX && minY <= maxY;
+        const float fallbackWidth = std::max(1.0f, maxLineWidth);
+        const float fallbackHeight = std::max(1.0f, penY + lineAdvance - baseline);
+        const float contentWidth = hasVisibleBounds ? (maxX - minX) : fallbackWidth;
+        const float contentHeight = hasVisibleBounds ? (maxY - minY) : fallbackHeight;
+        const int candidateWidth = std::max(1, static_cast<int>(std::ceil(contentWidth + padding * 2.0f)));
+        const int candidateHeight = std::max(1, static_cast<int>(std::ceil(contentHeight + padding * 2.0f)));
+
+        if ((candidateWidth > textureLimit || candidateHeight > textureLimit) && pixelSize > 1.0f) {
+            const float fit = std::min(
+                static_cast<float>(textureLimit) / static_cast<float>(std::max(1, candidateWidth)),
+                static_cast<float>(textureLimit) / static_cast<float>(std::max(1, candidateHeight)));
+            if (fit < 0.999f) {
+                requestedPixelSize = std::max(1.0f, pixelSize * std::clamp(fit * 0.98f, 0.1f, 0.98f));
+                continue;
+            }
+        }
+
+        outWidth = std::min(candidateWidth, textureLimit);
+        outHeight = std::min(candidateHeight, textureLimit);
+        outPixels.assign(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight) * 4, 0);
+        for (std::size_t pixelIndex = 0; pixelIndex < outPixels.size(); pixelIndex += 4) {
+            outPixels[pixelIndex + 0] = r;
+            outPixels[pixelIndex + 1] = g;
+            outPixels[pixelIndex + 2] = b;
+        }
+
+        const float originX = hasVisibleBounds ? (padding - minX) : padding;
+        const float originY = hasVisibleBounds ? (padding - minY) : padding;
+        for (const GlyphPlacement& placement : placements) {
+            int glyphW = 0;
+            int glyphH = 0;
+            int glyphXOff = 0;
+            int glyphYOff = 0;
+            unsigned char* bitmap = stbtt_GetCodepointBitmap(
+                &fontInfo,
+                scaleX,
+                scaleY,
+                placement.codepoint,
+                &glyphW,
+                &glyphH,
+                &glyphXOff,
+                &glyphYOff);
+            if (!bitmap || glyphW <= 0 || glyphH <= 0) {
+                if (bitmap) {
+                    stbtt_FreeBitmap(bitmap, nullptr);
+                }
+                continue;
+            }
+
+            const int destX = static_cast<int>(std::floor(placement.penX + static_cast<float>(glyphXOff) + originX));
+            const int destY = static_cast<int>(std::floor(placement.baselineY + static_cast<float>(glyphYOff) + originY));
+            for (int y = 0; y < glyphH; ++y) {
+                const int py = destY + y;
+                if (py < 0 || py >= outHeight) {
+                    continue;
+                }
+                for (int x = 0; x < glyphW; ++x) {
+                    const int px = destX + x;
+                    if (px < 0 || px >= outWidth) {
+                        continue;
+                    }
+
+                    const float glyphAlpha = static_cast<float>(bitmap[y * glyphW + x]) / 255.0f;
+                    if (glyphAlpha <= 0.0f) {
+                        continue;
+                    }
+
+                    const std::size_t pixelIndex =
+                        (static_cast<std::size_t>(py) * static_cast<std::size_t>(outWidth) + static_cast<std::size_t>(px)) * 4;
+                    const float srcAlpha = baseAlpha * glyphAlpha;
+                    const float dstAlpha = static_cast<float>(outPixels[pixelIndex + 3]) / 255.0f;
+                    const float outAlpha = srcAlpha + dstAlpha * (1.0f - srcAlpha);
+                    if (outAlpha <= 0.0f) {
+                        continue;
+                    }
+
+                    auto blendChannel = [&](const uint8_t srcChannel, const uint8_t dstChannel) {
+                        const float srcNorm = static_cast<float>(srcChannel) / 255.0f;
+                        const float dstNorm = static_cast<float>(dstChannel) / 255.0f;
+                        return static_cast<uint8_t>(std::round(((srcNorm * srcAlpha) + (dstNorm * dstAlpha * (1.0f - srcAlpha))) / outAlpha * 255.0f));
+                    };
+
+                    outPixels[pixelIndex + 0] = blendChannel(r, outPixels[pixelIndex + 0]);
+                    outPixels[pixelIndex + 1] = blendChannel(g, outPixels[pixelIndex + 1]);
+                    outPixels[pixelIndex + 2] = blendChannel(b, outPixels[pixelIndex + 2]);
+                    outPixels[pixelIndex + 3] = static_cast<uint8_t>(std::round(outAlpha * 255.0f));
+                }
+            }
+
+            stbtt_FreeBitmap(bitmap, nullptr);
+        }
+
+        return !outPixels.empty();
+    }
+
+    return false;
+}
+
+bool BuildTextGeneratorCanvas(const RenderGraphNode& node, int canvasWidth, int canvasHeight, std::vector<unsigned char>& outPixels) {
+    outPixels.clear();
+    if (canvasWidth <= 0 || canvasHeight <= 0) {
+        return false;
+    }
+
+    const std::array<float, 4> color = {
+        node.imageGeneratorSettings.colorA[0],
+        node.imageGeneratorSettings.colorA[1],
+        node.imageGeneratorSettings.colorA[2],
+        node.imageGeneratorSettings.colorA[3]
+    };
+
+    std::vector<uint8_t> textPixels;
+    int textWidth = 0;
+    int textHeight = 0;
+    float effectiveFontSize = std::max(8.0f, node.imageGeneratorSettings.fontSize) *
+        std::max(0.35f, std::min(static_cast<float>(canvasWidth), static_cast<float>(canvasHeight)) / 256.0f);
+
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        if (!BuildTextRgba(
+                DefaultGeneratorTextFontBytes(),
+                node.imageGeneratorSettings.text,
+                effectiveFontSize,
+                color,
+                1.0f,
+                1.0f,
+                textPixels,
+                textWidth,
+                textHeight)) {
+            return false;
+        }
+
+        if (textWidth <= std::max(1, canvasWidth - 6) && textHeight <= std::max(1, canvasHeight - 6)) {
+            break;
+        }
+
+        const float fit = std::min(
+            static_cast<float>(std::max(1, canvasWidth - 6)) / static_cast<float>(std::max(1, textWidth)),
+            static_cast<float>(std::max(1, canvasHeight - 6)) / static_cast<float>(std::max(1, textHeight)));
+        effectiveFontSize = std::max(6.0f, effectiveFontSize * std::clamp(fit * 0.97f, 0.1f, 0.97f));
+    }
+
+    outPixels.assign(static_cast<std::size_t>(canvasWidth) * static_cast<std::size_t>(canvasHeight) * 4, 0);
+    const int offsetX = std::max(0, (canvasWidth - textWidth) / 2);
+    const int offsetY = std::max(0, (canvasHeight - textHeight) / 2);
+    for (int y = 0; y < textHeight; ++y) {
+        const int dstY = offsetY + y;
+        if (dstY < 0 || dstY >= canvasHeight) {
+            continue;
+        }
+        for (int x = 0; x < textWidth; ++x) {
+            const int dstX = offsetX + x;
+            if (dstX < 0 || dstX >= canvasWidth) {
+                continue;
+            }
+            const std::size_t srcIndex =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(textWidth) + static_cast<std::size_t>(x)) * 4;
+            const std::size_t dstIndex =
+                (static_cast<std::size_t>(dstY) * static_cast<std::size_t>(canvasWidth) + static_cast<std::size_t>(dstX)) * 4;
+            outPixels[dstIndex + 0] = textPixels[srcIndex + 0];
+            outPixels[dstIndex + 1] = textPixels[srcIndex + 1];
+            outPixels[dstIndex + 2] = textPixels[srcIndex + 2];
+            outPixels[dstIndex + 3] = textPixels[srcIndex + 3];
+        }
+    }
+
+    return true;
 }
 
 } // namespace
@@ -688,7 +1025,27 @@ void RenderPipeline::RenderImageToMask(unsigned int inputImage, const RenderGrap
 
 unsigned int RenderPipeline::GenerateImageTexture(const RenderGraphNode& node) {
     EnsureUtilityPrograms();
-    if (!m_ImageGeneratorProgram || m_Width <= 0 || m_Height <= 0) {
+    if (m_Width <= 0 || m_Height <= 0) {
+        return 0;
+    }
+    if (node.imageGeneratorKind == RenderImageGeneratorKind::Text) {
+        std::vector<unsigned char> pixels;
+        if (!BuildTextGeneratorCanvas(node, m_Width, m_Height, pixels) || pixels.empty()) {
+            return 0;
+        }
+        // Flip vertically to align with OpenGL's bottom-left standard
+        int rowSize = m_Width * 4;
+        std::vector<unsigned char> tempRow(rowSize);
+        for (int y = 0; y < m_Height / 2; y++) {
+            unsigned char* row1 = &pixels[y * rowSize];
+            unsigned char* row2 = &pixels[(m_Height - 1 - y) * rowSize];
+            std::memcpy(tempRow.data(), row1, rowSize);
+            std::memcpy(row1, row2, rowSize);
+            std::memcpy(row2, tempRow.data(), rowSize);
+        }
+        return GLHelpers::CreateTextureFromPixels(pixels.data(), m_Width, m_Height, 4);
+    }
+    if (!m_ImageGeneratorProgram) {
         return 0;
     }
     unsigned int texture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
@@ -906,6 +1263,8 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
             }
             HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.angle));
             HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.offset));
+            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.text));
+            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.fontSize));
             HashCombine(fingerprint, HashValue(m_Width));
             HashCombine(fingerprint, HashValue(m_Height));
         } else if (node.kind == RenderGraphNodeKind::Layer) {

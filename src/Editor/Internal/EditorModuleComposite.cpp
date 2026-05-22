@@ -249,14 +249,15 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
         return false;
     }
 
-    EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
+    const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 330.0f, sourcePosition.y });
-    if (!sourceNode || !outputNode) {
+    if (sourceNodeId <= 0 || !outputNode) {
         return false;
     }
+    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
-    if (!ConnectGraphNodes(sourceNode->id, outputNode->id, &errorMessage)) {
+    if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -264,8 +265,35 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
         EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
-    MoveCompositeOutputToFront(outputNode->id);
-    m_CompositeSelectedOutputNodeId = outputNode->id;
+    MoveCompositeOutputToFront(outputNodeId);
+    m_CompositeSelectedOutputNodeId = outputNodeId;
+    return true;
+}
+
+bool EditorModule::AddGraphImageChainFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 sourcePosition) {
+    const int completedBefore = GetCompletedChainCount();
+    if (!AddImageNodeFromPayload(std::move(payload), sourcePosition)) {
+        return false;
+    }
+
+    const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
+    EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 330.0f, sourcePosition.y });
+    if (sourceNodeId <= 0 || !outputNode) {
+        return false;
+    }
+    const int outputNodeId = outputNode->id;
+
+    std::string errorMessage;
+    if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
+        return false;
+    }
+    if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
+        EnsureCompositeNode();
+        EnsureExportBoundsSettingsNode();
+    }
+    EnsureCompositeSceneState(m_LastCompositeCanvasSize);
+    MoveCompositeOutputToFront(outputNodeId);
+    m_CompositeSelectedOutputNodeId = outputNodeId;
     return true;
 }
 
@@ -297,14 +325,15 @@ bool EditorModule::AddCompositeImageChainFromFile(const std::string& path) {
         return false;
     }
 
-    EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
+    const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(outputPos);
-    if (!sourceNode || !outputNode) {
+    if (sourceNodeId <= 0 || !outputNode) {
         return false;
     }
+    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
-    if (!ConnectGraphNodes(sourceNode->id, outputNode->id, &errorMessage)) {
+    if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -312,8 +341,8 @@ bool EditorModule::AddCompositeImageChainFromFile(const std::string& path) {
         EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
-    MoveCompositeOutputToFront(outputNode->id);
-    m_CompositeSelectedOutputNodeId = outputNode->id;
+    MoveCompositeOutputToFront(outputNodeId);
+    m_CompositeSelectedOutputNodeId = outputNodeId;
     return true;
 }
 
@@ -332,13 +361,15 @@ bool EditorModule::AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKin
     const int completedBefore = GetCompletedChainCount();
     const auto [sourcePos, outputPos] = BuildCompositeChainPlacement();
     EditorNodeGraph::Node* generatorNode = m_NodeGraph.AddImageGeneratorNode(generatorKind, sourcePos);
+    const int generatorNodeId = generatorNode ? generatorNode->id : -1;
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(outputPos);
-    if (!generatorNode || !outputNode) {
+    if (generatorNodeId <= 0 || !outputNode) {
         return false;
     }
+    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
-    if (!ConnectGraphNodes(generatorNode->id, outputNode->id, &errorMessage)) {
+    if (!ConnectGraphNodes(generatorNodeId, outputNodeId, &errorMessage)) {
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -346,9 +377,9 @@ bool EditorModule::AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKin
         EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
-    MoveCompositeOutputToFront(outputNode->id);
-    m_CompositeSelectedOutputNodeId = outputNode->id;
-    SelectGraphNode(generatorNode->id);
+    MoveCompositeOutputToFront(outputNodeId);
+    m_CompositeSelectedOutputNodeId = outputNodeId;
+    SelectGraphNode(generatorNodeId);
     return true;
 }
 
@@ -365,6 +396,8 @@ void EditorModule::ClearCompositeSceneTextures() {
         item.cachedChainFingerprint = 0;
         item.requestedRenderRevision = 0;
         item.requestedChainFingerprint = 0;
+        item.requestedRasterWidth = 0;
+        item.requestedRasterHeight = 0;
     }
 }
 
@@ -593,8 +626,34 @@ std::vector<unsigned char> EditorModule::GetCompositePixelsForOutputNode(int out
     }
 
     if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
-        sourceW = 256;
-        sourceH = 256;
+        const CompositeSceneItem* item = FindCompositeSceneItem(outputNodeId);
+        if (CompletedChainSourceUsesScalableGenerator(outputNodeId)) {
+            constexpr int kScalableGeneratorBaseRaster = 1024;
+            constexpr int kScalableGeneratorMaxRaster = 4096;
+            const float scaleX = item ? std::max(0.01f, std::abs(item->scale.x)) : 1.0f;
+            const float scaleY = item ? std::max(0.01f, std::abs(item->scale.y)) : 1.0f;
+            const int referenceWidth = item && item->requestedRasterWidth > 0
+                ? item->requestedRasterWidth
+                : (item && item->textureWidth > 0 ? item->textureWidth : kScalableGeneratorBaseRaster);
+            const int referenceHeight = item && item->requestedRasterHeight > 0
+                ? item->requestedRasterHeight
+                : (item && item->textureHeight > 0 ? item->textureHeight : kScalableGeneratorBaseRaster);
+            sourceW = std::clamp(
+                static_cast<int>(std::ceil(std::max(
+                    static_cast<float>(kScalableGeneratorBaseRaster),
+                    static_cast<float>(referenceWidth) * scaleX))),
+                256,
+                kScalableGeneratorMaxRaster);
+            sourceH = std::clamp(
+                static_cast<int>(std::ceil(std::max(
+                    static_cast<float>(kScalableGeneratorBaseRaster),
+                    static_cast<float>(referenceHeight) * scaleY))),
+                256,
+                kScalableGeneratorMaxRaster);
+        } else {
+            sourceW = 256;
+            sourceH = 256;
+        }
         sourceCh = 4;
         sourcePixels.assign(static_cast<size_t>(sourceW * sourceH * sourceCh), 0);
         for (size_t i = 3; i < sourcePixels.size(); i += 4) {
@@ -610,6 +669,9 @@ std::vector<unsigned char> EditorModule::GetCompositePixelsForOutputNode(int out
 }
 
 bool EditorModule::MoveCompositeOutputToIndex(int outputNodeId, int targetIndex) {
+    if (m_CompositeZOrder.empty()) {
+        return false;
+    }
     auto it = std::find(m_CompositeZOrder.begin(), m_CompositeZOrder.end(), outputNodeId);
     if (it == m_CompositeZOrder.end()) {
         return false;
@@ -627,6 +689,49 @@ bool EditorModule::MoveCompositeOutputToIndex(int outputNodeId, int targetIndex)
 
 void EditorModule::MoveCompositeOutputToFront(int outputNodeId) {
     MoveCompositeOutputToIndex(outputNodeId, 0);
+}
+
+bool EditorModule::CompletedChainSourceUsesScalableGenerator(int outputNodeId) const {
+    RefreshCompletedChainCacheIfNeeded();
+    const auto chainIt = std::find_if(
+        m_CachedCompletedChains.begin(),
+        m_CachedCompletedChains.end(),
+        [outputNodeId](const CachedCompositeChainState& chain) {
+            return chain.info.outputNodeId == outputNodeId;
+        });
+    if (chainIt == m_CachedCompletedChains.end()) {
+        return false;
+    }
+
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
+    if (!sourceNode || sourceNode->kind != EditorNodeGraph::NodeKind::ImageGenerator) {
+        return false;
+    }
+
+    return sourceNode->imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Square ||
+           sourceNode->imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Circle ||
+           sourceNode->imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Text;
+}
+
+bool EditorModule::CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const {
+    RefreshCompletedChainCacheIfNeeded();
+    const auto chainIt = std::find_if(
+        m_CachedCompletedChains.begin(),
+        m_CachedCompletedChains.end(),
+        [outputNodeId](const CachedCompositeChainState& chain) {
+            return chain.info.outputNodeId == outputNodeId;
+        });
+    if (chainIt == m_CachedCompletedChains.end()) {
+        return false;
+    }
+
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
+    if (!sourceNode || sourceNode->kind != EditorNodeGraph::NodeKind::ImageGenerator) {
+        return false;
+    }
+
+    return sourceNode->imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Square ||
+           sourceNode->imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Circle;
 }
 
 bool EditorModule::ReorderCompositeOutputBefore(int draggedOutputNodeId, int targetOutputNodeId) {

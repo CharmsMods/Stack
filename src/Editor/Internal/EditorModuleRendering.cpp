@@ -2,9 +2,13 @@
 
 #include "Renderer/GLHelpers.h"
 #include <algorithm>
+#include <cmath>
 #include <imgui.h>
 
 namespace {
+
+constexpr int kScalableGeneratorBaseRaster = 1024;
+constexpr int kScalableGeneratorMaxRaster = 4096;
 
 struct CroppedRgbaImage {
     std::vector<unsigned char> pixels;
@@ -35,7 +39,7 @@ bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
            kind == EditorNodeGraph::NodeKind::Mix;
 }
 
-CroppedRgbaImage CropToAlphaBounds(const std::vector<unsigned char>& rgbaPixels, int width, int height) {
+CroppedRgbaImage CropToAlphaBounds(const std::vector<unsigned char>& rgbaPixels, int width, int height, int padding = 0) {
     CroppedRgbaImage result;
     if (rgbaPixels.empty() || width <= 0 || height <= 0) {
         return result;
@@ -64,6 +68,11 @@ CroppedRgbaImage CropToAlphaBounds(const std::vector<unsigned char>& rgbaPixels,
         result.height = height;
         return result;
     }
+
+    minX = std::max(0, minX - std::max(0, padding));
+    minY = std::max(0, minY - std::max(0, padding));
+    maxX = std::min(width - 1, maxX + std::max(0, padding));
+    maxY = std::min(height - 1, maxY + std::max(0, padding));
 
     result.width = std::max(1, maxX - minX + 1);
     result.height = std::max(1, maxY - minY + 1);
@@ -291,6 +300,12 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
         snapshot.width = m_Pipeline.GetCanvasWidth();
         snapshot.height = m_Pipeline.GetCanvasHeight();
         snapshot.channels = m_Pipeline.GetSourceChannels();
+        if (snapshot.sourcePixels.empty() || snapshot.width <= 0 || snapshot.height <= 0) {
+            snapshot.width = 256;
+            snapshot.height = 256;
+            snapshot.channels = 4;
+            snapshot.sourcePixels = BuildTransparentPixels(snapshot.width, snapshot.height);
+        }
     }
     snapshot.graph = BuildGraphSnapshot();
     snapshot.masks = BuildGraphRenderMasks();
@@ -450,13 +465,37 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
             m_CompositeOutputRequestedGenerations.count(chainState.info.outputNodeId)
                 ? m_CompositeOutputRequestedGenerations[chainState.info.outputNodeId]
                 : 0;
+        const bool scalableGenerator = CompletedChainSourceUsesScalableGenerator(chainState.info.outputNodeId);
+        const float scaleX = std::max(0.01f, std::abs(item->scale.x));
+        const float scaleY = std::max(0.01f, std::abs(item->scale.y));
+        const int desiredRasterWidth = scalableGenerator
+            ? std::clamp(
+                static_cast<int>(std::ceil(std::max(
+                    static_cast<float>(kScalableGeneratorBaseRaster),
+                    std::max(1.0f, static_cast<float>(item->textureWidth <= 0 ? kScalableGeneratorBaseRaster : item->textureWidth)) * scaleX))),
+                256,
+                kScalableGeneratorMaxRaster)
+            : std::max(1, item->textureWidth);
+        const int desiredRasterHeight = scalableGenerator
+            ? std::clamp(
+                static_cast<int>(std::ceil(std::max(
+                    static_cast<float>(kScalableGeneratorBaseRaster),
+                    std::max(1.0f, static_cast<float>(item->textureHeight <= 0 ? kScalableGeneratorBaseRaster : item->textureHeight)) * scaleY))),
+                256,
+                kScalableGeneratorMaxRaster)
+            : std::max(1, item->textureHeight);
         const bool needsTextureRefresh =
             item->texture == 0 ||
             completedGeneration < dirtyGeneration ||
-            item->cachedChainFingerprint != chainState.fingerprint;
+            item->cachedChainFingerprint != chainState.fingerprint ||
+            (scalableGenerator &&
+             (item->textureWidth < desiredRasterWidth || item->textureHeight < desiredRasterHeight));
         const bool requestAlreadyPending =
             requestedGeneration >= dirtyGeneration &&
-            item->requestedChainFingerprint == chainState.fingerprint;
+            item->requestedChainFingerprint == chainState.fingerprint &&
+            (!scalableGenerator ||
+             (item->requestedRasterWidth >= desiredRasterWidth &&
+              item->requestedRasterHeight >= desiredRasterHeight));
         if (!needsTextureRefresh || requestAlreadyPending) {
             continue;
         }
@@ -474,6 +513,11 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
             request.width = sourceNode->image.width;
             request.height = sourceNode->image.height;
             request.channels = std::max(1, sourceNode->image.channels);
+        } else if (scalableGenerator) {
+            request.width = desiredRasterWidth;
+            request.height = desiredRasterHeight;
+            request.channels = 4;
+            request.sourcePixels = BuildTransparentPixels(request.width, request.height);
         } else {
             request.width = 256;
             request.height = 256;
@@ -485,6 +529,8 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
         request.chainFingerprint = chainState.fingerprint;
         item->requestedRenderRevision = dirtyGeneration;
         item->requestedChainFingerprint = chainState.fingerprint;
+        item->requestedRasterWidth = request.width;
+        item->requestedRasterHeight = request.height;
         m_CompositeOutputRequestedGenerations[chainState.info.outputNodeId] = dirtyGeneration;
         requests.push_back(std::move(request));
     }
@@ -617,24 +663,46 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 continue;
             }
 
-            const CroppedRgbaImage cropped = CropToAlphaBounds(
-                compositeResult.pixels,
-                compositeResult.width,
-                compositeResult.height);
-            const std::vector<unsigned char>& uploadPixels =
-                !cropped.pixels.empty() ? cropped.pixels : compositeResult.pixels;
-            const int uploadW = cropped.width > 0 ? cropped.width : compositeResult.width;
-            const int uploadH = cropped.height > 0 ? cropped.height : compositeResult.height;
+            const bool scalableGenerator = CompletedChainSourceUsesScalableGenerator(compositeResult.outputNodeId);
+            const bool keepFullRasterFrame = CompletedChainSourceKeepsFullRasterFrame(compositeResult.outputNodeId);
+            const bool hadRasterBeforeUpload = item->textureWidth > 0 && item->textureHeight > 0;
+            const float previousDrawWidth = static_cast<float>(item->textureWidth) * std::max(0.01f, std::abs(item->scale.x));
+            const float previousDrawHeight = static_cast<float>(item->textureHeight) * std::max(0.01f, std::abs(item->scale.y));
+            const CroppedRgbaImage cropped = (scalableGenerator && keepFullRasterFrame)
+                ? CroppedRgbaImage{}
+                : CropToAlphaBounds(
+                    compositeResult.pixels,
+                    compositeResult.width,
+                    compositeResult.height,
+                    scalableGenerator ? 2 : 0);
+            const std::vector<unsigned char>& uploadPixels = (scalableGenerator && keepFullRasterFrame)
+                ? compositeResult.pixels
+                : (!cropped.pixels.empty() ? cropped.pixels : compositeResult.pixels);
+            const int uploadW = (scalableGenerator && keepFullRasterFrame)
+                ? compositeResult.width
+                : (cropped.width > 0 ? cropped.width : compositeResult.width);
+            const int uploadH = (scalableGenerator && keepFullRasterFrame)
+                ? compositeResult.height
+                : (cropped.height > 0 ? cropped.height : compositeResult.height);
             if (item->texture != 0) {
                 glDeleteTextures(1, &item->texture);
                 item->texture = 0;
             }
             item->texture = GLHelpers::CreateTextureFromPixels(uploadPixels.data(), uploadW, uploadH, 4);
+            if (scalableGenerator && hadRasterBeforeUpload) {
+                item->scale.x = previousDrawWidth / std::max(1.0f, static_cast<float>(uploadW));
+                item->scale.y = previousDrawHeight / std::max(1.0f, static_cast<float>(uploadH));
+            } else if (scalableGenerator) {
+                item->scale.x = 256.0f / std::max(1.0f, static_cast<float>(uploadW));
+                item->scale.y = 256.0f / std::max(1.0f, static_cast<float>(uploadH));
+            }
             item->textureWidth = uploadW;
             item->textureHeight = uploadH;
             item->rgbaPixels = uploadPixels;
             item->cachedRenderRevision = compositeResult.dirtyGeneration;
             item->cachedChainFingerprint = compositeResult.chainFingerprint;
+            item->requestedRasterWidth = uploadW;
+            item->requestedRasterHeight = uploadH;
             m_CompositeOutputCompletedGenerations[compositeResult.outputNodeId] = compositeResult.dirtyGeneration;
         }
 
@@ -713,20 +781,38 @@ void EditorModule::SubmitRenderIfReady() {
                 if (!item || pixels.empty() || texW <= 0 || texH <= 0) {
                     continue;
                 }
-                const CroppedRgbaImage cropped = CropToAlphaBounds(pixels, texW, texH);
-                const std::vector<unsigned char>& uploadPixels = !cropped.pixels.empty() ? cropped.pixels : pixels;
-                const int uploadW = cropped.width > 0 ? cropped.width : texW;
-                const int uploadH = cropped.height > 0 ? cropped.height : texH;
+                const bool scalableGenerator = CompletedChainSourceUsesScalableGenerator(request.outputNodeId);
+                const bool keepFullRasterFrame = CompletedChainSourceKeepsFullRasterFrame(request.outputNodeId);
+                const bool hadRasterBeforeUpload = item->textureWidth > 0 && item->textureHeight > 0;
+                const float previousDrawWidth = static_cast<float>(item->textureWidth) * std::max(0.01f, std::abs(item->scale.x));
+                const float previousDrawHeight = static_cast<float>(item->textureHeight) * std::max(0.01f, std::abs(item->scale.y));
+                const CroppedRgbaImage cropped =
+                    (scalableGenerator && keepFullRasterFrame) ? CroppedRgbaImage{} : CropToAlphaBounds(pixels, texW, texH, scalableGenerator ? 2 : 0);
+                const std::vector<unsigned char>& uploadPixels =
+                    (scalableGenerator && keepFullRasterFrame) ? pixels : (!cropped.pixels.empty() ? cropped.pixels : pixels);
+                const int uploadW =
+                    (scalableGenerator && keepFullRasterFrame) ? texW : (cropped.width > 0 ? cropped.width : texW);
+                const int uploadH =
+                    (scalableGenerator && keepFullRasterFrame) ? texH : (cropped.height > 0 ? cropped.height : texH);
                 if (item->texture != 0) {
                     glDeleteTextures(1, &item->texture);
                     item->texture = 0;
                 }
                 item->texture = GLHelpers::CreateTextureFromPixels(uploadPixels.data(), uploadW, uploadH, 4);
+                if (scalableGenerator && hadRasterBeforeUpload) {
+                    item->scale.x = previousDrawWidth / std::max(1.0f, static_cast<float>(uploadW));
+                    item->scale.y = previousDrawHeight / std::max(1.0f, static_cast<float>(uploadH));
+                } else if (scalableGenerator) {
+                    item->scale.x = 256.0f / std::max(1.0f, static_cast<float>(uploadW));
+                    item->scale.y = 256.0f / std::max(1.0f, static_cast<float>(uploadH));
+                }
                 item->textureWidth = uploadW;
                 item->textureHeight = uploadH;
                 item->rgbaPixels = uploadPixels;
                 item->cachedRenderRevision = request.dirtyGeneration;
                 item->cachedChainFingerprint = request.chainFingerprint;
+                item->requestedRasterWidth = uploadW;
+                item->requestedRasterHeight = uploadH;
                 m_CompositeOutputCompletedGenerations[request.outputNodeId] = request.dirtyGeneration;
             }
         }

@@ -154,16 +154,27 @@ bool EditorModule::IsScreenPointOverGraph(float x, float y) const {
 }
 
 bool EditorModule::HandleGraphFileDrop(const std::string& path, float screenX, float screenY) {
+    return HandleGraphFileDrop(std::vector<std::string>{ path }, screenX, screenY);
+}
+
+bool EditorModule::HandleGraphFileDrop(const std::vector<std::string>& paths, float screenX, float screenY) {
+    float anchorX = screenX;
+    float anchorY = screenY;
     if (!IsScreenPointOverGraph(screenX, screenY)) {
-        return false;
+        const bool hasGraphRect = m_GraphDropMaxX > m_GraphDropMinX && m_GraphDropMaxY > m_GraphDropMinY;
+        if (!hasGraphRect) {
+            return false;
+        }
+        anchorX = (m_GraphDropMinX + m_GraphDropMaxX) * 0.5f;
+        anchorY = (m_GraphDropMinY + m_GraphDropMaxY) * 0.5f;
     }
 
     const float safeZoom = std::max(0.01f, m_GraphViewZoom);
     const EditorNodeGraph::Vec2 graphPosition{
-        (screenX - m_GraphViewOriginX - m_GraphViewPanX) / safeZoom - 40.0f,
-        (screenY - m_GraphViewOriginY - m_GraphViewPanY) / safeZoom - 40.0f
+        (anchorX - m_GraphViewOriginX - m_GraphViewPanX) / safeZoom - 40.0f,
+        (anchorY - m_GraphViewOriginY - m_GraphViewPanY) / safeZoom - 40.0f
     };
-    return AddGraphImageChainFromFile(path, graphPosition);
+    return RequestGraphImageChainImports(paths, graphPosition);
 }
 
 void EditorModule::TogglePartialSplitTargets(

@@ -16,9 +16,8 @@ public:
     void Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) override;
     void RenderUI() override {}
     void RenderUI(class EditorModule* editor) override;
-    bool SupportsAdvancedEditor() const override { return true; }
-    const char* GetAdvancedEditorTitle() const override { return GetName(); }
-    void RenderAdvancedEditor(class EditorModule* editor) override;
+    NodeSurfaceSpec GetNodeSurfaceSpec() const override;
+    void RenderExpandedNodeSurface(class EditorModule* editor, const NodeSurfaceContext& context) override;
 
     json Serialize() const override;
     void Deserialize(const json& j) override;
