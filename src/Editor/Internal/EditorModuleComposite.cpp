@@ -45,8 +45,8 @@ EditorModule::CompositeFloatRect MakeNormalizedRect(const float x1, const float 
 }
 
 AffineTransform2D BuildSceneTransform(const EditorModule::CompositeSceneItem& item) {
-    const float baseWidth = std::max(1.0f, static_cast<float>(item.textureWidth));
-    const float baseHeight = std::max(1.0f, static_cast<float>(item.textureHeight));
+    const float baseWidth = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureWidth));
+    const float baseHeight = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureHeight));
     const float width = baseWidth * std::max(0.0001f, item.scale.x);
     const float height = baseHeight * std::max(0.0001f, item.scale.y);
     const float cosR = std::cos(item.rotation);
@@ -86,8 +86,8 @@ ImVec2 TransformPoint(const AffineTransform2D& matrix, const ImVec2& point) {
 
 std::array<ImVec2, 4> ComputeSceneQuadWorld(const EditorModule::CompositeSceneItem& item) {
     const AffineTransform2D transform = BuildSceneTransform(item);
-    const float width = std::max(1.0f, static_cast<float>(item.textureWidth));
-    const float height = std::max(1.0f, static_cast<float>(item.textureHeight));
+    const float width = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureWidth));
+    const float height = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureHeight));
     return {
         TransformPoint(transform, ImVec2(0.0f, 0.0f)),
         TransformPoint(transform, ImVec2(width, 0.0f)),
@@ -262,7 +262,6 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
         EnsureCompositeNode();
-        EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
     MoveCompositeOutputToFront(outputNodeId);
@@ -289,7 +288,6 @@ bool EditorModule::AddGraphImageChainFromPayload(EditorNodeGraph::ImagePayload p
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
         EnsureCompositeNode();
-        EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
     MoveCompositeOutputToFront(outputNodeId);
@@ -338,11 +336,11 @@ bool EditorModule::AddCompositeImageChainFromFile(const std::string& path) {
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
         EnsureCompositeNode();
-        EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
     MoveCompositeOutputToFront(outputNodeId);
     m_CompositeSelectedOutputNodeId = outputNodeId;
+    MarkRenderDirty();
     return true;
 }
 
@@ -374,12 +372,12 @@ bool EditorModule::AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKin
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
         EnsureCompositeNode();
-        EnsureExportBoundsSettingsNode();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
     MoveCompositeOutputToFront(outputNodeId);
     m_CompositeSelectedOutputNodeId = outputNodeId;
     SelectGraphNode(generatorNodeId);
+    MarkRenderDirty();
     return true;
 }
 
@@ -691,6 +689,23 @@ void EditorModule::MoveCompositeOutputToFront(int outputNodeId) {
     MoveCompositeOutputToIndex(outputNodeId, 0);
 }
 
+void EditorModule::MoveCompositeOutputZOrder(int draggedOutputNodeId, int targetOutputNodeId) {
+    auto draggedIt = std::find(m_CompositeZOrder.begin(), m_CompositeZOrder.end(), draggedOutputNodeId);
+    auto targetIt = std::find(m_CompositeZOrder.begin(), m_CompositeZOrder.end(), targetOutputNodeId);
+    if (draggedIt == m_CompositeZOrder.end() || targetIt == m_CompositeZOrder.end() || draggedOutputNodeId == targetOutputNodeId) {
+        return;
+    }
+    bool draggedWasEarlier = (draggedIt < targetIt);
+    m_CompositeZOrder.erase(draggedIt);
+    targetIt = std::find(m_CompositeZOrder.begin(), m_CompositeZOrder.end(), targetOutputNodeId);
+    int targetIdx = static_cast<int>(std::distance(m_CompositeZOrder.begin(), targetIt));
+    if (draggedWasEarlier) {
+        m_CompositeZOrder.insert(m_CompositeZOrder.begin() + targetIdx + 1, draggedOutputNodeId);
+    } else {
+        m_CompositeZOrder.insert(m_CompositeZOrder.begin() + targetIdx, draggedOutputNodeId);
+    }
+}
+
 bool EditorModule::CompletedChainSourceUsesScalableGenerator(int outputNodeId) const {
     RefreshCompletedChainCacheIfNeeded();
     const auto chainIt = std::find_if(
@@ -855,7 +870,6 @@ void EditorModule::SyncCompositeSceneItems(const ImVec2& canvasSize) {
     RefreshCompositeMetadataCacheIfNeeded();
     if (m_CachedCompletedChains.size() >= 2) {
         EnsureCompositeNode();
-        EnsureExportBoundsSettingsNode();
     }
 
     auto upsertPersistedEntry = [this](const CompositeSceneItem& item) {
@@ -933,6 +947,8 @@ void EditorModule::SyncCompositeSceneItems(const ImVec2& canvasSize) {
             item.outputNodeId = outputNodeId;
         }
 
+        item.isScalable = CompletedChainSourceUsesScalableGenerator(outputNodeId);
+
         const auto chainIt = std::find_if(
             m_CachedCompletedChains.begin(),
             m_CachedCompletedChains.end(),
@@ -944,7 +960,7 @@ void EditorModule::SyncCompositeSceneItems(const ImVec2& canvasSize) {
             item.label = "Output " + std::to_string(outputNodeId);
         }
 
-        if (!item.placementInitialized && item.textureWidth > 0 && item.textureHeight > 0 && canvasSize.x > 1.0f && canvasSize.y > 1.0f) {
+        if (!item.placementInitialized && (item.isScalable || (item.textureWidth > 0 && item.textureHeight > 0)) && canvasSize.x > 1.0f && canvasSize.y > 1.0f) {
             const int zIndex = static_cast<int>(std::distance(
                 m_CompositeZOrder.begin(),
                 std::find(m_CompositeZOrder.begin(), m_CompositeZOrder.end(), outputNodeId)));
@@ -952,13 +968,15 @@ void EditorModule::SyncCompositeSceneItems(const ImVec2& canvasSize) {
             const float visibleWorldH = canvasSize.y / std::max(0.001f, m_CompositeViewZoom);
             const float targetW = visibleWorldW * 0.42f;
             const float targetH = visibleWorldH * 0.42f;
+            const float baseW = item.isScalable ? 256.0f : static_cast<float>(item.textureWidth);
+            const float baseH = item.isScalable ? 256.0f : static_cast<float>(item.textureHeight);
             const float fitScale = std::clamp(
-                std::min(targetW / static_cast<float>(item.textureWidth), targetH / static_cast<float>(item.textureHeight)),
+                std::min(targetW / baseW, targetH / baseH),
                 0.1f,
                 1.0f);
             item.scale = ImVec2(fitScale, fitScale);
-            const float drawW = static_cast<float>(item.textureWidth) * item.scale.x;
-            const float drawH = static_cast<float>(item.textureHeight) * item.scale.y;
+            const float drawW = baseW * item.scale.x;
+            const float drawH = baseH * item.scale.y;
             const ImVec2 stagger(
                 (static_cast<float>(zIndex % 3) - 1.0f) * 38.0f,
                 (static_cast<float>(zIndex % 4) - 1.5f) * 26.0f);
@@ -1037,6 +1055,20 @@ bool EditorModule::TryGetCompositeAutoExportBounds(CompositeFloatRect& outBounds
 }
 
 float EditorModule::GetCurrentCompositeExportAspectRatio() const {
+    if (m_CompositeExportSettings.aspectPreset != CompositeExportAspectPreset::Custom) {
+        switch (m_CompositeExportSettings.aspectPreset) {
+            case CompositeExportAspectPreset::Ratio1x1: return 1.0f;
+            case CompositeExportAspectPreset::Ratio4x3: return 4.0f / 3.0f;
+            case CompositeExportAspectPreset::Ratio3x2: return 3.0f / 2.0f;
+            case CompositeExportAspectPreset::Ratio16x9: return 16.0f / 9.0f;
+            case CompositeExportAspectPreset::Ratio9x16: return 9.0f / 16.0f;
+            case CompositeExportAspectPreset::Ratio2x3: return 2.0f / 3.0f;
+            case CompositeExportAspectPreset::Ratio5x4: return 5.0f / 4.0f;
+            case CompositeExportAspectPreset::Ratio21x9: return 21.0f / 9.0f;
+            default: return 1.0f;
+        }
+    }
+
     if (m_CompositeExportSettings.boundsMode == CompositeExportBoundsMode::Custom) {
         const CompositeFloatRect customBounds {
             m_CompositeExportSettings.customX,
@@ -1054,19 +1086,7 @@ float EditorModule::GetCurrentCompositeExportAspectRatio() const {
         }
     }
 
-    switch (m_CompositeExportSettings.aspectPreset) {
-        case CompositeExportAspectPreset::Ratio4x3: return 4.0f / 3.0f;
-        case CompositeExportAspectPreset::Ratio3x2: return 3.0f / 2.0f;
-        case CompositeExportAspectPreset::Ratio16x9: return 16.0f / 9.0f;
-        case CompositeExportAspectPreset::Ratio9x16: return 9.0f / 16.0f;
-        case CompositeExportAspectPreset::Ratio2x3: return 2.0f / 3.0f;
-        case CompositeExportAspectPreset::Ratio5x4: return 5.0f / 4.0f;
-        case CompositeExportAspectPreset::Ratio21x9: return 21.0f / 9.0f;
-        case CompositeExportAspectPreset::Custom: return std::max(0.0001f, m_CompositeExportSettings.customAspectRatio);
-        case CompositeExportAspectPreset::Ratio1x1:
-        default:
-            return 1.0f;
-    }
+    return std::max(0.0001f, m_CompositeExportSettings.customAspectRatio);
 }
 
 void EditorModule::UpdateCompositeCustomExportAspectFromBounds() {

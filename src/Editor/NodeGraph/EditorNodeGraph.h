@@ -30,7 +30,6 @@ enum class NodeKind {
     Layer,
     Output,
     Composite,
-    ExportBoundsSettings,
     Scope,
     MaskGenerator,
     Mix,
@@ -213,7 +212,6 @@ public:
     Node* AddPreviewNode(Vec2 position);
     Node* AddOutputNode(Vec2 position, bool makePrimary = false);
     Node* AddCompositeNode(Vec2 position);
-    Node* AddExportBoundsSettingsNode(Vec2 position);
     Node* EnsureOutputNode();
     void RemoveLayerNode(int layerIndex);
 

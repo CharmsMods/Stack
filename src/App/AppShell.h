@@ -3,12 +3,10 @@
 #include <string>
 #include <memory>
 #include "settings/AppearanceTheme.h"
-#include "SettingsModule.h"
+#include "StyleModule.h"
 #include "../Composite/CompositeModule.h"
 #include "../Editor/EditorModule.h"
 #include "../Library/LibraryModule.h"
-#include "../RenderTab/RenderTab.h"
-#include "../Bundler/BundlerModule.h"
 
 struct GLFWwindow;
 
@@ -36,8 +34,8 @@ private:
     unsigned int m_SplashTexture = 0;
     unsigned int m_EditorTabTexture = 0;
     unsigned int m_LibraryTabTexture = 0;
-    unsigned int m_RenderTabTexture = 0;
     unsigned int m_ProgramLogoTexture = 0;
+    unsigned int m_StyleTabTexture = 0;
     bool m_IsRunning;
     bool m_FirstTimeLayout;
     int m_RequestedTab = 0; // 0 = Library, 1 = Editor
@@ -49,8 +47,6 @@ private:
     std::unique_ptr<StackAppearance::AppearanceManager> m_Appearance;
     EditorModule m_Editor;
     LibraryModule m_Library;
-    RenderTab m_RenderTab;
     CompositeModule m_Composite;
-    BundlerModule m_Bundler;
-    SettingsModule m_Settings;
+    StyleModule m_Style;
 };

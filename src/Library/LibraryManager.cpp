@@ -5,7 +5,7 @@
 #include "Composite/CompositeModule.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
-#include "RenderTab/RenderTab.h"
+
 #include "Renderer/GLHelpers.h"
 #include "Utils/Base64.h"
 #include <algorithm>
@@ -576,85 +576,6 @@ std::vector<unsigned char> DecodeDataUrl(const std::string& dataUrl) {
     size_t commaPos = dataUrl.find(',');
     if (commaPos == std::string::npos) return Utils::Base64Decode(dataUrl);
     return Utils::Base64Decode(dataUrl.substr(commaPos + 1));
-}
-
-bool ConvertWebJsonToStackDocument(const StackFormat::json& webJson, StackFormat::ProjectDocument& outDoc) {
-    if (!webJson.is_object() || webJson.value("version", "") != "mns/v2") return false;
-
-    outDoc.metadata.projectKind = StackFormat::kEditorProjectKind;
-    outDoc.metadata.projectName = webJson.value("name", "Imported Web Project");
-    outDoc.metadata.timestamp = BuildTimestampString();
-
-    // 1. Source Image
-    if (webJson.contains("source")) {
-        const auto& src = webJson["source"];
-        if (src.is_object()) {
-            std::string data;
-            if (src.contains("imageData")) data = src["imageData"];
-            else if (src.contains("rawData")) data = src["rawData"];
-
-            if (!data.empty()) {
-                outDoc.sourceImageBytes = DecodeDataUrl(data);
-            }
-            outDoc.metadata.sourceWidth = src.value("width", 0);
-            outDoc.metadata.sourceHeight = src.value("height", 0);
-        }
-    }
-
-    // 2. Thumbnail
-    if (webJson.contains("preview") && webJson["preview"].is_object()) {
-        const auto& prev = webJson["preview"];
-        std::string thumbData = prev.value("imageData", "");
-        if (!thumbData.empty()) {
-            outDoc.thumbnailBytes = DecodeDataUrl(thumbData);
-        }
-    }
-
-    // 3. Pipeline / Layer Stack
-    StackFormat::json pipeline = StackFormat::json::array();
-    if (webJson.contains("layerStack") && webJson["layerStack"].is_array()) {
-        for (const auto& webLayer : webJson["layerStack"]) {
-            StackFormat::json stackLayer = StackFormat::json::object();
-            
-            // Map layerId -> type
-            std::string layerId = webLayer.value("layerId", "unknown");
-            
-            // Basic mapping of type names
-            std::string type = layerId;
-            if (layerId == "cropTransform") type = "CropTransform";
-            else if (layerId == "adjustments") type = "Adjustments";
-            else if (layerId == "colorGrade") type = "ColorGrade";
-            else if (layerId == "blur") type = "Blur";
-            else if (layerId == "noise") type = "Noise";
-            else if (layerId == "dither") type = "Dither";
-            else if (layerId == "compression") type = "Compression";
-            else if (layerId == "chromaticAberration") type = "ChromaticAberration";
-            else if (layerId == "vignette") type = "Vignette";
-            else if (layerId == "airyBloom") type = "AiryBloom";
-            else if (layerId == "expander") type = "Expander";
-            else if (layerId == "textOverlay") type = "TextOverlay";
-            else if (layerId == "analogVideo") type = "AnalogVideo";
-            else if (layerId == "halftoning") type = "Halftoning";
-            else if (layerId == "glareRays") type = "GlareRays";
-            else if (layerId == "corruption") type = "Corruption";
-            else if (layerId == "alphaHandling") type = "AlphaHandling";
-            
-            stackLayer["type"] = type;
-            stackLayer["enabled"] = webLayer.value("enabled", true);
-
-            // Merge params
-            if (webLayer.contains("params") && webLayer["params"].is_object()) {
-                for (auto& [k, v] : webLayer["params"].items()) {
-                    stackLayer[k] = v;
-                }
-            }
-
-            pipeline.push_back(stackLayer);
-        }
-    }
-
-    outDoc.pipelineData = pipeline;
-    return true;
 }
 
 } // namespace
@@ -1450,23 +1371,42 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
     const std::string trimmedName = TrimWhitespace(name).empty() ? "Untitled Project" : TrimWhitespace(name);
     const StackFormat::json pipeline = editor->SerializePipeline();
 
-    if (editor->IsRenderOnlyUpToActive()) {
-        editor->GetPipeline().Execute(editor->GetLayers());
-    }
-
     int renderedW = 0;
     int renderedH = 0;
-    auto renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
-    if (renderedPixels.empty()) {
+    std::vector<unsigned char> renderedPixels;
+    int sourceW = 0;
+    int sourceH = 0;
+    std::vector<unsigned char> sourcePixels;
+
+    const bool compositeProject = editor->IsCompositeViewportMode();
+    if (compositeProject) {
+        editor->BuildCompositeExportRaster(renderedPixels, renderedW, renderedH);
+        if (!renderedPixels.empty() && renderedW > 0 && renderedH > 0) {
+            sourceW = renderedW;
+            sourceH = renderedH;
+            sourcePixels = std::vector<unsigned char>(static_cast<size_t>(sourceW) * static_cast<size_t>(sourceH) * 4ull, 0u);
+        }
+    } else {
+        if (editor->IsRenderOnlyUpToActive()) {
+            editor->GetPipeline().Execute(editor->GetLayers());
+        }
+        renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
+        if ((renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) && editor->GetNodeGraph().IsOutputConnected()) {
+            editor->GetPipeline().ExecuteGraph(editor->BuildGraphSnapshot());
+            renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
+        }
+        if (!renderedPixels.empty() && renderedW > 0 && renderedH > 0) {
+            sourcePixels = editor->GetPipeline().GetSourcePixels(sourceW, sourceH);
+        }
+    }
+
+    if (renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) {
         m_SaveTaskState = Async::TaskState::Failed;
         m_SaveStatusText = "Failed to capture the rendered result for saving.";
         return;
     }
 
-    int sourceW = 0;
-    int sourceH = 0;
-    auto sourcePixels = editor->GetPipeline().GetSourcePixels(sourceW, sourceH);
-    if (sourcePixels.empty()) {
+    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
         m_SaveTaskState = Async::TaskState::Failed;
         m_SaveStatusText = "Failed to capture the source image for saving.";
         return;
@@ -1622,168 +1562,7 @@ void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModul
     });
 }
 
-void LibraryManager::RequestSaveRenderProject(
-    const std::string& name,
-    const StackFormat::json& renderPayload,
-    const std::vector<unsigned char>& beautyPixels,
-    int width,
-    int height,
-    const std::string& existingFileName,
-    std::function<void(bool, const std::string&, const std::string&)> onComplete) {
-    if (Async::IsBusy(m_SaveTaskState) || beautyPixels.empty() || width <= 0 || height <= 0) {
-        if (onComplete) {
-            onComplete(false, std::string(), std::string());
-        }
-        return;
-    }
 
-    m_SaveTaskState = Async::TaskState::Applying;
-    m_SaveStatusText = "Capturing the render project snapshot for the library...";
-
-    const std::string trimmedName = TrimWhitespace(name).empty() ? "Untitled Render Scene" : TrimWhitespace(name);
-    const std::string safeStem = SanitizeFileStem(trimmedName);
-    const std::string fileName = existingFileName.empty()
-        ? safeStem + "_" + std::to_string(std::time(nullptr)) + ".stack"
-        : existingFileName;
-    const std::string assetFileName = BuildAssetPathForProjectFile(fileName).filename().string();
-
-    ++m_SaveGeneration;
-    const std::uint64_t generation = m_SaveGeneration;
-    m_SaveTaskState = Async::TaskState::Running;
-    m_SaveStatusText = "Packaging and writing render project files in the background...";
-
-    Async::TaskSystem::Get().Submit([this,
-                                     generation,
-                                     trimmedName,
-                                     fileName,
-                                     assetFileName,
-                                     renderPayload,
-                                     width,
-                                     height,
-                                     beautyPixels,
-                                     onComplete = std::move(onComplete)]() mutable {
-        bool wroteProject = false;
-        bool wroteAsset = false;
-
-        try {
-            std::vector<unsigned char> flippedPixels = beautyPixels;
-            FlipImageRowsInPlace(flippedPixels, width, height, 4);
-
-            std::vector<unsigned char> previewPngBytes;
-            stbi_write_png_to_func(png_write_func, &previewPngBytes, width, height, 4, flippedPixels.data(), width * 4);
-
-            StackFormat::ProjectDocument document;
-            document.metadata.projectKind = StackFormat::kRenderProjectKind;
-            document.metadata.projectName = trimmedName;
-            document.metadata.timestamp = BuildTimestampString();
-            document.metadata.sourceWidth = width;
-            document.metadata.sourceHeight = height;
-            document.thumbnailBytes = GenerateThumbnailBytes(flippedPixels, width, height);
-            document.sourceImageBytes = previewPngBytes;
-            document.pipelineData = renderPayload;
-
-            wroteProject = StackFormat::WriteProjectFile(m_LibraryPath / fileName, document);
-            if (wroteProject) {
-                wroteAsset = WriteFileBytes(m_AssetsPath / assetFileName, previewPngBytes);
-            }
-        } catch (...) {
-            wroteProject = false;
-            wroteAsset = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this,
-                                             generation,
-                                             wroteProject,
-                                             wroteAsset,
-                                             fileName,
-                                             assetFileName,
-                                             onComplete = std::move(onComplete)]() mutable {
-            if (generation != m_SaveGeneration) {
-                return;
-            }
-
-            if (wroteProject && wroteAsset) {
-                m_SaveTaskState = Async::TaskState::Idle;
-                m_SaveStatusText = "Render project saved to the library.";
-                m_LastLibrarySignature = 0;
-                if (onComplete) {
-                    onComplete(true, fileName, assetFileName);
-                }
-            } else {
-                m_SaveTaskState = Async::TaskState::Failed;
-                m_SaveStatusText = "Failed to save the render project to the library.";
-                if (onComplete) {
-                    onComplete(false, fileName, assetFileName);
-                }
-            }
-        });
-    });
-}
-
-void LibraryManager::RequestLoadRenderProject(const std::string& fileName, RenderTab* renderTab, std::function<void(bool)> onComplete) {
-    if (fileName.empty() || renderTab == nullptr) {
-        if (onComplete) onComplete(false);
-        return;
-    }
-
-    ++m_ProjectLoadGeneration;
-    const std::uint64_t generation = m_ProjectLoadGeneration;
-    m_ProjectLoadTaskState = Async::TaskState::Queued;
-    m_ProjectLoadStatusText = "Loading the render project in the background...";
-
-    Async::TaskSystem::Get().Submit([this, generation, fileName, renderTab, onComplete = std::move(onComplete)]() mutable {
-        StackFormat::ProjectLoadOptions options;
-        options.includeThumbnail = false;
-        options.includeSourceImage = false;
-        options.includePipelineData = true;
-
-        StackFormat::ProjectDocument document;
-        bool success = LoadProjectDocument(fileName, document, options);
-        if (success) {
-            success = document.metadata.projectKind == StackFormat::kRenderProjectKind;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this,
-                                             generation,
-                                             fileName,
-                                             renderTab,
-                                             onComplete = std::move(onComplete),
-                                             document = std::move(document),
-                                             success]() mutable {
-            if (generation != m_ProjectLoadGeneration) {
-                return;
-            }
-
-            if (!success) {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                m_ProjectLoadStatusText = "Failed to load the selected render project.";
-                if (onComplete) onComplete(false);
-                return;
-            }
-
-            m_ProjectLoadTaskState = Async::TaskState::Applying;
-            m_ProjectLoadStatusText = "Applying render project data...";
-
-            std::string errorMessage;
-            const bool applied = renderTab->ApplyLibraryProjectPayload(
-                document.pipelineData,
-                document.metadata.projectName,
-                fileName,
-                errorMessage);
-            if (applied) {
-                m_ProjectLoadTaskState = Async::TaskState::Idle;
-                m_ProjectLoadStatusText = "Render project loaded into the render tab.";
-            } else {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                m_ProjectLoadStatusText = errorMessage.empty()
-                    ? "Failed to apply the loaded render project."
-                    : errorMessage;
-            }
-
-            if (onComplete) onComplete(applied);
-        });
-    });
-}
 
 void LibraryManager::RequestSaveCompositeProject(
     const std::string& name,
@@ -2648,46 +2427,6 @@ void LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bu
 std::filesystem::path LibraryManager::BuildAssetPathForProjectFile(const std::string& projectFileName) const {
     return m_AssetsPath / (std::filesystem::path(projectFileName).stem().string() + ".png");
 }
-void LibraryManager::RequestImportWebProject(const std::string& sourcePath) {
-    if (sourcePath.empty() || Async::IsBusy(m_ImportTaskState)) return;
-
-    m_ImportTaskState = Async::TaskState::Applying;
-    m_ImportStatusText = "Importing and converting web project...";
-
-    ++m_ImportGeneration;
-    const std::uint64_t generation = m_ImportGeneration;
-
-    Async::TaskSystem::Get().Submit([this, generation, sourcePath]() mutable {
-        bool success = false;
-        try {
-            std::ifstream file(sourcePath, std::ios::binary);
-            if (file.is_open()) {
-                StackFormat::json webJson = StackFormat::json::parse(file);
-                StackFormat::ProjectDocument document;
-                if (ConvertWebJsonToStackDocument(webJson, document)) {
-                    std::string stem = std::filesystem::path(sourcePath).stem().string();
-                    std::string fileName = SanitizeFileStem(stem) + "_" + std::to_string(std::time(nullptr)) + ".stack";
-                    success = StackFormat::WriteProjectFile(m_LibraryPath / fileName, document);
-                }
-            }
-        } catch (...) {
-            success = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this, generation, success]() {
-            if (generation != m_ImportGeneration) return;
-
-            if (success) {
-                m_ImportTaskState = Async::TaskState::Idle;
-                m_ImportStatusText = "Web project imported successfully.";
-                m_LastLibrarySignature = 0;
-            } else {
-                m_ImportTaskState = Async::TaskState::Failed;
-                m_ImportStatusText = "Failed to import web project.";
-            }
-        });
-    });
-}
 
 void LibraryManager::RequestLoadProjectFromPath(const std::filesystem::path& absolutePath, EditorModule* editor, std::function<void(bool)> onComplete) {
     if (absolutePath.empty() || !editor) {
@@ -2773,80 +2512,11 @@ void LibraryManager::RequestLoadProjectFromPath(const std::filesystem::path& abs
     });
 }
 
-void LibraryManager::RequestLoadRenderProjectFromPath(const std::filesystem::path& absolutePath, RenderTab* renderTab, std::function<void(bool)> onComplete) {
-    if (absolutePath.empty() || renderTab == nullptr) {
-        if (onComplete) onComplete(false);
-        return;
-    }
 
-    ++m_ProjectLoadGeneration;
-    const std::uint64_t generation = m_ProjectLoadGeneration;
-    m_ProjectLoadTaskState = Async::TaskState::Queued;
-    m_ProjectLoadStatusText = "Loading render project from path...";
-
-    Async::TaskSystem::Get().Submit([this, generation, absolutePath, renderTab, onComplete = std::move(onComplete)]() mutable {
-        StackFormat::ProjectLoadOptions options;
-        options.includeThumbnail = false;
-        options.includeSourceImage = false;
-        options.includePipelineData = true;
-
-        StackFormat::ProjectDocument document;
-        bool success = false;
-        if (std::filesystem::exists(absolutePath)) {
-            if (StackFormat::ReadProjectFile(absolutePath, document, options)) {
-                success = true;
-            }
-        }
-
-        if (success) {
-            success = document.metadata.projectKind == StackFormat::kRenderProjectKind;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this,
-                                             generation,
-                                             absolutePath,
-                                             renderTab,
-                                             onComplete = std::move(onComplete),
-                                             document = std::move(document),
-                                             success]() mutable {
-            if (generation != m_ProjectLoadGeneration) {
-                return;
-            }
-
-            if (!success) {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                m_ProjectLoadStatusText = "Failed to load render project from disk.";
-                if (onComplete) onComplete(false);
-                return;
-            }
-
-            m_ProjectLoadTaskState = Async::TaskState::Applying;
-            m_ProjectLoadStatusText = "Applying render data...";
-
-            std::string errorMessage;
-            const bool applied = renderTab->ApplyLibraryProjectPayload(
-                document.pipelineData,
-                document.metadata.projectName,
-                absolutePath.filename().string(),
-                errorMessage);
-
-            if (applied) {
-                m_ProjectLoadTaskState = Async::TaskState::Idle;
-                m_ProjectLoadStatusText = "Render project loaded successfully.";
-            } else {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                m_ProjectLoadStatusText = errorMessage.empty() ? "Failed to apply render data." : errorMessage;
-            }
-
-            if (onComplete) onComplete(applied);
-        });
-    });
-}
 
 void LibraryManager::RequestImportAndLoad(
     const std::string& sourcePath,
     EditorModule* editor,
-    RenderTab* renderTab,
     CompositeModule* composite,
     std::function<void(int)> onTabSwitchRequested) {
     if (sourcePath.empty()) return;
@@ -2947,8 +2617,9 @@ void LibraryManager::RequestImportAndLoad(
         RefreshLibrary();
 
         if (document.metadata.projectKind == StackFormat::kRenderProjectKind) {
-            if (onTabSwitchRequested) onTabSwitchRequested(3);
-            RequestLoadRenderProjectFromPath(m_LibraryPath / fileName, renderTab);
+            m_ImportStatusText = "Render projects are no longer supported.";
+            m_ImportTaskState = Async::TaskState::Failed;
+            return;
         } else {
             if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
                 m_ImportStatusText = "Legacy standalone composite projects are no longer supported.";

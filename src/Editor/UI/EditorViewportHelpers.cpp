@@ -32,8 +32,8 @@ AffineTransform2D Inverse(const AffineTransform2D& matrix) {
 }
 
 AffineTransform2D BuildLocalTransform(const EditorModule::CompositeSceneItem& item) {
-    const float baseWidth = std::max(1.0f, static_cast<float>(item.textureWidth));
-    const float baseHeight = std::max(1.0f, static_cast<float>(item.textureHeight));
+    const float baseWidth = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureWidth));
+    const float baseHeight = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureHeight));
     const float width = baseWidth * std::max(0.0001f, item.scale.x);
     const float height = baseHeight * std::max(0.0001f, item.scale.y);
     const float cosR = std::cos(item.rotation);
@@ -57,8 +57,8 @@ ImVec2 TransformPoint(const AffineTransform2D& matrix, const ImVec2& point) {
 
 std::array<ImVec2, 4> ComputeSceneQuadWorld(const EditorModule::CompositeSceneItem& item) {
     const AffineTransform2D local = BuildLocalTransform(item);
-    const float width = std::max(1.0f, static_cast<float>(item.textureWidth));
-    const float height = std::max(1.0f, static_cast<float>(item.textureHeight));
+    const float width = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureWidth));
+    const float height = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureHeight));
     return {
         TransformPoint(local, ImVec2(0.0f, 0.0f)),
         TransformPoint(local, ImVec2(width, 0.0f)),

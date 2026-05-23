@@ -689,13 +689,6 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 item->texture = 0;
             }
             item->texture = GLHelpers::CreateTextureFromPixels(uploadPixels.data(), uploadW, uploadH, 4);
-            if (scalableGenerator && hadRasterBeforeUpload) {
-                item->scale.x = previousDrawWidth / std::max(1.0f, static_cast<float>(uploadW));
-                item->scale.y = previousDrawHeight / std::max(1.0f, static_cast<float>(uploadH));
-            } else if (scalableGenerator) {
-                item->scale.x = 256.0f / std::max(1.0f, static_cast<float>(uploadW));
-                item->scale.y = 256.0f / std::max(1.0f, static_cast<float>(uploadH));
-            }
             item->textureWidth = uploadW;
             item->textureHeight = uploadH;
             item->rgbaPixels = uploadPixels;
@@ -799,13 +792,6 @@ void EditorModule::SubmitRenderIfReady() {
                     item->texture = 0;
                 }
                 item->texture = GLHelpers::CreateTextureFromPixels(uploadPixels.data(), uploadW, uploadH, 4);
-                if (scalableGenerator && hadRasterBeforeUpload) {
-                    item->scale.x = previousDrawWidth / std::max(1.0f, static_cast<float>(uploadW));
-                    item->scale.y = previousDrawHeight / std::max(1.0f, static_cast<float>(uploadH));
-                } else if (scalableGenerator) {
-                    item->scale.x = 256.0f / std::max(1.0f, static_cast<float>(uploadW));
-                    item->scale.y = 256.0f / std::max(1.0f, static_cast<float>(uploadH));
-                }
                 item->textureWidth = uploadW;
                 item->textureHeight = uploadH;
                 item->rgbaPixels = uploadPixels;

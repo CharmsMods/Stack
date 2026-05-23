@@ -953,14 +953,17 @@ void RenderPipeline::EnsureUtilityPrograms() {
                 return;
             }
             if (uKind == 2) {
-                vec2 centered = abs(vTexCoord - vec2(0.5)) / vec2(0.34, 0.34);
-                float mask = step(max(centered.x, centered.y), 1.0);
+                float dist = max(abs(vTexCoord.x - 0.5), abs(vTexCoord.y - 0.5)) - 0.34;
+                float delta = fwidth(dist);
+                float mask = 1.0 - smoothstep(-0.5 * delta, 0.5 * delta, dist);
                 FragColor = vec4(uColorA.rgb, uColorA.a * mask);
                 return;
             }
             if (uKind == 3) {
                 float d = distance(vTexCoord, vec2(0.5));
-                float mask = 1.0 - smoothstep(0.33, 0.345, d);
+                float dist = d - 0.34;
+                float delta = fwidth(dist);
+                float mask = 1.0 - smoothstep(-0.5 * delta, 0.5 * delta, dist);
                 FragColor = vec4(uColorA.rgb, uColorA.a * mask);
                 return;
             }

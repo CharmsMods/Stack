@@ -13,5 +13,8 @@ public:
     void Render(EditorModule* editor);
 
 private:
+    void RenderExportSettings(EditorModule* editor);
+    void RenderSettings(EditorModule* editor);
+
     EditorNodeGraphUI m_NodeGraphUI;
 };

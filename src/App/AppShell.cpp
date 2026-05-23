@@ -2,7 +2,7 @@
 #include "Async/TaskSystem.h"
 #include "Renderer/GLLoader.h"
 #include "settings/AppearanceTheme.h"
-#include "SettingsModule.h"
+#include "StyleModule.h"
 #include <GLFW/glfw3.h>
 #include "imgui.h"
 #include <imgui_internal.h>
@@ -28,9 +28,7 @@ enum RootTabId {
     RootTabLibrary = 0,
     RootTabEditor = 1,
     RootTabComposite = 2,
-    RootTabRender = 3,
-    RootTabBundler = 4,
-    RootTabSettings = 5
+    RootTabStyle = 3
 };
 
 struct RootTabDescriptor {
@@ -89,8 +87,8 @@ AppShell::AppShell()
     , m_SplashTexture(0)
     , m_EditorTabTexture(0)
     , m_LibraryTabTexture(0)
-    , m_RenderTabTexture(0)
     , m_ProgramLogoTexture(0)
+    , m_StyleTabTexture(0)
     , m_IsRunning(false)
     , m_FirstTimeLayout(true) {}
 
@@ -166,24 +164,22 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
         EmbeddedTabIcons::Library_png_data,
         EmbeddedTabIcons::Library_png_size,
         "Library");
-    m_RenderTabTexture = LoadEmbeddedPngTexture(
-        EmbeddedTabIcons::Render_png_data,
-        EmbeddedTabIcons::Render_png_size,
-        "Render");
     m_ProgramLogoTexture = LoadEmbeddedPngTexture(
         EmbeddedTabIcons::CharmLogo_png_data,
         EmbeddedTabIcons::CharmLogo_png_size,
         "Charm logo");
+    m_StyleTabTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::Style_png_data,
+        EmbeddedTabIcons::Style_png_size,
+        "Style");
 
     glfwSetWindowUserPointer(m_Window, this);
     glfwSetDropCallback(m_Window, OnFileDrop);
 
     Async::TaskSystem::Get().Initialize();
-    m_Editor.Initialize(m_Window);
+    m_Editor.Initialize(m_Window, m_Appearance.get());
     m_Composite.Initialize();
     // m_Library.Initialize(); // We will call this manually in the splash screen
-    m_RenderTab.Initialize();
-    m_Bundler.Initialize();
 
     ShowSplashScreen();
 
@@ -191,7 +187,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
         m_Appearance->Save();
     }
 
-    m_Settings.Initialize(m_Appearance.get());
+    m_Style.Initialize(m_Appearance.get());
 
     // Now that we are back in the main context, upload the library textures
     LibraryManager::Get().UploadLibraryTextures();
@@ -245,6 +241,10 @@ void AppShell::Run() {
 }
 
 void AppShell::RenderUI() {
+    if (m_Appearance) {
+        m_Appearance->ApplyCurrentTheme(ImGui::GetIO(), ImGui::GetStyle());
+    }
+
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -264,11 +264,9 @@ void AppShell::RenderUI() {
     ImGui::PopStyleVar(3);
 
     const std::vector<RootTabDescriptor> tabs = {
-        { RootTabLibrary, "Library", m_LibraryTabTexture, [this]() { m_Library.RenderUI(&m_Editor, &m_RenderTab, &m_Composite, &m_RequestedTab); } },
+        { RootTabLibrary, "Library", m_LibraryTabTexture, [this]() { m_Library.RenderUI(&m_Editor, &m_Composite, m_Appearance.get(), &m_RequestedTab); } },
         { RootTabEditor, "Editor", m_EditorTabTexture, [this]() { m_Editor.RenderUI(); } },
-        { RootTabRender, "Render", m_RenderTabTexture, [this]() { m_RenderTab.RenderUI(); } },
-        { RootTabBundler, "Bundler", 0, [this]() { m_Bundler.RenderUI(); } },
-        { RootTabSettings, "Settings", 0, [this]() { m_Settings.RenderUI(); } }
+        { RootTabStyle, "Style", m_StyleTabTexture, [this]() { m_Style.RenderUI(); } }
     };
 
     if (m_RequestedTab != -1 && m_RequestedTab != m_CurrentTabId) {
@@ -314,6 +312,9 @@ void AppShell::RenderUI() {
         return clicked;
     };
 
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::SetCursorPosX(12.0f);
+
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
     for (size_t i = 0; i < tabs.size(); ++i) {
         const RootTabDescriptor& tab = tabs[i];
@@ -329,7 +330,7 @@ void AppShell::RenderUI() {
 
     if (m_ProgramLogoTexture != 0) {
         constexpr float logoSize = 20.0f;
-        constexpr float logoRightPadding = 10.0f;
+        constexpr float logoRightPadding = 12.0f;
         const float logoX = ImGui::GetWindowContentRegionMax().x - logoSize - logoRightPadding;
         if (logoX > ImGui::GetCursorPosX()) {
             ImGui::SameLine(0.0f, 0.0f);
@@ -342,6 +343,8 @@ void AppShell::RenderUI() {
 
     m_Library.RenderGlobalPopups();
     RenderEditorSavePrompts();
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
     for (const RootTabDescriptor& tab : tabs) {
         if (tab.id == m_CurrentTabId) {
@@ -444,17 +447,15 @@ void AppShell::Shutdown() {
         glDeleteTextures(1, &m_LibraryTabTexture);
         m_LibraryTabTexture = 0;
     }
-    if (m_RenderTabTexture) {
-        glDeleteTextures(1, &m_RenderTabTexture);
-        m_RenderTabTexture = 0;
-    }
     if (m_ProgramLogoTexture) {
         glDeleteTextures(1, &m_ProgramLogoTexture);
         m_ProgramLogoTexture = 0;
     }
-    m_Settings.Shutdown();
-    m_Bundler.Shutdown();
-    m_RenderTab.Shutdown();
+    if (m_StyleTabTexture) {
+        glDeleteTextures(1, &m_StyleTabTexture);
+        m_StyleTabTexture = 0;
+    }
+    m_Style.Shutdown();
     m_Composite.Shutdown();
     Async::TaskSystem::Get().Shutdown();
     ImGui_ImplOpenGL3_Shutdown();
@@ -503,7 +504,7 @@ void AppShell::HandleDrop(int count, const char** paths) {
                 if (IsSupportedDroppedImagePath(path)) {
                     continue;
                 }
-                LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, nullptr, [this](int tabId) {
+                LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, nullptr, [this](int tabId) {
                     RequestTabSwitch(tabId);
                 });
             }
@@ -513,7 +514,7 @@ void AppShell::HandleDrop(int count, const char** paths) {
 
     for (int i = 0; i < count; ++i) {
         const std::string path = paths[i] ? paths[i] : "";
-        LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, &m_RenderTab, nullptr, [this](int tabId) {
+        LibraryManager::Get().RequestImportAndLoad(path, &m_Editor, nullptr, [this](int tabId) {
             RequestTabSwitch(tabId);
         });
     }

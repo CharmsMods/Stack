@@ -206,7 +206,6 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             break;
     }
     const std::vector<int>& selected = editor->GetNodeGraph().GetSelectedNodeIds();

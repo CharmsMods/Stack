@@ -99,6 +99,12 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
     if (ImGui::MenuItem("New Project")) {
         editor->RequestNewProject();
     }
+    if (ImGui::MenuItem("Load Project File...")) {
+        const std::string path = FileDialogs::OpenProjectFileDialog("Load Project File");
+        if (!path.empty()) {
+            LibraryManager::Get().RequestImportAndLoad(path, editor);
+        }
+    }
     ImGui::Separator();
     if (ImGui::BeginMenu("Save...")) {
         ImGui::BeginDisabled(!canSaveProject || saveBusy);

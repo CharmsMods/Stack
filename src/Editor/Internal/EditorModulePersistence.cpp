@@ -185,6 +185,14 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
         sourceWidth,
         sourceHeight,
         m_Pipeline.GetSourceChannels());
+
+    // Auto-restore embedded project image assets into local library assets
+    for (const auto& node : m_NodeGraph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::Image && !node.image.pngBytes.empty()) {
+            LibraryManager::Get().QueueLooseAssetSave(node.image.label, node.image.pngBytes);
+        }
+    }
+
     DeserializeCompositePersistence(serialized);
     RefreshGraphLayerMetadata();
 

@@ -7,7 +7,9 @@
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include "ThirdParty/stb_image.h"
+#include "App/Resources/EmbeddedTabIcons.h"
 #include "ThirdParty/stb_image_write.h"
+#include "App/settings/AppearanceTheme.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -479,7 +481,8 @@ EditorModule::~EditorModule() {
     ClearCompositeSceneTextures();
 }
 
-void EditorModule::Initialize(GLFWwindow* sharedWindow) {
+void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::AppearanceManager* appearance) {
+    m_Appearance = appearance;
     std::vector<std::string> registryErrors;
     if (!LayerRegistry::ValidateRegistry(&registryErrors)) {
         for (const std::string& error : registryErrors) {
@@ -713,6 +716,9 @@ void EditorModule::SelectGraphNode(int nodeId) {
     } else {
         SelectLayer(-1);
     }
+    if (node && node->kind == EditorNodeGraph::NodeKind::Output) {
+        m_CompositeSelectedOutputNodeId = nodeId;
+    }
 }
 
 bool EditorModule::LayerUsesRichNodeSurface(int layerIndex) const {
@@ -838,6 +844,10 @@ bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph
 }
 
 bool EditorModule::AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition) {
+    if (!payload.pngBytes.empty()) {
+        LibraryManager::Get().QueueLooseAssetSave(payload.label, payload.pngBytes);
+    }
+
     EditorNodeGraph::Node* node = m_NodeGraph.AddImageNode(std::move(payload), graphPosition);
     if (node) {
         SelectGraphNode(node->id);
@@ -1344,7 +1354,6 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
                 renderNode.mixFactor = node.mixFactor;
                 break;
             case EditorNodeGraph::NodeKind::Composite:
-            case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             case EditorNodeGraph::NodeKind::Scope:
             case EditorNodeGraph::NodeKind::Preview:
                 continue;
@@ -1506,58 +1515,57 @@ std::string EditorModule::BuildCompositeChainLabel(int outputNodeId) const {
 }
 
 bool EditorModule::HasCompositeNode() const {
-    return std::any_of(
-        m_NodeGraph.GetNodes().begin(),
-        m_NodeGraph.GetNodes().end(),
-        [](const EditorNodeGraph::Node& node) { return node.kind == EditorNodeGraph::NodeKind::Composite; });
+    return false;
 }
 
 void EditorModule::EnsureCompositeNode() {
-    if (HasCompositeNode()) {
-        return;
-    }
-
-    float anchorX = 300.0f;
-    float anchorY = 280.0f;
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::Output) {
-            anchorX = std::max(anchorX, node.position.x - 240.0f);
-            anchorY = std::max(anchorY, node.position.y + 180.0f);
-        }
-    }
-    m_NodeGraph.AddCompositeNode(EditorNodeGraph::Vec2{ anchorX, anchorY });
+    // Deprecated: settings have been fully migrated to the unified editor settings panel.
 }
 
-bool EditorModule::HasExportBoundsSettingsNode() const {
-    return std::any_of(
-        m_NodeGraph.GetNodes().begin(),
-        m_NodeGraph.GetNodes().end(),
-        [](const EditorNodeGraph::Node& node) { return node.kind == EditorNodeGraph::NodeKind::ExportBoundsSettings; });
-}
-
-void EditorModule::EnsureExportBoundsSettingsNode() {
-    if (HasExportBoundsSettingsNode()) {
-        return;
-    }
-
-    float anchorX = 620.0f;
-    float anchorY = 320.0f;
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::Composite) {
-            anchorX = node.position.x + 320.0f;
-            anchorY = node.position.y;
-            break;
-        }
-        if (node.kind == EditorNodeGraph::NodeKind::Output) {
-            anchorX = std::max(anchorX, node.position.x + 220.0f);
-            anchorY = std::max(anchorY, node.position.y + 100.0f);
-        }
-    }
-    m_NodeGraph.AddExportBoundsSettingsNode(EditorNodeGraph::Vec2{ anchorX, anchorY });
-}
 
 void EditorModule::RenderUI() {
     ConsumeRenderWorkerResults();
+
+    // Safety fallback: if ExportSettings is active or targeted but we have less than 2 completed chains, fallback to NodeGraph
+    if (GetCompletedChainCount() < 2) {
+        if (m_ActiveSubWindow == EditorSubWindow::ExportSettings) {
+            m_ActiveSubWindow = EditorSubWindow::NodeGraph;
+        }
+        if (m_TargetSubWindow == EditorSubWindow::ExportSettings) {
+            m_TargetSubWindow = EditorSubWindow::NodeGraph;
+        }
+    }
+
+    // Update Sub-Window Transition
+    if (m_ActiveSubWindow != m_TargetSubWindow || m_SubWindowTransitionFadingOut || m_SubWindowTransitionAlpha < 1.0f) {
+        float dt = ImGui::GetIO().DeltaTime;
+        if (m_SubWindowTransitionFadingOut) {
+            m_SubWindowTransitionAlpha -= dt * 6.0f;
+            if (m_SubWindowTransitionAlpha <= 0.0f) {
+                m_SubWindowTransitionAlpha = 0.0f;
+                m_ActiveSubWindow = m_TargetSubWindow;
+                m_SubWindowTransitionFadingOut = false; // Start fading in
+            }
+        } else {
+            m_SubWindowTransitionAlpha += dt * 6.0f;
+            if (m_SubWindowTransitionAlpha >= 1.0f) {
+                m_SubWindowTransitionAlpha = 1.0f;
+            }
+        }
+    }
+
+    // Intercept keyboard hotkeys 1, 2, and 3
+    if (CanConsumeEditorCommandKeys()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_1, false)) {
+            SwitchToSubWindow(EditorSubWindow::NodeGraph);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_2, false) && GetCompletedChainCount() >= 2) {
+            SwitchToSubWindow(EditorSubWindow::ExportSettings);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_3, false)) {
+            SwitchToSubWindow(EditorSubWindow::Settings);
+        }
+    }
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
                            | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
@@ -1639,6 +1647,40 @@ void EditorModule::RenderUI() {
     const float paneHeight = std::max(0.0f, workspaceSize.y);
     const float rightWidth = std::max(0.0f, workspaceSize.x - m_LeftPaneWidth - effectiveSplitGap);
 
+    // Update Left Panel Hover & Animation State
+    if (m_ActiveSubWindow == EditorSubWindow::NodeGraph && m_LeftPaneWidth > 1.0f) {
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        bool hoveringPanelOrTab = false;
+        
+        if (!m_LeftPanelExpanded) {
+            // Hover trigger along the entire left wall/edge of the window
+            if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + 15.0f &&
+                mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
+                hoveringPanelOrTab = true;
+            }
+        } else {
+            if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + m_LeftPanelWidthAnim + 15.0f &&
+                mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
+                hoveringPanelOrTab = true;
+            }
+        }
+        
+        if (ImGui::IsDragDropActive()) {
+            hoveringPanelOrTab = true;
+        }
+        
+        m_LeftPanelExpanded = hoveringPanelOrTab;
+    } else {
+        m_LeftPanelExpanded = false;
+    }
+
+    float leftPanelTargetWidth = m_LeftPanelExpanded ? 220.0f : 0.0f;
+    float animDt = ImGui::GetIO().DeltaTime;
+    m_LeftPanelWidthAnim += (leftPanelTargetWidth - m_LeftPanelWidthAnim) * animDt * 10.0f;
+    if (std::abs(m_LeftPanelWidthAnim - leftPanelTargetWidth) < 0.1f) {
+        m_LeftPanelWidthAnim = leftPanelTargetWidth;
+    }
+
     if (m_LeftPaneWidth > 1.0f) {
         ImGui::SetCursorScreenPos(workspacePos);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 16.0f));
@@ -1646,7 +1688,143 @@ void EditorModule::RenderUI() {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, workspaceColor);
         ImGui::BeginChild("EditorGraphPane", ImVec2(m_LeftPaneWidth, paneHeight), false,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_SubWindowTransitionAlpha);
         m_Sidebar.Render(this);
+        ImGui::PopStyleVar();
+
+        RenderFloatingToolbar();
+
+        // Canvas Stack Slide-out Drawer Overlay
+        if (m_ActiveSubWindow == EditorSubWindow::NodeGraph) {
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            
+            // 1. Sliding panel background & content
+            if (m_LeftPanelWidthAnim > 0.1f) {
+                ImVec2 panelMin = workspacePos;
+                
+                // Redesigned premium feathered blend background
+                float gradientWidth = std::min(60.0f, m_LeftPanelWidthAnim);
+                float solidWidth = m_LeftPanelWidthAnim - gradientWidth;
+                
+                // Dynamic matching color with translucency based on theme workspace color
+                const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
+                const bool isLightBg = luminance >= 0.5f;
+
+                ImVec4 colBgOpaqueVec = workspaceColor;
+                colBgOpaqueVec.w = isLightBg ? 0.94f : 0.92f;
+                const ImU32 colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
+
+                ImVec4 colBgTransVec = workspaceColor;
+                colBgTransVec.w = 0.0f;
+                const ImU32 colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
+
+                const ImU32 colTitleText = isLightBg ? IM_COL32(18, 24, 30, 255) : IM_COL32(255, 255, 255, 255);
+                const ImU32 colPassiveText = isLightBg ? IM_COL32(80, 95, 105, 220) : IM_COL32(140, 160, 170, 200);
+                const ImU32 colActiveText = isLightBg ? IM_COL32(16, 110, 190, 255) : IM_COL32(92, 178, 255, 255);
+                const ImU32 colNormalText = isLightBg ? IM_COL32(40, 50, 60, 220) : IM_COL32(200, 210, 220, 200);
+                const ImU32 colHoveredHeader = isLightBg ? IM_COL32(16, 110, 190, 28) : IM_COL32(92, 178, 255, 30);
+                const ImU32 colActiveHeader = isLightBg ? IM_COL32(16, 110, 190, 48) : IM_COL32(92, 178, 255, 50);
+                
+                // Solid part
+                if (solidWidth > 0.0f) {
+                    drawList->AddRectFilled(panelMin, ImVec2(workspacePos.x + solidWidth, workspacePos.y + paneHeight), colBgOpaque);
+                }
+                // Gradient feathered blend part
+                drawList->AddRectFilledMultiColor(
+                    ImVec2(workspacePos.x + solidWidth, workspacePos.y),
+                    ImVec2(workspacePos.x + m_LeftPanelWidthAnim, workspacePos.y + paneHeight),
+                    colBgOpaque, colBgTrans, colBgTrans, colBgOpaque
+                );
+                
+                // Content area
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_SubWindowTransitionAlpha);
+                
+                float contentWidth = m_LeftPanelWidthAnim - 40.0f; // breathing room on right for the feathered edge
+                if (contentWidth > 1.0f) {
+                    ImGui::SetCursorScreenPos(ImVec2(workspacePos.x + 16.0f, workspacePos.y + 28.0f));
+                    ImGui::BeginChild("CanvasStackDrawer", ImVec2(contentWidth, paneHeight - 56.0f), false, ImGuiWindowFlags_NoScrollbar);
+                    
+                    ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
+                    ImGui::TextUnformatted("CANVAS STACK");
+                    ImGui::PopStyleColor();
+                    
+                    ImGui::Dummy(ImVec2(0.0f, 10.0f)); // Spacing instead of solid separator line
+                    
+                    const std::vector<int>& zOrder = GetCompositeZOrder();
+                    if (zOrder.empty()) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, colPassiveText);
+                        ImGui::TextWrapped("Add at least two completed chains to enable the canvas stack.");
+                        ImGui::PopStyleColor();
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, colPassiveText);
+                        ImGui::TextUnformatted("Drag to reorder:");
+                        ImGui::PopStyleColor();
+                        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+                        
+                        // Iterate in REVERSE order (top is front, bottom is back)
+                        for (int i = (int)zOrder.size() - 1; i >= 0; --i) {
+                            int outputNodeId = zOrder[i];
+                            const CompositeSceneItem* item = FindCompositeSceneItem(outputNodeId);
+                            std::string label = item && !item->label.empty() ? item->label : ("Output " + std::to_string(outputNodeId));
+                            
+                            // Truncate if too long
+                            std::string displayLabel = label;
+                            if (displayLabel.size() > 18) {
+                                displayLabel = displayLabel.substr(0, 15) + "...";
+                            }
+                            
+                            char itemID[128];
+                            snprintf(itemID, sizeof(itemID), "%s##DrawerZItem_%d", displayLabel.c_str(), outputNodeId);
+                            
+                            bool selected = GetCompositeSelectedOutputNodeId() == outputNodeId;
+                            
+                            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+                            // Completely borderless and backgroundless selectables
+                            ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+                            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, colHoveredHeader);
+                            ImGui::PushStyleColor(ImGuiCol_HeaderActive, colActiveHeader);
+                            
+                            if (selected) {
+                                ImGui::PushStyleColor(ImGuiCol_Text, colActiveText); // Active text glow
+                            } else {
+                                ImGui::PushStyleColor(ImGuiCol_Text, colNormalText); // Floating passive text
+                            }
+                            
+                            if (ImGui::Selectable(itemID, selected, 0, ImVec2(contentWidth, 26.0f))) {
+                                SetCompositeSelectedOutputNodeId(outputNodeId);
+                            }
+                            
+                            ImGui::PopStyleColor(4);
+                            ImGui::PopStyleVar();
+                            
+                            // Drag and Drop Source
+                            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                                ImGui::SetDragDropPayload("CompositeZOrderItem", &outputNodeId, sizeof(outputNodeId));
+                                ImGui::Text("Moving %s", label.c_str());
+                                ImGui::EndDragDropSource();
+                            }
+                            
+                            // Drag and Drop Target
+                            if (ImGui::BeginDragDropTarget()) {
+                                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CompositeZOrderItem")) {
+                                    int draggedId = *static_cast<const int*>(payload->Data);
+                                    MoveCompositeOutputZOrder(draggedId, outputNodeId);
+                                }
+                                ImGui::EndDragDropTarget();
+                            }
+                            
+                            ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                        }
+                    }
+                    
+                    ImGui::EndChild();
+                }
+                
+                ImGui::PopStyleVar();
+            }
+        }
+
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(2);
@@ -1827,9 +2005,156 @@ std::uint64_t EditorModule::GetScopeNodeRevision(int sourceNodeId) const {
 }
 
 ImVec4 EditorModule::GetWorkspaceBaseColor() const {
+    if (m_Appearance) {
+        return m_Appearance->GetWorkingTheme().colors[ImGuiCol_WindowBg];
+    }
+    if (ImGui::GetCurrentContext() != nullptr) {
+        return ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    }
     return kEditorWorkspaceBaseColor;
 }
 
 bool EditorModule::CanConsumeEditorCommandKeys() const {
-    return !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
+    return !ImGui::GetIO().WantTextInput;
+}
+
+void EditorModule::SwitchToSubWindow(EditorSubWindow target) {
+    if (m_ActiveSubWindow == target && m_TargetSubWindow == target) {
+        return;
+    }
+    m_TargetSubWindow = target;
+    m_SubWindowTransitionFadingOut = true;
+}
+
+static unsigned int LoadEditorResourceTexture(const unsigned char* data, unsigned int size, const char* debugName) {
+    if (!data || size == 0) {
+        return 0;
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load_thread(0);
+    unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
+    if (!pixels) {
+        fprintf(stderr, "[EditorModule] Failed to decode embedded %s icon.\n", debugName);
+        return 0;
+    }
+    const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    return texture;
+}
+
+void EditorModule::LoadResourceTextures() {
+    if (m_TexturesLoaded) {
+        return;
+    }
+    m_NodeGraphIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::NodeGraph_png_data,
+        EmbeddedTabIcons::NodeGraph_png_size,
+        "NodeGraph"
+    );
+    m_ExportIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::Export_png_data,
+        EmbeddedTabIcons::Export_png_size,
+        "Export"
+    );
+    m_SettingsIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::Settings_png_data,
+        EmbeddedTabIcons::Settings_png_size,
+        "Settings"
+    );
+    m_TexturesLoaded = true;
+}
+
+void EditorModule::RenderFloatingToolbar() {
+    LoadResourceTextures();
+
+    const float radius = 20.0f;
+    const float margin = 24.0f;
+    const float spacing = 12.0f;
+    const float buttonDiameter = radius * 2.0f;
+
+    const ImVec2 windowPos = ImGui::GetWindowPos();
+    const ImVec2 windowSize = ImGui::GetWindowSize();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    const ImVec2 basePos(
+        windowPos.x + margin + radius + m_LeftPanelWidthAnim,
+        windowPos.y + windowSize.y - margin - radius
+    );
+
+    std::vector<EditorSubWindow> visibleWindows;
+    visibleWindows.push_back(EditorSubWindow::NodeGraph);
+    if (GetCompletedChainCount() >= 2) {
+        visibleWindows.push_back(EditorSubWindow::ExportSettings);
+    }
+    visibleWindows.push_back(EditorSubWindow::Settings);
+
+    for (size_t i = 0; i < visibleWindows.size(); ++i) {
+        const EditorSubWindow subWin = visibleWindows[i];
+        const bool isActive = (m_TargetSubWindow == subWin);
+        const ImVec2 center(basePos.x + i * (buttonDiameter + spacing), basePos.y);
+
+        ImGui::SetCursorScreenPos(ImVec2(center.x - radius, center.y - radius));
+        char btnId[64];
+        snprintf(btnId, sizeof(btnId), "##FloatingSubWindowBtn_%d", static_cast<int>(subWin));
+        
+        ImGui::InvisibleButton(btnId, ImVec2(buttonDiameter, buttonDiameter));
+        const bool hovered = ImGui::IsItemHovered();
+        const bool clicked = ImGui::IsItemClicked();
+
+        if (clicked) {
+            SwitchToSubWindow(subWin);
+        }
+
+        ImU32 bgCol = IM_COL32(24, 24, 24, 200);
+        ImU32 borderCol = IM_COL32(60, 60, 60, 180);
+        float borderThickness = 1.0f;
+
+        if (isActive) {
+            borderCol = IM_COL32(92, 178, 255, 255);
+            borderThickness = 2.0f;
+            bgCol = IM_COL32(30, 30, 30, 230);
+        } else if (hovered) {
+            borderCol = IM_COL32(100, 100, 100, 255);
+            bgCol = IM_COL32(40, 40, 40, 230);
+        }
+
+        drawList->AddCircleFilled(ImVec2(center.x, center.y + 2.0f), radius, IM_COL32(0, 0, 0, 40), 32);
+        drawList->AddCircleFilled(center, radius, bgCol, 32);
+        drawList->AddCircle(center, radius, borderCol, 32, borderThickness);
+
+        unsigned int tex = 0;
+        if (subWin == EditorSubWindow::NodeGraph) {
+            tex = m_NodeGraphIconTexture;
+        } else if (subWin == EditorSubWindow::ExportSettings) {
+            tex = m_ExportIconTexture;
+        } else if (subWin == EditorSubWindow::Settings) {
+            tex = m_SettingsIconTexture;
+        }
+
+        if (tex) {
+            const float iconHalfSize = 12.0f;
+            ImVec2 pMin(center.x - iconHalfSize, center.y - iconHalfSize);
+            ImVec2 pMax(center.x + iconHalfSize, center.y + iconHalfSize);
+            
+            ImU32 iconColor = IM_COL32(255, 255, 255, 255);
+            if (!isActive && !hovered) {
+                iconColor = IM_COL32(180, 180, 180, 180);
+            }
+            drawList->AddImage((ImTextureID)(intptr_t)tex, pMin, pMax, ImVec2(0, 0), ImVec2(1, 1), iconColor);
+        }
+
+        if (hovered) {
+            ImGui::BeginTooltip();
+            if (subWin == EditorSubWindow::NodeGraph) {
+                ImGui::TextUnformatted("Node Graph [1]");
+            } else if (subWin == EditorSubWindow::ExportSettings) {
+                ImGui::TextUnformatted("Export Settings [2]");
+            } else if (subWin == EditorSubWindow::Settings) {
+                ImGui::TextUnformatted("Editor Settings [3]");
+            }
+            ImGui::EndTooltip();
+        }
+    }
 }

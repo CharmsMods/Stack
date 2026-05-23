@@ -73,7 +73,6 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
         case NodeKind::Composite: return "Composite";
-        case NodeKind::ExportBoundsSettings: return "ExportBoundsSettings";
         case NodeKind::Scope: return "Scope";
         case NodeKind::MaskGenerator: return "MaskGenerator";
         case NodeKind::Mix: return "Mix";
@@ -405,6 +404,10 @@ void DeserializeGraphPayload(
         node.expanded = item.value("expanded", false);
 
         const std::string kind = item.value("kind", std::string("Layer"));
+        if (kind == "ExportBoundsSettings" || kind == "Composite") {
+            continue;
+        }
+
         if (kind == "Image") {
             node.kind = NodeKind::Image;
             node.image.label = item.value("label", node.title.empty() ? std::string("Image") : node.title);
@@ -417,9 +420,6 @@ void DeserializeGraphPayload(
         } else if (kind == "Composite") {
             node.kind = NodeKind::Composite;
             if (node.title.empty()) node.title = "Composite";
-        } else if (kind == "ExportBoundsSettings") {
-            node.kind = NodeKind::ExportBoundsSettings;
-            if (node.title.empty()) node.title = "Export Bounds";
         } else if (kind == "Scope") {
             node.kind = NodeKind::Scope;
             node.scopeKind = ScopeKindFromString(item.value("scopeKind", std::string("Histogram")));

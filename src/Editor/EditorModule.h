@@ -1,5 +1,9 @@
 #pragma once
 
+namespace StackAppearance {
+    class AppearanceManager;
+}
+
 #include "Async/TaskState.h"
 #include "Layers/LayerBase.h"
 #include "LayerRegistry.h"
@@ -118,6 +122,7 @@ public:
         bool visible = true;
         bool locked = false;
         bool placementInitialized = false;
+        bool isScalable = false;
         std::string label;
         unsigned int texture = 0;
         int textureWidth = 0;
@@ -160,13 +165,14 @@ public:
     EditorModule();
     ~EditorModule();
 
-    void Initialize(GLFWwindow* sharedWindow = nullptr);
+    void Initialize(GLFWwindow* sharedWindow = nullptr, StackAppearance::AppearanceManager* appearance = nullptr);
     
     // Called every frame by the AppShell
     void RenderUI();
 
     RenderPipeline& GetPipeline() { return m_Pipeline; }
     std::vector<std::shared_ptr<LayerBase>>& GetLayers() { return m_Layers; }
+    StackAppearance::AppearanceManager* GetAppearance() { return m_Appearance; }
 
     // Dynamic Layer Management
     void AddLayer(LayerType type);
@@ -227,6 +233,7 @@ public:
     std::vector<unsigned char> GetPreviewPixelsForNode(int nodeId, int& outW, int& outH);
     void RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId);
     void MarkRenderDirty(int touchedNodeId = -1);
+    RenderGraphSnapshot BuildGraphSnapshot() const;
     bool IsEditorRenderBusy() const { return m_RenderWorker.IsBusy() || m_RenderPending; }
     std::uint64_t GetRenderRevision() const { return m_RenderRevision; }
     std::uint64_t GetPreviewNodeRevision(int previewNodeId) const;
@@ -302,6 +309,17 @@ public:
     }
     ImVec4 GetWorkspaceBaseColor() const;
     bool CanConsumeEditorCommandKeys() const;
+
+    enum class EditorSubWindow {
+        NodeGraph = 0,
+        ExportSettings = 1,
+        Settings = 2
+    };
+    EditorSubWindow GetActiveSubWindow() const { return m_ActiveSubWindow; }
+    float GetSubWindowTransitionAlpha() const { return m_SubWindowTransitionAlpha; }
+    void SwitchToSubWindow(EditorSubWindow target);
+    void MoveCompositeOutputZOrder(int draggedOutputNodeId, int targetOutputNodeId);
+    float GetLeftPanelWidthAnim() const { return m_LeftPanelWidthAnim; }
     ViewportMode GetViewportMode() const;
     bool IsCompositeViewportMode() const { return GetViewportMode() == ViewportMode::CompositeCanvas; }
     int GetCompletedChainCount() const;
@@ -317,8 +335,16 @@ public:
     void SetCompositeViewZoom(float zoom) { m_CompositeViewZoom = zoom; }
     void SetCompositeViewPan(float panX, float panY) { m_CompositeViewPanX = panX; m_CompositeViewPanY = panY; }
     void AddCompositeViewPan(float deltaX, float deltaY) { m_CompositeViewPanX += deltaX; m_CompositeViewPanY += deltaY; }
-    void SetCompositeSelectedOutputNodeId(int outputNodeId) { m_CompositeSelectedOutputNodeId = outputNodeId; }
-    void ClearCompositeSelection() { m_CompositeSelectedOutputNodeId = -1; }
+    void SetCompositeSelectedOutputNodeId(int outputNodeId) {
+        m_CompositeSelectedOutputNodeId = outputNodeId;
+        if (outputNodeId > 0) {
+            SelectGraphNode(outputNodeId);
+        }
+    }
+    void ClearCompositeSelection() {
+        m_CompositeSelectedOutputNodeId = -1;
+        m_NodeGraph.ClearSelection();
+    }
     CompositeSceneItem* FindCompositeSceneItem(int outputNodeId);
     const CompositeSceneItem* FindCompositeSceneItem(int outputNodeId) const;
     void EnsureCompositeSceneState(const ImVec2& canvasSize);
@@ -326,8 +352,6 @@ public:
     bool MoveCompositeOutputToIndex(int outputNodeId, int targetIndex);
     bool HasCompositeNode() const;
     void EnsureCompositeNode();
-    bool HasExportBoundsSettingsNode() const;
-    void EnsureExportBoundsSettingsNode();
     std::vector<unsigned char> GetCompositePixelsForOutputNode(int outputNodeId, int& outW, int& outH);
     void BeginCompositeMove(int outputNodeId, const ImVec2& mouseWorld);
     void UpdateCompositeMove(const ImVec2& mouseWorld);
@@ -378,6 +402,20 @@ private:
     EditorScopes m_Scopes;
     RenderPipeline m_Pipeline;
     EditorRenderWorker m_RenderWorker;
+    EditorSubWindow m_ActiveSubWindow = EditorSubWindow::NodeGraph;
+    EditorSubWindow m_TargetSubWindow = EditorSubWindow::NodeGraph;
+    float m_SubWindowTransitionAlpha = 1.0f;
+    bool m_SubWindowTransitionFadingOut = false;
+    unsigned int m_NodeGraphIconTexture = 0;
+    unsigned int m_ExportIconTexture = 0;
+    unsigned int m_SettingsIconTexture = 0;
+    bool m_LeftPanelExpanded = false;
+    float m_LeftPanelWidthAnim = 0.0f;
+    bool m_TexturesLoaded = false;
+
+    void LoadResourceTextures();
+    void RenderFloatingToolbar();
+
     EditorNodeGraph::Graph m_NodeGraph;
 
     std::vector<std::shared_ptr<LayerBase>> m_Layers;
@@ -505,7 +543,6 @@ private:
     std::vector<std::shared_ptr<LayerBase>> BuildGraphRenderLayers() const;
     std::vector<RenderLayerStep> BuildGraphRenderSteps() const;
     std::vector<RenderMaskSource> BuildGraphRenderMasks() const;
-    RenderGraphSnapshot BuildGraphSnapshot() const;
     EditorRenderWorker::Snapshot BuildRenderSnapshot(std::uint64_t generation) const;
     std::vector<EditorRenderWorker::CompositeOutputRequest> BuildCompositeOutputRequests();
     std::vector<EditorRenderWorker::PreviewRequest> BuildPreviewRequests();
@@ -545,4 +582,5 @@ private:
     bool CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const;
     void ResetToBlankProject();
     void RenderProjectLifecyclePopups();
+    StackAppearance::AppearanceManager* m_Appearance = nullptr;
 };

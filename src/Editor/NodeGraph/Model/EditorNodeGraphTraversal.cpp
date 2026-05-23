@@ -73,7 +73,6 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 case NodeKind::ImageToMask:
                 case NodeKind::Output:
                 case NodeKind::Composite:
-                case NodeKind::ExportBoundsSettings:
                 case NodeKind::Scope:
                 case NodeKind::MaskGenerator:
                 case NodeKind::Preview:

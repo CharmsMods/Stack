@@ -1,5 +1,9 @@
 #pragma once
 #include "App/IAppModule.h"
+
+namespace StackAppearance {
+    class AppearanceManager;
+}
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -30,8 +34,8 @@ public:
     void RenderUI() override {} // Dummy for IAppModule
     void RenderUI(
         class EditorModule* editor,
-        class RenderTab* renderTab,
         class CompositeModule* composite,
+        StackAppearance::AppearanceManager* appearance,
         int* activeTab = nullptr);
     void RenderGlobalPopups();
     void OpenProjectPreviewByFileName(const std::string& fileName);
@@ -42,15 +46,12 @@ private:
     bool RenderAssetCard(const struct AssetEntry& asset, class EditorModule* editor);
     void RenderPreviewPopup(
         class EditorModule* editor,
-        class RenderTab* renderTab,
         class CompositeModule* composite,
         int* activeTab = nullptr);
     void RenderAssetPreviewPopup(
         class EditorModule* editor,
-        class RenderTab* renderTab,
         class CompositeModule* composite,
         int* activeTab = nullptr);
-    void RenderConfirmRenderLoadPopup(class RenderTab* renderTab, int* activeTab = nullptr);
     void RenderConfirmLoadPopup();
     void RenderFolderImportPopup();
     void RenderImportConflictPopup();
@@ -72,6 +73,8 @@ private:
     float m_FilterPanelWidth = 220.0f;
     float m_FilterPanelExpandedWidth = 220.0f;
     bool m_FilterPanelCollapsed = false;
+    bool m_FilterPanelExpanded = false;
+    float m_FilterPanelWidthAnim = 0.0f;
     std::string m_RenameTargetFileName;
     std::string m_PendingRenderProjectFileName;
     bool m_RenderLoadConfirmOpen = false;

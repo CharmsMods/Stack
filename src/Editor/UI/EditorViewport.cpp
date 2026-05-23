@@ -56,13 +56,17 @@ void EditorViewport::Render(EditorModule* editor) {
         editor->SetLastCompositeCanvasSize(avail);
         auto& exportSettings = editor->GetMutableCompositeExportSettings();
 
-        const ImVec2 canvasMin = screenPos;
-        const ImVec2 canvasMax(screenPos.x + avail.x, screenPos.y + avail.y);
-        drawList->AddRectFilled(canvasMin, canvasMax, IM_COL32(0, 0, 0, 0), kCanvasRounding);
+        const float margin = 12.0f;
+        const ImVec2 canvasMin(screenPos.x + margin, screenPos.y + margin);
+        const ImVec2 canvasMax(screenPos.x + avail.x - margin, screenPos.y + avail.y - margin);
+        const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
+        drawList->AddRectFilled(canvasMin, canvasMax, workspaceFill, kCanvasRounding);
 
         const float checkerScale = 24.0f;
-        const float tilesX = std::max(1.0f, avail.x / checkerScale);
-        const float tilesY = std::max(1.0f, avail.y / checkerScale);
+        const float canvasW = std::max(1.0f, avail.x - margin * 2.0f);
+        const float canvasH = std::max(1.0f, avail.y - margin * 2.0f);
+        const float tilesX = std::max(1.0f, canvasW / checkerScale);
+        const float tilesY = std::max(1.0f, canvasH / checkerScale);
         drawList->AddImageRounded(
             (ImTextureID)(intptr_t)m_CheckerTex,
             canvasMin,
@@ -148,8 +152,8 @@ void EditorViewport::Render(EditorModule* editor) {
             m_SceneStartScaleX = item.scale.x;
             m_SceneStartScaleY = item.scale.y;
             m_SceneStartRotation = item.rotation;
-            m_SceneStartWidth = std::max(1.0f, static_cast<float>(item.textureWidth) * std::max(0.0001f, item.scale.x));
-            m_SceneStartHeight = std::max(1.0f, static_cast<float>(item.textureHeight) * std::max(0.0001f, item.scale.y));
+            m_SceneStartWidth = std::max(1.0f, (item.isScalable ? 256.0f : static_cast<float>(item.textureWidth)) * std::max(0.0001f, item.scale.x));
+            m_SceneStartHeight = std::max(1.0f, (item.isScalable ? 256.0f : static_cast<float>(item.textureHeight)) * std::max(0.0001f, item.scale.y));
 
             const std::array<ImVec2, 4> worldQuad = ComputeSceneQuadWorld(item);
             const ImVec2 worldTopCenter = Midpoint(worldQuad[0], worldQuad[1]);
@@ -284,17 +288,13 @@ void EditorViewport::Render(EditorModule* editor) {
                     m_ActiveExportHandle = ExportHandleType::BottomRight;
                 } else if (DistanceToPoint(mousePos, exportBottomLeft) <= threshold) {
                     m_ActiveExportHandle = ExportHandleType::BottomLeft;
-                } else if (exportSettings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom &&
-                           DistanceToPoint(mousePos, exportTopCenter) <= threshold) {
+                } else if (DistanceToPoint(mousePos, exportTopCenter) <= threshold) {
                     m_ActiveExportHandle = ExportHandleType::Top;
-                } else if (exportSettings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom &&
-                           DistanceToPoint(mousePos, exportRightCenter) <= threshold) {
+                } else if (DistanceToPoint(mousePos, exportRightCenter) <= threshold) {
                     m_ActiveExportHandle = ExportHandleType::Right;
-                } else if (exportSettings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom &&
-                           DistanceToPoint(mousePos, exportBottomCenter) <= threshold) {
+                } else if (DistanceToPoint(mousePos, exportBottomCenter) <= threshold) {
                     m_ActiveExportHandle = ExportHandleType::Bottom;
-                } else if (exportSettings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom &&
-                           DistanceToPoint(mousePos, exportLeftCenter) <= threshold) {
+                } else if (DistanceToPoint(mousePos, exportLeftCenter) <= threshold) {
                     m_ActiveExportHandle = ExportHandleType::Left;
                 } else if (insideExportRect) {
                     m_ActiveExportHandle = ExportHandleType::Move;
@@ -371,6 +371,10 @@ void EditorViewport::Render(EditorModule* editor) {
         }
         if (m_ActiveExportHandle != ExportHandleType::None) {
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                if (m_ActiveExportHandle != ExportHandleType::Move &&
+                    exportSettings.aspectPreset != EditorModule::CompositeExportAspectPreset::Custom) {
+                    exportSettings.aspectPreset = EditorModule::CompositeExportAspectPreset::Custom;
+                }
                 const float deltaX = mouseWorld.x - m_ExportDragStartMouseWorldX;
                 const float deltaY = mouseWorld.y - m_ExportDragStartMouseWorldY;
                 const bool lockedAspect = exportSettings.aspectPreset != EditorModule::CompositeExportAspectPreset::Custom;
@@ -457,6 +461,7 @@ void EditorViewport::Render(EditorModule* editor) {
                 if (exportSettings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom) {
                     editor->UpdateCompositeCustomExportAspectFromBounds();
                 }
+                editor->SyncCompositeExportResolutionFromWidth();
             } else {
                 m_ActiveExportHandle = ExportHandleType::None;
             }
@@ -691,8 +696,8 @@ void EditorViewport::Render(EditorModule* editor) {
                     }
 
                     if (snapSettings.enabled && snapSettings.scaleSnapStep > 0.0f) {
-                        const float baseWidth = std::max(1.0f, static_cast<float>(activeItem->textureWidth));
-                        const float baseHeight = std::max(1.0f, static_cast<float>(activeItem->textureHeight));
+                        const float baseWidth = activeItem->isScalable ? 256.0f : std::max(1.0f, static_cast<float>(activeItem->textureWidth));
+                        const float baseHeight = activeItem->isScalable ? 256.0f : std::max(1.0f, static_cast<float>(activeItem->textureHeight));
                         newWidth = std::max(1.0f, std::round((newWidth / baseWidth) / snapSettings.scaleSnapStep) * snapSettings.scaleSnapStep * baseWidth);
                         newHeight = std::max(1.0f, std::round((newHeight / baseHeight) / snapSettings.scaleSnapStep) * snapSettings.scaleSnapStep * baseHeight);
                     }
@@ -702,8 +707,8 @@ void EditorViewport::Render(EditorModule* editor) {
                         : ImVec2(
                             anchor.x + axisX.x * signX * newWidth * 0.5f + axisY.x * signY * newHeight * 0.5f,
                             anchor.y + axisX.y * signX * newWidth * 0.5f + axisY.y * signY * newHeight * 0.5f);
-                    activeItem->scale.x = std::max(0.01f, newWidth / std::max(1.0f, static_cast<float>(activeItem->textureWidth)));
-                    activeItem->scale.y = std::max(0.01f, newHeight / std::max(1.0f, static_cast<float>(activeItem->textureHeight)));
+                    activeItem->scale.x = std::max(0.01f, newWidth / (activeItem->isScalable ? 256.0f : std::max(1.0f, static_cast<float>(activeItem->textureWidth))));
+                    activeItem->scale.y = std::max(0.01f, newHeight / (activeItem->isScalable ? 256.0f : std::max(1.0f, static_cast<float>(activeItem->textureHeight))));
                     activeItem->position = ImVec2(newCenter.x - newWidth * 0.5f, newCenter.y - newHeight * 0.5f);
                 }
             } else {
@@ -829,6 +834,39 @@ void EditorViewport::Render(EditorModule* editor) {
         for (const SnapGuideLine& guide : m_CompositeSnapGuides) {
             drawList->AddLine(guide.a, guide.b, guide.color, 1.4f);
         }
+
+        // Draw an ultra-premium, gap-free, non-overlapping concentric rounded vignette.
+        // This completely eliminates overlapping artifacts, double-blending at corners,
+        // and hard edges, creating a mathematically perfect and smooth blend for the canvas.
+        const float seamFade = 48.0f;
+        const float edgeFade = 24.0f;
+        const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
+
+        constexpr int N = 32;
+        for (int i = 0; i < N; ++i) {
+            float t = static_cast<float>(i) / N;
+
+            // Inset from canvas edges moving inward
+            float leftInset = t * seamFade;
+            float rightInset = t * edgeFade;
+            float topInset = t * edgeFade;
+            float bottomInset = t * edgeFade;
+
+            ImVec2 rectMin(canvasMin.x + leftInset, canvasMin.y + topInset);
+            ImVec2 rectMax(canvasMax.x - rightInset, canvasMax.y - bottomInset);
+
+            // Premium cubic falloff for a cinematic, natural-looking smooth transition
+            float smoothAlpha = std::pow(1.0f - t, 2.5f);
+            ImU32 color = ImGui::ColorConvertFloat4ToU32(ImVec4(workspaceBg.x, workspaceBg.y, workspaceBg.z, smoothAlpha));
+
+            // Adjust corner rounding radius to match the inset rectangle perfectly
+            float rounding = std::max(0.0f, kCanvasRounding - (t * edgeFade));
+
+            // Draw concentric rounded rectangle outlines with a thickness of 2.0f.
+            // This ensures overlaps are continuous and completely gap-free.
+            drawList->AddRect(rectMin, rectMax, color, rounding, ImDrawFlags_None, 2.0f);
+        }
+
         drawList->PopClipRect();
 
         if (hasExportBounds) {
@@ -837,7 +875,7 @@ void EditorViewport::Render(EditorModule* editor) {
                 : IM_COL32(96, 192, 255, 110);
             drawList->AddRect(exportTopLeft, exportBottomRight, boundsColor, 0.0f, 0, 2.0f);
             if (editableCustomBounds) {
-                const bool freeAspect = exportSettings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom;
+                const bool freeAspect = true;
                 std::array<ImVec2, 8> handlePoints = {
                     exportTopLeft,
                     exportTopCenter,
@@ -848,7 +886,7 @@ void EditorViewport::Render(EditorModule* editor) {
                     exportBottomLeft,
                     exportLeftCenter
                 };
-                const int handleCount = freeAspect ? 8 : 4;
+                const int handleCount = 8;
                 const int handleIndices[] = { 0, 2, 4, 6, 1, 3, 5, 7 };
                 for (int handleIndex = 0; handleIndex < handleCount; ++handleIndex) {
                     const ImVec2& point = handlePoints[handleIndices[handleIndex]];

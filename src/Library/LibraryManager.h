@@ -11,7 +11,6 @@
 #include <vector>
 
 class EditorModule;
-class RenderTab;
 class CompositeModule;
 
 enum class ConflictAction {
@@ -93,15 +92,6 @@ public:
 
     void RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName = "");
     void RequestLoadProject(const std::string& fileName, EditorModule* editor, std::function<void(bool)> onComplete = {});
-    void RequestSaveRenderProject(
-        const std::string& name,
-        const StackBinaryFormat::json& renderPayload,
-        const std::vector<unsigned char>& beautyPixels,
-        int width,
-        int height,
-        const std::string& existingFileName = "",
-        std::function<void(bool, const std::string&, const std::string&)> onComplete = {});
-    void RequestLoadRenderProject(const std::string& fileName, RenderTab* renderTab, std::function<void(bool)> onComplete = {});
     bool OverwriteEditorProject(
         const std::string& fileName,
         const std::string& projectName,
@@ -122,7 +112,6 @@ public:
 
     void RequestExportLibraryBundle(const std::string& destinationPath);
     void RequestImportLibraryBundle(const std::string& sourcePath);
-    void RequestImportWebProject(const std::string& sourcePath);
     void RequestSaveCompositeProject(const std::string& name, CompositeModule* composite, const std::string& existingFileName = "");
     void RequestLoadCompositeProject(const std::string& fileName, CompositeModule* composite, std::function<void(bool)> onComplete = {});
     void RequestLoadCompositeProjectFromPath(const std::filesystem::path& absolutePath, CompositeModule* composite, std::function<void(bool)> onComplete = {});
@@ -138,13 +127,11 @@ public:
     void RequestImportAndLoad(
         const std::string& sourcePath,
         EditorModule* editor,
-        RenderTab* renderTab,
         CompositeModule* composite = nullptr,
         std::function<void(int)> onTabSwitchRequested = {});
 
     // New: Direct load from an absolute path (for projects already in the library or just dropped)
     void RequestLoadProjectFromPath(const std::filesystem::path& absolutePath, EditorModule* editor, std::function<void(bool)> onComplete = {});
-    void RequestLoadRenderProjectFromPath(const std::filesystem::path& absolutePath, RenderTab* renderTab, std::function<void(bool)> onComplete = {});
 
     bool HasPendingConflicts() const { return !m_PendingConflicts.empty(); }
     const std::vector<ImportConflict>& GetPendingConflicts() const { return m_PendingConflicts; }

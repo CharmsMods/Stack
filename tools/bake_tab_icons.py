@@ -47,6 +47,10 @@ if __name__ == "__main__":
         ("Library", os.path.join(root_dir, "Icons", "Library.png")),
         ("Render", os.path.join(root_dir, "Icons", "Render, Cube with points.png")),
         ("CharmLogo", os.path.join(root_dir, "Icons", "Charm logo icon.png")),
+        ("NodeGraph", os.path.join(root_dir, "Icons", "node graph.png")),
+        ("Export", os.path.join(root_dir, "Icons", "export.png")),
+        ("Style", os.path.join(root_dir, "Icons", "paint brush.png")),
+        ("Settings", os.path.join(root_dir, "Icons", "settings.png")),
     ]
     output_file = os.path.join(root_dir, "src", "App", "Resources", "EmbeddedTabIcons.h")
 

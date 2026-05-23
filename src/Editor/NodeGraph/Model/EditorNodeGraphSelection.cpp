@@ -23,8 +23,7 @@ Vec2 DefaultSelectionSize(const Node& node) {
         : (node.kind == NodeKind::Mix ? Vec2{ 250.0f, 170.0f }
         : (node.kind == NodeKind::Preview ? Vec2{ 266.0f, 196.0f }
         : (node.kind == NodeKind::Composite ? Vec2{ 286.0f, 360.0f }
-        : (node.kind == NodeKind::ExportBoundsSettings ? Vec2{ 318.0f, 404.0f }
-        : Vec2{ 232.0f, 82.0f })))))));
+        : Vec2{ 232.0f, 82.0f }))))));
 }
 
 } // namespace

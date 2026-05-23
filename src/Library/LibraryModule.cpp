@@ -1,4 +1,5 @@
 #include "LibraryModule.h"
+#include "App/settings/AppearanceTheme.h"
 #include "LibraryManager.h"
 #include "TagManager.h"
 #include "Async/TaskSystem.h"
@@ -6,7 +7,7 @@
 #include "Editor/EditorModule.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
-#include "RenderTab/RenderTab.h"
+
 #include "ProjectData.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
@@ -471,7 +472,7 @@ void LibraryModule::OpenAssetPreviewByFileName(const std::string& fileName) {
     }
 }
 
-void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, CompositeModule* composite, int* activeTab) {
+void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, StackAppearance::AppearanceManager* appearance, int* activeTab) {
     m_CachedEditor = editor;
     m_CachedComposite = composite;
     m_CachedActiveTab = activeTab;
@@ -531,11 +532,15 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(255, 255, 255, 34));
     ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(220, 236, 244, 34));
 
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(48.0f, 16.0f));
+    ImGui::BeginChild("LibraryTabContainer", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::BeginChild("LibraryHeader", ImVec2(0, 58.0f), false, ImGuiWindowFlags_NoScrollbar);
     {
         const float pillHeight = 28.0f;
         const float pillWidth = 110.0f;
-        const float searchWidth = std::min(420.0f, std::max(220.0f, ImGui::GetContentRegionAvail().x - 340.0f));
 
         if (ImGui::Button("Options", ImVec2(84.0f, pillHeight))) {
             ImGui::OpenPopup("LibraryOptionsPopup");
@@ -570,10 +575,6 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
         }
         ImGui::EndGroup();
 
-        ImGui::SameLine(0.0f, 14.0f);
-        ImGui::SetNextItemWidth(searchWidth);
-        ImGui::InputTextWithHint("##search", "Search library...", m_SearchFilter, sizeof(m_SearchFilter));
-
         bool hasPreviousStatus = false;
         auto renderInlineStatus = [&](const char* text, float& alphaState) {
             if (text == nullptr || text[0] == '\0' || alphaState <= 0.01f) {
@@ -595,109 +596,10 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
         }
     }
     ImGui::EndChild();
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - (ImGui::GetStyle().ItemSpacing.y + 4.0f));
-
-    m_FilterPanelExpandedWidth = std::clamp(m_FilterPanelExpandedWidth, kSidebarMinWidth, kSidebarMaxWidth);
-    const float sidebarTargetWidth = m_FilterPanelCollapsed ? kSidebarRailWidth : m_FilterPanelExpandedWidth;
-    m_FilterPanelWidth = ImGuiExtras::AnimateTowards(m_FilterPanelWidth, sidebarTargetWidth, dt, kSidebarMotionSpeed);
-    m_FilterPanelWidth = std::clamp(m_FilterPanelWidth, kSidebarRailWidth, kSidebarMaxWidth);
-
-    const float sidebarDenominator = std::max(1.0f, m_FilterPanelExpandedWidth - kSidebarRailWidth);
-    const float sidebarProgress = std::clamp((m_FilterPanelWidth - kSidebarRailWidth) / sidebarDenominator, 0.0f, 1.0f);
-    const float sidebarContentAlpha = ImGuiExtras::EaseOutCubic(sidebarProgress);
-    const bool sidebarExpanded = sidebarProgress > 0.06f;
-    auto& currentSelection = m_ShowAssets ? m_SelectedAssets : m_SelectedProjects;
-    const bool hasSelectionForTagging = !currentSelection.empty();
-    auto applyTagToSelection = [&]() {
-        std::string tagText = m_AddTagBuffer;
-        auto firstNonSpace = std::find_if_not(tagText.begin(), tagText.end(), [](unsigned char ch) {
-            return std::isspace(ch) != 0;
-        });
-        auto lastNonSpace = std::find_if_not(tagText.rbegin(), tagText.rend(), [](unsigned char ch) {
-            return std::isspace(ch) != 0;
-        }).base();
-        if (firstNonSpace >= lastNonSpace || currentSelection.empty()) {
-            return false;
-        }
-
-        tagText = std::string(firstNonSpace, lastNonSpace);
-        for (const auto& fileName : currentSelection) {
-            TagManager::Get().AddTag(fileName, tagText);
-        }
-        m_AddTagBuffer[0] = '\0';
-        return true;
-    };
-
-    ImGui::BeginChild("LibrarySidebar", ImVec2(m_FilterPanelWidth, 0), false);
+    ImGui::PopStyleVar(); // Pop LibraryHeader's WindowPadding
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
-    if (ImGui::Button(m_FilterPanelCollapsed ? ">" : "<", ImVec2(std::max(0.0f, m_FilterPanelWidth - 16.0f), 24.0f))) {
-        m_FilterPanelCollapsed = !m_FilterPanelCollapsed;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(m_FilterPanelCollapsed ? "Expand filters" : "Collapse filters");
-    }
-
-    if (sidebarExpanded) {
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, sidebarContentAlpha);
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        ImGui::Indent(10.0f);
-        auto allTags = TagManager::Get().GetAllKnownTags();
-
-        bool noTagFilter = m_FilterNoTag;
-        if (ImGui::Checkbox("Untagged only", &noTagFilter)) {
-            m_FilterNoTag = noTagFilter;
-            if (m_FilterNoTag) {
-                m_ActiveTagFilters.clear();
-            }
-        }
-
-        if (!m_FilterNoTag) {
-            for (const auto& tag : allTags) {
-                bool active = m_ActiveTagFilters.count(tag) > 0;
-                if (ImGui::Checkbox(tag.c_str(), &active)) {
-                    if (active) {
-                        m_ActiveTagFilters.insert(tag);
-                    } else {
-                        m_ActiveTagFilters.erase(tag);
-                    }
-                }
-            }
-        }
-
-        if (!m_ActiveTagFilters.empty() || m_FilterNoTag) {
-            if (ImGui::SmallButton("Clear Filters")) {
-                m_ActiveTagFilters.clear();
-                m_FilterNoTag = false;
-            }
-        }
-
-        ImGui::Spacing();
-        const bool tagReady = hasSelectionForTagging && (m_AddTagBuffer[0] != '\0');
-        if (tagReady) {
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(64, 150, 84, 92));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(74, 168, 94, 104));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(82, 184, 102, 116));
-        }
-        ImGui::SetNextItemWidth(-14.0f);
-        const bool submittedTag = ImGui::InputTextWithHint(
-            "##addtag",
-            "New tag...",
-            m_AddTagBuffer,
-            sizeof(m_AddTagBuffer),
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (tagReady) {
-            ImGui::PopStyleColor(3);
-        }
-        if (submittedTag) {
-            applyTagToSelection();
-        }
-        ImGui::PopStyleVar();
-    }
-    ImGui::EndChild();
-    ImGui::SameLine(0.0f, 0.0f);
-
-    ImGui::BeginChild("LibraryGrid", ImVec2(0, 0), false);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), false);
 
     int renderedCount = 0;
     if (m_ShowAssets) {
@@ -764,7 +666,224 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
         ImGui::EndPopup();
     }
 
-    ImGui::EndChild();
+    // Sliding tags panel overlay inside LibraryGrid
+    {
+        ImVec2 gridPos = ImGui::GetWindowPos();
+        ImVec2 gridSize = ImGui::GetWindowSize();
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        const float mainViewportLeft = ImGui::GetMainViewport()->Pos.x;
+        
+        bool hoveringTagsPanel = false;
+        if (!m_FilterPanelExpanded) {
+            // Hover trigger along the absolute left program edge up to 15px past LibraryGrid left bounds
+            if (mousePos.x >= mainViewportLeft && mousePos.x <= gridPos.x + 15.0f &&
+                mousePos.y >= gridPos.y && mousePos.y <= gridPos.y + gridSize.y) {
+                hoveringTagsPanel = true;
+            }
+        } else {
+            // Keep open while hovering the drawer (which is m_FilterPanelWidthAnim wide) plus trigger buffer
+            if (mousePos.x >= mainViewportLeft && mousePos.x <= gridPos.x + m_FilterPanelWidthAnim + 15.0f &&
+                mousePos.y >= gridPos.y && mousePos.y <= gridPos.y + gridSize.y) {
+                hoveringTagsPanel = true;
+            }
+        }
+        
+        if (ImGui::IsDragDropActive()) {
+            hoveringTagsPanel = true;
+        }
+        
+        m_FilterPanelExpanded = hoveringTagsPanel;
+        
+        float tagsPanelTargetWidth = m_FilterPanelExpanded ? 220.0f : 0.0f;
+        m_FilterPanelWidthAnim += (tagsPanelTargetWidth - m_FilterPanelWidthAnim) * dt * 10.0f;
+        if (std::abs(m_FilterPanelWidthAnim - tagsPanelTargetWidth) < 0.1f) {
+            m_FilterPanelWidthAnim = tagsPanelTargetWidth;
+        }
+        
+        if (m_FilterPanelWidthAnim > 0.1f) {
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            ImVec2 panelMin = gridPos;
+            
+            // Feathered blend overlay background
+            float gradientWidth = std::min(60.0f, m_FilterPanelWidthAnim);
+            float solidWidth = m_FilterPanelWidthAnim - gradientWidth;
+            
+            ImVec4 workspaceColor = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+            const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
+            const bool isLightBg = luminance >= 0.5f;
+
+            ImVec4 colBgOpaqueVec = workspaceColor;
+            colBgOpaqueVec.w = isLightBg ? 0.95f : 0.93f;
+            const ImU32 colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
+
+            ImVec4 colBgTransVec = workspaceColor;
+            colBgTransVec.w = 0.0f;
+            const ImU32 colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
+
+            const ImU32 colTitleText = isLightBg ? IM_COL32(18, 24, 30, 255) : IM_COL32(255, 255, 255, 255);
+            
+            // Solid part
+            if (solidWidth > 0.0f) {
+                drawList->AddRectFilled(panelMin, ImVec2(gridPos.x + solidWidth, gridPos.y + gridSize.y), colBgOpaque);
+            }
+            // Feathered part
+            drawList->AddRectFilledMultiColor(
+                ImVec2(gridPos.x + solidWidth, gridPos.y),
+                ImVec2(gridPos.x + m_FilterPanelWidthAnim, gridPos.y + gridSize.y),
+                colBgOpaque, colBgTrans, colBgTrans, colBgOpaque
+            );
+            
+            // Content
+            float contentWidth = m_FilterPanelWidthAnim - 40.0f;
+            if (contentWidth > 1.0f) {
+                ImGui::SetCursorScreenPos(ImVec2(gridPos.x + 16.0f, gridPos.y + 24.0f));
+                ImGui::BeginChild("LibraryTagsDrawer", ImVec2(contentWidth, gridSize.y - 48.0f), false, ImGuiWindowFlags_NoScrollbar);
+                
+                ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
+                ImGui::TextUnformatted("LIBRARY FILTERS");
+                ImGui::PopStyleColor();
+                ImGui::Dummy(ImVec2(0.0f, 10.0f));
+                
+                // Render the filter options here!
+                auto& currentSelection = m_ShowAssets ? m_SelectedAssets : m_SelectedProjects;
+                const bool hasSelectionForTagging = !currentSelection.empty();
+                auto applyTagToSelection = [&]() {
+                    std::string tagText = m_AddTagBuffer;
+                    auto firstNonSpace = std::find_if_not(tagText.begin(), tagText.end(), [](unsigned char ch) {
+                        return std::isspace(ch) != 0;
+                    });
+                    auto lastNonSpace = std::find_if_not(tagText.rbegin(), tagText.rend(), [](unsigned char ch) {
+                        return std::isspace(ch) != 0;
+                    }).base();
+                    if (firstNonSpace >= lastNonSpace || currentSelection.empty()) {
+                        return false;
+                    }
+
+                    tagText = std::string(firstNonSpace, lastNonSpace);
+                    for (const auto& fileName : currentSelection) {
+                        TagManager::Get().AddTag(fileName, tagText);
+                    }
+                    m_AddTagBuffer[0] = '\0';
+                    return true;
+                };
+                
+                auto allTags = TagManager::Get().GetAllKnownTags();
+
+                bool noTagFilter = m_FilterNoTag;
+                if (ImGui::Checkbox("Untagged only", &noTagFilter)) {
+                    m_FilterNoTag = noTagFilter;
+                    if (m_FilterNoTag) {
+                        m_ActiveTagFilters.clear();
+                    }
+                }
+
+                if (!m_FilterNoTag) {
+                    for (const auto& tag : allTags) {
+                        bool active = m_ActiveTagFilters.count(tag) > 0;
+                        if (ImGui::Checkbox(tag.c_str(), &active)) {
+                            if (active) {
+                                m_ActiveTagFilters.insert(tag);
+                            } else {
+                                m_ActiveTagFilters.erase(tag);
+                            }
+                        }
+                    }
+                }
+
+                if (!m_ActiveTagFilters.empty() || m_FilterNoTag) {
+                    if (ImGui::SmallButton("Clear Filters")) {
+                        m_ActiveTagFilters.clear();
+                        m_FilterNoTag = false;
+                    }
+                }
+
+                ImGui::Spacing();
+                const bool tagReady = hasSelectionForTagging && (m_AddTagBuffer[0] != '\0');
+                if (tagReady) {
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(64, 150, 84, 92));
+                    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(74, 168, 94, 104));
+                    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(82, 184, 102, 116));
+                }
+                ImGui::SetNextItemWidth(-14.0f);
+                const bool submittedTag = ImGui::InputTextWithHint(
+                    "##addtag",
+                    "New tag...",
+                    m_AddTagBuffer,
+                    sizeof(m_AddTagBuffer),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                if (tagReady) {
+                    ImGui::PopStyleColor(3);
+                }
+                if (submittedTag) {
+                    applyTagToSelection();
+                }
+
+                ImGui::Dummy(ImVec2(0.0f, 16.0f));
+                ImGui::SeparatorText("Theme");
+                if (appearance != nullptr) {
+                    const std::string activePresetId = appearance->GetActivePresetId();
+                    const StackAppearance::ThemeDefinition* activePreset = appearance->GetActivePreset();
+                    const std::string currentPresetName = activePreset ? activePreset->displayName : "Custom";
+                    ImGui::SetNextItemWidth(-14.0f);
+                    if (ImGui::BeginCombo("##LibraryThemePresetCombo", currentPresetName.c_str())) {
+                        // Draw factory presets
+                        for (const auto& preset : appearance->GetFactoryThemes()) {
+                            const bool selected = activePresetId == preset.id;
+                            if (ImGui::Selectable(preset.displayName.c_str(), selected)) {
+                                appearance->SelectPresetById(preset.id);
+                                appearance->ApplyCurrentTheme(ImGui::GetIO(), ImGui::GetStyle());
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+
+                ImGui::EndChild();
+            }
+        }
+    }
+
+    // Centered floating search bar at bottom
+    {
+        ImVec2 libraryPos = ImGui::GetWindowPos();
+        ImVec2 librarySize = ImGui::GetWindowSize();
+        
+        const float searchW = 340.0f;
+        const float searchH = 34.0f;
+        const float gapFromBottom = 16.0f;
+        ImVec2 searchPos = ImVec2(
+            libraryPos.x + (librarySize.x - searchW) * 0.5f,
+            libraryPos.y + librarySize.y - searchH - gapFromBottom
+        );
+
+        ImGui::SetNextWindowPos(searchPos);
+        ImGui::SetNextWindowSize(ImVec2(searchW, searchH));
+        ImGui::SetNextWindowBgAlpha(0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(10.0f, 10.0f));
+        ImGui::Begin("##LibraryFloatingSearch", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(24, 28, 34, 235));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(32, 38, 46, 245));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(38, 44, 52, 255));
+        ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(110, 186, 255, 64));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 17.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 6.0f));
+
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##search", "Search library...", m_SearchFilter, sizeof(m_SearchFilter));
+
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(4);
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+    }
+
+    ImGui::EndChild(); // End LibraryGrid
+    ImGui::PopStyleVar(); // Pop LibraryGrid's WindowPadding
+    ImGui::EndChild(); // End LibraryTabContainer
 
     ImGui::PopStyleColor(7);
     ImGui::PopStyleVar(3);
@@ -773,12 +892,10 @@ void LibraryModule::RenderUI(EditorModule* editor, RenderTab* renderTab, Composi
     PruneCardMotionStates(m_AssetCardMotion, ImGui::GetFrameCount());
 
     if (m_PreviewProject || m_ProjectPreviewTransition > 0.0f) {
-        RenderPreviewPopup(editor, renderTab, composite, activeTab);
+        RenderPreviewPopup(editor, composite, activeTab);
     } else if (m_PreviewAsset || m_AssetPreviewTransition > 0.0f) {
-        RenderAssetPreviewPopup(editor, renderTab, composite, activeTab);
+        RenderAssetPreviewPopup(editor, composite, activeTab);
     }
-
-    RenderConfirmRenderLoadPopup(renderTab, activeTab);
 
     if (importBusy) {
         ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetImportStatusText().c_str());
@@ -1117,7 +1234,7 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     return true;
 }
 
-void LibraryModule::RenderPreviewPopup(EditorModule* editor, RenderTab* renderTab, CompositeModule* composite, int* activeTab) {
+void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* composite, int* activeTab) {
     if (!m_PreviewProject && m_ProjectPreviewTransition <= 0.0f) {
         return;
     }
@@ -1209,6 +1326,7 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, RenderTab* renderTa
         canCloseFromBackdrop &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         !m_ProjectPreviewClosing &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         !finalImageRect.Contains(ImGui::GetIO().MousePos) &&
         !detailsRect.Contains(ImGui::GetIO().MousePos);
     if (clickedBackdrop) {
@@ -1279,7 +1397,8 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, RenderTab* renderTa
         ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y),
         IM_COL32(255, 255, 255, 10),
         18.0f);
-    const bool detailsHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    const bool anyPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+    const bool detailsHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || anyPopupOpen;
     m_ProjectPreviewMenuHover = ImGuiExtras::AnimateTowards(
         m_ProjectPreviewMenuHover,
         detailsHovered ? 1.0f : 0.0f,
@@ -1359,33 +1478,15 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, RenderTab* renderTa
 
     ImGui::BeginDisabled(
         m_ProjectPreviewClosing || projectLoadBusy || previewBusy
-        || (renderProject && renderTab == nullptr)
+        || renderProject
         || compositeProject);
     if (ImGui::Button(
             projectLoadBusy
                 ? "Loading Project..."
-                : (renderProject ? "Load Into Render" : (compositeProject ? "Load Unsupported" : "Load Into Editor")),
+                : ((renderProject || compositeProject) ? "Load Unsupported" : "Load Into Editor"),
             actionSize)) {
         const std::string projectFileName = m_PreviewProject->fileName;
-        if (renderProject) {
-            if (renderTab != nullptr && renderTab->HasUnsavedChanges()) {
-                m_PendingRenderProjectFileName = projectFileName;
-                m_RenderLoadConfirmOpen = true;
-                ImGui::OpenPopup("Discard Unsaved Render Project Changes");
-            } else {
-                m_ProjectPreviewClosing = true;
-                m_ProjectPreviewRefreshAfterClose = false;
-                LibraryManager::Get().RequestLoadRenderProject(projectFileName, renderTab, [this, activeTab](bool success) {
-                    if (!success) {
-                        return;
-                    }
-
-                    if (activeTab) {
-                        *activeTab = 3;
-                    }
-                });
-            }
-        } else if (!compositeProject) {
+        if (!renderProject && !compositeProject) {
             if (editor != nullptr && editor->GetPipeline().HasSourceImage()) {
                 m_PendingLoadProjectFileName = projectFileName;
                 m_PendingLoadTarget = PendingLoadTarget::Editor;
@@ -1476,7 +1577,7 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, RenderTab* renderTa
     }
 }
 
-void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, RenderTab* renderTab, CompositeModule* composite, int* activeTab) {
+void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, CompositeModule* composite, int* activeTab) {
     if (!m_PreviewAsset && m_AssetPreviewTransition <= 0.0f) {
         return;
     }
@@ -1563,6 +1664,7 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, RenderTab* ren
         canCloseFromBackdrop &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         !m_AssetPreviewClosing &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
         !finalImageRect.Contains(ImGui::GetIO().MousePos) &&
         !detailsRect.Contains(ImGui::GetIO().MousePos);
     if (clickedBackdrop) {
@@ -1630,7 +1732,8 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, RenderTab* ren
         ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y),
         IM_COL32(255, 255, 255, 10),
         18.0f);
-    const bool detailsHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    const bool anyPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+    const bool detailsHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || anyPopupOpen;
     m_AssetPreviewMenuHover = ImGuiExtras::AnimateTowards(
         m_AssetPreviewMenuHover,
         detailsHovered ? 1.0f : 0.0f,
@@ -1709,34 +1812,15 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, RenderTab* ren
 
     ImGui::BeginDisabled(
         m_AssetPreviewClosing || projectLoadBusy || previewBusy || m_PreviewAsset->projectFileName.empty()
-        || (renderLinkedProject && renderTab == nullptr)
+        || renderLinkedProject
         || compositeLinkedProject);
     if (ImGui::Button(
             projectLoadBusy
                 ? "Loading Project..."
-                : (renderLinkedProject
-                    ? "Load Into Render"
-                    : (compositeLinkedProject ? "Load Unsupported" : "Load Into Editor")),
+                : ((renderLinkedProject || compositeLinkedProject) ? "Load Unsupported" : "Load Into Editor"),
             ImVec2(contentWidth, 34.0f))) {
         const std::string projectFileName = m_PreviewAsset->projectFileName;
-        if (renderLinkedProject) {
-            if (renderTab != nullptr && renderTab->HasUnsavedChanges()) {
-                m_PendingRenderProjectFileName = projectFileName;
-                m_RenderLoadConfirmOpen = true;
-                ImGui::OpenPopup("Discard Unsaved Render Project Changes");
-            } else {
-                m_AssetPreviewClosing = true;
-                LibraryManager::Get().RequestLoadRenderProject(projectFileName, renderTab, [this, activeTab](bool success) {
-                    if (!success) {
-                        return;
-                    }
-
-                    if (activeTab) {
-                        *activeTab = 3;
-                    }
-                });
-            }
-        } else {
+        if (!renderLinkedProject && !compositeLinkedProject) {
             if (editor != nullptr && editor->GetPipeline().HasSourceImage()) {
                 m_PendingLoadProjectFileName = projectFileName;
                 m_PendingLoadTarget = PendingLoadTarget::Editor;
@@ -1785,66 +1869,7 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, RenderTab* ren
     }
 }
 
-void LibraryModule::RenderConfirmRenderLoadPopup(RenderTab* renderTab, int* activeTab) {
-    if (!m_RenderLoadConfirmOpen) {
-        return;
-    }
 
-    if (!ImGui::BeginPopupModal("Discard Unsaved Render Project Changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        return;
-    }
-
-    static double s_renderConfirmOpenedAt = 0.0;
-    if (ImGui::IsWindowAppearing()) {
-        s_renderConfirmOpenedAt = ImGui::GetTime();
-    }
-    const float popupAlpha = ImGuiExtras::EaseOutCubic(std::clamp(
-        static_cast<float>((ImGui::GetTime() - s_renderConfirmOpenedAt) / kDialogAppearDuration),
-        0.0f,
-        1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, popupAlpha);
-
-    ImGui::TextWrapped("Load another render project and discard the current unsaved render-scene changes?");
-    ImGui::TextDisabled("This closes the current in-memory render scene state.");
-    ImGui::Spacing();
-
-    if (ImGui::Button("Discard And Load", ImVec2(150.0f, 0.0f))) {
-        const std::string pendingFileName = m_PendingRenderProjectFileName;
-        m_RenderLoadConfirmOpen = false;
-        m_PendingRenderProjectFileName.clear();
-        ImGui::CloseCurrentPopup();
-
-        if (renderTab != nullptr && !pendingFileName.empty()) {
-            if (m_PreviewProject) {
-                m_ProjectPreviewClosing = true;
-                m_ProjectPreviewRefreshAfterClose = false;
-            }
-            if (m_PreviewAsset) {
-                m_AssetPreviewClosing = true;
-            }
-            LibraryManager::Get().RequestLoadRenderProject(pendingFileName, renderTab, [this, activeTab](bool success) {
-                if (!success) {
-                    return;
-                }
-
-                if (activeTab) {
-                    *activeTab = 3;
-                }
-            });
-        }
-    }
-
-    ImGui::SameLine();
-
-    if (ImGui::Button("Keep Editing", ImVec2(150.0f, 0.0f))) {
-        m_RenderLoadConfirmOpen = false;
-        m_PendingRenderProjectFileName.clear();
-        ImGui::CloseCurrentPopup();
-    }
-
-    ImGui::PopStyleVar();
-    ImGui::EndPopup();
-}
 
 void LibraryModule::RenderGlobalPopups() {
     RenderConfirmLoadPopup();
@@ -2358,12 +2383,6 @@ void LibraryModule::RenderLibraryMenuOptions(bool importBusy, bool exportBusy) {
         std::string path = FileDialogs::OpenLibraryBundleFileDialog("Import Library Bundle");
         if (!path.empty()) {
             LibraryManager::Get().RequestImportLibraryBundle(path);
-        }
-    }
-    if (ImGui::MenuItem("Import Web Project...")) {
-        std::string path = FileDialogs::OpenWebProjectFileDialog("Import Web Project (.mns.json)");
-        if (!path.empty()) {
-            LibraryManager::Get().RequestImportWebProject(path);
         }
     }
     if (ImGui::MenuItem("Import Folder Assets...")) {

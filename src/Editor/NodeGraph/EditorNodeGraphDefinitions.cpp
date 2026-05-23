@@ -70,9 +70,6 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Composite:
             node.title = "Composite";
             break;
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
-            node.title = "Export Bounds";
-            break;
         case EditorNodeGraph::NodeKind::Scope:
             node.title = ScopeTitle(node.scopeKind);
             node.expanded = true;
@@ -126,7 +123,6 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             break;
         case EditorNodeGraph::NodeKind::Scope:
             add(EditorNodeGraph::kScopeInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Analysis, "Scope", false, true);
@@ -165,7 +161,6 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Output:
             return EditorNodeGraph::kImageInputSocketId;
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             break;
         case EditorNodeGraph::NodeKind::Mix:
             return EditorNodeGraph::kMixInputASocketId;
@@ -197,7 +192,6 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ImageToMask:
             return EditorNodeGraph::kMaskOutputSocketId;
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Scope:
         case EditorNodeGraph::NodeKind::Preview:

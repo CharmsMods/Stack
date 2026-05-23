@@ -243,16 +243,6 @@ Node* Graph::AddCompositeNode(Vec2 position) {
     return &m_Nodes.back();
 }
 
-Node* Graph::AddExportBoundsSettingsNode(Vec2 position) {
-    Node node;
-    node.id = AllocateNodeId();
-    node.kind = NodeKind::ExportBoundsSettings;
-    node.position = position;
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-    m_Nodes.push_back(std::move(node));
-    TouchStructure();
-    return &m_Nodes.back();
-}
 
 Node* Graph::EnsureOutputNode() {
     if (Node* existing = FindNode(m_OutputNodeId)) {

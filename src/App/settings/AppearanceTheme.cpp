@@ -1206,40 +1206,41 @@ bool AppearanceManager::ExportWorkingTheme(const std::filesystem::path& path, st
 void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const {
     ImGui::StyleColorsDark(&style);
 
-    style.Alpha = m_WorkingTheme.style.alpha;
-    style.WindowPadding = m_WorkingTheme.style.windowPadding;
-    style.FramePadding = m_WorkingTheme.style.framePadding;
-    style.CellPadding = m_WorkingTheme.style.cellPadding;
-    style.ItemSpacing = m_WorkingTheme.style.itemSpacing;
-    style.ItemInnerSpacing = m_WorkingTheme.style.itemInnerSpacing;
+    // Premium hardcoded style values for a clean, consistent modern look
+    style.Alpha = 1.0f;
+    style.WindowPadding = ImVec2(16.0f, 16.0f);
+    style.FramePadding = ImVec2(10.0f, 6.0f);
+    style.CellPadding = ImVec2(8.0f, 6.0f);
+    style.ItemSpacing = ImVec2(10.0f, 8.0f);
+    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
     style.TouchExtraPadding = ImVec2(0.0f, 0.0f);
-    style.IndentSpacing = m_WorkingTheme.style.indentSpacing;
-    style.ScrollbarSize = m_WorkingTheme.style.scrollbarSize;
-    style.GrabMinSize = m_WorkingTheme.style.grabMinSize;
-    style.WindowBorderSize = m_WorkingTheme.style.windowBorderSize;
-    style.ChildBorderSize = m_WorkingTheme.style.childBorderSize;
-    style.PopupBorderSize = m_WorkingTheme.style.popupBorderSize;
-    style.FrameBorderSize = m_WorkingTheme.style.frameBorderSize;
-    style.TabBorderSize = m_WorkingTheme.style.tabBorderSize;
-    style.WindowRounding = m_WorkingTheme.style.windowRounding;
-    style.ChildRounding = m_WorkingTheme.style.childRounding;
-    style.FrameRounding = m_WorkingTheme.style.frameRounding;
-    style.PopupRounding = m_WorkingTheme.style.popupRounding;
-    style.ScrollbarRounding = m_WorkingTheme.style.scrollbarRounding;
-    style.GrabRounding = m_WorkingTheme.style.grabRounding;
-    style.TabRounding = m_WorkingTheme.style.tabRounding;
-    style.WindowTitleAlign = m_WorkingTheme.style.windowTitleAlign;
-    style.ButtonTextAlign = m_WorkingTheme.style.buttonTextAlign;
-    style.SelectableTextAlign = m_WorkingTheme.style.selectableTextAlign;
-    style.AntiAliasedLines = m_WorkingTheme.style.antiAliasedLines;
-    style.AntiAliasedFill = m_WorkingTheme.style.antiAliasedFill;
-    style.CurveTessellationTol = m_WorkingTheme.style.curveTessellationTol;
+    style.IndentSpacing = 18.0f;
+    style.ScrollbarSize = 12.0f;
+    style.GrabMinSize = 10.0f;
+    style.WindowBorderSize = 0.0f;
+    style.ChildBorderSize = 0.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.TabBorderSize = 0.0f;
+    style.WindowRounding = 12.0f;
+    style.ChildRounding = 10.0f;
+    style.FrameRounding = 8.0f;
+    style.PopupRounding = 12.0f;
+    style.ScrollbarRounding = 12.0f;
+    style.GrabRounding = 8.0f;
+    style.TabRounding = 8.0f;
+    style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+    style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
+    style.SelectableTextAlign = ImVec2(0.0f, 0.0f);
+    style.AntiAliasedLines = true;
+    style.AntiAliasedFill = true;
+    style.CurveTessellationTol = 1.25f;
 
     for (int index = 0; index < ImGuiCol_COUNT; ++index) {
         style.Colors[index] = m_WorkingTheme.colors[static_cast<std::size_t>(index)];
     }
 
-    io.FontGlobalScale = std::clamp(m_WorkingTheme.textScale, kMinTextScale, kMaxTextScale);
+    io.FontGlobalScale = 1.0f; // Hardcode global font scale for consistent typography
 }
 
 void AppearanceManager::SetupFonts(ImGuiIO& io) const {

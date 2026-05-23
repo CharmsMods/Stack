@@ -46,8 +46,8 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         return false;
     }
     if (from->kind == NodeKind::Output || to->kind == NodeKind::Image ||
-        from->kind == NodeKind::Composite || from->kind == NodeKind::ExportBoundsSettings ||
-        to->kind == NodeKind::Composite || to->kind == NodeKind::ExportBoundsSettings) {
+        from->kind == NodeKind::Composite ||
+        to->kind == NodeKind::Composite) {
         if (errorMessage) *errorMessage = "That pin direction is not valid.";
         return false;
     }

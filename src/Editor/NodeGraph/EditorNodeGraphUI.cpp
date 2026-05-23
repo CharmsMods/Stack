@@ -100,7 +100,6 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             return NodeFamily::Gray;
         case EditorNodeGraph::NodeKind::Layer:
             return NodeFamily::Layer;
@@ -270,7 +269,6 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
             break;
     }
     return editor->GetNodeGraph().GetSelectedNodeId();
@@ -361,16 +359,7 @@ NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
         metrics.itemGap = 9.0f;
         return metrics;
     }
-    if (node.kind == EditorNodeGraph::NodeKind::ExportBoundsSettings) {
-        metrics.width = 318.0f;
-        metrics.contentLaneWidth = 238.0f;
-        metrics.previewWidth = 238.0f;
-        metrics.previewHeight = 168.0f;
-        metrics.minExpandedHeight = 404.0f;
-        metrics.sectionGap = 12.0f;
-        metrics.itemGap = 9.0f;
-        return metrics;
-    }
+
     switch (FamilyForNode(node)) {
         case NodeFamily::Gray:
             metrics.width = 232.0f;
@@ -494,8 +483,6 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             return headerBlock + sectionGap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::Composite:
             return headerBlock + sectionGap + row + gap + std::max(136.0f, metrics.previewHeight + 24.0f) + sectionGap + row + gap + row + gap + checkboxRow + gap + checkboxRow + gap + checkboxRow + gap + checkboxRow + gap + row + gap + row + bottomPadding;
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
-            return headerBlock + sectionGap + row + gap + row + gap + row + gap + row + gap + colorRow + gap + row + gap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::Scope:
             return headerBlock + sectionGap + row + sectionGap + metrics.scopeHeight + bottomPadding;
         case EditorNodeGraph::NodeKind::MaskGenerator:
@@ -547,7 +534,6 @@ bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings:
         case EditorNodeGraph::NodeKind::Scope:
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::Mix:
@@ -562,8 +548,7 @@ bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node) {
 
 bool ShouldShowKindLabel(const EditorNodeGraph::Node& node) {
     return node.expanded &&
-        node.kind != EditorNodeGraph::NodeKind::Composite &&
-        node.kind != EditorNodeGraph::NodeKind::ExportBoundsSettings;
+        node.kind != EditorNodeGraph::NodeKind::Composite;
 }
 
 std::string EllipsizeLabel(const std::string& value, float maxWidth) {
@@ -592,7 +577,6 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::Layer: return "Layer";
         case EditorNodeGraph::NodeKind::Output: return "Output";
         case EditorNodeGraph::NodeKind::Composite: return "Composite";
-        case EditorNodeGraph::NodeKind::ExportBoundsSettings: return "Export";
         case EditorNodeGraph::NodeKind::Scope: return "Scope";
         case EditorNodeGraph::NodeKind::MaskGenerator: return "Mask";
         case EditorNodeGraph::NodeKind::Mix: return "Merge";
@@ -764,11 +748,7 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     m_LastNodeControlId = 0;
     m_NodeLayoutCache.clear();
 
-    const bool minimalGuide = graph.GetNodes().size() <= 1;
-    if (minimalGuide) {
-        ImGui::TextDisabled("Drag to connect. Right-click to add.");
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    }
+    // Minimal Guide Removed as requested by user to keep empty state pristine
 
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const ImVec2 canvasSize = ImVec2(std::max(320.0f, available.x), std::max(320.0f, available.y));
@@ -834,8 +814,10 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     drawList->AddRectFilled(canvasMin, canvasMax, ImGui::ColorConvertFloat4ToU32(workspaceBg));
 
     const float gridStep = std::max(8.0f, 32.0f * m_Zoom);
-    const ImVec4 separatorColor = ImGui::GetStyleColorVec4(ImGuiCol_Separator);
-    const ImU32 gridColor = ImGui::ColorConvertFloat4ToU32(ImVec4(separatorColor.x, separatorColor.y, separatorColor.z, 0.12f));
+    const float luminance = 0.2126f * workspaceBg.x + 0.7152f * workspaceBg.y + 0.0722f * workspaceBg.z;
+    const ImU32 gridColor = (luminance < 0.5f)
+        ? IM_COL32(255, 255, 255, 20)  // Dark background: soft light grid
+        : IM_COL32(0, 0, 0, 18);        // Light background: soft dark grid
     for (float x = std::fmod(m_Pan.x, gridStep); x < canvasSize.x; x += gridStep) {
         drawList->AddLine(ImVec2(canvasMin.x + x, canvasMin.y), ImVec2(canvasMin.x + x, canvasMax.y), gridColor);
     }
@@ -873,8 +855,7 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     RenderContextMenu(editor);
     RenderNodeBrowser(editor);
 
-    const float seamFadeFloor = std::min(56.0f, std::max(8.0f, canvasSize.x - 2.0f));
-    const float seamFade = std::clamp(canvasSize.x * 0.26f, seamFadeFloor, 160.0f);
+    const float seamFade = std::min(120.0f, canvasSize.x);
     const float edgeFade = std::min(56.0f, std::min(canvasSize.x, canvasSize.y) * 0.10f);
     const ImU32 fadeSoft = ColorWithAlpha(workspaceBg, 0.62f);
     const ImU32 fadeStrong = ColorWithAlpha(workspaceBg, 1.0f);
@@ -1197,7 +1178,6 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             case EditorNodeGraph::NodeKind::Image:
             case EditorNodeGraph::NodeKind::Output:
             case EditorNodeGraph::NodeKind::Composite:
-            case EditorNodeGraph::NodeKind::ExportBoundsSettings:
                 return node.title.empty() ? NodeKindLabel(node.kind) : node.title;
         }
         return node.title.empty() ? NodeKindLabel(node.kind) : node.title;
@@ -1457,112 +1437,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             "Resize Mode: %s (%s)",
             editor->GetCompositeResizeMode() == EditorModule::CompositeResizeMode::Stretch ? "Stretch" : "Scale",
             editor->GetCompositeScaleOriginMode() == EditorModule::CompositeScaleOriginMode::Center ? "Center" : "Opposite");
-    } else if (node.kind == EditorNodeGraph::NodeKind::ExportBoundsSettings) {
-        auto& settings = editor->GetMutableCompositeExportSettings();
-        const bool autoBounds = settings.boundsMode == EditorModule::CompositeExportBoundsMode::Auto;
-        const bool hasCompositeContent = !editor->GetCompositeSceneItems().empty();
-        ImGui::BeginDisabled(!hasCompositeContent);
-        if (ImGui::RadioButton("Auto Bounds", autoBounds)) {
-            settings.boundsMode = EditorModule::CompositeExportBoundsMode::Auto;
-            editor->SyncCompositeExportResolutionFromWidth();
-        }
-        if (ImGui::RadioButton("Custom Bounds", !autoBounds)) {
-            settings.boundsMode = EditorModule::CompositeExportBoundsMode::Custom;
-            if (settings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom) {
-                editor->UpdateCompositeCustomExportAspectFromBounds();
-            } else {
-                editor->SyncCompositeExportResolutionFromWidth();
-            }
-        }
 
-        static const EditorModule::CompositeExportAspectPreset presets[] = {
-            EditorModule::CompositeExportAspectPreset::Ratio1x1,
-            EditorModule::CompositeExportAspectPreset::Ratio4x3,
-            EditorModule::CompositeExportAspectPreset::Ratio3x2,
-            EditorModule::CompositeExportAspectPreset::Ratio16x9,
-            EditorModule::CompositeExportAspectPreset::Ratio9x16,
-            EditorModule::CompositeExportAspectPreset::Ratio2x3,
-            EditorModule::CompositeExportAspectPreset::Ratio5x4,
-            EditorModule::CompositeExportAspectPreset::Ratio21x9,
-            EditorModule::CompositeExportAspectPreset::Custom
-        };
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::BeginCombo("Aspect Ratio", ExportAspectPresetLabel(settings.aspectPreset))) {
-            for (const auto preset : presets) {
-                const bool selected = preset == settings.aspectPreset;
-                if (ImGui::Selectable(ExportAspectPresetLabel(preset), selected)) {
-                    settings.aspectPreset = preset;
-                    if (settings.aspectPreset == EditorModule::CompositeExportAspectPreset::Custom) {
-                        editor->UpdateCompositeCustomExportAspectFromBounds();
-                    } else if (settings.boundsMode == EditorModule::CompositeExportBoundsMode::Custom) {
-                        const float ratio = editor->GetCurrentCompositeExportAspectRatio();
-                        const float centerY = settings.customY + settings.customHeight * 0.5f;
-                        settings.customHeight = std::max(1.0f, settings.customWidth / std::max(0.0001f, ratio));
-                        settings.customY = centerY - settings.customHeight * 0.5f;
-                    }
-                    editor->SyncCompositeExportResolutionFromWidth();
-                }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-
-        if (settings.boundsMode == EditorModule::CompositeExportBoundsMode::Custom) {
-            ImGui::TextDisabled("Toggle boundary edit with F.");
-            ImGui::Text("Bounds: %.1f x %.1f", settings.customWidth, settings.customHeight);
-            ImGui::TextDisabled("Origin: %.1f, %.1f", settings.customX, settings.customY);
-            if (ImGui::Button("Use View As Export", ImVec2(controlWidth, 0.0f))) {
-                editor->UseCompositeViewAsExportBounds(editor->GetLastCompositeCanvasSize());
-            }
-        } else {
-            ImGui::TextDisabled("Auto bounds follow the visible composite objects.");
-        }
-
-        drawInlineSeparator();
-        if (ImGui::RadioButton("Transparent Background", settings.backgroundMode == EditorModule::CompositeExportBackgroundMode::Transparent)) {
-            settings.backgroundMode = EditorModule::CompositeExportBackgroundMode::Transparent;
-        }
-        if (ImGui::RadioButton("Solid Background", settings.backgroundMode == EditorModule::CompositeExportBackgroundMode::Solid)) {
-            settings.backgroundMode = EditorModule::CompositeExportBackgroundMode::Solid;
-        }
-        if (settings.backgroundMode == EditorModule::CompositeExportBackgroundMode::Solid) {
-            float color[3] = {
-                settings.backgroundColor[0],
-                settings.backgroundColor[1],
-                settings.backgroundColor[2]
-            };
-            if (ImGuiExtras::NodeColorEdit3("Background Color", "##BackgroundColor", color, 0, controlWidth)) {
-                settings.backgroundColor[0] = std::clamp(color[0], 0.0f, 1.0f);
-                settings.backgroundColor[1] = std::clamp(color[1], 0.0f, 1.0f);
-                settings.backgroundColor[2] = std::clamp(color[2], 0.0f, 1.0f);
-                settings.backgroundColor[3] = 1.0f;
-            }
-            captureIfActive();
-        }
-
-        drawInlineSeparator();
-        const bool widthChanged = ImGuiExtras::NodeInputInt("Output Width", "##OutputWidth", &settings.outputWidth, 1, 100, controlWidth);
-        captureIfActive();
-        const bool heightChanged = ImGuiExtras::NodeInputInt("Output Height", "##OutputHeight", &settings.outputHeight, 1, 100, controlWidth);
-        captureIfActive();
-        if (widthChanged) {
-            editor->SyncCompositeExportResolutionFromWidth();
-        } else if (heightChanged) {
-            editor->SyncCompositeExportResolutionFromHeight();
-        }
-
-        if (ImGui::Button("Export PNG", ImVec2(controlWidth, 0.0f))) {
-            const std::string path = FileDialogs::SavePngFileDialog("Export Composite Image", "composite_output.png");
-            if (!path.empty()) {
-                editor->RequestExportImage(path);
-            }
-        }
-        ImGui::EndDisabled();
-        if (!hasCompositeContent) {
-            ImGui::TextDisabled("Add at least two completed chains to export the composite.");
-        }
     } else if (node.kind == EditorNodeGraph::NodeKind::Scope) {
         const EditorNodeGraph::Link* input = graph.FindScopeInputLink(node.id);
         if (input) {
@@ -2051,6 +1926,9 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
 }
 
 void EditorNodeGraphUI::RenderValidationStatus(const EditorNodeGraph::Graph& graph) {
+    if (graph.GetNodes().empty()) {
+        return;
+    }
     const EditorNodeGraph::ValidationResult validation = graph.Validate();
     if (validation.valid && validation.outputConnected && m_StatusMessage.empty()) {
         return;
