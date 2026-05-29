@@ -2,6 +2,7 @@
 #include "App/settings/AppearanceTheme.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/LayerRegistry.h"
 #include "Library/LibraryManager.h"
 #include "Utils/ImGuiExtras.h"
 #include "Utils/FileDialogs.h"
@@ -23,6 +24,67 @@ namespace {
             default:
                 return "1:1";
         }
+    }
+
+    const char* ChannelDisplayName(const std::string& channel) {
+        if (channel == "r") return "R";
+        if (channel == "g") return "G";
+        if (channel == "b") return "B";
+        if (channel == "a") return "A";
+        return "";
+    }
+
+    ImVec4 ChannelPolicyColor(LayerChannelPolicy policy) {
+        switch (policy) {
+            case LayerChannelPolicy::ChannelSafe:
+                return ImVec4(0.42f, 0.72f, 0.56f, 1.0f);
+            case LayerChannelPolicy::ChannelUsefulWithWarning:
+                return ImVec4(0.88f, 0.70f, 0.34f, 1.0f);
+            case LayerChannelPolicy::FullImagePreferred:
+            case LayerChannelPolicy::FullImageOnly:
+            case LayerChannelPolicy::ReworkBeforeExpose:
+                return ImVec4(0.95f, 0.55f, 0.38f, 1.0f);
+        }
+        return ImVec4(0.80f, 0.80f, 0.80f, 1.0f);
+    }
+
+    void RenderLayerMetadataPanel(EditorModule* editor, const EditorNodeGraph::Node& node, float controlWidth) {
+        const LayerDescriptor* descriptor = LayerRegistry::FindDescriptorByTypeId(node.typeId);
+        if (!editor || !descriptor) {
+            return;
+        }
+
+        const std::string channel = editor->GetNodeGraph().ResolveSocketChannel(node.id, EditorNodeGraph::kImageOutputSocketId);
+        const bool hasChannel = !channel.empty();
+        const bool lifecycleNeedsNote = descriptor->lifecycleStatus != LayerLifecycleStatus::Stable;
+        if (!hasChannel && !lifecycleNeedsNote) {
+            return;
+        }
+
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(120.0f, controlWidth));
+        if (hasChannel) {
+            ImGui::TextColored(
+                ChannelPolicyColor(descriptor->channelPolicy),
+                "Channel stream: %s (%s)",
+                ChannelDisplayName(channel),
+                LayerRegistry::ChannelPolicyLabel(descriptor->channelPolicy));
+            if (descriptor->channelPolicy != LayerChannelPolicy::ChannelSafe &&
+                descriptor->channelNote &&
+                descriptor->channelNote[0] != '\0') {
+                ImGui::TextDisabled("%s", descriptor->channelNote);
+            }
+        }
+        if (lifecycleNeedsNote) {
+            ImGui::TextColored(
+                ImVec4(0.90f, 0.68f, 0.32f, 1.0f),
+                "Status: %s",
+                LayerRegistry::LifecycleStatusLabel(descriptor->lifecycleStatus));
+            if (descriptor->lifecycleNote && descriptor->lifecycleNote[0] != '\0') {
+                ImGui::TextDisabled("%s", descriptor->lifecycleNote);
+            }
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
 }
 
@@ -56,6 +118,8 @@ void EditorSidebar::Render(EditorModule* editor) {
         m_NodeGraphUI.Render(editor);
     } else if (editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ExportSettings) {
         RenderExportSettings(editor);
+    } else if (editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode) {
+        RenderComplexNodeSettings(editor);
     } else {
         RenderSettings(editor);
     }
@@ -368,5 +432,89 @@ void EditorSidebar::RenderExportSettings(EditorModule* editor) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.4f, 0.4f, 1.0f));
         ImGui::TextWrapped("Add at least two completed chains to export the composite.");
         ImGui::PopStyleColor();
-    }
+     }
 }
+
+void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
+    const float fullWidth = ImGui::GetContentRegionAvail().x;
+    
+    if (ImGuiExtras::RichFullWidthButton("< Back to Graph", fullWidth, 30.0f)) {
+        editor->SwitchToSubWindow(EditorModule::EditorSubWindow::NodeGraph);
+    }
+    
+    int nodeId = editor->GetActiveComplexNodeId();
+    EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(nodeId);
+    if (!node) {
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::TextDisabled("Selected complex node is no longer available.");
+        return;
+    }
+    
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    std::string displayName = node->title;
+    if (displayName.empty()) {
+        const LayerDescriptor* descriptor = LayerRegistry::FindDescriptorByTypeId(node->typeId);
+        displayName = descriptor && descriptor->displayName ? descriptor->displayName : "Advanced Node";
+    }
+    ImGuiExtras::RichSectionLabel(displayName.c_str(), 6.0f);
+    
+    const float controlWidth = std::min(450.0f * ImGui::GetIO().FontGlobalScale, fullWidth);
+    ImGui::BeginChild("ComplexNodeScrollRegion", ImVec2(0.0f, 0.0f), false);
+    RenderLayerMetadataPanel(editor, *node, controlWidth);
+    
+    if (node->kind == EditorNodeGraph::NodeKind::RawSource) {
+        editor->RenderRawSourceControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
+        editor->RenderRawNeuralDenoiseControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        editor->RenderRawDevelopControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+
+    auto& layers = editor->GetLayers();
+    if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(layers.size())) {
+        editor->RenderLayerControlsWithDirtyTracking(*node, [&](LayerBase& layer) {
+            NodeSurfaceContext surfaceContext;
+            surfaceContext.nodeId = node->id;
+            surfaceContext.availableWidth = controlWidth;
+            surfaceContext.safeContentWidth = controlWidth;
+            surfaceContext.logicalAvailableWidth = controlWidth / ImGui::GetIO().FontGlobalScale;
+            surfaceContext.logicalSafeContentWidth = controlWidth / ImGui::GetIO().FontGlobalScale;
+            surfaceContext.layoutScale = ImGui::GetIO().FontGlobalScale;
+            surfaceContext.contentScale = ImGui::GetIO().FontGlobalScale;
+            surfaceContext.itemGap = 6.0f;
+            surfaceContext.sectionGap = 10.0f;
+            surfaceContext.focused = true;
+            surfaceContext.density = NodeSurfaceDensity::Dense;
+            surfaceContext.canvasToolActive = editor->GetCanvasToolOwnerNodeId() == node->id;
+            surfaceContext.canvasToolStatusText = editor->GetCanvasToolStatusText().empty()
+                ? nullptr
+                : editor->GetCanvasToolStatusText().c_str();
+
+            const float uiScale = ImGui::GetIO().FontGlobalScale;
+            const float densityScale = 0.85f;
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::max(2.0f, 6.0f * uiScale * densityScale), std::max(2.0f, 4.0f * uiScale * densityScale)));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(std::max(2.0f, 6.0f * uiScale * 0.75f * densityScale), std::max(2.0f, 6.0f * uiScale * 0.58f * densityScale)));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(std::max(2.0f, 5.0f * uiScale * densityScale), std::max(2.0f, 4.0f * uiScale * densityScale)));
+            ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 999.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, std::max(2.5f, 6.5f * uiScale * densityScale));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(0.8f, 1.0f * uiScale));
+
+            layer.RenderExpandedNodeSurface(editor, surfaceContext);
+
+            ImGui::PopStyleVar(7);
+        });
+    } else {
+        ImGui::TextDisabled("Layer controls are not available.");
+    }
+    ImGui::EndChild();
+}
+

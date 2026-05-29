@@ -21,7 +21,7 @@ namespace GLHelpers {
     // Create a simple RGBA texture from CPU pixel data
     unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int height, int channels);
 
-    // Create an empty RGBA texture for FBO attachment
+    // Create an empty RGBA16F scene-linear texture for FBO attachment
     unsigned int CreateEmptyTexture(int width, int height);
 
     // Create an immutable texture storage target for image load/store workloads

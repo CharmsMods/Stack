@@ -191,6 +191,18 @@ void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, 
         rounding,
         0,
         hovered || selected > 0.01f ? 1.1f : 1.0f);
+
+    // Draw high-visibility selected neon-blue outline
+    if (selected > 0.01f) {
+        const ImU32 selectedOutlineColor = IM_COL32(95, 165, 255, static_cast<int>(220 * selected));
+        drawList->AddRect(
+            rect.Min,
+            rect.Max,
+            selectedOutlineColor,
+            rounding,
+            0,
+            1.8f);
+    }
 }
 
 void DrawCardOverlayText(
@@ -532,9 +544,27 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(255, 255, 255, 34));
     ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(220, 236, 244, 34));
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(48.0f, 16.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(56.0f, 24.0f));
     ImGui::BeginChild("LibraryTabContainer", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
     ImGui::PopStyleVar();
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            if (m_ShowAssets) {
+                if (!m_SelectedAssets.empty()) {
+                    m_PendingDeleteFileNames.assign(m_SelectedAssets.begin(), m_SelectedAssets.end());
+                    m_DeletingAssets = true;
+                    m_DeleteConfirmOpen = true;
+                }
+            } else {
+                if (!m_SelectedProjects.empty()) {
+                    m_PendingDeleteFileNames.assign(m_SelectedProjects.begin(), m_SelectedProjects.end());
+                    m_DeletingAssets = false;
+                    m_DeleteConfirmOpen = true;
+                }
+            }
+        }
+    }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::BeginChild("LibraryHeader", ImVec2(0, 58.0f), false, ImGuiWindowFlags_NoScrollbar);
@@ -599,15 +629,27 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
     ImGui::PopStyleVar(); // Pop LibraryHeader's WindowPadding
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x + 12.0f, style.ItemSpacing.y + 16.0f));
     ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), false);
+
+    auto getCardWidth = [](float aspect) {
+        const float standardWidth = 220.0f;
+        float cardWidth = standardWidth;
+        float cardHeight = standardWidth / std::max(aspect, 0.1f);
+        if (cardHeight > 300.0f) {
+            cardWidth = 300.0f * aspect;
+        }
+        return cardWidth;
+    };
 
     int renderedCount = 0;
     if (m_ShowAssets) {
         float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-        ImGuiStyle& style = ImGui::GetStyle();
 
         const auto& assets = LibraryManager::Get().GetAssets();
-        for (const auto& asset : assets) {
+        for (size_t idx = 0; idx < assets.size(); ++idx) {
+            const auto& asset = assets[idx];
             if (!asset) continue;
 
             ImGui::PushID(asset->fileName.c_str());
@@ -615,7 +657,19 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
             if (rendered) {
                 ++renderedCount;
                 const float lastButtonX2 = ImGui::GetItemRectMax().x;
-                const float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + 220.0f;
+
+                // Lookahead to find next matched asset
+                float nextCardWidth = 220.0f;
+                for (size_t nextIdx = idx + 1; nextIdx < assets.size(); ++nextIdx) {
+                    const auto& nextAsset = assets[nextIdx];
+                    if (nextAsset && AssetMatchesFilter(*nextAsset, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag)) {
+                        const float nextAspect = (nextAsset->height > 0) ? (static_cast<float>(nextAsset->width) / static_cast<float>(nextAsset->height)) : 1.0f;
+                        nextCardWidth = getCardWidth(nextAspect);
+                        break;
+                    }
+                }
+
+                const float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + nextCardWidth;
                 if (nextButtonX2 < windowVisibleX2) {
                     ImGui::SameLine();
                 }
@@ -624,10 +678,10 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
         }
     } else {
         float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-        ImGuiStyle& style = ImGui::GetStyle();
 
         const auto& projects = LibraryManager::Get().GetProjects();
-        for (const auto& project : projects) {
+        for (size_t idx = 0; idx < projects.size(); ++idx) {
+            const auto& project = projects[idx];
             if (!project) continue;
 
             ImGui::PushID(project->fileName.c_str());
@@ -635,7 +689,19 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
             if (rendered) {
                 ++renderedCount;
                 const float lastButtonX2 = ImGui::GetItemRectMax().x;
-                const float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + 220.0f;
+
+                // Lookahead to find next matched project
+                float nextCardWidth = 220.0f;
+                for (size_t nextIdx = idx + 1; nextIdx < projects.size(); ++nextIdx) {
+                    const auto& nextProject = projects[nextIdx];
+                    if (nextProject && ProjectMatchesFilter(*nextProject, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag)) {
+                        const float nextAspect = (nextProject->sourceHeight > 0) ? (static_cast<float>(nextProject->sourceWidth) / static_cast<float>(nextProject->sourceHeight)) : 1.0f;
+                        nextCardWidth = getCardWidth(nextAspect);
+                        break;
+                    }
+                }
+
+                const float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + nextCardWidth;
                 if (nextButtonX2 < windowVisibleX2) {
                     ImGui::SameLine();
                 }
@@ -882,7 +948,7 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
     }
 
     ImGui::EndChild(); // End LibraryGrid
-    ImGui::PopStyleVar(); // Pop LibraryGrid's WindowPadding
+    ImGui::PopStyleVar(2); // Pop LibraryGrid's WindowPadding and ItemSpacing
     ImGui::EndChild(); // End LibraryTabContainer
 
     ImGui::PopStyleColor(7);
@@ -925,15 +991,16 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
         return false;
     }
 
-    const float cardWidth = 220.0f;
+    const float standardWidth = 220.0f;
     const float aspect = (project.sourceHeight > 0) ? (static_cast<float>(project.sourceWidth) / static_cast<float>(project.sourceHeight)) : 1.0f;
-    ImVec2 thumbSize(cardWidth, cardWidth / std::max(aspect, 0.1f));
+    ImVec2 thumbSize(standardWidth, standardWidth / std::max(aspect, 0.1f));
 
     if (thumbSize.y > 300.0f) {
         thumbSize.y = 300.0f;
         thumbSize.x = 300.0f * aspect;
     }
 
+    const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
     const ImVec2 screenMin = ImGui::GetCursorScreenPos();
     const ImRect cardRect(screenMin, ImVec2(screenMin.x + cardWidth, screenMin.y + totalHeight));
@@ -1093,15 +1160,16 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
         return false;
     }
 
-    const float cardWidth = 220.0f;
+    const float standardWidth = 220.0f;
     const float aspect = (asset.height > 0) ? (static_cast<float>(asset.width) / static_cast<float>(asset.height)) : 1.0f;
-    ImVec2 thumbSize(cardWidth, cardWidth / std::max(aspect, 0.1f));
+    ImVec2 thumbSize(standardWidth, standardWidth / std::max(aspect, 0.1f));
 
     if (thumbSize.y > 300.0f) {
         thumbSize.y = 300.0f;
         thumbSize.x = 300.0f * aspect;
     }
 
+    const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
     const ImVec2 screenMin = ImGui::GetCursorScreenPos();
     const ImRect cardRect(screenMin, ImVec2(screenMin.x + cardWidth, screenMin.y + totalHeight));
@@ -1487,7 +1555,7 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* co
             actionSize)) {
         const std::string projectFileName = m_PreviewProject->fileName;
         if (!renderProject && !compositeProject) {
-            if (editor != nullptr && editor->GetPipeline().HasSourceImage()) {
+            if (editor != nullptr && editor->IsDirty()) {
                 m_PendingLoadProjectFileName = projectFileName;
                 m_PendingLoadTarget = PendingLoadTarget::Editor;
                 m_ConfirmLoadOpen = true;
@@ -1821,7 +1889,7 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, CompositeModul
             ImVec2(contentWidth, 34.0f))) {
         const std::string projectFileName = m_PreviewAsset->projectFileName;
         if (!renderLinkedProject && !compositeLinkedProject) {
-            if (editor != nullptr && editor->GetPipeline().HasSourceImage()) {
+            if (editor != nullptr && editor->IsDirty()) {
                 m_PendingLoadProjectFileName = projectFileName;
                 m_PendingLoadTarget = PendingLoadTarget::Editor;
                 m_ConfirmLoadOpen = true;

@@ -339,5 +339,6 @@ private:
     std::string m_ProjectName = "Untitled Composite";
     std::string m_ProjectFileName;
     bool m_Dirty = false;
+    bool m_CanvasFocused = false;
     bool m_Initialized = false;
 };

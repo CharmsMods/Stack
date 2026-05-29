@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <unordered_map>
+#include <stdexcept>
 
 namespace StackBinaryFormat {
 namespace {
@@ -32,6 +33,17 @@ enum class ValueType : std::uint8_t {
     Object = 9
 };
 
+std::uint32_t ComputeCRC32(const unsigned char* data, std::size_t length, std::uint32_t previousCrc32 = 0) {
+    std::uint32_t crc = ~previousCrc32;
+    for (std::size_t i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; ++j) {
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320 : (crc >> 1);
+        }
+    }
+    return ~crc;
+}
+
 struct SectionData {
     std::array<char, 4> id;
     std::vector<unsigned char> bytes;
@@ -51,12 +63,18 @@ public:
     }
 
     void WriteString(const std::string& value) {
+        if (value.size() > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("ByteWriter: String size exceeds maximum allowed (4GB)");
+        }
         const std::uint32_t size = static_cast<std::uint32_t>(value.size());
         WritePod(size);
         m_Bytes.insert(m_Bytes.end(), value.begin(), value.end());
     }
 
     void WriteBinary(const std::vector<unsigned char>& value) {
+        if (value.size() > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("ByteWriter: Binary size exceeds maximum allowed (4GB)");
+        }
         const std::uint32_t size = static_cast<std::uint32_t>(value.size());
         WritePod(size);
         m_Bytes.insert(m_Bytes.end(), value.begin(), value.end());
@@ -281,7 +299,10 @@ bool DeserializeJson(const std::vector<unsigned char>& bytes, json& value) {
 }
 
 bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const std::vector<SectionData>& sections) {
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    std::filesystem::path tempPath = path;
+    tempPath += ".tmp";
+
+    std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) return false;
 
     const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size());
@@ -294,27 +315,54 @@ bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const 
 
     std::uint64_t dataOffset = headerSize;
 
-    file.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
-    file.write(reinterpret_cast<const char*>(&kFormatVersion), sizeof(kFormatVersion));
-    file.write(reinterpret_cast<const char*>(&kind), sizeof(kind));
-    file.write(reinterpret_cast<const char*>(&sectionCount), sizeof(sectionCount));
+    std::uint32_t currentCrc = 0;
+    auto writeAndCrc = [&](const void* data, std::size_t size) {
+        file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+        currentCrc = ComputeCRC32(reinterpret_cast<const unsigned char*>(data), size, currentCrc);
+    };
+
+    writeAndCrc(kMagic.data(), kMagic.size());
+    writeAndCrc(&kFormatVersion, sizeof(kFormatVersion));
+    writeAndCrc(&kind, sizeof(kind));
+    writeAndCrc(&sectionCount, sizeof(sectionCount));
 
     for (const auto& section : sections) {
-        file.write(section.id.data(), static_cast<std::streamsize>(section.id.size()));
+        writeAndCrc(section.id.data(), section.id.size());
         const std::uint64_t sectionOffset = dataOffset;
         const std::uint64_t sectionSize = static_cast<std::uint64_t>(section.bytes.size());
-        file.write(reinterpret_cast<const char*>(&sectionOffset), sizeof(sectionOffset));
-        file.write(reinterpret_cast<const char*>(&sectionSize), sizeof(sectionSize));
+        writeAndCrc(&sectionOffset, sizeof(sectionOffset));
+        writeAndCrc(&sectionSize, sizeof(sectionSize));
         dataOffset += sectionSize;
     }
 
     for (const auto& section : sections) {
         if (!section.bytes.empty()) {
-            file.write(reinterpret_cast<const char*>(section.bytes.data()), static_cast<std::streamsize>(section.bytes.size()));
+            writeAndCrc(section.bytes.data(), section.bytes.size());
         }
     }
 
-    return file.good();
+    // Write CRC32 footer
+    const std::array<char, 4> kCksmTag = { 'C', 'K', 'S', 'M' };
+    file.write(kCksmTag.data(), kCksmTag.size());
+    file.write(reinterpret_cast<const char*>(&currentCrc), sizeof(currentCrc));
+
+    file.close();
+    if (!file.good()) {
+        std::error_code ec;
+        std::filesystem::remove(tempPath, ec);
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(tempPath, path, ec);
+    if (ec) {
+        // Fallback for cross-device renames or other filesystem issues
+        std::filesystem::copy_file(tempPath, path, std::filesystem::copy_options::overwrite_existing, ec);
+        std::filesystem::remove(tempPath, ec);
+        if (ec) return false;
+    }
+
+    return true;
 }
 
 bool ReadSectionTable(
@@ -346,6 +394,38 @@ bool ReadSectionTable(
 
     file.seekg(0, std::ios::end);
     const std::uint64_t fileSize = static_cast<std::uint64_t>(file.tellg());
+    
+    // Check for CRC32 footer
+    if (fileSize >= 8) {
+        file.seekg(static_cast<std::streamoff>(fileSize - 8), std::ios::beg);
+        std::array<char, 4> footerTag = {};
+        file.read(footerTag.data(), footerTag.size());
+        if (footerTag[0] == 'C' && footerTag[1] == 'K' && footerTag[2] == 'S' && footerTag[3] == 'M') {
+            std::uint32_t expectedCrc = 0;
+            file.read(reinterpret_cast<char*>(&expectedCrc), sizeof(expectedCrc));
+            
+            // Compute CRC32 of the file up to the footer
+            file.seekg(0, std::ios::beg);
+            std::uint32_t actualCrc = 0;
+            constexpr std::size_t kBufferSize = 65536;
+            std::vector<char> buffer(kBufferSize);
+            std::uint64_t bytesToRead = fileSize - 8;
+            
+            while (bytesToRead > 0 && file.good()) {
+                const std::size_t toRead = static_cast<std::size_t>(std::min(static_cast<std::uint64_t>(kBufferSize), bytesToRead));
+                file.read(buffer.data(), static_cast<std::streamsize>(toRead));
+                const std::size_t readCount = static_cast<std::size_t>(file.gcount());
+                if (readCount == 0) break;
+                actualCrc = ComputeCRC32(reinterpret_cast<const unsigned char*>(buffer.data()), readCount, actualCrc);
+                bytesToRead -= readCount;
+            }
+            
+            if (actualCrc != expectedCrc) {
+                return false; // Corrupted file
+            }
+        }
+    }
+
     file.seekg(static_cast<std::streamoff>(kMagic.size() + sizeof(version) + sizeof(rawKind) + sizeof(sectionCount)), std::ios::beg);
 
     for (std::uint32_t index = 0; index < sectionCount; ++index) {

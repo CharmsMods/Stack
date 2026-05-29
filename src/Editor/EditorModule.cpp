@@ -4,6 +4,7 @@
 #include "NodeGraph/EditorNodeGraphSerializer.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
+#include "Raw/RawLoader.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include "ThirdParty/stb_image.h"
@@ -29,6 +30,7 @@ struct DecodedImageData {
     int width = 0;
     int height = 0;
     int channels = 4;
+    int originalChannels = 4;
 };
 
 bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
@@ -46,6 +48,7 @@ bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
     outImage.width = width;
     outImage.height = height;
     outImage.channels = 4;
+    outImage.originalChannels = channels;
     outImage.pixels.assign(pixels, pixels + (width * height * 4));
     stbi_image_free(pixels);
     return true;
@@ -175,9 +178,71 @@ EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
     payload.width = decoded.width;
     payload.height = decoded.height;
     payload.channels = decoded.channels;
+    payload.originalChannels = decoded.originalChannels;
     payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
     payload.pixels = std::move(decoded.pixels);
     return payload;
+}
+
+EditorNodeGraph::RawSourcePayload BuildRawPayloadFromMetadata(
+    const std::string& path,
+    Raw::RawMetadata metadata) {
+    EditorNodeGraph::RawSourcePayload payload;
+    payload.label = FileNameFromPath(path).empty() ? "RAW" : FileNameFromPath(path);
+    payload.sourcePath = path;
+    payload.metadata = std::move(metadata);
+    payload.metadata.sourcePath = path;
+    return payload;
+}
+
+Raw::RawDevelopSettings BuildRawDevelopSettingsFromMetadata(const Raw::RawMetadata& metadata) {
+    Raw::RawDevelopSettings settings;
+    settings.blackLevelOverride = metadata.blackLevel;
+    settings.whiteLevelOverride = metadata.whiteLevel;
+    if (!metadata.isDng) {
+        settings.cameraTransformSource = Raw::RawCameraTransformSource::LibRawRgbCam;
+    } else if (metadata.hasDngForwardMatrix1 || metadata.hasDngForwardMatrix2 ||
+        metadata.hasDngColorMatrix1 || metadata.hasDngColorMatrix2) {
+        settings.cameraTransformSource = Raw::RawCameraTransformSource::DngAuto;
+    } else {
+        settings.cameraTransformSource = Raw::RawCameraTransformSource::LibRawRgbCam;
+    }
+    return settings;
+}
+
+int ResolveRawDevelopOrientation(const Raw::RawMetadata& metadata, const Raw::RawDevelopSettings& settings) {
+    int exifRotationSteps = 0;
+    if (metadata.orientation == 3) exifRotationSteps = 2;
+    else if (metadata.orientation == 5) exifRotationSteps = 1;
+    else if (metadata.orientation == 6) exifRotationSteps = 1;
+    else if (metadata.orientation == 8) exifRotationSteps = 3;
+
+    int manualRotationSteps = 0;
+    if (settings.rotationDegrees == 90) manualRotationSteps = 3;
+    else if (settings.rotationDegrees == 180) manualRotationSteps = 2;
+    else if (settings.rotationDegrees == 270) manualRotationSteps = 1;
+    const int totalRotationSteps = (exifRotationSteps + manualRotationSteps) % 4;
+
+    int effectiveOrientation = metadata.orientation;
+    if (metadata.orientation <= 1 || metadata.orientation == 3 || metadata.orientation == 6 || metadata.orientation == 8) {
+        if (totalRotationSteps == 0) effectiveOrientation = 1;
+        else if (totalRotationSteps == 1) effectiveOrientation = 6;
+        else if (totalRotationSteps == 2) effectiveOrientation = 3;
+        else if (totalRotationSteps == 3) effectiveOrientation = 8;
+    } else if (metadata.orientation == 2 || metadata.orientation == 4 || metadata.orientation == 5 || metadata.orientation == 7) {
+        int baseSteps = 0;
+        if (metadata.orientation == 2) baseSteps = 0;
+        else if (metadata.orientation == 7) baseSteps = 1;
+        else if (metadata.orientation == 4) baseSteps = 2;
+        else if (metadata.orientation == 5) baseSteps = 3;
+
+        const int finalSteps = (baseSteps + manualRotationSteps) % 4;
+        if (finalSteps == 0) effectiveOrientation = 2;
+        else if (finalSteps == 1) effectiveOrientation = 7;
+        else if (finalSteps == 2) effectiveOrientation = 4;
+        else if (finalSteps == 3) effectiveOrientation = 5;
+    }
+    return effectiveOrientation;
 }
 
 struct GraphReconnectPlan {
@@ -186,6 +251,92 @@ struct GraphReconnectPlan {
     int toNodeId = 0;
     std::string toSocketId;
 };
+
+struct ScenePathState {
+    bool sceneReferred = false;
+    bool hasViewTransform = false;
+};
+
+ScenePathState MergeScenePathState(ScenePathState a, const ScenePathState& b) {
+    a.sceneReferred = a.sceneReferred || b.sceneReferred;
+    a.hasViewTransform = a.hasViewTransform || b.hasViewTransform;
+    return a;
+}
+
+ScenePathState AnalyzeScenePathFromNode(
+    const EditorNodeGraph::Graph& graph,
+    const std::vector<std::shared_ptr<LayerBase>>& layers,
+    int nodeId,
+    std::unordered_set<int>& visiting) {
+    if (!visiting.insert(nodeId).second) {
+        return {};
+    }
+
+    ScenePathState state;
+    const EditorNodeGraph::Node* node = graph.FindNode(nodeId);
+    if (!node) {
+        visiting.erase(nodeId);
+        return state;
+    }
+
+    auto mergeInput = [&](const char* socketId) {
+        if (const EditorNodeGraph::Link* input = graph.FindInputLink(nodeId, socketId)) {
+            state = MergeScenePathState(state, AnalyzeScenePathFromNode(graph, layers, input->fromNodeId, visiting));
+        }
+    };
+
+    switch (node->kind) {
+        case EditorNodeGraph::NodeKind::RawDevelop:
+            state.sceneReferred = true;
+            mergeInput(EditorNodeGraph::kRawInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            mergeInput(EditorNodeGraph::kRawInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::Layer:
+            if (node->layerType == LayerType::ToneCurve) {
+                state.sceneReferred = true;
+            } else if (node->layerType == LayerType::ViewTransform) {
+                state.hasViewTransform = true;
+            }
+            mergeInput(EditorNodeGraph::kImageInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::Mix:
+            mergeInput(EditorNodeGraph::kMixInputASocketId);
+            mergeInput(EditorNodeGraph::kMixInputBSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+            mergeInput(EditorNodeGraph::kImageInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            mergeInput("r");
+            mergeInput("g");
+            mergeInput("b");
+            mergeInput("a");
+            break;
+        case EditorNodeGraph::NodeKind::Output:
+            mergeInput(EditorNodeGraph::kImageInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::ImageToMask:
+            mergeInput(EditorNodeGraph::kImageToMaskInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::MaskUtility:
+            mergeInput(EditorNodeGraph::kMaskUtilityInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::Image:
+        case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::MaskGenerator:
+        case EditorNodeGraph::NodeKind::Composite:
+        case EditorNodeGraph::NodeKind::Scope:
+        case EditorNodeGraph::NodeKind::Preview:
+            break;
+    }
+
+    visiting.erase(nodeId);
+    (void)layers;
+    return state;
+}
 
 std::optional<GraphReconnectPlan> BuildReconnectSourcePlan(
     const EditorNodeGraph::Graph& graph,
@@ -213,6 +364,18 @@ std::optional<GraphReconnectPlan> BuildReconnectSourcePlan(
                 input->fromSocketId,
                 0,
                 EditorNodeGraph::kMaskOutputSocketId
+            };
+        }
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise: {
+            const EditorNodeGraph::Link* input = graph.FindInputLink(node.id, EditorNodeGraph::kRawInputSocketId);
+            if (!input) {
+                return std::nullopt;
+            }
+            return GraphReconnectPlan{
+                input->fromNodeId,
+                input->fromSocketId,
+                0,
+                EditorNodeGraph::kRawOutputSocketId
             };
         }
         case EditorNodeGraph::NodeKind::Mix: {
@@ -391,6 +554,7 @@ bool IsMaskOutputNode(EditorNodeGraph::NodeKind kind) {
 
 bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
     return kind == EditorNodeGraph::NodeKind::Image ||
+        kind == EditorNodeGraph::NodeKind::RawDevelop ||
         kind == EditorNodeGraph::NodeKind::ImageGenerator ||
         kind == EditorNodeGraph::NodeKind::Layer ||
         kind == EditorNodeGraph::NodeKind::Mix ||
@@ -419,6 +583,10 @@ bool ConnectionUsesImageAsRenderSource(
     if (to->kind == EditorNodeGraph::NodeKind::Mix &&
         (toSocketId == EditorNodeGraph::kMixInputASocketId ||
          toSocketId == EditorNodeGraph::kMixInputBSocketId)) {
+        return true;
+    }
+    if (to->kind == EditorNodeGraph::NodeKind::ChannelSplit &&
+        toSocketId == EditorNodeGraph::kImageInputSocketId) {
         return true;
     }
     return false;
@@ -507,6 +675,9 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::Appeara
     m_NodeGraph.ResetFromLayers(0, false);
     ClearCompositeRuntimeState();
     MarkRenderDirty();
+
+    m_Dirty = false;
+    m_LastUserActionTime = 0.0;
 }
 
 void EditorModule::RequestNewProject() {
@@ -551,6 +722,8 @@ void EditorModule::ResetToBlankProject() {
     SetCurrentProjectName("");
     SetCurrentProjectFileName("");
     MarkRenderDirty();
+    ClearDirty();
+    m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
 }
 
 void EditorModule::RenderProjectLifecyclePopups() {
@@ -722,17 +895,18 @@ void EditorModule::SelectGraphNode(int nodeId) {
 }
 
 bool EditorModule::LayerUsesRichNodeSurface(int layerIndex) const {
-    return layerIndex >= 0 &&
-        layerIndex < static_cast<int>(m_Layers.size()) &&
-        m_Layers[layerIndex] &&
-        m_Layers[layerIndex]->GetNodeSurfaceSpec().presentation == NodeSurfacePresentation::RichExpandedSurface;
+    // Rich expanded surface layers now render as clean, compact nodes in the graph
+    // and open their settings in dedicated settings pages instead of expanding on-graph.
+    return false;
 }
 
 bool EditorModule::NodeUsesRichNodeSurface(int nodeId) const {
     const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
     return node &&
-        node->kind == EditorNodeGraph::NodeKind::Layer &&
-        LayerUsesRichNodeSurface(node->layerIndex);
+        ((node->kind == EditorNodeGraph::NodeKind::Layer && LayerUsesRichNodeSurface(node->layerIndex)) ||
+         node->kind == EditorNodeGraph::NodeKind::RawSource ||
+         node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+         node->kind == EditorNodeGraph::NodeKind::RawDevelop);
 }
 
 NodeSurfaceSpec EditorModule::GetLayerNodeSurfaceSpec(int layerIndex) const {
@@ -744,7 +918,27 @@ NodeSurfaceSpec EditorModule::GetLayerNodeSurfaceSpec(int layerIndex) const {
 
 NodeSurfaceSpec EditorModule::GetNodeSurfaceSpec(int nodeId) const {
     const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer) {
+    if (!node) {
+        return {};
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::RawSource) {
+        NodeSurfaceSpec spec;
+        spec.presentation = NodeSurfacePresentation::RichExpandedSurface;
+        spec.density = NodeSurfaceDensity::Dense;
+        spec.preferredWidth = 420.0f;
+        spec.maxWidth = 520.0f;
+        return spec;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+        node->kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        NodeSurfaceSpec spec;
+        spec.presentation = NodeSurfacePresentation::RichExpandedSurface;
+        spec.density = NodeSurfaceDensity::Dense;
+        spec.preferredWidth = 420.0f;
+        spec.maxWidth = 520.0f;
+        return spec;
+    }
+    if (node->kind != EditorNodeGraph::NodeKind::Layer) {
         return {};
     }
     return GetLayerNodeSurfaceSpec(node->layerIndex);
@@ -835,6 +1029,9 @@ void EditorModule::PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition) {
 }
 
 bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition) {
+    if (Raw::RawLoader::IsRawPath(path)) {
+        return AddRawSourceNodeFromFile(path, graphPosition);
+    }
     DecodedImageData decoded;
     if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
         return false;
@@ -843,16 +1040,113 @@ bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph
     return AddImageNodeFromPayload(BuildImagePayloadFromDecoded(path, std::move(decoded)), graphPosition);
 }
 
-bool EditorModule::AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    if (!payload.pngBytes.empty()) {
-        LibraryManager::Get().QueueLooseAssetSave(payload.label, payload.pngBytes);
+bool EditorModule::AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition) {
+    Raw::RawImageData rawData;
+    const bool loaded = Raw::RawLoader::LoadFile(path, rawData);
+    if (!loaded && rawData.metadata.sourcePath.empty()) {
+        rawData.metadata.sourcePath = path;
+    }
+    if (!loaded && rawData.metadata.error.empty()) {
+        rawData.metadata.error = "Failed to load RAW file.";
     }
 
+    EditorNodeGraph::RawSourcePayload payload = BuildRawPayloadFromMetadata(path, std::move(rawData.metadata));
+    return AddRawSourceNodeFromPayload(std::move(payload), graphPosition);
+}
+
+bool EditorModule::AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition) {
     EditorNodeGraph::Node* node = m_NodeGraph.AddImageNode(std::move(payload), graphPosition);
     if (node) {
         SelectGraphNode(node->id);
     }
     return node != nullptr;
+}
+
+bool EditorModule::AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::Node* node = m_NodeGraph.AddRawSourceNode(std::move(payload), graphPosition);
+    if (node) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+    return node != nullptr;
+}
+
+void EditorModule::AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::RawNeuralDenoisePayload payload;
+    AddRawNeuralDenoiseNodeFromPayload(std::move(payload), graphPosition);
+}
+
+bool EditorModule::AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::Node* node = m_NodeGraph.AddRawNeuralDenoiseNode(std::move(payload), graphPosition);
+    if (node) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+    return node != nullptr;
+}
+
+void EditorModule::AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::RawDevelopPayload payload;
+    if (const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId())) {
+        if (selected->kind == EditorNodeGraph::NodeKind::RawSource) {
+            payload.settings = BuildRawDevelopSettingsFromMetadata(selected->rawSource.metadata);
+        }
+    }
+    AddRawDevelopNodeFromPayload(std::move(payload), graphPosition);
+}
+
+bool EditorModule::AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDevelopNode(std::move(payload), graphPosition);
+    if (node) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+    return node != nullptr;
+}
+
+bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
+    const EditorNodeGraph::Node* rawSourceNode = m_NodeGraph.FindNode(rawSourceNodeId);
+    if (!rawSourceNode || rawSourceNode->kind != EditorNodeGraph::NodeKind::RawSource) {
+        return false;
+    }
+
+    const EditorNodeGraph::Vec2 sourcePosition = rawSourceNode->position;
+    SelectGraphNode(rawSourceNodeId);
+
+    constexpr float kNodeSpacing = 250.0f;
+    AddRawDevelopNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 1.0f, sourcePosition.y });
+    const int developNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddLayerNodeAt(LayerType::SceneDenoise, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 2.0f, sourcePosition.y });
+    const int sceneDenoiseNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddLayerNodeAt(LayerType::ToneCurve, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 3.0f, sourcePosition.y });
+    const int toneCurveNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 4.0f, sourcePosition.y });
+    const int viewTransformNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddLayerNodeAt(LayerType::Flip, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 5.0f, sourcePosition.y });
+    const int flipNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddOutputNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 6.0f, sourcePosition.y });
+    const int outputNodeId = m_NodeGraph.GetSelectedNodeId();
+
+    if (developNodeId <= 0 || sceneDenoiseNodeId <= 0 || toneCurveNodeId <= 0 ||
+        viewTransformNodeId <= 0 || flipNodeId <= 0 || outputNodeId <= 0) {
+        return false;
+    }
+
+    std::string errorMessage;
+    const bool ok =
+        ConnectGraphSockets(rawSourceNodeId, EditorNodeGraph::kRawOutputSocketId, developNodeId, EditorNodeGraph::kRawInputSocketId, &errorMessage) &&
+        ConnectGraphSockets(developNodeId, EditorNodeGraph::kImageOutputSocketId, sceneDenoiseNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
+        ConnectGraphSockets(sceneDenoiseNodeId, EditorNodeGraph::kImageOutputSocketId, toneCurveNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
+        ConnectGraphSockets(toneCurveNodeId, EditorNodeGraph::kImageOutputSocketId, viewTransformNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
+        ConnectGraphSockets(viewTransformNodeId, EditorNodeGraph::kImageOutputSocketId, flipNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
+        ConnectGraphSockets(flipNodeId, EditorNodeGraph::kImageOutputSocketId, outputNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
+    if (!ok) {
+        return false;
+    }
+
+    MarkRenderDirty(rawSourceNodeId);
+    SelectGraphNode(outputNodeId);
+    return true;
 }
 
 bool EditorModule::RequestGraphImageChainImports(
@@ -898,7 +1192,12 @@ bool EditorModule::StartGraphImageChainImport(
 
         std::vector<DecodedDropImage> decodedImages;
         decodedImages.reserve(validPaths.size());
+        std::vector<std::string> rawPaths;
         for (const std::string& path : validPaths) {
+            if (Raw::RawLoader::IsRawPath(path)) {
+                rawPaths.push_back(path);
+                continue;
+            }
             DecodedImageData decoded;
             if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
                 continue;
@@ -911,13 +1210,14 @@ bool EditorModule::StartGraphImageChainImport(
             generation,
             sourcePosition,
             requestedCount = validPaths.size(),
-            decodedImages = std::move(decodedImages)
+            decodedImages = std::move(decodedImages),
+            rawPaths = std::move(rawPaths)
         ]() mutable {
             if (generation != m_GraphDropImportGeneration) {
                 return;
             }
 
-            if (decodedImages.empty()) {
+            if (decodedImages.empty() && rawPaths.empty()) {
                 m_GraphDropImportTaskState = Async::TaskState::Failed;
                 m_GraphDropImportStatusText = "Failed to import the dropped images.";
                 if (!m_PendingGraphDropImports.empty()) {
@@ -932,14 +1232,23 @@ bool EditorModule::StartGraphImageChainImport(
             m_GraphDropImportStatusText = "Creating image nodes...";
 
             constexpr float kGraphDropRowSpacing = 190.0f;
-            const float startY = sourcePosition.y - (static_cast<float>(decodedImages.size() - 1) * kGraphDropRowSpacing * 0.5f);
+            const std::size_t totalNodes = decodedImages.size() + rawPaths.size();
+            const float startY = sourcePosition.y - (static_cast<float>(totalNodes - 1) * kGraphDropRowSpacing * 0.5f);
             int importedCount = 0;
-            for (size_t index = 0; index < decodedImages.size(); ++index) {
+            size_t outputIndex = 0;
+            for (size_t index = 0; index < decodedImages.size(); ++index, ++outputIndex) {
                 EditorNodeGraph::Vec2 nodePosition = sourcePosition;
-                nodePosition.y = startY + static_cast<float>(index) * kGraphDropRowSpacing;
+                nodePosition.y = startY + static_cast<float>(outputIndex) * kGraphDropRowSpacing;
                 if (AddGraphImageChainFromPayload(
                     BuildImagePayloadFromDecoded(decodedImages[index].path, std::move(decodedImages[index].decoded)),
                     nodePosition)) {
+                    ++importedCount;
+                }
+            }
+            for (const std::string& path : rawPaths) {
+                EditorNodeGraph::Vec2 nodePosition = sourcePosition;
+                nodePosition.y = startY + static_cast<float>(outputIndex++) * kGraphDropRowSpacing;
+                if (AddGraphRawChainFromFile(path, nodePosition)) {
                     ++importedCount;
                 }
             }
@@ -978,11 +1287,18 @@ bool EditorModule::StartGraphImageChainImport(
 
 bool EditorModule::ConnectGraphImageNode(int nodeId) {
     EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    if (!node || node->kind != EditorNodeGraph::NodeKind::Image || node->image.pixels.empty()) {
+    if (!node) {
+        return false;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::Image) {
+        if (node->image.pixels.empty()) {
+            return false;
+        }
+        LoadSourceFromPixels(node->image.pixels.data(), node->image.width, node->image.height, node->image.channels);
+    } else if (node->kind != EditorNodeGraph::NodeKind::RawDevelop) {
         return false;
     }
 
-    LoadSourceFromPixels(node->image.pixels.data(), node->image.width, node->image.height, node->image.channels);
     m_NodeGraph.ConnectImageToOutput(nodeId);
     SelectGraphNode(nodeId);
     MarkRenderDirty();
@@ -1001,11 +1317,57 @@ bool EditorModule::ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* 
     const std::string fromSocket = from ? m_NodeGraph.DefaultOutputSocket(*from) : std::string();
     const EditorNodeGraph::Node* pendingTo = m_NodeGraph.FindNode(toNodeId);
     const std::string toSocket = pendingTo ? m_NodeGraph.DefaultInputSocket(*pendingTo) : std::string();
-    if (!m_NodeGraph.TryConnect(fromNodeId, toNodeId, errorMessage)) {
+    return ConnectGraphSockets(fromNodeId, fromSocket, toNodeId, toSocket, errorMessage);
+}
+
+bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage) {
+    EditorNodeGraph::Node* from = m_NodeGraph.FindNode(fromNodeId);
+    if (from && from->kind == EditorNodeGraph::NodeKind::Image) {
+        if (from->image.pixels.empty()) {
+            if (errorMessage) *errorMessage = "Image node has no embedded pixels.";
+            return false;
+        }
+    }
+
+    const EditorNodeGraph::Node* targetNode = m_NodeGraph.FindNode(toNodeId);
+    if (targetNode &&
+        targetNode->kind == EditorNodeGraph::NodeKind::Output &&
+        toSocketId == EditorNodeGraph::kImageInputSocketId &&
+        fromSocketId == EditorNodeGraph::kImageOutputSocketId) {
+        std::unordered_set<int> visiting;
+        const ScenePathState scenePath = AnalyzeScenePathFromNode(m_NodeGraph, m_Layers, fromNodeId, visiting);
+        if (scenePath.sceneReferred && !scenePath.hasViewTransform) {
+            const EditorNodeGraph::Vec2 fromPosition = from ? from->position : EditorNodeGraph::Vec2{};
+            const EditorNodeGraph::Vec2 toPosition = targetNode->position;
+            const EditorNodeGraph::Vec2 viewPosition{
+                (fromPosition.x + toPosition.x) * 0.5f,
+                (fromPosition.y + toPosition.y) * 0.5f
+            };
+            AddLayerNodeAt(LayerType::ViewTransform, viewPosition);
+            const int viewNodeId = m_NodeGraph.GetSelectedNodeId();
+            if (viewNodeId <= 0) {
+                if (errorMessage) *errorMessage = "Could not create View Transform node.";
+                return false;
+            }
+            if (!m_NodeGraph.TryConnectSockets(fromNodeId, fromSocketId, viewNodeId, EditorNodeGraph::kImageInputSocketId, errorMessage)) {
+                return false;
+            }
+            if (!m_NodeGraph.TryConnectSockets(viewNodeId, EditorNodeGraph::kImageOutputSocketId, toNodeId, toSocketId, errorMessage)) {
+                return false;
+            }
+            ApplyGraphLayerOrder();
+            MarkRenderDirty();
+            SelectGraphNode(viewNodeId);
+            return true;
+        }
+    }
+
+    if (!m_NodeGraph.TryConnectSockets(fromNodeId, fromSocketId, toNodeId, toSocketId, errorMessage)) {
         return false;
     }
 
-    if (from && ConnectionUsesImageAsRenderSource(m_NodeGraph, fromNodeId, fromSocket, toNodeId, toSocket)) {
+    if (from && from->kind == EditorNodeGraph::NodeKind::Image &&
+        ConnectionUsesImageAsRenderSource(m_NodeGraph, fromNodeId, fromSocketId, toNodeId, toSocketId)) {
         LoadSourceFromPixels(from->image.pixels.data(), from->image.width, from->image.height, from->image.channels);
     }
 
@@ -1020,32 +1382,98 @@ bool EditorModule::ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* 
     return true;
 }
 
-bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage) {
-    EditorNodeGraph::Node* from = m_NodeGraph.FindNode(fromNodeId);
-    if (from && from->kind == EditorNodeGraph::NodeKind::Image) {
-        if (from->image.pixels.empty()) {
-            if (errorMessage) *errorMessage = "Image node has no embedded pixels.";
-            return false;
-        }
+bool EditorModule::OutputPathNeedsViewTransform(int outputNodeId) const {
+    const EditorNodeGraph::Node* output = m_NodeGraph.FindNode(outputNodeId);
+    if (!output || output->kind != EditorNodeGraph::NodeKind::Output) {
+        return false;
     }
+    const EditorNodeGraph::Link* input = m_NodeGraph.FindInputLink(outputNodeId, EditorNodeGraph::kImageInputSocketId);
+    if (!input) {
+        return false;
+    }
+    std::unordered_set<int> visiting;
+    const ScenePathState scenePath = AnalyzeScenePathFromNode(m_NodeGraph, m_Layers, input->fromNodeId, visiting);
+    return scenePath.sceneReferred && !scenePath.hasViewTransform;
+}
 
-    if (!m_NodeGraph.TryConnectSockets(fromNodeId, fromSocketId, toNodeId, toSocketId, errorMessage)) {
+bool EditorModule::SelectedLayerInputContainsViewTransform() const {
+    if (m_SelectedLayerIndex < 0) {
+        return false;
+    }
+    const EditorNodeGraph::Node* selectedNode = m_NodeGraph.FindNodeByLayerIndex(m_SelectedLayerIndex);
+    if (!selectedNode || selectedNode->kind != EditorNodeGraph::NodeKind::Layer) {
         return false;
     }
 
-    if (from && ConnectionUsesImageAsRenderSource(m_NodeGraph, fromNodeId, fromSocketId, toNodeId, toSocketId)) {
-        LoadSourceFromPixels(from->image.pixels.data(), from->image.width, from->image.height, from->image.channels);
+    std::unordered_set<int> visiting;
+    std::function<bool(int)> inputContainsViewTransform = [&](int nodeId) -> bool {
+        if (!visiting.insert(nodeId).second) {
+            return false;
+        }
+        const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+        if (!node) {
+            visiting.erase(nodeId);
+            return false;
+        }
+        if (node->kind == EditorNodeGraph::NodeKind::Layer && node->layerType == LayerType::ViewTransform) {
+            visiting.erase(nodeId);
+            return true;
+        }
+        auto checkInput = [&](const std::string& socketId) {
+            const EditorNodeGraph::Link* link = m_NodeGraph.FindInputLink(nodeId, socketId);
+            return link ? inputContainsViewTransform(link->fromNodeId) : false;
+        };
+        bool found = false;
+        if (node->kind == EditorNodeGraph::NodeKind::Mix) {
+            found = checkInput(EditorNodeGraph::kMixInputASocketId) ||
+                checkInput(EditorNodeGraph::kMixInputBSocketId);
+        } else if (node->kind == EditorNodeGraph::NodeKind::ChannelCombine) {
+            found = checkInput("r") || checkInput("g") || checkInput("b") || checkInput("a");
+        } else if (node->kind != EditorNodeGraph::NodeKind::RawSource &&
+            node->kind != EditorNodeGraph::NodeKind::Image) {
+            found = checkInput(EditorNodeGraph::kImageInputSocketId);
+        }
+        visiting.erase(nodeId);
+        return found;
+    };
+
+    const EditorNodeGraph::Link* input = m_NodeGraph.FindInputLink(selectedNode->id, EditorNodeGraph::kImageInputSocketId);
+    return input ? inputContainsViewTransform(input->fromNodeId) : false;
+}
+
+bool EditorModule::RenderLayerControlsWithDirtyTracking(
+    EditorNodeGraph::Node& node,
+    const std::function<void(LayerBase&)>& renderControls) {
+    if (node.kind != EditorNodeGraph::NodeKind::Layer ||
+        node.layerIndex < 0 ||
+        node.layerIndex >= static_cast<int>(m_Layers.size()) ||
+        !m_Layers[node.layerIndex]) {
+        return false;
     }
 
-    ApplyGraphLayerOrder();
-    MarkRenderDirty();
-    const EditorNodeGraph::Node* to = m_NodeGraph.FindNode(toNodeId);
-    if (to && to->kind == EditorNodeGraph::NodeKind::Layer) {
-        SelectGraphNode(toNodeId);
-    } else if (from) {
-        SelectGraphNode(fromNodeId);
+    LayerBase& layer = *m_Layers[node.layerIndex];
+    const nlohmann::json before = layer.Serialize();
+    const bool beforeEnabled = layer.IsEnabled();
+    const bool beforeVisible = layer.IsVisible();
+    renderControls(layer);
+    const nlohmann::json after = layer.Serialize();
+    if (before != after ||
+        beforeEnabled != layer.IsEnabled() ||
+        beforeVisible != layer.IsVisible()) {
+        MarkRenderDirty(node.id);
+        return true;
     }
-    return true;
+    return false;
+}
+
+void EditorModule::MarkSelectedLayerRenderDirty() {
+    if (m_SelectedLayerIndex >= 0) {
+        if (const EditorNodeGraph::Node* node = m_NodeGraph.FindNodeByLayerIndex(m_SelectedLayerIndex)) {
+            MarkRenderDirty(node->id);
+            return;
+        }
+    }
+    MarkRenderDirty();
 }
 
 bool EditorModule::RemoveGraphLink(int fromNodeId, int toNodeId) {
@@ -1154,24 +1582,28 @@ bool EditorModule::DeleteSelectedGraphNodes() {
 void EditorModule::AddScopeNodeAt(EditorNodeGraph::ScopeKind scopeKind, EditorNodeGraph::Vec2 graphPosition) {
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddScopeNode(scopeKind, graphPosition)) {
         SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
     }
 }
 
 void EditorModule::AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind maskKind, EditorNodeGraph::Vec2 graphPosition) {
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddMaskGeneratorNode(maskKind, graphPosition)) {
         SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
     }
 }
 
 void EditorModule::AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind utilityKind, EditorNodeGraph::Vec2 graphPosition) {
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddMaskUtilityNode(utilityKind, graphPosition)) {
         SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
     }
 }
 
 void EditorModule::AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind converterKind, EditorNodeGraph::Vec2 graphPosition) {
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddImageToMaskNode(converterKind, graphPosition)) {
         SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
     }
 }
 
@@ -1197,12 +1629,28 @@ void EditorModule::AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind g
 void EditorModule::AddMixNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddMixNode(graphPosition)) {
         SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
     }
 }
 
 void EditorModule::AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddPreviewNode(graphPosition)) {
         SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+}
+
+void EditorModule::AddChannelSplitNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    if (EditorNodeGraph::Node* node = m_NodeGraph.AddChannelSplitNode(graphPosition)) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+}
+
+void EditorModule::AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    if (EditorNodeGraph::Node* node = m_NodeGraph.AddChannelCombineNode(graphPosition)) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
     }
 }
 
@@ -1319,6 +1767,19 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
                 renderNode.image.height = node.image.height;
                 renderNode.image.channels = node.image.channels;
                 break;
+            case EditorNodeGraph::NodeKind::RawSource:
+                renderNode.kind = RenderGraphNodeKind::RawSource;
+                renderNode.rawSource.sourcePath = node.rawSource.sourcePath;
+                renderNode.rawSource.metadata = node.rawSource.metadata;
+                break;
+            case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+                renderNode.kind = RenderGraphNodeKind::RawNeuralDenoise;
+                renderNode.rawNeuralDenoise.settings = node.rawNeuralDenoise.settings;
+                break;
+            case EditorNodeGraph::NodeKind::RawDevelop:
+                renderNode.kind = RenderGraphNodeKind::RawDevelop;
+                renderNode.rawDevelop.settings = node.rawDevelop.settings;
+                break;
             case EditorNodeGraph::NodeKind::Layer:
                 renderNode.kind = RenderGraphNodeKind::Layer;
                 if (node.layerIndex >= 0 && node.layerIndex < static_cast<int>(m_Layers.size()) && m_Layers[node.layerIndex]) {
@@ -1353,6 +1814,12 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
                 renderNode.mixBlendMode = ToRenderMixBlendMode(node.mixBlendMode);
                 renderNode.mixFactor = node.mixFactor;
                 break;
+            case EditorNodeGraph::NodeKind::ChannelSplit:
+                renderNode.kind = RenderGraphNodeKind::ChannelSplit;
+                break;
+            case EditorNodeGraph::NodeKind::ChannelCombine:
+                renderNode.kind = RenderGraphNodeKind::ChannelCombine;
+                break;
             case EditorNodeGraph::NodeKind::Composite:
             case EditorNodeGraph::NodeKind::Scope:
             case EditorNodeGraph::NodeKind::Preview:
@@ -1373,6 +1840,78 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
         });
     }
     return snapshot;
+}
+
+bool EditorModule::TryCopyImageNodePixels(int sourceNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const {
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
+    if (!sourceNode) {
+        return false;
+    }
+
+    if (sourceNode->kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        const EditorNodeGraph::Link* rawInput = m_NodeGraph.FindInputLink(sourceNode->id, EditorNodeGraph::kRawInputSocketId);
+        const EditorNodeGraph::Node* rawSourceNode = rawInput ? m_NodeGraph.FindNode(rawInput->fromNodeId) : nullptr;
+        const Raw::RawMetadata emptyMetadata;
+        const Raw::RawMetadata& metadata = rawSourceNode ? rawSourceNode->rawSource.metadata : emptyMetadata;
+        
+        const int visibleWidth = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
+        const int visibleHeight = metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
+        
+        const int effectiveOrientation = ResolveRawDevelopOrientation(metadata, sourceNode->rawDevelop.settings);
+        const bool swaps = (effectiveOrientation == 5 || effectiveOrientation == 6 || effectiveOrientation == 7 || effectiveOrientation == 8);
+        if (sourceNode->rawDevelop.settings.rotateToFitFrame) {
+            outW = visibleWidth;
+            outH = visibleHeight;
+        } else {
+            outW = swaps ? visibleHeight : visibleWidth;
+            outH = swaps ? visibleWidth : visibleHeight;
+        }
+        outChannels = 4;
+        outPixels = BuildTransparentPixels(outW, outH);
+        return !outPixels.empty();
+    }
+
+    if (sourceNode->kind == EditorNodeGraph::NodeKind::RawSource) {
+        outW = Raw::DisplayWidth(sourceNode->rawSource.metadata);
+        outH = Raw::DisplayHeight(sourceNode->rawSource.metadata);
+        outChannels = 4;
+        outPixels = BuildTransparentPixels(outW, outH);
+        return !outPixels.empty();
+    }
+
+    if (sourceNode->kind != EditorNodeGraph::NodeKind::Image ||
+        sourceNode->image.pixels.empty() ||
+        sourceNode->image.width <= 0 ||
+        sourceNode->image.height <= 0) {
+        return false;
+    }
+
+    outPixels = sourceNode->image.pixels;
+    outW = sourceNode->image.width;
+    outH = sourceNode->image.height;
+    outChannels = std::max(1, sourceNode->image.channels);
+    return true;
+}
+
+bool EditorModule::TryResolveReferenceSourcePixels(
+    int nodeId,
+    const std::string& socketId,
+    std::vector<unsigned char>& outPixels,
+    int& outW,
+    int& outH,
+    int& outChannels) const {
+    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeId(nodeId, socketId);
+    return TryCopyImageNodePixels(referenceSourceNodeId, outPixels, outW, outH, outChannels);
+}
+
+bool EditorModule::TryResolveReferenceSourcePixelsForOutput(
+    int outputNodeId,
+    std::vector<unsigned char>& outPixels,
+    int& outW,
+    int& outH,
+    int& outChannels) const {
+    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
+    return TryCopyImageNodePixels(referenceSourceNodeId, outPixels, outW, outH, outChannels);
 }
 
 
@@ -1526,12 +2065,63 @@ void EditorModule::EnsureCompositeNode() {
 void EditorModule::RenderUI() {
     ConsumeRenderWorkerResults();
 
+    // User Activity Tracking & Auto-Save Check
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        bool userActive = false;
+        // Check for any keypress
+        for (int i = 0; i < ImGuiKey_NamedKey_COUNT; i++) {
+            if (ImGui::IsKeyPressed((ImGuiKey)i)) {
+                userActive = true;
+                break;
+            }
+        }
+        // Check for mouse down
+        if (!userActive) {
+            for (int i = 0; i < 5; i++) {
+                if (ImGui::IsMouseDown(i)) {
+                    userActive = true;
+                    break;
+                }
+            }
+        }
+        // Check for mouse movement or characters typed
+        if (!userActive && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || io.InputQueueCharacters.Size > 0)) {
+            userActive = true;
+        }
+
+        if (userActive) {
+            m_LastUserActionTime = ImGui::GetTime();
+        }
+
+        if (m_Dirty && !m_CurrentProjectFileName.empty() && !Async::IsBusy(LibraryManager::Get().GetSaveTaskState())) {
+            double idleTime = ImGui::GetTime() - m_LastUserActionTime;
+            if (idleTime >= 10.0 && idleTime < 30.0) {
+                LibraryManager::Get().RequestSaveProject(m_CurrentProjectName, this, m_CurrentProjectFileName);
+                // Reset user action time to current time to avoid repeated saves in subsequent frames
+                m_LastUserActionTime = ImGui::GetTime();
+            }
+        }
+    }
+
     // Safety fallback: if ExportSettings is active or targeted but we have less than 2 completed chains, fallback to NodeGraph
     if (GetCompletedChainCount() < 2) {
         if (m_ActiveSubWindow == EditorSubWindow::ExportSettings) {
             m_ActiveSubWindow = EditorSubWindow::NodeGraph;
         }
         if (m_TargetSubWindow == EditorSubWindow::ExportSettings) {
+            m_TargetSubWindow = EditorSubWindow::NodeGraph;
+        }
+    }
+
+    // Safety fallback: if ComplexNode is active or targeted but the node no longer exists in the graph, fallback to NodeGraph
+    if (m_ActiveSubWindow == EditorSubWindow::ComplexNode) {
+        if (!m_NodeGraph.FindNode(m_ActiveComplexNodeId)) {
+            m_ActiveSubWindow = EditorSubWindow::NodeGraph;
+        }
+    }
+    if (m_TargetSubWindow == EditorSubWindow::ComplexNode) {
+        if (!m_NodeGraph.FindNode(m_TargetComplexNodeId)) {
             m_TargetSubWindow = EditorSubWindow::NodeGraph;
         }
     }
@@ -1544,6 +2134,7 @@ void EditorModule::RenderUI() {
             if (m_SubWindowTransitionAlpha <= 0.0f) {
                 m_SubWindowTransitionAlpha = 0.0f;
                 m_ActiveSubWindow = m_TargetSubWindow;
+                m_ActiveComplexNodeId = m_TargetComplexNodeId;
                 m_SubWindowTransitionFadingOut = false; // Start fading in
             }
         } else {
@@ -1592,26 +2183,73 @@ void EditorModule::RenderUI() {
     const float minLeftWidth = 260.0f;
     const float minRightWidth = 420.0f;
     const float maxLeftWidth = std::max(minLeftWidth, workspaceSize.x - minRightWidth - splitGap);
-    if (m_LeftPaneWidth <= 0.0f && !compositeViewportMode) {
-        m_LeftPaneWidth = std::clamp(workspaceSize.x * (2.0f / 3.0f), minLeftWidth, maxLeftWidth);
-    } else if (!compositeViewportMode) {
-        m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, minLeftWidth, maxLeftWidth);
-    }
-    if (CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
-        TogglePartialSplitTargets(workspaceSize.x, minLeftWidth, maxLeftWidth, compositeViewportMode);
-    }
-    if (compositeViewportMode) {
-        if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::GraphOnly && !m_DraggingSplitHandle && !m_SplitAutoAnimating) {
-            m_LeftPaneWidth = workspaceSize.x;
-        } else if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::ViewportOnly && !m_DraggingSplitHandle && !m_SplitAutoAnimating) {
-            m_LeftPaneWidth = 0.0f;
-        } else if (!m_DraggingSplitHandle && !m_SplitAutoAnimating) {
-            m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, minLeftWidth, maxLeftWidth);
-        } else {
-            m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, 0.0f, workspaceSize.x);
+
+    // Transition detection for split auto-animation to optimal sizes
+    if (m_TargetSubWindow != m_LastSplitTargetSubWindow || m_TargetComplexNodeId != m_LastSplitTargetComplexNodeId) {
+        m_LastSplitTargetSubWindow = m_TargetSubWindow;
+        m_LastSplitTargetComplexNodeId = m_TargetComplexNodeId;
+
+        float targetWidth = m_LeftPaneWidth;
+        if (m_TargetSubWindow == EditorSubWindow::NodeGraph) {
+            if (m_LastUserNodeGraphWidth <= 0.0f) {
+                m_LastUserNodeGraphWidth = std::clamp(workspaceSize.x * (2.0f / 3.0f), minLeftWidth, maxLeftWidth);
+            }
+            targetWidth = m_LastUserNodeGraphWidth;
+        } else if (m_TargetSubWindow == EditorSubWindow::ExportSettings) {
+            targetWidth = 360.0f;
+        } else if (m_TargetSubWindow == EditorSubWindow::Settings) {
+            targetWidth = 360.0f;
+        } else if (m_TargetSubWindow == EditorSubWindow::ComplexNode) {
+            targetWidth = 470.0f;
+        }
+
+        targetWidth = std::clamp(targetWidth, minLeftWidth, maxLeftWidth);
+
+        m_SplitAutoAnimFrom = m_LeftPaneWidth;
+        m_SplitAutoAnimTo = targetWidth;
+        m_SplitAutoAnimStartTime = ImGui::GetTime();
+        m_SplitAutoAnimating = true;
+        if (compositeViewportMode) {
+            m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+            m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
         }
     }
-    const float effectiveSplitGap = compositeViewportMode
+
+    if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::GraphOnly && !m_DraggingSplitHandle && !m_SplitAutoAnimating) {
+        m_LeftPaneWidth = workspaceSize.x;
+    } else if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::ViewportOnly && !m_DraggingSplitHandle && !m_SplitAutoAnimating) {
+        m_LeftPaneWidth = 0.0f;
+    } else {
+        if (m_DraggingSplitHandle || m_SplitAutoAnimating) {
+            m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, 0.0f, workspaceSize.x);
+        } else {
+            if (m_LeftPaneWidth <= 0.0f && !compositeViewportMode) {
+                m_LeftPaneWidth = std::clamp(workspaceSize.x * (2.0f / 3.0f), minLeftWidth, maxLeftWidth);
+            } else {
+                m_LeftPaneWidth = std::clamp(m_LeftPaneWidth, minLeftWidth, maxLeftWidth);
+            }
+        }
+    }
+
+    if (CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+        m_SpacebarPressTime = ImGui::GetTime();
+        m_SpacebarHeld = true;
+    }
+
+    if (m_SpacebarHeld) {
+        if (!ImGui::IsKeyDown(ImGuiKey_Space)) {
+            const float holdTime = static_cast<float>(ImGui::GetTime() - m_SpacebarPressTime);
+            const float paneHeight = std::max(0.0f, workspaceSize.y);
+            if (holdTime >= 0.4f) {
+                HandleSpacebarLongPress(workspaceSize.x, paneHeight, minLeftWidth, maxLeftWidth, splitGap);
+            } else {
+                HandleSpacebarPress(workspaceSize.x, paneHeight, minLeftWidth, maxLeftWidth, splitGap);
+            }
+            m_SpacebarHeld = false;
+        }
+    }
+
+    const float effectiveSplitGap = (compositeViewportMode || m_CompositeEdgeSnapMode != CompositeEdgeSnapMode::None || m_DraggingSplitHandle || m_SplitAutoAnimating)
         ? splitGap * std::clamp(
             std::min(m_LeftPaneWidth, std::max(0.0f, workspaceSize.x - m_LeftPaneWidth)) / std::max(1.0f, splitGap),
             0.0f,
@@ -1632,9 +2270,7 @@ void EditorModule::RenderUI() {
         m_LeftPaneWidth = m_SplitAutoAnimFrom + (m_SplitAutoAnimTo - m_SplitAutoAnimFrom) * eased;
         if (t >= 1.0f) {
             m_SplitAutoAnimating = false;
-            if (compositeViewportMode) {
-                m_CompositeEdgeSnapMode = m_SplitAutoAnimSnapMode;
-            }
+            m_CompositeEdgeSnapMode = m_SplitAutoAnimSnapMode;
         }
     }
 
@@ -1648,25 +2284,28 @@ void EditorModule::RenderUI() {
     const float rightWidth = std::max(0.0f, workspaceSize.x - m_LeftPaneWidth - effectiveSplitGap);
 
     // Update Left Panel Hover & Animation State
+    const bool isNodeBrowserOpen = m_Sidebar.GetNodeGraphUI().IsNodeBrowserOpen();
     if (m_ActiveSubWindow == EditorSubWindow::NodeGraph && m_LeftPaneWidth > 1.0f) {
         ImVec2 mousePos = ImGui::GetIO().MousePos;
         bool hoveringPanelOrTab = false;
         
-        if (!m_LeftPanelExpanded) {
-            // Hover trigger along the entire left wall/edge of the window
-            if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + 15.0f &&
-                mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
+        if (!isNodeBrowserOpen) {
+            if (!m_LeftPanelExpanded) {
+                // Hover trigger along the entire left wall/edge of the window
+                if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + 15.0f &&
+                    mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
+                    hoveringPanelOrTab = true;
+                }
+            } else {
+                if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + m_LeftPanelWidthAnim + 15.0f &&
+                    mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
+                    hoveringPanelOrTab = true;
+                }
+            }
+            
+            if (ImGui::IsDragDropActive()) {
                 hoveringPanelOrTab = true;
             }
-        } else {
-            if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + m_LeftPanelWidthAnim + 15.0f &&
-                mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
-                hoveringPanelOrTab = true;
-            }
-        }
-        
-        if (ImGui::IsDragDropActive()) {
-            hoveringPanelOrTab = true;
         }
         
         m_LeftPanelExpanded = hoveringPanelOrTab;
@@ -1679,6 +2318,12 @@ void EditorModule::RenderUI() {
     m_LeftPanelWidthAnim += (leftPanelTargetWidth - m_LeftPanelWidthAnim) * animDt * 10.0f;
     if (std::abs(m_LeftPanelWidthAnim - leftPanelTargetWidth) < 0.1f) {
         m_LeftPanelWidthAnim = leftPanelTargetWidth;
+    }
+
+    float nodesPanelTargetWidth = isNodeBrowserOpen ? 280.0f : 0.0f;
+    m_NodesPanelWidthAnim += (nodesPanelTargetWidth - m_NodesPanelWidthAnim) * animDt * 10.0f;
+    if (std::abs(m_NodesPanelWidthAnim - nodesPanelTargetWidth) < 0.1f) {
+        m_NodesPanelWidthAnim = nodesPanelTargetWidth;
     }
 
     if (m_LeftPaneWidth > 1.0f) {
@@ -1743,7 +2388,7 @@ void EditorModule::RenderUI() {
                 float contentWidth = m_LeftPanelWidthAnim - 40.0f; // breathing room on right for the feathered edge
                 if (contentWidth > 1.0f) {
                     ImGui::SetCursorScreenPos(ImVec2(workspacePos.x + 16.0f, workspacePos.y + 28.0f));
-                    ImGui::BeginChild("CanvasStackDrawer", ImVec2(contentWidth, paneHeight - 56.0f), false, ImGuiWindowFlags_NoScrollbar);
+                    ImGui::BeginChild("CanvasStackDrawer", ImVec2(contentWidth, paneHeight - 56.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav);
                     
                     ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
                     ImGui::TextUnformatted("CANVAS STACK");
@@ -1757,6 +2402,33 @@ void EditorModule::RenderUI() {
                         ImGui::TextWrapped("Add at least two completed chains to enable the canvas stack.");
                         ImGui::PopStyleColor();
                     } else {
+                        // Keyboard Z-order Reordering via Up/Down Arrow keys
+                        const bool drawerFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+                        const bool drawerHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+                        int selectedId = GetCompositeSelectedOutputNodeId();
+                        if ((drawerFocused || drawerHovered) && selectedId > 0 && !ImGui::GetIO().WantTextInput) {
+                            int selectedIdx = -1;
+                            for (int idx = 0; idx < static_cast<int>(zOrder.size()); ++idx) {
+                                if (zOrder[idx] == selectedId) {
+                                    selectedIdx = idx;
+                                    break;
+                                }
+                            }
+                            if (selectedIdx != -1) {
+                                if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+                                    if (selectedIdx < static_cast<int>(zOrder.size()) - 1) {
+                                        MoveCompositeOutputToIndex(selectedId, selectedIdx + 1);
+                                        MarkDirty();
+                                    }
+                                } else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+                                    if (selectedIdx > 0) {
+                                        MoveCompositeOutputToIndex(selectedId, selectedIdx - 1);
+                                        MarkDirty();
+                                    }
+                                }
+                            }
+                        }
+
                         ImGui::PushStyleColor(ImGuiCol_Text, colPassiveText);
                         ImGui::TextUnformatted("Drag to reorder:");
                         ImGui::PopStyleColor();
@@ -1825,6 +2497,13 @@ void EditorModule::RenderUI() {
             }
         }
 
+        // Nodes Panel Slide-out Drawer Overlay
+        if (m_ActiveSubWindow == EditorSubWindow::NodeGraph) {
+            if (m_NodesPanelWidthAnim > 0.1f) {
+                m_Sidebar.GetNodeGraphUI().RenderNodesPanelDrawer(this, m_NodesPanelWidthAnim, paneHeight, workspacePos);
+            }
+        }
+
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(2);
@@ -1839,7 +2518,7 @@ void EditorModule::RenderUI() {
         ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, workspaceColor);
         ImGui::BeginChild("EditorViewportPane", ImVec2(rightWidth, paneHeight), false,
-            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
         m_Viewport.Render(this);
         ImGui::EndChild();
         viewportPaneMin = ImGui::GetItemRectMin();
@@ -1851,10 +2530,10 @@ void EditorModule::RenderUI() {
 
     ImVec2 handleOverlayPos(handleCenter.x - 12.0f, handleCenter.y - 12.0f);
     ImVec2 handleOverlaySize(24.0f, 24.0f);
-    if (compositeViewportMode && (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::ViewportOnly || m_LeftPaneWidth <= 2.0f)) {
+    if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::ViewportOnly || m_LeftPaneWidth <= 2.0f) {
         handleOverlayPos = ImVec2(workspacePos.x, workspacePos.y + 2.0f);
         handleOverlaySize = ImVec2(28.0f, std::min(38.0f, std::max(24.0f, paneHeight)));
-    } else if (compositeViewportMode && (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::GraphOnly || m_LeftPaneWidth >= workspaceSize.x - 2.0f)) {
+    } else if (m_CompositeEdgeSnapMode == CompositeEdgeSnapMode::GraphOnly || m_LeftPaneWidth >= workspaceSize.x - 2.0f) {
         handleOverlayPos = ImVec2(workspacePos.x + workspaceSize.x - 28.0f, workspacePos.y + 2.0f);
         handleOverlaySize = ImVec2(28.0f, std::min(38.0f, std::max(24.0f, paneHeight)));
     }
@@ -1884,10 +2563,8 @@ void EditorModule::RenderUI() {
         if (std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) > 2.0f) {
             m_DraggingSplitHandle = true;
             m_SplitHandleMoved = true;
-            if (compositeViewportMode) {
-                m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
-                m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
-            }
+            m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+            m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
         }
     }
 
@@ -1901,12 +2578,15 @@ void EditorModule::RenderUI() {
     }
     if (m_DraggingSplitHandle) {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+            m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
             if (compositeViewportMode) {
-                m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
-                m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
                 m_LeftPaneWidth = std::clamp(m_LeftPaneWidth + ImGui::GetIO().MouseDelta.x, 0.0f, workspaceSize.x);
             } else {
                 m_LeftPaneWidth = std::clamp(m_LeftPaneWidth + ImGui::GetIO().MouseDelta.x, minLeftWidth, maxLeftWidth);
+            }
+            if (m_ActiveSubWindow == EditorSubWindow::NodeGraph) {
+                m_LastUserNodeGraphWidth = m_LeftPaneWidth;
             }
         } else {
             m_DraggingSplitHandle = false;
@@ -2026,6 +2706,16 @@ void EditorModule::SwitchToSubWindow(EditorSubWindow target) {
     m_SubWindowTransitionFadingOut = true;
 }
 
+void EditorModule::SwitchToComplexNodeSubWindow(int nodeId) {
+    if (m_ActiveSubWindow == EditorSubWindow::ComplexNode && m_ActiveComplexNodeId == nodeId &&
+        m_TargetSubWindow == EditorSubWindow::ComplexNode && m_TargetComplexNodeId == nodeId) {
+        return;
+    }
+    m_TargetSubWindow = EditorSubWindow::ComplexNode;
+    m_TargetComplexNodeId = nodeId;
+    m_SubWindowTransitionFadingOut = true;
+}
+
 static unsigned int LoadEditorResourceTexture(const unsigned char* data, unsigned int size, const char* debugName) {
     if (!data || size == 0) {
         return 0;
@@ -2037,6 +2727,21 @@ static unsigned int LoadEditorResourceTexture(const unsigned char* data, unsigne
     unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
     if (!pixels) {
         fprintf(stderr, "[EditorModule] Failed to decode embedded %s icon.\n", debugName);
+        return 0;
+    }
+    const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    return texture;
+}
+
+static unsigned int LoadTextureFromFile(const char* path, const char* debugName) {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load_thread(0);
+    unsigned char* pixels = stbi_load(path, &width, &height, &channels, 4);
+    if (!pixels) {
+        fprintf(stderr, "[EditorModule] Failed to load %s icon from path: %s\n", debugName, path);
         return 0;
     }
     const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
@@ -2063,6 +2768,16 @@ void EditorModule::LoadResourceTextures() {
         EmbeddedTabIcons::Settings_png_size,
         "Settings"
     );
+    m_BackgroundRemoverIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::BackgroundRemover_png_data,
+        EmbeddedTabIcons::BackgroundRemover_png_size,
+        "BackgroundRemover"
+    );
+    m_ColorGradeIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::ColorGrade_png_data,
+        EmbeddedTabIcons::ColorGrade_png_size,
+        "ColorGrade"
+    );
     m_TexturesLoaded = true;
 }
 
@@ -2083,28 +2798,89 @@ void EditorModule::RenderFloatingToolbar() {
         windowPos.y + windowSize.y - margin - radius
     );
 
-    std::vector<EditorSubWindow> visibleWindows;
-    visibleWindows.push_back(EditorSubWindow::NodeGraph);
-    if (GetCompletedChainCount() >= 2) {
-        visibleWindows.push_back(EditorSubWindow::ExportSettings);
-    }
-    visibleWindows.push_back(EditorSubWindow::Settings);
+    struct ToolbarButton {
+        bool isStandard = true;
+        EditorSubWindow subWin = EditorSubWindow::NodeGraph;
+        int nodeId = -1;
+        std::string typeId;
+        std::string label;
+    };
 
-    for (size_t i = 0; i < visibleWindows.size(); ++i) {
-        const EditorSubWindow subWin = visibleWindows[i];
-        const bool isActive = (m_TargetSubWindow == subWin);
-        const ImVec2 center(basePos.x + i * (buttonDiameter + spacing), basePos.y);
+    std::vector<ToolbarButton> buttons;
+    buttons.push_back({ true, EditorSubWindow::Settings, -1, "", "Editor Settings [3]" });
+    buttons.push_back({ true, EditorSubWindow::NodeGraph, -1, "", "Node Graph [1]" });
+
+    // Append dynamic complex node buttons
+    for (const auto& node : m_NodeGraph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::Layer) {
+            const NodeSurfaceSpec surfaceSpec = GetNodeSurfaceSpec(node.id);
+            if (surfaceSpec.presentation == NodeSurfacePresentation::RichExpandedSurface) {
+                const LayerDescriptor* descriptor = LayerRegistry::FindDescriptorByTypeId(node.typeId);
+                const std::string label = !node.title.empty()
+                    ? node.title
+                    : (descriptor && descriptor->displayName ? descriptor->displayName : std::string("Advanced Node"));
+                buttons.push_back({ false, EditorSubWindow::ComplexNode, node.id, node.typeId, label });
+            }
+        }
+    }
+
+    if (GetCompletedChainCount() >= 2) {
+        buttons.push_back({ true, EditorSubWindow::ExportSettings, -1, "", "Export Settings [2]" });
+    }
+
+    auto scaleAlpha = [](ImU32 col, float alpha) -> ImU32 {
+        unsigned int r = col & 0xFF;
+        unsigned int g = (col >> 8) & 0xFF;
+        unsigned int b = (col >> 16) & 0xFF;
+        unsigned int a = (col >> 24) & 0xFF;
+        unsigned int newA = static_cast<unsigned int>(a * alpha);
+        return r | (g << 8) | (b << 16) | (newA << 24);
+    };
+
+    for (size_t i = 0; i < buttons.size(); ++i) {
+        const auto& btn = buttons[i];
+        const bool isActive = btn.isStandard 
+            ? (m_TargetSubWindow == btn.subWin) 
+            : (m_TargetSubWindow == EditorSubWindow::ComplexNode && m_TargetComplexNodeId == btn.nodeId);
+        
+        ImVec2 center(basePos.x + i * (buttonDiameter + spacing), basePos.y);
+
+        float animAlpha = 1.0f;
+        if (!btn.isStandard) {
+            double curTime = ImGui::GetTime();
+            double spawnTime = curTime;
+            auto it = m_ToolbarButtonSpawnTimes.find(btn.nodeId);
+            if (it == m_ToolbarButtonSpawnTimes.end()) {
+                m_ToolbarButtonSpawnTimes[btn.nodeId] = curTime;
+            } else {
+                spawnTime = it->second;
+            }
+            double age = curTime - spawnTime;
+            float tAnim = std::clamp(static_cast<float>(age / 0.4), 0.0f, 1.0f);
+            float easeOut = 1.0f - std::pow(1.0f - tAnim, 3.0f);
+
+            center.x += (easeOut - 1.0f) * 40.0f;
+            animAlpha = easeOut;
+        }
 
         ImGui::SetCursorScreenPos(ImVec2(center.x - radius, center.y - radius));
         char btnId[64];
-        snprintf(btnId, sizeof(btnId), "##FloatingSubWindowBtn_%d", static_cast<int>(subWin));
+        if (btn.isStandard) {
+            snprintf(btnId, sizeof(btnId), "##FloatingSubWindowBtn_%d", static_cast<int>(btn.subWin));
+        } else {
+            snprintf(btnId, sizeof(btnId), "##FloatingComplexNodeBtn_%d", btn.nodeId);
+        }
         
         ImGui::InvisibleButton(btnId, ImVec2(buttonDiameter, buttonDiameter));
         const bool hovered = ImGui::IsItemHovered();
         const bool clicked = ImGui::IsItemClicked();
 
         if (clicked) {
-            SwitchToSubWindow(subWin);
+            if (btn.isStandard) {
+                SwitchToSubWindow(btn.subWin);
+            } else {
+                SwitchToComplexNodeSubWindow(btn.nodeId);
+            }
         }
 
         ImU32 bgCol = IM_COL32(24, 24, 24, 200);
@@ -2120,17 +2896,32 @@ void EditorModule::RenderFloatingToolbar() {
             bgCol = IM_COL32(40, 40, 40, 230);
         }
 
-        drawList->AddCircleFilled(ImVec2(center.x, center.y + 2.0f), radius, IM_COL32(0, 0, 0, 40), 32);
+        if (animAlpha < 1.0f) {
+            bgCol = scaleAlpha(bgCol, animAlpha);
+            borderCol = scaleAlpha(borderCol, animAlpha);
+        }
+
+        drawList->AddCircleFilled(ImVec2(center.x, center.y + 2.0f), radius, scaleAlpha(IM_COL32(0, 0, 0, 40), animAlpha), 32);
         drawList->AddCircleFilled(center, radius, bgCol, 32);
         drawList->AddCircle(center, radius, borderCol, 32, borderThickness);
 
         unsigned int tex = 0;
-        if (subWin == EditorSubWindow::NodeGraph) {
-            tex = m_NodeGraphIconTexture;
-        } else if (subWin == EditorSubWindow::ExportSettings) {
-            tex = m_ExportIconTexture;
-        } else if (subWin == EditorSubWindow::Settings) {
-            tex = m_SettingsIconTexture;
+        if (btn.isStandard) {
+            if (btn.subWin == EditorSubWindow::NodeGraph) {
+                tex = m_NodeGraphIconTexture;
+            } else if (btn.subWin == EditorSubWindow::ExportSettings) {
+                tex = m_ExportIconTexture;
+            } else if (btn.subWin == EditorSubWindow::Settings) {
+                tex = m_SettingsIconTexture;
+            }
+        } else {
+            if (btn.typeId == "BackgroundPatcher") {
+                tex = m_BackgroundRemoverIconTexture;
+            } else if (btn.typeId == "ColorGrade") {
+                tex = m_ColorGradeIconTexture;
+            } else {
+                tex = m_SettingsIconTexture;
+            }
         }
 
         if (tex) {
@@ -2142,19 +2933,32 @@ void EditorModule::RenderFloatingToolbar() {
             if (!isActive && !hovered) {
                 iconColor = IM_COL32(180, 180, 180, 180);
             }
+            if (animAlpha < 1.0f) {
+                iconColor = scaleAlpha(iconColor, animAlpha);
+            }
             drawList->AddImage((ImTextureID)(intptr_t)tex, pMin, pMax, ImVec2(0, 0), ImVec2(1, 1), iconColor);
         }
 
         if (hovered) {
             ImGui::BeginTooltip();
-            if (subWin == EditorSubWindow::NodeGraph) {
-                ImGui::TextUnformatted("Node Graph [1]");
-            } else if (subWin == EditorSubWindow::ExportSettings) {
-                ImGui::TextUnformatted("Export Settings [2]");
-            } else if (subWin == EditorSubWindow::Settings) {
-                ImGui::TextUnformatted("Editor Settings [3]");
-            }
+            ImGui::TextUnformatted(btn.label.c_str());
             ImGui::EndTooltip();
+        }
+    }
+
+    // Clean up spawn times map
+    for (auto it = m_ToolbarButtonSpawnTimes.begin(); it != m_ToolbarButtonSpawnTimes.end();) {
+        bool found = false;
+        for (const auto& btn : buttons) {
+            if (!btn.isStandard && btn.nodeId == it->first) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            it = m_ToolbarButtonSpawnTimes.erase(it);
+        } else {
+            ++it;
         }
     }
 }

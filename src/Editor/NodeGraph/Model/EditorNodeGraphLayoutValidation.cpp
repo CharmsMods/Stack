@@ -10,6 +10,10 @@
 namespace EditorNodeGraph {
 namespace {
 
+bool IsChannelSocketId(const std::string& socketId) {
+    return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
+}
+
 bool ContainsNodeId(const std::vector<Node>& nodes, int id) {
     return std::any_of(nodes.begin(), nodes.end(), [id](const Node& node) {
         return node.id == id;
@@ -42,7 +46,7 @@ void Graph::AutoLayout() {
     int scopeRow = 0;
     int maskRow = 0;
     for (Node& node : m_Nodes) {
-        if (node.kind == NodeKind::Image && node.id != m_ActiveImageNodeId) {
+        if ((node.kind == NodeKind::Image || node.kind == NodeKind::RawSource) && node.id != m_ActiveImageNodeId) {
             node.position = { x0, y0 + 170.0f + static_cast<float>(imageRow) * 145.0f };
             ++imageRow;
         } else if (node.kind == NodeKind::Scope || node.kind == NodeKind::Preview) {
@@ -130,7 +134,7 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Link uses an invalid socket direction.");
         }
-        if (from->kind == NodeKind::Image) {
+        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDevelop) {
             outgoingImages.insert(from->id);
         }
 
@@ -138,7 +142,10 @@ ValidationResult Graph::Validate() const {
             if (to->kind == NodeKind::Scope) {
                 const bool validScopeInput = link.toSocketId == kScopeInputSocketId &&
                     (fromSocket.type == SocketType::Image ||
-                     (fromSocket.type == SocketType::Mask && link.fromSocketId == kMaskOutputSocketId));
+                     (fromSocket.type == SocketType::Mask &&
+                      (link.fromSocketId == kMaskOutputSocketId ||
+                       (from->kind == NodeKind::ChannelSplit &&
+                        (link.fromSocketId == "r" || link.fromSocketId == "g" || link.fromSocketId == "b" || link.fromSocketId == "a")))));
                 if (!validScopeInput) {
                     result.valid = false;
                     result.messages.push_back("Scope nodes can only analyze image or mask outputs.");
@@ -146,7 +153,10 @@ ValidationResult Graph::Validate() const {
             } else if (to->kind == NodeKind::Preview) {
                 const bool validPreview = link.toSocketId == kPreviewInputSocketId &&
                     (fromSocket.type == SocketType::Image ||
-                     (fromSocket.type == SocketType::Mask && link.fromSocketId == kMaskOutputSocketId));
+                     (fromSocket.type == SocketType::Mask &&
+                      (link.fromSocketId == kMaskOutputSocketId ||
+                       (from->kind == NodeKind::ChannelSplit &&
+                        (link.fromSocketId == "r" || link.fromSocketId == "g" || link.fromSocketId == "b" || link.fromSocketId == "a")))));
                 if (!validPreview) {
                     result.valid = false;
                     result.messages.push_back("Preview nodes can only inspect image or mask outputs.");
@@ -155,29 +165,63 @@ ValidationResult Graph::Validate() const {
                 result.valid = false;
                 result.messages.push_back("Invalid analysis link.");
             }
-        } else if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask) {
-            const bool validMaskSource =
-                (from->kind == NodeKind::MaskGenerator ||
-                 from->kind == NodeKind::MaskUtility ||
-                 from->kind == NodeKind::ImageToMask) &&
-                fromSocket.type == SocketType::Mask &&
-                link.fromSocketId == kMaskOutputSocketId;
-            const bool validMaskTarget =
-                (to->kind == NodeKind::Layer && link.toSocketId == kMaskInputSocketId) ||
-                (to->kind == NodeKind::Mix && link.toSocketId == kMixFactorSocketId) ||
-                (to->kind == NodeKind::MaskUtility && link.toSocketId == kMaskUtilityInputSocketId);
-            if (!validMaskSource ||
-                !validMaskTarget ||
-                toSocket.type != SocketType::Mask) {
+        } else if (fromSocket.type == SocketType::Raw || toSocket.type == SocketType::Raw) {
+            const bool validRawLink =
+                fromSocket.type == SocketType::Raw &&
+                toSocket.type == SocketType::Raw &&
+                (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
+                link.fromSocketId == kRawOutputSocketId &&
+                (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDevelop) &&
+                link.toSocketId == kRawInputSocketId;
+            if (!validRawLink) {
                 result.valid = false;
-                result.messages.push_back("Invalid mask link.");
+                result.messages.push_back("Invalid RAW link.");
+            }
+        } else if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask) {
+            const std::string upstreamChannel = ResolveSocketChannel(link.fromNodeId, link.fromSocketId);
+            const bool validMaskSource =
+                ((from->kind == NodeKind::MaskGenerator ||
+                  from->kind == NodeKind::MaskUtility ||
+                  from->kind == NodeKind::ImageToMask) && link.fromSocketId == kMaskOutputSocketId) ||
+                (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(link.fromSocketId)) ||
+                (!upstreamChannel.empty() && fromSocket.type == SocketType::Image);
+
+            const bool isMaskToMask = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask;
+            const bool isChannelImageToMask = fromSocket.type == SocketType::Image && toSocket.type == SocketType::Mask && !upstreamChannel.empty();
+            const bool isMaskToImage = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image;
+
+            if (isMaskToMask || isChannelImageToMask) {
+                const bool validMaskTarget =
+                    (to->kind == NodeKind::Layer && link.toSocketId == kMaskInputSocketId) ||
+                    (to->kind == NodeKind::Mix && link.toSocketId == kMixFactorSocketId) ||
+                    (to->kind == NodeKind::MaskUtility && link.toSocketId == kMaskUtilityInputSocketId) ||
+                    (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(link.toSocketId)) ||
+                    (to->kind == NodeKind::Output && IsChannelSocketId(link.toSocketId));
+                if (!validMaskSource || !validMaskTarget) {
+                    result.valid = false;
+                    result.messages.push_back("Invalid mask link.");
+                }
+            } else if (isMaskToImage) {
+                const bool validImageTarget =
+                    (to->kind == NodeKind::Layer && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::Mix && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
+                    (to->kind == NodeKind::Output && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::ImageToMask && link.toSocketId == kImageToMaskInputSocketId) ||
+                    (to->kind == NodeKind::ChannelSplit && link.toSocketId == kImageInputSocketId);
+                if (!validMaskSource || !validImageTarget) {
+                    result.valid = false;
+                    result.messages.push_back("Invalid mask-to-image link.");
+                }
+            } else {
+                result.valid = false;
+                result.messages.push_back("Cannot connect an image output directly to a mask input.");
             }
         } else {
             if (fromSocket.type != SocketType::Image || toSocket.type != SocketType::Image) {
                 result.valid = false;
                 result.messages.push_back("Render-chain links must connect image sockets.");
             }
-            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || from->kind == NodeKind::Output) {
+            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
                 result.valid = false;
                 result.messages.push_back("Invalid render-chain link.");
             }
@@ -233,7 +277,7 @@ std::vector<int> Graph::GetRenderLayerNodePath(int outputNodeId) const {
             return {};
         }
         visited.insert(from->id);
-        if (from->kind == NodeKind::Image) {
+        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDevelop) {
             std::reverse(reversePath.begin(), reversePath.end());
             return reversePath;
         }
@@ -272,20 +316,54 @@ LinkRole Graph::GetLinkRole(const Link& link) const {
 
 bool Graph::IsRenderChainNode(const Node& node) const {
     return node.kind == NodeKind::Image ||
+        node.kind == NodeKind::RawSource ||
+        node.kind == NodeKind::RawNeuralDenoise ||
+        node.kind == NodeKind::RawDevelop ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::Layer ||
         node.kind == NodeKind::Output ||
         node.kind == NodeKind::Mix ||
-        node.kind == NodeKind::ImageToMask;
+        node.kind == NodeKind::ImageToMask ||
+        node.kind == NodeKind::ChannelSplit ||
+        node.kind == NodeKind::ChannelCombine;
 }
 
 bool Graph::IsRenderLink(const Link& link) const {
-    return GetLinkRole(link) == LinkRole::Render &&
-        link.fromSocketId == kImageOutputSocketId &&
-        (link.toSocketId == kImageInputSocketId ||
-         link.toSocketId == kMixInputASocketId ||
-         link.toSocketId == kMixInputBSocketId ||
-         link.toSocketId == kImageToMaskInputSocketId);
+    if (GetLinkRole(link) != LinkRole::Render) {
+        return false;
+    }
+    const Node* from = FindNode(link.fromNodeId);
+    const Node* to = FindNode(link.toNodeId);
+    if (!from || !to) {
+        return false;
+    }
+
+    SocketDefinition fromSocket;
+    SocketDefinition toSocket;
+    if (!FindSocket(link.fromNodeId, link.fromSocketId, &fromSocket) ||
+        !FindSocket(link.toNodeId, link.toSocketId, &toSocket)) {
+        return false;
+    }
+
+    if (fromSocket.type == SocketType::Raw && toSocket.type == SocketType::Raw) {
+        return true;
+    }
+    if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask) {
+        return true;
+    }
+    if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image) {
+        return true;
+    }
+    if (fromSocket.type == SocketType::Image &&
+        toSocket.type == SocketType::Mask &&
+        !ResolveSocketChannel(link.fromNodeId, link.fromSocketId).empty()) {
+        return true;
+    }
+    if (fromSocket.type == SocketType::Image && toSocket.type == SocketType::Image) {
+        return true;
+    }
+
+    return false;
 }
 
 const Link* Graph::FindInputLink(int nodeId, const std::string& socketId) const {

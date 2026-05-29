@@ -200,3 +200,116 @@ void EditorModule::TogglePartialSplitTargets(
     m_SplitAutoAnimStartTime = ImGui::GetTime();
     m_SplitAutoAnimating = true;
 }
+
+void EditorModule::HandleSpacebarPress(
+    float workspaceWidth,
+    float paneHeight,
+    float minLeftWidth,
+    float maxLeftWidth,
+    float splitGap) {
+    
+    m_SplitAutoAnimFrom = m_LeftPaneWidth;
+    
+    if (m_ActiveSubWindow == EditorSubWindow::NodeGraph) {
+        const bool compositeViewportMode = IsCompositeViewportMode();
+        
+        if (compositeViewportMode) {
+            // --- 1. COMPOSITE CANVAS MODE: ORIGINAL MIDPOINT TOGGLE ---
+            const float midpoint = workspaceWidth * 0.5f;
+            const float leftTarget = minLeftWidth;
+            const float rightTarget = maxLeftWidth;
+            
+            if (m_LeftPaneWidth <= 2.0f) {
+                m_SplitAutoAnimTo = leftTarget;
+            } else if (m_LeftPaneWidth >= workspaceWidth - 2.0f) {
+                m_SplitAutoAnimTo = rightTarget;
+            } else {
+                m_SplitAutoAnimTo = (m_LeftPaneWidth < midpoint) ? rightTarget : leftTarget;
+            }
+        } else {
+            // --- 2. SINGLE IMAGE VIEWPORT MODE: ASPECT-RATIO MAXIMUM SIZING ---
+            int imgW = m_Pipeline.GetCanvasWidth();
+            int imgH = m_Pipeline.GetCanvasHeight();
+            
+            // If no image is active/loaded, fall back to default toggle behavior
+            if (imgW <= 0 || imgH <= 0) {
+                const float midpoint = workspaceWidth * 0.5f;
+                m_SplitAutoAnimTo = (m_LeftPaneWidth < midpoint) ? maxLeftWidth : minLeftWidth;
+            } else {
+                // Viewport padding parameters matching EditorViewport
+                const float paddingY = 32.0f;
+                const float paddingX = 36.0f;
+                const float availY = std::max(100.0f, paneHeight - paddingY);
+                
+                // Maximum height-limited display width (no 0.84f constraint so it reaches absolute max height limit)
+                const float dispW = availY * (static_cast<float>(imgW) / static_cast<float>(imgH));
+                const float optimalRightWidth = dispW + paddingX;
+                
+                // Constrain optimalRightWidth to fit within currently enforced limits
+                const float minRightWidth = 420.0f;
+                const float maxRightWidth = workspaceWidth - minLeftWidth - splitGap;
+                const float constrainedRightWidth = std::clamp(optimalRightWidth, minRightWidth, maxRightWidth);
+                
+                const float targetLeftPaneWidth = workspaceWidth - splitGap - constrainedRightWidth;
+                
+                // Toggle logic: if we are already close to the optimal expanded state, toggle back to maxLeftWidth to see mostly graph
+                if (std::abs(m_LeftPaneWidth - targetLeftPaneWidth) < 5.0f) {
+                    m_SplitAutoAnimTo = maxLeftWidth;
+                } else {
+                    m_SplitAutoAnimTo = targetLeftPaneWidth;
+                }
+            }
+        }
+    } else {
+        // --- 3. SIDEBAR MENU WINDOW OPTIMAL SIZING ---
+        float optimalWidth = 360.0f;
+        if (m_ActiveSubWindow == EditorSubWindow::ComplexNode) {
+            optimalWidth = 470.0f;
+        }
+        
+        const float targetLeftPaneWidth = std::clamp(optimalWidth, minLeftWidth, maxLeftWidth);
+        
+        // Toggle logic: if already at the optimal width, contract to minLeftWidth, otherwise expand to optimal
+        if (std::abs(m_LeftPaneWidth - targetLeftPaneWidth) < 5.0f) {
+            m_SplitAutoAnimTo = minLeftWidth;
+        } else {
+            m_SplitAutoAnimTo = targetLeftPaneWidth;
+        }
+    }
+    
+    m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+    m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+    m_SplitAutoAnimStartTime = ImGui::GetTime();
+    m_SplitAutoAnimating = true;
+}
+
+void EditorModule::HandleSpacebarLongPress(
+    float workspaceWidth,
+    float paneHeight,
+    float minLeftWidth,
+    float maxLeftWidth,
+    float splitGap) {
+    
+    m_SplitAutoAnimFrom = m_LeftPaneWidth;
+    
+    const float midpoint = workspaceWidth * 0.5f;
+    if (m_LeftPaneWidth <= 5.0f) {
+        m_SplitAutoAnimTo = workspaceWidth;
+        m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::GraphOnly;
+    } else if (m_LeftPaneWidth >= workspaceWidth - 5.0f) {
+        m_SplitAutoAnimTo = 0.0f;
+        m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::ViewportOnly;
+    } else {
+        if (m_LeftPaneWidth < midpoint) {
+            m_SplitAutoAnimTo = workspaceWidth;
+            m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::GraphOnly;
+        } else {
+            m_SplitAutoAnimTo = 0.0f;
+            m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::ViewportOnly;
+        }
+    }
+    
+    m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
+    m_SplitAutoAnimStartTime = ImGui::GetTime();
+    m_SplitAutoAnimating = true;
+}

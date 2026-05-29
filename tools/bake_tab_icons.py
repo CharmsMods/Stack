@@ -51,6 +51,8 @@ if __name__ == "__main__":
         ("Export", os.path.join(root_dir, "Icons", "export.png")),
         ("Style", os.path.join(root_dir, "Icons", "paint brush.png")),
         ("Settings", os.path.join(root_dir, "Icons", "settings.png")),
+        ("BackgroundRemover", os.path.join(root_dir, "Icons", "nodes", "background remover.png")),
+        ("ColorGrade", os.path.join(root_dir, "Icons", "nodes", "3 color wheels.png")),
     ]
     output_file = os.path.join(root_dir, "src", "App", "Resources", "EmbeddedTabIcons.h")
 

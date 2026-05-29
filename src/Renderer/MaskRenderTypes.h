@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Editor/Layers/LayerBase.h"
+#include "NeuralDenoise/NeuralDenoiseTypes.h"
+#include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
 #include <memory>
 #include <string>
@@ -81,13 +83,18 @@ struct RenderLayerStep {
 
 enum class RenderGraphNodeKind {
     Image,
+    RawSource,
+    RawNeuralDenoise,
+    RawDevelop,
     Layer,
     Output,
     MaskGenerator,
     Mix,
     MaskUtility,
     ImageToMask,
-    ImageGenerator
+    ImageGenerator,
+    ChannelSplit,
+    ChannelCombine
 };
 
 enum class RenderMixBlendMode {
@@ -105,10 +112,26 @@ struct RenderGraphImagePayload {
     int channels = 4;
 };
 
+struct RenderGraphRawSourcePayload {
+    std::string sourcePath;
+    Raw::RawMetadata metadata;
+};
+
+struct RenderGraphRawDevelopPayload {
+    Raw::RawDevelopSettings settings;
+};
+
+struct RenderGraphRawNeuralDenoisePayload {
+    NeuralDenoise::NeuralDenoiseSettings settings;
+};
+
 struct RenderGraphNode {
     int nodeId = -1;
     RenderGraphNodeKind kind = RenderGraphNodeKind::Image;
     RenderGraphImagePayload image;
+    RenderGraphRawSourcePayload rawSource;
+    RenderGraphRawNeuralDenoisePayload rawNeuralDenoise;
+    RenderGraphRawDevelopPayload rawDevelop;
     nlohmann::json layerJson;
     RenderMaskGeneratorKind maskKind = RenderMaskGeneratorKind::Solid;
     RenderMaskSettings maskSettings;
@@ -131,6 +154,7 @@ struct RenderGraphLink {
 
 struct RenderGraphSnapshot {
     int outputNodeId = -1;
+    std::string outputSocketId;
     std::vector<RenderGraphNode> nodes;
     std::vector<RenderGraphLink> links;
 };

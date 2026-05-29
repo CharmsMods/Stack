@@ -28,8 +28,14 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
     auto collectChain = [&](int outputNodeId, auto&& collectChainRef) -> CompletedChainInfo {
         CompletedChainInfo chain;
         chain.outputNodeId = outputNodeId;
+
         const Link* outputInput = FindInputLink(outputNodeId, kImageInputSocketId);
-        if (!outputInput) {
+        const Link* linkR = FindInputLink(outputNodeId, "r");
+        const Link* linkG = FindInputLink(outputNodeId, "g");
+        const Link* linkB = FindInputLink(outputNodeId, "b");
+        const Link* linkA = FindInputLink(outputNodeId, "a");
+
+        if (!outputInput && !linkR && !linkG && !linkB && !linkA) {
             return chain;
         }
 
@@ -51,12 +57,24 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
             bool valid = false;
             switch (node->kind) {
                 case NodeKind::Image:
+                case NodeKind::RawSource:
                 case NodeKind::ImageGenerator:
+                case NodeKind::MaskGenerator:
                     if (chain.sourceNodeId <= 0) {
                         chain.sourceNodeId = nodeId;
                     }
                     valid = true;
                     break;
+                case NodeKind::RawDevelop: {
+                    const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
+                case NodeKind::RawNeuralDenoise: {
+                    const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
                 case NodeKind::Layer: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
                     valid = upstream ? visit(upstream->fromNodeId) : false;
@@ -70,13 +88,54 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                         visit(inputB->fromNodeId);
                     break;
                 }
-                case NodeKind::ImageToMask:
+                case NodeKind::ChannelSplit: {
+                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
+                case NodeKind::ChannelCombine: {
+                    const Link* upstreamR = FindInputLink(nodeId, "r");
+                    const Link* upstreamG = FindInputLink(nodeId, "g");
+                    const Link* upstreamB = FindInputLink(nodeId, "b");
+                    const Link* upstreamA = FindInputLink(nodeId, "a");
+
+                    bool hasConnection = false;
+                    bool allValid = true;
+
+                    if (upstreamR) {
+                        hasConnection = true;
+                        if (!visit(upstreamR->fromNodeId)) allValid = false;
+                    }
+                    if (upstreamG) {
+                        hasConnection = true;
+                        if (!visit(upstreamG->fromNodeId)) allValid = false;
+                    }
+                    if (upstreamB) {
+                        hasConnection = true;
+                        if (!visit(upstreamB->fromNodeId)) allValid = false;
+                    }
+                    if (upstreamA) {
+                        hasConnection = true;
+                        if (!visit(upstreamA->fromNodeId)) allValid = false;
+                    }
+
+                    valid = hasConnection && allValid;
+                    break;
+                }
+                case NodeKind::ImageToMask: {
+                    const Link* upstream = FindInputLink(nodeId, kImageToMaskInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
+                case NodeKind::MaskUtility: {
+                    const Link* upstream = FindInputLink(nodeId, kMaskUtilityInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
                 case NodeKind::Output:
                 case NodeKind::Composite:
                 case NodeKind::Scope:
-                case NodeKind::MaskGenerator:
                 case NodeKind::Preview:
-                case NodeKind::MaskUtility:
                     valid = false;
                     break;
             }
@@ -85,12 +144,50 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
             return valid;
         };
 
-        chain.terminalNodeId = outputInput->fromNodeId;
-        if (!visit(chain.terminalNodeId)) {
-            chain.terminalNodeId = -1;
-            chain.sourceNodeId = -1;
-            chain.nodeIds.clear();
+        if (outputInput) {
+            chain.terminalNodeId = outputInput->fromNodeId;
+            if (!visit(chain.terminalNodeId)) {
+                chain.terminalNodeId = -1;
+                chain.sourceNodeId = -1;
+                chain.nodeIds.clear();
+            }
+        } else {
+            bool allChannelsValid = true;
+            int firstTerminalNodeId = -1;
+
+            if (linkR) {
+                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkR->fromNodeId;
+                if (!visit(linkR->fromNodeId)) allChannelsValid = false;
+            }
+            if (linkG) {
+                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkG->fromNodeId;
+                if (!visit(linkG->fromNodeId)) allChannelsValid = false;
+            }
+            if (linkB) {
+                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkB->fromNodeId;
+                if (!visit(linkB->fromNodeId)) allChannelsValid = false;
+            }
+            if (linkA) {
+                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkA->fromNodeId;
+                if (!visit(linkA->fromNodeId)) allChannelsValid = false;
+            }
+
+            if (allChannelsValid && firstTerminalNodeId != -1) {
+                chain.terminalNodeId = firstTerminalNodeId;
+            } else {
+                chain.terminalNodeId = -1;
+                chain.sourceNodeId = -1;
+                chain.nodeIds.clear();
+            }
         }
+
+        if (chain.terminalNodeId > 0) {
+            const int referenceSourceNodeId = ResolveReferenceSourceNodeIdForOutput(outputNodeId);
+            if (referenceSourceNodeId > 0) {
+                chain.sourceNodeId = referenceSourceNodeId;
+            }
+        }
+
         return chain;
     };
 
@@ -170,6 +267,9 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
     auto isMainChainNodeKind = [](NodeKind kind) {
         switch (kind) {
             case NodeKind::Image:
+            case NodeKind::RawSource:
+            case NodeKind::RawDevelop:
+            case NodeKind::RawNeuralDenoise:
             case NodeKind::Layer:
             case NodeKind::Mix:
             case NodeKind::ImageGenerator:
@@ -228,6 +328,10 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::Layer:
             case NodeKind::Output:
                 addInputCandidate(kImageInputSocketId);
+                break;
+            case NodeKind::RawDevelop:
+            case NodeKind::RawNeuralDenoise:
+                addInputCandidate(kRawInputSocketId);
                 break;
             case NodeKind::Mix:
                 addInputCandidate(kMixInputASocketId);

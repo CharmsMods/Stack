@@ -158,7 +158,20 @@ bool ResolveProjectPreviewPixels(
         previewEditor.Initialize();
         previewEditor.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, 4);
         previewEditor.DeserializePipeline(project.pipelineData);
-        previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
+
+        bool hasRawDevelop = false;
+        for (const auto& node : previewEditor.GetNodeGraph().GetNodes()) {
+            if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+                hasRawDevelop = true;
+                break;
+            }
+        }
+
+        if (hasRawDevelop) {
+            previewEditor.GetPipeline().ExecuteGraph(previewEditor.BuildGraphSnapshot());
+        } else {
+            previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
+        }
 
         int renderedW = 0;
         int renderedH = 0;
@@ -404,7 +417,7 @@ bool ShouldQueueAssetConflict(
         ComputeExactPixelFingerprint(localPixels) == ComputeExactPixelFingerprint(importedPixels) &&
         localPixels == importedPixels) {
         outExactMatch = true;
-        return true;
+        return false;
     }
 
     const std::uint64_t localHash = ComputeAverageHash64(localPixels, localWidth, localHeight);
@@ -865,6 +878,167 @@ void LibraryManager::ResolveAssetConflict(int index, AssetConflictAction action)
     }
 }
 
+static std::string ComputeImageHash(const std::vector<unsigned char>& data) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char b : data) {
+        hash ^= b;
+        hash *= 1099511628211ULL;
+    }
+    char hex[32];
+    sprintf_s(hex, "%016llx", hash);
+    return std::string(hex);
+}
+
+static std::vector<unsigned char> ReadBinaryJsonHelper(const nlohmann::json& value) {
+    if (!value.is_binary()) {
+        return {};
+    }
+    const auto& binaryValue = value.get_binary();
+    return std::vector<unsigned char>(binaryValue.begin(), binaryValue.end());
+}
+
+std::vector<std::string> LibraryManager::SyncProjectAssets(const std::string& projectFileName, const StackBinaryFormat::ProjectDocument& document) {
+    std::vector<std::string> syncedFileNames;
+    
+    if (projectFileName.empty()) {
+        return syncedFileNames;
+    }
+
+    std::filesystem::path projectPath(projectFileName);
+    std::string projectStem = projectPath.stem().string();
+
+    // 1. Sync the project's main source image (sourceImageBytes)
+    if (!document.sourceImageBytes.empty()) {
+        std::string hash = ComputeImageHash(document.sourceImageBytes);
+        std::string assetFileName = projectStem + ".png";
+        std::filesystem::path pngPath = m_AssetsPath / assetFileName;
+        std::filesystem::path hashPath = m_AssetsPath / (assetFileName + ".hash");
+
+        bool needWrite = true;
+        if (std::filesystem::exists(pngPath) && std::filesystem::exists(hashPath)) {
+            try {
+                std::ifstream f(hashPath);
+                if (f.is_open()) {
+                    nlohmann::json meta;
+                    f >> meta;
+                    if (meta.value("hash", "") == hash && meta.value("projectFileName", "") == projectFileName) {
+                        needWrite = false;
+                    }
+                }
+            } catch (...) {}
+        }
+
+        if (needWrite) {
+            WriteFileBytes(pngPath, document.sourceImageBytes);
+
+            int w = 0, h = 0, c = 4;
+            std::vector<unsigned char> pixels;
+            DecodeImageBytes(document.sourceImageBytes, pixels, w, h, c);
+
+            nlohmann::json meta = {
+                {"hash", hash},
+                {"projectFileName", projectFileName},
+                {"displayName", document.metadata.projectName.empty() ? projectStem : document.metadata.projectName},
+                {"timestamp", document.metadata.timestamp},
+                {"width", w},
+                {"height", h}
+            };
+            std::ofstream f(hashPath);
+            if (f.is_open()) {
+                f << meta.dump(4);
+            }
+        }
+
+        syncedFileNames.push_back(assetFileName);
+    }
+
+    // 2. Sync all embedded Image nodes in the graph
+    if (document.pipelineData.is_object()) {
+        const auto& nodes = document.pipelineData.value("nodes", nlohmann::json::array());
+        for (const auto& item : nodes) {
+            if (item.value("kind", "") == "Image" && item.contains("pngBytes")) {
+                std::vector<unsigned char> pngBytes = ReadBinaryJsonHelper(item.at("pngBytes"));
+                if (!pngBytes.empty()) {
+                    std::string hash = ComputeImageHash(pngBytes);
+                    std::string label = item.value("label", item.value("title", "Image"));
+                    std::string sanitizedLabel = SanitizeFileStem(label);
+                    if (sanitizedLabel.empty()) {
+                        sanitizedLabel = "image";
+                    }
+                    
+                    std::string hashPrefix = hash.substr(0, 8);
+                    std::string assetFileName = projectStem + "_" + sanitizedLabel + "_" + hashPrefix + ".png";
+                    std::filesystem::path pngPath = m_AssetsPath / assetFileName;
+                    std::filesystem::path hashPath = m_AssetsPath / (assetFileName + ".hash");
+
+                    bool needWrite = true;
+                    if (std::filesystem::exists(pngPath) && std::filesystem::exists(hashPath)) {
+                        try {
+                            std::ifstream f(hashPath);
+                            if (f.is_open()) {
+                                nlohmann::json meta;
+                                f >> meta;
+                                if (meta.value("hash", "") == hash && meta.value("projectFileName", "") == projectFileName) {
+                                    needWrite = false;
+                                }
+                            }
+                        } catch (...) {}
+                    }
+
+                    if (needWrite) {
+                        WriteFileBytes(pngPath, pngBytes);
+
+                        int w = 0, h = 0, c = 4;
+                        std::vector<unsigned char> pixels;
+                        DecodeImageBytes(pngBytes, pixels, w, h, c);
+
+                        nlohmann::json meta = {
+                            {"hash", hash},
+                            {"projectFileName", projectFileName},
+                            {"displayName", label},
+                            {"timestamp", document.metadata.timestamp},
+                            {"width", w},
+                            {"height", h}
+                        };
+                        std::ofstream f(hashPath);
+                        if (f.is_open()) {
+                            f << meta.dump(4);
+                        }
+                    }
+
+                    syncedFileNames.push_back(assetFileName);
+                }
+            }
+        }
+    }
+
+    return syncedFileNames;
+}
+
+void LibraryManager::CleanupOrphanedAssets(const std::vector<std::string>& activeAssetFileNames) {
+    if (!std::filesystem::exists(m_AssetsPath)) {
+        return;
+    }
+
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(m_AssetsPath, ec)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+
+        std::string filename = entry.path().filename().string();
+        
+        std::string checkName = filename;
+        if (filename.size() > 5 && filename.substr(filename.size() - 5) == ".hash") {
+            checkName = filename.substr(0, filename.size() - 5);
+        }
+
+        if (std::find(activeAssetFileNames.begin(), activeAssetFileNames.end(), checkName) == activeAssetFileNames.end()) {
+            std::filesystem::remove(entry.path(), ec);
+        }
+    }
+}
+
 void LibraryManager::QueueLooseAssetSave(
     const std::string& displayName,
     const std::vector<unsigned char>& imageBytes,
@@ -898,6 +1072,24 @@ void LibraryManager::QueueLooseAssetSave(
 
         if (!std::filesystem::exists(m_AssetsPath)) {
             std::filesystem::create_directories(m_AssetsPath);
+        }
+
+        // Direct check for a perfect exact match first
+        const std::filesystem::path preferredPath = m_AssetsPath / resolvedPreferredFileName;
+        if (std::filesystem::exists(preferredPath)) {
+            std::vector<unsigned char> existingPixels;
+            int existingW = 0;
+            int existingH = 0;
+            if (LoadRgbaImageFromFile(preferredPath, existingPixels, existingW, existingH)) {
+                if (existingW == importedW &&
+                    existingH == importedH &&
+                    existingPixels.size() == importedPixels.size() &&
+                    ComputeExactPixelFingerprint(existingPixels) == ComputeExactPixelFingerprint(importedPixels) &&
+                    existingPixels == importedPixels) {
+                    // Silent success: asset already exists with identical pixels. No conflict or duplicate files needed.
+                    return;
+                }
+            }
         }
 
         bool foundConflict = false;
@@ -1147,15 +1339,11 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
         std::filesystem::create_directories(m_AssetsPath);
     }
 
-    const StackFormat::ProjectLoadOptions metadataOnly {
-        true,
-        false,
-        false
-    };
-
     int totalItems = GetProjectCount();
     int currentItem = 0;
     TraceStartupStep("[LibraryManager] Refresh counts: " + std::to_string(totalItems));
+
+    std::vector<std::string> activeAssetFiles;
 
     for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath)) {
         if (!IsSupportedProjectExtension(entry.path())) continue;
@@ -1164,8 +1352,14 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
         TraceStartupStep("[LibraryManager] Loading project: " + entry.path().filename().string());
         if (progressCallback) progressCallback(currentItem, totalItems, entry.path().filename().string());
 
+        // Use deep options to parse pipelineData and sourceImageBytes for asset syncing
+        StackFormat::ProjectLoadOptions options;
+        options.includeThumbnail = true;
+        options.includeSourceImage = true;
+        options.includePipelineData = true;
+
         StackFormat::ProjectDocument document;
-        if (!LoadProjectDocument(entry.path().filename().string(), document, metadataOnly)) {
+        if (!LoadProjectDocument(entry.path().filename().string(), document, options)) {
             std::cerr << "Failed to parse project: " << entry.path() << std::endl;
             continue;
         }
@@ -1179,54 +1373,56 @@ void LibraryManager::RefreshLibrary(std::function<void(int current, int total, c
         project->sourceWidth = document.metadata.sourceWidth;
         project->sourceHeight = document.metadata.sourceHeight;
 
-        // InitializeThumbnail(project); // Defer to main context
         m_Projects.push_back(project);
+
+        // Sync the assets of this project and collect active asset filenames
+        std::vector<std::string> projectAssets = SyncProjectAssets(project->fileName, document);
+        activeAssetFiles.insert(activeAssetFiles.end(), projectAssets.begin(), projectAssets.end());
     }
 
+    // Clean up any orphaned assets from m_AssetsPath
+    CleanupOrphanedAssets(activeAssetFiles);
+
+    // Populate m_Assets directly from the synced .hash files
     if (std::filesystem::exists(m_AssetsPath)) {
         for (const auto& entry : std::filesystem::directory_iterator(m_AssetsPath)) {
-            if (!IsSupportedAssetExtension(entry.path())) continue;
+            std::string filename = entry.path().filename().string();
+            if (filename.size() > 5 && filename.substr(filename.size() - 5) == ".hash") {
+                try {
+                    std::ifstream f(entry.path());
+                    if (f.is_open()) {
+                        nlohmann::json meta;
+                        f >> meta;
 
-            currentItem++;
-            TraceStartupStep("[LibraryManager] Loading asset: " + entry.path().filename().string());
-            if (progressCallback) progressCallback(currentItem, totalItems, entry.path().filename().string());
+                        std::string assetPngName = filename.substr(0, filename.size() - 5);
+                        std::filesystem::path pngPath = m_AssetsPath / assetPngName;
 
-            auto asset = std::make_shared<AssetEntry>();
-            asset->fileName = entry.path().filename().string();
-            asset->displayName = DisplayNameFromStem(entry.path().stem().string());
-            asset->projectFileName = ResolveAssetProjectFileName(entry.path().stem().string(), m_Projects);
+                        if (std::filesystem::exists(pngPath)) {
+                            auto asset = std::make_shared<AssetEntry>();
+                            asset->fileName = assetPngName;
+                            asset->displayName = meta.value("displayName", assetPngName);
+                            asset->projectFileName = meta.value("projectFileName", "");
+                            asset->timestamp = meta.value("timestamp", "Unknown");
+                            asset->width = meta.value("width", 0);
+                            asset->height = meta.value("height", 0);
 
-            const auto projectIt = std::find_if(
-                m_Projects.begin(),
-                m_Projects.end(),
-                [&](const std::shared_ptr<ProjectEntry>& p) {
-                    return p && !asset->projectFileName.empty() && p->fileName == asset->projectFileName;
-                });
+                            const auto projectIt = std::find_if(
+                                m_Projects.begin(),
+                                m_Projects.end(),
+                                [&](const std::shared_ptr<ProjectEntry>& p) {
+                                    return p && !asset->projectFileName.empty() && p->fileName == asset->projectFileName;
+                                });
 
-            if (projectIt != m_Projects.end() && *projectIt) {
-                if ((*projectIt)->projectKind != StackFormat::kCompositeProjectKind) {
-                    asset->projectName = (*projectIt)->projectName;
-                    asset->projectKind = (*projectIt)->projectKind;
-                    asset->displayName = (*projectIt)->projectName;
-                } else {
-                    asset->projectFileName.clear();
-                }
+                            if (projectIt != m_Projects.end() && *projectIt) {
+                                asset->projectName = (*projectIt)->projectName;
+                                asset->projectKind = (*projectIt)->projectKind;
+                            }
+
+                            m_Assets.push_back(asset);
+                        }
+                    }
+                } catch (...) {}
             }
-
-            int width = 0;
-            int height = 0;
-            int channels = 0;
-            if (stbi_info(entry.path().string().c_str(), &width, &height, &channels)) {
-                asset->width = width;
-                asset->height = height;
-            }
-
-            std::error_code ec;
-            const auto writeTime = std::filesystem::last_write_time(entry.path(), ec);
-            asset->timestamp = ec ? "Unknown" : BuildTimestampStringFromFileTime(writeTime);
-
-            // InitializeAssetThumbnail(asset); // Defer to main context
-            m_Assets.push_back(asset);
         }
     }
 
@@ -1392,11 +1588,15 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
         }
         renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
         if ((renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) && editor->GetNodeGraph().IsOutputConnected()) {
-            editor->GetPipeline().ExecuteGraph(editor->BuildGraphSnapshot());
-            renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
+            editor->BuildSingleOutputExportRaster(renderedPixels, renderedW, renderedH);
         }
         if (!renderedPixels.empty() && renderedW > 0 && renderedH > 0) {
             sourcePixels = editor->GetPipeline().GetSourcePixels(sourceW, sourceH);
+            if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+                sourceW = renderedW;
+                sourceH = renderedH;
+                sourcePixels.assign(static_cast<size_t>(sourceW) * static_cast<size_t>(sourceH) * 4ull, 0u);
+            }
         }
     }
 
@@ -1412,10 +1612,14 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
         return;
     }
 
-    const std::string safeStem = SanitizeFileStem(trimmedName);
-    const std::string fileName = existingFileName.empty()
-        ? safeStem + "_" + std::to_string(std::time(nullptr)) + ".stack"
-        : existingFileName;
+    std::string fileName = existingFileName;
+    if (fileName.empty() && editor && !editor->GetCurrentProjectFileName().empty()) {
+        fileName = editor->GetCurrentProjectFileName();
+    }
+    if (fileName.empty()) {
+        const std::string safeStem = SanitizeFileStem(trimmedName);
+        fileName = safeStem + "_" + std::to_string(std::time(nullptr)) + ".stack";
+    }
     const std::string assetFileName = BuildAssetPathForProjectFile(fileName).filename().string();
 
     editor->SetCurrentProjectName(trimmedName);
@@ -1437,7 +1641,8 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
                                      renderedPixels = std::move(renderedPixels),
                                      sourceW,
                                      sourceH,
-                                     sourcePixels = std::move(sourcePixels)]() mutable {
+                                     sourcePixels = std::move(sourcePixels),
+                                     editor]() mutable {
         bool wroteProject = false;
         bool wroteAsset = false;
 
@@ -1464,13 +1669,34 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
                     4,
                     renderedPixels.data(),
                     renderedW * 4) != 0;
+                
+                if (wroteAsset) {
+                    std::vector<unsigned char> renderedPngBytes;
+                    stbi_write_png_to_func(png_write_func, &renderedPngBytes, renderedW, renderedH, 4, renderedPixels.data(), renderedW * 4);
+                    std::string hash = ComputeImageHash(renderedPngBytes);
+                    nlohmann::json meta = {
+                        {"hash", hash},
+                        {"projectFileName", fileName},
+                        {"displayName", trimmedName},
+                        {"timestamp", document.metadata.timestamp},
+                        {"width", renderedW},
+                        {"height", renderedH}
+                    };
+                    std::ofstream f(m_AssetsPath / (assetFileName + ".hash"));
+                    if (f.is_open()) {
+                        f << meta.dump(4);
+                    }
+                }
+
+                // Sync all other embedded assets inside the project
+                SyncProjectAssets(fileName, document);
             }
         } catch (...) {
             wroteProject = false;
             wroteAsset = false;
         }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, wroteProject, wroteAsset]() {
+        Async::TaskSystem::Get().PostToMain([this, generation, wroteProject, wroteAsset, editor]() {
             if (generation != m_SaveGeneration) {
                 return;
             }
@@ -1479,6 +1705,9 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
                 m_SaveTaskState = Async::TaskState::Idle;
                 m_SaveStatusText = "Project saved to the library.";
                 m_LastLibrarySignature = 0;
+                if (editor) {
+                    editor->ClearDirty();
+                }
             } else {
                 m_SaveTaskState = Async::TaskState::Failed;
                 m_SaveStatusText = "Failed to save the project to the library.";
@@ -1589,10 +1818,14 @@ void LibraryManager::RequestSaveCompositeProject(
 
     document.metadata.timestamp = BuildTimestampString();
 
+    std::string fileName = existingFileName;
+    if (fileName.empty() && composite && !composite->GetCurrentProjectFileName().empty()) {
+        fileName = composite->GetCurrentProjectFileName();
+    }
     const std::string safeStem = SanitizeFileStem(trimmedName);
     const std::string fallbackStem = safeStem + "_" + std::to_string(std::time(nullptr));
-    const std::string fileName = EnsureProjectFileNameForKind(
-        existingFileName,
+    fileName = EnsureProjectFileNameForKind(
+        fileName,
         fallbackStem,
         StackFormat::kCompositeProjectKind);
     const std::string legacyProjectFileToDelete =
@@ -1891,20 +2124,12 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             project->sourceWidth = preview.width;
             project->sourceHeight = preview.height;
 
-            unsigned int newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
-                preview.sourcePixels.data(),
-                preview.width,
-                preview.height,
-                preview.channels);
-            if (newSourcePreviewTex == 0) {
-                project->previewTaskState = Async::TaskState::Failed;
-                project->previewStatusText = "Preview render failed.";
-                return;
-            }
-
             int renderedW = 0;
             int renderedH = 0;
             std::vector<unsigned char> renderedPixels;
+            std::vector<unsigned char> comparePixels;
+            int compareW = 0;
+            int compareH = 0;
             bool livePreviewLooksBlank = false;
 
             if (!preview.renderProject
@@ -1918,13 +2143,50 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                     preview.height,
                     preview.channels);
                 previewEditor.DeserializePipeline(project->pipelineData);
-                previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
-                renderedPixels = previewEditor.GetPipeline().GetOutputPixels(renderedW, renderedH);
+
+                bool hasRawDevelop = false;
+                for (const auto& node : previewEditor.GetNodeGraph().GetNodes()) {
+                    if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+                        hasRawDevelop = true;
+                        break;
+                    }
+                }
+
+                if (hasRawDevelop) {
+                    previewEditor.GetPipeline().ExecuteGraph(previewEditor.BuildGraphSnapshot());
+                    renderedPixels = previewEditor.GetPipeline().GetOutputPixels(renderedW, renderedH);
+                    comparePixels = previewEditor.GetPipeline().GetCompareSourcePixels(compareW, compareH);
+                } else {
+                    previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
+                    renderedPixels = previewEditor.GetPipeline().GetOutputPixels(renderedW, renderedH);
+                }
 
                 livePreviewLooksBlank =
                     !renderedPixels.empty() &&
                     !HasMeaningfulPixels(renderedPixels) &&
                     HasMeaningfulPixels(preview.sourcePixels);
+            }
+
+            unsigned int newSourcePreviewTex = 0;
+            if (!comparePixels.empty() && compareW > 0 && compareH > 0) {
+                FlipImageRowsInPlace(comparePixels, compareW, compareH, 4);
+                newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
+                    comparePixels.data(),
+                    compareW,
+                    compareH,
+                    4);
+            } else {
+                newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
+                    preview.sourcePixels.data(),
+                    preview.width,
+                    preview.height,
+                    preview.channels);
+            }
+
+            if (newSourcePreviewTex == 0) {
+                project->previewTaskState = Async::TaskState::Failed;
+                project->previewStatusText = "Preview render failed.";
+                return;
             }
 
             std::vector<unsigned char> finalPreviewPixels;

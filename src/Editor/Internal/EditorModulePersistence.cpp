@@ -3,12 +3,14 @@
 #include "Async/TaskSystem.h"
 #include "Library/LibraryManager.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Raw/RawLoader.h"
 #include "ThirdParty/stb_image.h"
 #include "ThirdParty/stb_image_write.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <iostream>
 
 namespace {
 
@@ -19,6 +21,7 @@ struct DecodedImageData {
     int width = 0;
     int height = 0;
     int channels = 4;
+    int originalChannels = 4;
 };
 
 bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
@@ -36,6 +39,7 @@ bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
     outImage.width = width;
     outImage.height = height;
     outImage.channels = 4;
+    outImage.originalChannels = channels;
     outImage.pixels.assign(pixels, pixels + (width * height * 4));
     stbi_image_free(pixels);
     return true;
@@ -146,6 +150,8 @@ nlohmann::json EditorModule::SerializePipeline() {
 }
 
 void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
+    m_Pipeline.Clear();
+    m_CompositePreviewPipeline.Clear();
     m_Layers.clear();
     ClearCompositeRuntimeState();
     m_NodeDirtyGenerations.clear();
@@ -186,13 +192,6 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
         sourceHeight,
         m_Pipeline.GetSourceChannels());
 
-    // Auto-restore embedded project image assets into local library assets
-    for (const auto& node : m_NodeGraph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::Image && !node.image.pngBytes.empty()) {
-            LibraryManager::Get().QueueLooseAssetSave(node.image.label, node.image.pngBytes);
-        }
-    }
-
     DeserializeCompositePersistence(serialized);
     RefreshGraphLayerMetadata();
 
@@ -201,6 +200,11 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
         if (EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(activeImageNodeId)) {
             if (imageNode->kind == EditorNodeGraph::NodeKind::Image && !imageNode->image.pixels.empty()) {
                 LoadSourceFromPixels(imageNode->image.pixels.data(), imageNode->image.width, imageNode->image.height, imageNode->image.channels);
+            } else if (imageNode->kind == EditorNodeGraph::NodeKind::RawSource) {
+                const int width = Raw::DisplayWidth(imageNode->rawSource.metadata);
+                const int height = Raw::DisplayHeight(imageNode->rawSource.metadata);
+                std::vector<unsigned char> transparent = BuildTransparentPixels(width, height);
+                LoadSourceFromPixels(transparent.data(), width, height, 4);
             }
         }
         ApplyGraphLayerOrder();
@@ -226,11 +230,24 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
     DeserializePipeline(projectData.pipelineData);
     SetCurrentProjectName(projectData.projectName);
     SetCurrentProjectFileName(projectData.projectFileName);
+    ClearDirty();
+    m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
     return true;
 }
 
 void EditorModule::RequestLoadSourceImage(const std::string& path) {
     if (path.empty()) {
+        return;
+    }
+
+    if (Raw::RawLoader::IsRawPath(path)) {
+        if (AddGraphRawChainFromFile(path, EditorNodeGraph::Vec2{ 20.0f, 120.0f })) {
+            m_SourceLoadTaskState = Async::TaskState::Idle;
+            m_SourceLoadStatusText = "RAW source node loaded.";
+        } else {
+            m_SourceLoadTaskState = Async::TaskState::Failed;
+            m_SourceLoadStatusText = "Failed to load RAW source node.";
+        }
         return;
     }
 
@@ -317,11 +334,16 @@ bool EditorModule::RequestExportImage(const std::string& path) {
             return false;
         }
     } else {
-        m_Pipeline.ExecuteGraph(BuildGraphSnapshot());
-        pixels = m_Pipeline.GetOutputPixels(width, height);
+        if (!BuildSingleOutputExportRaster(pixels, width, height)) {
+            m_ExportTaskState = Async::TaskState::Failed;
+            m_ExportStatusText = "Failed to capture the rendered export.";
+            return false;
+        }
     }
 
     if (pixels.empty()) {
+        std::cerr << "[EditorModule] RequestExportImage: Failed to capture pixels (empty output). Width=" 
+                  << width << ", Height=" << height << std::endl;
         m_ExportTaskState = Async::TaskState::Failed;
         m_ExportStatusText = "Failed to capture the rendered image.";
         return false;
@@ -338,22 +360,55 @@ bool EditorModule::RequestExportImage(const std::string& path) {
 
     Async::TaskSystem::Get().Submit([this, generation, path, width, height, pixels = std::move(pixels)]() mutable {
         bool success = false;
+        std::string errorMsg;
 
         try {
-            const std::filesystem::path destination(path);
+            const std::filesystem::path destination = std::filesystem::u8path(path);
             if (destination.has_parent_path()) {
                 std::filesystem::create_directories(destination.parent_path());
             }
 
-            success = stbi_write_png(
+            int stbiResult = stbi_write_png(
                 destination.string().c_str(),
                 width,
                 height,
                 4,
                 pixels.data(),
-                width * 4) != 0;
+                width * 4);
+                
+            success = (stbiResult != 0);
+            
+            if (success) {
+                // Verify the file was actually written
+                if (!std::filesystem::exists(destination) || std::filesystem::file_size(destination) == 0) {
+                    success = false;
+                    errorMsg = "File does not exist or is empty after stbi_write_png returned success.";
+                }
+            }
+            
+            if (!success) {
+                errorMsg = "stbi_write_png or verification failed.";
+                // Try fallback path with sanitized name
+                std::string fallbackPath = (destination.parent_path() / "fallback_export.png").string();
+                std::cerr << "[EditorModule] stbi_write_png failed for " << path << ". Trying fallback " << fallbackPath << std::endl;
+                success = stbi_write_png(
+                    fallbackPath.c_str(),
+                    width,
+                    height,
+                    4,
+                    pixels.data(),
+                    width * 4) != 0;
+            }
+        } catch (const std::exception& e) {
+            success = false;
+            errorMsg = std::string("Exception: ") + e.what();
         } catch (...) {
             success = false;
+            errorMsg = "Unknown exception during export.";
+        }
+
+        if (!success) {
+            std::cerr << "[EditorModule] Export failed for path: " << path << ". Reason: " << errorMsg << std::endl;
         }
 
         Async::TaskSystem::Get().PostToMain([this, generation, success]() {
@@ -389,8 +444,7 @@ bool EditorModule::BuildProjectDocumentForSave(
     } else {
         renderedPixels = m_Pipeline.GetOutputPixels(renderedW, renderedH);
         if ((renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) && m_NodeGraph.IsOutputConnected()) {
-            m_Pipeline.ExecuteGraph(BuildGraphSnapshot());
-            renderedPixels = m_Pipeline.GetOutputPixels(renderedW, renderedH);
+            BuildSingleOutputExportRaster(renderedPixels, renderedW, renderedH);
         }
     }
     if (renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) {
@@ -407,7 +461,9 @@ bool EditorModule::BuildProjectDocumentForSave(
     } else {
         sourcePixels = m_Pipeline.GetSourcePixels(sourceW, sourceH);
         if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
-            return false;
+            sourceW = renderedW;
+            sourceH = renderedH;
+            sourcePixels = BuildTransparentPixels(sourceW, sourceH);
         }
     }
 

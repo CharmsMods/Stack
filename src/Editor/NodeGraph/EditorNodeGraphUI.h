@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 class EditorModule;
 
@@ -15,6 +16,13 @@ public:
     ~EditorNodeGraphUI();
     void Initialize();
     void Render(EditorModule* editor);
+    bool IsNodeBrowserOpen() const { return m_NodeBrowserOpen; }
+    void RenderNodesPanelDrawer(EditorModule* editor, float panelWidth, float paneHeight, const ImVec2& workspacePos);
+
+    static bool ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId);
+    static bool ConnectBestOutputToInput(EditorModule* editor, int fromNodeId, int toNodeId, const std::string& toSocketId);
+    static std::string GetUpstreamChannel(const EditorNodeGraph::Graph& graph, int nodeId, const std::string& socketId, std::unordered_set<int>& visited);
+
 
 private:
     enum class ContextTarget {
@@ -81,6 +89,7 @@ private:
 
     void RenderContextMenu(EditorModule* editor);
     void RenderNode(EditorModule* editor, EditorNodeGraph::Node& node);
+    void RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph);
     void RenderLinks(const EditorNodeGraph::Graph& graph);
     void RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph);
     void RenderNodeBrowser(EditorModule* editor);
@@ -176,10 +185,17 @@ private:
     int m_PushedSourceNodeId = -1;
     float m_PushDistance = 0.0f;
     std::vector<int> m_PushedNodeIds;
+    int m_EditingGroupId = -1;
+    char m_GroupRenameBuffer[128] = {};
+    int m_DragGroupId = -1;
+    int m_ResizingGroupId = -1;
+    int m_HoveredGroupId = -1;
 
     void CopySelectedNodes(EditorModule* editor);
     void PasteNodes(EditorModule* editor);
     void DuplicateSelectedNodes(EditorModule* editor);
     nlohmann::json m_Clipboard;
     int m_ClipboardPasteCount = 0;
+    bool m_OpenRenameProjectPopup = false;
+    char m_RenameProjectBuffer[256] = {};
 };

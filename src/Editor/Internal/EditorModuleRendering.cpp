@@ -34,9 +34,15 @@ bool IsMaskOutputNode(EditorNodeGraph::NodeKind kind) {
 
 bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
     return kind == EditorNodeGraph::NodeKind::Image ||
+           kind == EditorNodeGraph::NodeKind::RawDevelop ||
            kind == EditorNodeGraph::NodeKind::Layer ||
            kind == EditorNodeGraph::NodeKind::ImageGenerator ||
            kind == EditorNodeGraph::NodeKind::Mix;
+}
+
+void ResolveRawDisplayDimensions(const Raw::RawMetadata& metadata, int& width, int& height) {
+    width = Raw::DisplayWidth(metadata);
+    height = Raw::DisplayHeight(metadata);
 }
 
 CroppedRgbaImage CropToAlphaBounds(const std::vector<unsigned char>& rgbaPixels, int width, int height, int padding = 0) {
@@ -119,7 +125,15 @@ std::vector<unsigned char> EditorModule::GetScopePixelsForNode(int nodeId, int& 
     int sourceW = 0;
     int sourceH = 0;
     int sourceCh = 4;
-    if (node->kind == EditorNodeGraph::NodeKind::Image && !node->image.pixels.empty() &&
+    const std::string sourceSocketId = IsMaskOutputNode(node->kind)
+        ? EditorNodeGraph::kMaskOutputSocketId
+        : EditorNodeGraph::kImageOutputSocketId;
+    if ((node->kind == EditorNodeGraph::NodeKind::Output &&
+         TryResolveReferenceSourcePixelsForOutput(nodeId, sourcePixels, sourceW, sourceH, sourceCh)) ||
+        (node->kind != EditorNodeGraph::NodeKind::Output &&
+         TryResolveReferenceSourcePixels(nodeId, sourceSocketId, sourcePixels, sourceW, sourceH, sourceCh))) {
+        // Scope renders use the same reference canvas as the graph path.
+    } else if (node->kind == EditorNodeGraph::NodeKind::Image && !node->image.pixels.empty() &&
         node->image.width > 0 && node->image.height > 0) {
         sourcePixels = node->image.pixels;
         sourceW = node->image.width;
@@ -208,7 +222,9 @@ std::vector<unsigned char> EditorModule::GetPreviewPixelsForNode(int nodeId, int
     int sourceW = 0;
     int sourceH = 0;
     int sourceCh = 4;
-    if (sourceNode->kind == EditorNodeGraph::NodeKind::Image && !sourceNode->image.pixels.empty() &&
+    if (TryResolveReferenceSourcePixels(input->fromNodeId, input->fromSocketId, sourcePixels, sourceW, sourceH, sourceCh)) {
+        // Preview renders use the same reference canvas as the inspected stream.
+    } else if (sourceNode->kind == EditorNodeGraph::NodeKind::Image && !sourceNode->image.pixels.empty() &&
         sourceNode->image.width > 0 && sourceNode->image.height > 0) {
         sourcePixels = sourceNode->image.pixels;
         sourceW = sourceNode->image.width;
@@ -246,6 +262,7 @@ std::vector<unsigned char> EditorModule::GetPreviewPixelsForNode(int nodeId, int
     const int syntheticOutputId = -100000 - nodeId;
     if (sourceSocket.type == EditorNodeGraph::SocketType::Mask) {
         snapshot.outputNodeId = input->fromNodeId;
+        snapshot.outputSocketId = input->fromSocketId;
     } else {
         RenderGraphNode outputNode;
         outputNode.nodeId = syntheticOutputId;
@@ -267,6 +284,122 @@ std::vector<unsigned char> EditorModule::GetPreviewPixelsForNode(int nodeId, int
     return previewPipeline.GetScopesPixels(outW, outH);
 }
 
+bool EditorModule::BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) const {
+    outW = 0;
+    outH = 0;
+    outPixels.clear();
+
+    if (!m_NodeGraph.IsOutputConnected()) {
+        return false;
+    }
+
+    RenderGraphSnapshot snapshot = BuildGraphSnapshot();
+
+    std::vector<unsigned char> sourcePixels;
+    int sourceW = 0;
+    int sourceH = 0;
+    int sourceCh = 4;
+
+    if (TryResolveReferenceSourcePixelsForOutput(snapshot.outputNodeId, sourcePixels, sourceW, sourceH, sourceCh)) {
+        // Use reference canvas.
+    } else if (const EditorNodeGraph::Node* activeImage = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId())) {
+        if (activeImage->kind == EditorNodeGraph::NodeKind::Image && !activeImage->image.pixels.empty() && activeImage->image.width > 0 && activeImage->image.height > 0) {
+            sourcePixels = activeImage->image.pixels;
+            sourceW = activeImage->image.width;
+            sourceH = activeImage->image.height;
+            sourceCh = std::max(1, activeImage->image.channels);
+        }
+    }
+
+    if (sourcePixels.empty()) {
+        for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+            if (node.kind == EditorNodeGraph::NodeKind::Image && !node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
+                sourcePixels = node.image.pixels;
+                sourceW = node.image.width;
+                sourceH = node.image.height;
+                sourceCh = std::max(1, node.image.channels);
+                break;
+            }
+        }
+    }
+
+    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+        sourcePixels = m_Pipeline.GetSourcePixelsRaw();
+        sourceW = m_Pipeline.GetCanvasWidth();
+        sourceH = m_Pipeline.GetCanvasHeight();
+        sourceCh = std::max(1, m_Pipeline.GetSourceChannels());
+    }
+
+    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+        sourceW = 256;
+        sourceH = 256;
+        sourceCh = 4;
+        sourcePixels.assign(static_cast<size_t>(sourceW * sourceH * sourceCh), 0);
+        for (size_t i = 3; i < sourcePixels.size(); i += 4) {
+            sourcePixels[i] = 255;
+        }
+    }
+
+    RenderPipeline exportPipeline;
+    exportPipeline.Initialize();
+    exportPipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, std::max(1, sourceCh));
+    exportPipeline.ExecuteGraph(snapshot);
+    outPixels = exportPipeline.GetOutputPixels(outW, outH);
+    return !outPixels.empty() && outW > 0 && outH > 0;
+}
+
+bool EditorModule::ProbeViewTransformInputStats(int viewTransformNodeId, RenderTextureStats& outStats) const {
+    outStats = {};
+
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(viewTransformNodeId);
+    if (!node ||
+        node->kind != EditorNodeGraph::NodeKind::Layer ||
+        node->layerType != LayerType::ViewTransform) {
+        return false;
+    }
+
+    const EditorNodeGraph::Link* input = m_NodeGraph.FindInputLink(viewTransformNodeId, EditorNodeGraph::kImageInputSocketId);
+    if (!input) {
+        return false;
+    }
+
+    std::vector<unsigned char> sourcePixels;
+    int sourceW = 0;
+    int sourceH = 0;
+    int sourceCh = 4;
+    if (!TryResolveReferenceSourcePixels(input->fromNodeId, input->fromSocketId, sourcePixels, sourceW, sourceH, sourceCh)) {
+        sourcePixels = m_Pipeline.GetSourcePixelsRaw();
+        sourceW = m_Pipeline.GetCanvasWidth();
+        sourceH = m_Pipeline.GetCanvasHeight();
+        sourceCh = std::max(1, m_Pipeline.GetSourceChannels());
+    }
+    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+        return false;
+    }
+
+    RenderGraphSnapshot snapshot = BuildGraphSnapshot();
+    const int syntheticOutputId = -300000 - viewTransformNodeId;
+    RenderGraphNode outputNode;
+    outputNode.nodeId = syntheticOutputId;
+    outputNode.kind = RenderGraphNodeKind::Output;
+    snapshot.nodes.push_back(std::move(outputNode));
+    snapshot.links.push_back(RenderGraphLink{
+        input->fromNodeId,
+        input->fromSocketId,
+        syntheticOutputId,
+        EditorNodeGraph::kImageInputSocketId
+    });
+    snapshot.outputNodeId = syntheticOutputId;
+    snapshot.outputSocketId = EditorNodeGraph::kImageInputSocketId;
+
+    RenderPipeline probePipeline;
+    probePipeline.Initialize();
+    probePipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, std::max(1, sourceCh));
+    probePipeline.ExecuteGraph(snapshot);
+    outStats = probePipeline.GetOutputTextureStats();
+    return outStats.valid;
+}
+
 void EditorModule::RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId) {
     m_Scopes.RenderScopeNode(this, scopeKind, sourceNodeId);
 }
@@ -274,6 +407,7 @@ void EditorModule::RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, in
 void EditorModule::MarkRenderDirty(int touchedNodeId) {
     const bool wasAlreadyDirty = m_RenderDirty;
     m_RenderDirty = true;
+    m_Dirty = true;
     ++m_RenderRevision;
     if (!wasAlreadyDirty) {
         m_LastRenderDirtyTime = ImGui::GetTime();
@@ -294,12 +428,58 @@ void EditorModule::MarkRenderDirty(int touchedNodeId) {
 EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t generation) const {
     EditorRenderWorker::Snapshot snapshot;
     snapshot.generation = generation;
+    snapshot.graph = BuildGraphSnapshot();
     snapshot.outputConnected = GetViewportMode() == ViewportMode::SingleOutputPreview && m_NodeGraph.IsOutputConnected();
     if (snapshot.outputConnected) {
-        snapshot.sourcePixels = m_Pipeline.GetSourcePixelsRaw();
-        snapshot.width = m_Pipeline.GetCanvasWidth();
-        snapshot.height = m_Pipeline.GetCanvasHeight();
-        snapshot.channels = m_Pipeline.GetSourceChannels();
+        if (TryResolveReferenceSourcePixelsForOutput(
+                snapshot.graph.outputNodeId,
+                snapshot.sourcePixels,
+                snapshot.width,
+                snapshot.height,
+                snapshot.channels)) {
+            // Use the output's reference canvas for multi-source channel recombination.
+        } else if (const EditorNodeGraph::Node* activeImage = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId())) {
+            if (activeImage->kind == EditorNodeGraph::NodeKind::Image &&
+                !activeImage->image.pixels.empty() &&
+                activeImage->image.width > 0 &&
+                activeImage->image.height > 0) {
+                snapshot.sourcePixels = activeImage->image.pixels;
+                snapshot.width = activeImage->image.width;
+                snapshot.height = activeImage->image.height;
+                snapshot.channels = std::max(1, activeImage->image.channels);
+            } else if (activeImage->kind == EditorNodeGraph::NodeKind::RawSource) {
+                ResolveRawDisplayDimensions(activeImage->rawSource.metadata, snapshot.width, snapshot.height);
+                snapshot.channels = 4;
+                snapshot.sourcePixels = BuildTransparentPixels(snapshot.width, snapshot.height);
+            }
+        }
+        if (snapshot.sourcePixels.empty()) {
+            snapshot.sourcePixels = m_Pipeline.GetSourcePixelsRaw();
+            snapshot.width = m_Pipeline.GetCanvasWidth();
+            snapshot.height = m_Pipeline.GetCanvasHeight();
+            snapshot.channels = m_Pipeline.GetSourceChannels();
+        }
+        if (snapshot.sourcePixels.empty()) {
+            for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+                if (node.kind == EditorNodeGraph::NodeKind::Image &&
+                    !node.image.pixels.empty() &&
+                    node.image.width > 0 &&
+                    node.image.height > 0) {
+                    snapshot.sourcePixels = node.image.pixels;
+                    snapshot.width = node.image.width;
+                    snapshot.height = node.image.height;
+                    snapshot.channels = std::max(1, node.image.channels);
+                    break;
+                } else if (node.kind == EditorNodeGraph::NodeKind::RawSource &&
+                    node.rawSource.metadata.visibleWidth > 0 &&
+                    node.rawSource.metadata.visibleHeight > 0) {
+                    ResolveRawDisplayDimensions(node.rawSource.metadata, snapshot.width, snapshot.height);
+                    snapshot.channels = 4;
+                    snapshot.sourcePixels = BuildTransparentPixels(snapshot.width, snapshot.height);
+                    break;
+                }
+            }
+        }
         if (snapshot.sourcePixels.empty() || snapshot.width <= 0 || snapshot.height <= 0) {
             snapshot.width = 256;
             snapshot.height = 256;
@@ -307,7 +487,6 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
             snapshot.sourcePixels = BuildTransparentPixels(snapshot.width, snapshot.height);
         }
     }
-    snapshot.graph = BuildGraphSnapshot();
     snapshot.masks = BuildGraphRenderMasks();
     for (const RenderLayerStep& step : BuildGraphRenderSteps()) {
         if (step.layer) {
@@ -502,10 +681,20 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
 
         EditorRenderWorker::CompositeOutputRequest request;
         request.outputNodeId = chainState.info.outputNodeId;
-        request.sourceNodeId = chainState.info.sourceNodeId;
+        request.sourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(chainState.info.outputNodeId);
+        if (request.sourceNodeId <= 0) {
+            request.sourceNodeId = chainState.info.sourceNodeId;
+        }
 
-        const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainState.info.sourceNodeId);
-        if (sourceNode &&
+        const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(request.sourceNodeId);
+        if (TryResolveReferenceSourcePixelsForOutput(
+                chainState.info.outputNodeId,
+                request.sourcePixels,
+                request.width,
+                request.height,
+                request.channels)) {
+            // Render this output against its own reference canvas.
+        } else if (sourceNode &&
             sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
             !sourceNode->image.pixels.empty() &&
             sourceNode->image.width > 0 &&
@@ -584,7 +773,15 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         request.maskInput = sourceSocket.type == EditorNodeGraph::SocketType::Mask;
         request.dirtyGeneration = dirtyGeneration;
 
-        if (sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
+        if (TryResolveReferenceSourcePixels(
+                input->fromNodeId,
+                input->fromSocketId,
+                request.sourcePixels,
+                request.width,
+                request.height,
+                request.channels)) {
+            // Preview channel/combined streams on their resolved reference canvas.
+        } else if (sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
             !sourceNode->image.pixels.empty() &&
             sourceNode->image.width > 0 &&
             sourceNode->image.height > 0) {
@@ -592,6 +789,12 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             request.width = sourceNode->image.width;
             request.height = sourceNode->image.height;
             request.channels = std::max(1, sourceNode->image.channels);
+        } else if (sourceNode->kind == EditorNodeGraph::NodeKind::RawSource &&
+            sourceNode->rawSource.metadata.visibleWidth > 0 &&
+            sourceNode->rawSource.metadata.visibleHeight > 0) {
+            ResolveRawDisplayDimensions(sourceNode->rawSource.metadata, request.width, request.height);
+            request.channels = 4;
+            request.sourcePixels = BuildTransparentPixels(request.width, request.height);
         } else {
             request.sourcePixels = m_Pipeline.GetSourcePixelsRaw();
             request.width = m_Pipeline.GetCanvasWidth();

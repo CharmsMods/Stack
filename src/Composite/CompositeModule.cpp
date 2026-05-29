@@ -2107,6 +2107,7 @@ void CompositeModule::Initialize() {
 
     m_Initialized = true;
     m_StagePreviewDirty = true;
+    m_CanvasFocused = false;
 }
 
 void CompositeModule::Shutdown() {
@@ -3607,6 +3608,42 @@ void CompositeModule::RenderLayerPane() {
         }
 
         ImGui::EndTable();
+
+        const bool layersFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        const bool layersHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+        if ((layersFocused || layersHovered || m_CanvasFocused) && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !m_SelectedId.empty()) {
+            int selectedIdx = -1;
+            for (int i = 0; i < static_cast<int>(sorted.size()); ++i) {
+                if (sorted[i]->id == m_SelectedId) {
+                    selectedIdx = i;
+                    break;
+                }
+            }
+
+            if (selectedIdx != -1) {
+                bool ZOrderMoved = false;
+                if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+                    if (selectedIdx > 0) {
+                        CompositeLayer* movingLayer = sorted[selectedIdx];
+                        sorted.erase(sorted.begin() + selectedIdx);
+                        sorted.insert(sorted.begin() + (selectedIdx - 1), movingLayer);
+                        ZOrderMoved = true;
+                    }
+                } else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+                    if (selectedIdx < static_cast<int>(sorted.size()) - 1) {
+                        CompositeLayer* movingLayer = sorted[selectedIdx];
+                        sorted.erase(sorted.begin() + selectedIdx);
+                        sorted.insert(sorted.begin() + (selectedIdx + 1), movingLayer);
+                        ZOrderMoved = true;
+                    }
+                }
+
+                if (ZOrderMoved) {
+                    ReassignZFromTopOrder(sorted);
+                    MarkDocumentDirty();
+                }
+            }
+        }
     }
 }
 
@@ -4062,6 +4099,8 @@ void CompositeModule::RenderCanvasContextMenu() {
 }
 
 void CompositeModule::RenderStage() {
+    m_CanvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
     struct SnapGuideLine {
         ImVec2 a;
         ImVec2 b;
@@ -5006,6 +5045,15 @@ void CompositeModule::RenderStage() {
     selectedLayer = GetSelectedLayer();
     if (hovered && ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedLayer && !selectedLayer->locked) {
         RemoveSelectedLayers();
+    }
+
+    if ((hovered || m_CanvasFocused) && ImGui::IsKeyPressed(ImGuiKey_T) && !ImGui::GetIO().WantTextInput) {
+        if (m_SnapEnabled) {
+            ApplySnapModePreset(CompositeSnapModePreset::Off);
+        } else {
+            ApplySnapModePreset(CompositeSnapModePreset::Full);
+        }
+        MarkDocumentDirty();
     }
 
     if (ImGui::BeginPopup("CompositeCanvasLayerContext")) {

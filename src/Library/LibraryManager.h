@@ -133,6 +133,9 @@ public:
     // New: Direct load from an absolute path (for projects already in the library or just dropped)
     void RequestLoadProjectFromPath(const std::filesystem::path& absolutePath, EditorModule* editor, std::function<void(bool)> onComplete = {});
 
+    std::vector<std::string> SyncProjectAssets(const std::string& projectFileName, const StackBinaryFormat::ProjectDocument& document);
+    void CleanupOrphanedAssets(const std::vector<std::string>& activeAssetFileNames);
+
     bool HasPendingConflicts() const { return !m_PendingConflicts.empty(); }
     const std::vector<ImportConflict>& GetPendingConflicts() const { return m_PendingConflicts; }
     void ResolveConflict(int index, ConflictAction action, const std::string& newName = "");

@@ -97,11 +97,20 @@ typedef struct __GLsync* GLsync;
 #ifndef GL_RED
 #define GL_RED 0x1903
 #endif
+#ifndef GL_RED_INTEGER
+#define GL_RED_INTEGER 0x8D94
+#endif
+#ifndef GL_R16UI
+#define GL_R16UI 0x8234
+#endif
 #ifndef GL_RGB
 #define GL_RGB 0x1907
 #endif
 #ifndef GL_RGBA8
 #define GL_RGBA8 0x8058
+#endif
+#ifndef GL_RGBA16F
+#define GL_RGBA16F 0x881A
 #endif
 #ifndef GL_RGBA32F
 #define GL_RGBA32F 0x8814
@@ -187,6 +196,7 @@ extern void(APIENTRY* glUniform2i_)(GLint location, GLint v0, GLint v1);
 extern void(APIENTRY* glUniform3f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
 extern void(APIENTRY* glUniform4f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
 extern void(APIENTRY* glUniform3fv_)(GLint location, GLsizei count, const GLfloat* value);
+extern void(APIENTRY* glUniformMatrix3fv_)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 extern void(APIENTRY* glUniformMatrix4fv_)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 
 // Vertex arrays
@@ -251,6 +261,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glUniform3f glUniform3f_
 #define glUniform4f glUniform4f_
 #define glUniform3fv glUniform3fv_
+#define glUniformMatrix3fv glUniformMatrix3fv_
 #define glUniformMatrix4fv glUniformMatrix4fv_
 #define glGenVertexArrays glGenVertexArrays_
 #define glDeleteVertexArrays glDeleteVertexArrays_

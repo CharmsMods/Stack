@@ -7,6 +7,10 @@
 namespace EditorNodeGraph {
 namespace {
 
+bool IsChannelSocketId(const std::string& socketId) {
+    return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
+}
+
 Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
     Link link;
     link.fromNodeId = fromNodeId;
@@ -46,6 +50,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         return false;
     }
     if (from->kind == NodeKind::Output || to->kind == NodeKind::Image ||
+        to->kind == NodeKind::RawSource ||
         from->kind == NodeKind::Composite ||
         to->kind == NodeKind::Composite) {
         if (errorMessage) *errorMessage = "That pin direction is not valid.";
@@ -55,7 +60,9 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
     const bool toScope = to->kind == NodeKind::Scope && toSocketId == kScopeInputSocketId;
     if (toScope) {
         const bool validImageScope = fromSocket.type == SocketType::Image;
-        const bool validMaskScope = fromSocket.type == SocketType::Mask && fromSocketId == kMaskOutputSocketId;
+        const bool validMaskScope = fromSocket.type == SocketType::Mask &&
+            (fromSocketId == kMaskOutputSocketId ||
+             (from->kind == NodeKind::ChannelSplit && (fromSocketId == "r" || fromSocketId == "g" || fromSocketId == "b" || fromSocketId == "a")));
         if (!validImageScope && !validMaskScope) {
             if (errorMessage) *errorMessage = "Scopes can analyze image or mask outputs.";
             return false;
@@ -69,7 +76,9 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
     const bool toPreview = to->kind == NodeKind::Preview && toSocketId == kPreviewInputSocketId;
     if (toPreview) {
         const bool validImagePreview = fromSocket.type == SocketType::Image;
-        const bool validMaskPreview = fromSocket.type == SocketType::Mask && fromSocketId == kMaskOutputSocketId;
+        const bool validMaskPreview = fromSocket.type == SocketType::Mask &&
+            (fromSocketId == kMaskOutputSocketId ||
+             (from->kind == NodeKind::ChannelSplit && (fromSocketId == "r" || fromSocketId == "g" || fromSocketId == "b" || fromSocketId == "a")));
         if (!validImagePreview && !validMaskPreview) {
             if (errorMessage) *errorMessage = "Preview nodes can inspect image or mask outputs.";
             return false;
@@ -80,26 +89,80 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         return true;
     }
 
-    if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask) {
-        const bool validMaskSource =
-            (from->kind == NodeKind::MaskGenerator ||
-             from->kind == NodeKind::MaskUtility ||
-             from->kind == NodeKind::ImageToMask) &&
-            fromSocketId == kMaskOutputSocketId;
-        const bool validMaskTarget =
-            (to->kind == NodeKind::Layer && toSocketId == kMaskInputSocketId) ||
-            (to->kind == NodeKind::Mix && toSocketId == kMixFactorSocketId) ||
-            (to->kind == NodeKind::MaskUtility && toSocketId == kMaskUtilityInputSocketId);
-        if (!validMaskSource ||
-            !validMaskTarget ||
-            fromSocket.type != SocketType::Mask ||
-            toSocket.type != SocketType::Mask) {
-            if (errorMessage) *errorMessage = "Mask outputs can connect to layer masks, mix factors, or mask utilities.";
+    const std::string upstreamChannel = ResolveSocketChannel(fromNodeId, fromSocketId);
+    if (to->kind == NodeKind::Output &&
+        toSocketId == kImageInputSocketId &&
+        !upstreamChannel.empty()) {
+        return TryConnectSockets(fromNodeId, fromSocketId, toNodeId, upstreamChannel, errorMessage);
+    }
+
+    if (fromSocket.type == SocketType::Raw || toSocket.type == SocketType::Raw) {
+        const bool validRawLink =
+            fromSocket.type == SocketType::Raw &&
+            toSocket.type == SocketType::Raw &&
+            (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
+            fromSocketId == kRawOutputSocketId &&
+            (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDevelop) &&
+            toSocketId == kRawInputSocketId;
+        if (!validRawLink) {
+            if (errorMessage) *errorMessage = "RAW sockets connect from RAW Source or RAW neural nodes into RAW neural or RAW Develop nodes.";
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
             if (errorMessage) *errorMessage = "That connection would create a cycle.";
             return false;
+        }
+        RemoveRenderLinksForNodeInput(toNodeId, toSocketId);
+        m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, toSocketId));
+        TouchStructure();
+        return true;
+    }
+
+    if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask) {
+        const bool validMaskSource =
+            ((from->kind == NodeKind::MaskGenerator ||
+              from->kind == NodeKind::MaskUtility ||
+              from->kind == NodeKind::ImageToMask) && fromSocketId == kMaskOutputSocketId) ||
+            (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(fromSocketId)) ||
+            (!upstreamChannel.empty() && fromSocket.type == SocketType::Image);
+
+        const bool isMaskToMask = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask;
+        const bool isChannelImageToMask = fromSocket.type == SocketType::Image && toSocket.type == SocketType::Mask && !upstreamChannel.empty();
+        const bool isMaskToImage = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image;
+
+        if (isMaskToMask || isChannelImageToMask) {
+            const bool validMaskTarget =
+                (to->kind == NodeKind::Layer && toSocketId == kMaskInputSocketId) ||
+                (to->kind == NodeKind::Mix && toSocketId == kMixFactorSocketId) ||
+                (to->kind == NodeKind::MaskUtility && toSocketId == kMaskUtilityInputSocketId) ||
+                (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(toSocketId)) ||
+                (to->kind == NodeKind::Output && IsChannelSocketId(toSocketId));
+            if (!validMaskSource || !validMaskTarget) {
+                if (errorMessage) *errorMessage = "Mask outputs can connect to layer masks, mix factors, mask utilities, channels, or color-split outputs.";
+                return false;
+            }
+        } else if (isMaskToImage) {
+            const bool validImageTarget =
+                (to->kind == NodeKind::Layer && toSocketId == kImageInputSocketId) ||
+                (to->kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
+                (to->kind == NodeKind::Output && toSocketId == kImageInputSocketId) ||
+                (to->kind == NodeKind::ImageToMask && toSocketId == kImageToMaskInputSocketId) ||
+                (to->kind == NodeKind::ChannelSplit && toSocketId == kImageInputSocketId);
+            if (!validMaskSource || !validImageTarget) {
+                if (errorMessage) *errorMessage = "Mask outputs can connect to main image inputs of layers, mix inputs, or the output node.";
+                return false;
+            }
+        } else {
+            if (errorMessage) *errorMessage = "Cannot connect an image output directly to a mask input.";
+            return false;
+        }
+
+        if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
+            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            return false;
+        }
+        if (to->kind == NodeKind::Output && IsChannelSocketId(toSocketId)) {
+            RemoveLinksForNodeInput(toNodeId, kImageInputSocketId);
         }
         RemoveLinksForNodeInput(toNodeId, toSocketId);
         m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, toSocketId));
@@ -111,7 +174,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         if (errorMessage) *errorMessage = "Only image sockets can be connected in the render chain in this pass.";
         return false;
     }
-    if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || from->kind == NodeKind::Output) {
+    if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
         if (errorMessage) *errorMessage = "Only image-producing nodes, layer, mix, and output nodes can be in the render chain.";
         return false;
     }
@@ -131,8 +194,12 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         if (errorMessage) *errorMessage = "Image links must target the luminance image input.";
         return false;
     }
-    if (to->kind != NodeKind::Layer && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask) {
-        if (errorMessage) *errorMessage = "Image links must target a layer, mix node, mask converter, or the output.";
+    if (to->kind == NodeKind::ChannelSplit && toSocketId != kImageInputSocketId) {
+        if (errorMessage) *errorMessage = "Image links must target the split image input.";
+        return false;
+    }
+    if (to->kind != NodeKind::Layer && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit) {
+        if (errorMessage) *errorMessage = "Image links must target a layer, mix node, split node, mask converter, or the output.";
         return false;
     }
     if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
@@ -140,11 +207,14 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         return false;
     }
 
+    if (to->kind == NodeKind::Output && toSocketId == kImageInputSocketId) {
+        RemoveLinksForNodeInput(toNodeId, "r");
+        RemoveLinksForNodeInput(toNodeId, "g");
+        RemoveLinksForNodeInput(toNodeId, "b");
+        RemoveLinksForNodeInput(toNodeId, "a");
+    }
     RemoveRenderLinksForNodeInput(toNodeId, toSocketId);
-    if (from->kind == NodeKind::Image &&
-        ((to->kind == NodeKind::Layer && toSocketId == kImageInputSocketId) ||
-         (to->kind == NodeKind::Output && toSocketId == kImageInputSocketId) ||
-         (to->kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)))) {
+    if (from->kind == NodeKind::Image) {
         ActivateImageNode(fromNodeId);
     }
     m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, toSocketId));
@@ -256,11 +326,13 @@ bool Graph::WouldCreateCycle(int fromNodeId, const std::string& fromSocketId, in
          toSocketId == kMixInputASocketId ||
          toSocketId == kMixInputBSocketId ||
          toSocketId == kImageToMaskInputSocketId);
-    const bool maskEdge = fromSocketId == kMaskOutputSocketId &&
+    const bool maskEdge = (fromSocketId == kMaskOutputSocketId || fromSocketId == "r" || fromSocketId == "g" || fromSocketId == "b" || fromSocketId == "a") &&
         (toSocketId == kMaskInputSocketId ||
          toSocketId == kMixFactorSocketId ||
-         toSocketId == kMaskUtilityInputSocketId);
-    if (!imageEdge && !maskEdge) {
+         toSocketId == kMaskUtilityInputSocketId ||
+         toSocketId == "r" || toSocketId == "g" || toSocketId == "b" || toSocketId == "a");
+    const bool rawEdge = fromSocketId == kRawOutputSocketId && toSocketId == kRawInputSocketId;
+    if (!imageEdge && !maskEdge && !rawEdge) {
         return false;
     }
 

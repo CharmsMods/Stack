@@ -25,6 +25,7 @@ void(APIENTRY* glUniform2i_)(GLint, GLint, GLint) = nullptr;
 void(APIENTRY* glUniform3f_)(GLint, GLfloat, GLfloat, GLfloat) = nullptr;
 void(APIENTRY* glUniform4f_)(GLint, GLfloat, GLfloat, GLfloat, GLfloat) = nullptr;
 void(APIENTRY* glUniform3fv_)(GLint, GLsizei, const GLfloat*) = nullptr;
+void(APIENTRY* glUniformMatrix3fv_)(GLint, GLsizei, GLboolean, const GLfloat*) = nullptr;
 void(APIENTRY* glUniformMatrix4fv_)(GLint, GLsizei, GLboolean, const GLfloat*) = nullptr;
 
 void(APIENTRY* glGenVertexArrays_)(GLsizei, GLuint*) = nullptr;
@@ -96,6 +97,7 @@ bool LoadGLFunctions() {
     LOAD(glUniform3f_, "glUniform3f");
     LOAD(glUniform4f_, "glUniform4f");
     LOAD(glUniform3fv_, "glUniform3fv");
+    LOAD(glUniformMatrix3fv_, "glUniformMatrix3fv");
     LOAD(glUniformMatrix4fv_, "glUniformMatrix4fv");
 
     LOAD(glGenVertexArrays_, "glGenVertexArrays");

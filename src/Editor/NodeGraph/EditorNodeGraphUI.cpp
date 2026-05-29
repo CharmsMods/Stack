@@ -1,6 +1,7 @@
 #include "EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/LayerRegistry.h"
 #include "EditorNodeGraphDefinitions.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
@@ -98,6 +99,9 @@ using NodeBrowserEntry = EditorNodeGraphDefinitions::NodeCatalogEntry;
 NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Image:
+        case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+        case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
             return NodeFamily::Gray;
@@ -114,6 +118,8 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ImageGenerator:
             return NodeFamily::Generator;
         case EditorNodeGraph::NodeKind::Mix:
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+        case EditorNodeGraph::NodeKind::ChannelCombine:
             return NodeFamily::Merge;
     }
     return NodeFamily::Gray;
@@ -132,47 +138,7 @@ std::vector<NodeBrowserEntry> BuildNodeBrowserEntries() {
     return EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
 }
 
-bool ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId) {
-    if (!editor) {
-        return false;
-    }
-    EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
-    if (!to) {
-        return false;
-    }
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
-        if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
-            continue;
-        }
-        std::string error;
-        if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
-            return true;
-        }
-    }
-    return false;
-}
 
-bool ConnectBestOutputToInput(EditorModule* editor, int fromNodeId, int toNodeId, const std::string& toSocketId) {
-    if (!editor) {
-        return false;
-    }
-    EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
-    if (!from) {
-        return false;
-    }
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
-        if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
-            continue;
-        }
-        std::string error;
-        if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
-            return true;
-        }
-    }
-    return false;
-}
 
 bool PrototypeHasCompatibleInput(
     const EditorNodeGraph::Graph& graph,
@@ -196,12 +162,28 @@ bool PrototypeHasCompatibleInput(
             if (prototype.kind == EditorNodeGraph::NodeKind::Output && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
-        } else if (fromSocket.type == EditorNodeGraph::SocketType::Mask && fromSocketId == EditorNodeGraph::kMaskOutputSocketId) {
+        } else if (fromSocket.type == EditorNodeGraph::SocketType::Mask) {
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix && socket.id == EditorNodeGraph::kMixFactorSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::MaskUtility && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::ChannelCombine &&
+                (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a")) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::Output &&
+                (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a")) return true;
+
+            // Also allow mask outputs to connect to main image inputs (treating mask as grayscale image)
+            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
+                (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::Output && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::ChannelSplit && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+        } else if (fromSocket.type == EditorNodeGraph::SocketType::Raw) {
+            if ((prototype.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+                 prototype.kind == EditorNodeGraph::NodeKind::RawDevelop) &&
+                socket.id == EditorNodeGraph::kRawInputSocketId) return true;
         }
     }
     return false;
@@ -229,6 +211,12 @@ bool PrototypeHasCompatibleOutput(
             return true;
         }
         if (toSocket.type == EditorNodeGraph::SocketType::Mask && socket.type == EditorNodeGraph::SocketType::Mask) {
+            return true;
+        }
+        if (toSocket.type == EditorNodeGraph::SocketType::Raw &&
+            socket.type == EditorNodeGraph::SocketType::Raw &&
+            (prototype.kind == EditorNodeGraph::NodeKind::RawSource ||
+             prototype.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise)) {
             return true;
         }
     }
@@ -267,7 +255,20 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Mix:
             editor->AddMixNodeAt(graphPos);
             break;
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+            editor->AddChannelSplitNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            editor->AddChannelCombineNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawDevelop:
+            editor->AddRawDevelopNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            editor->AddRawNeuralDenoiseNodeAt(graphPos);
+            break;
         case EditorNodeGraph::NodeKind::Image:
+        case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::Composite:
             break;
     }
@@ -349,6 +350,14 @@ const NodeFamilyStyle& StyleForFamily(NodeFamily family) {
 
 NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
     NodeLayoutMetrics metrics;
+    if (node.kind == EditorNodeGraph::NodeKind::Output) {
+        metrics.width = 90.0f;
+        metrics.collapsedHeight = 90.0f;
+        metrics.minExpandedHeight = 90.0f;
+        metrics.contentLaneWidth = 74.0f;
+        return metrics;
+    }
+
     if (node.kind == EditorNodeGraph::NodeKind::Composite) {
         metrics.width = 286.0f;
         metrics.contentLaneWidth = 220.0f;
@@ -437,6 +446,105 @@ ImU32 ColorWithAlpha(const ImVec4& color, float alpha) {
     return ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, std::clamp(alpha, 0.0f, 1.0f)));
 }
 
+bool HasAdvancedLayerSurface(const EditorModule* editor, const EditorNodeGraph::Node& node) {
+    if (!editor) {
+        return false;
+    }
+    if (node.kind == EditorNodeGraph::NodeKind::RawSource ||
+        node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+        node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        return true;
+    }
+    if (node.kind != EditorNodeGraph::NodeKind::Layer) {
+        return false;
+    }
+    return editor->GetNodeSurfaceSpec(node.id).presentation == NodeSurfacePresentation::RichExpandedSurface;
+}
+
+std::string CompactAdvancedLayerLabel(const EditorNodeGraph::Node& node) {
+    if (node.layerType == LayerType::BackgroundPatcher) {
+        return "Remover";
+    }
+    if (node.layerType == LayerType::ColorGrade) {
+        return "Grade";
+    }
+
+    std::string label = node.title.empty() ? "Advanced" : node.title;
+    const std::size_t space = label.find(' ');
+    if (space != std::string::npos && space > 0) {
+        label = label.substr(0, space);
+    }
+    if (label.size() > 8) {
+        label = label.substr(0, 8);
+    }
+    return label.empty() ? std::string("Advanced") : label;
+}
+
+const char* ChannelDisplayName(const std::string& channel) {
+    if (channel == "r") return "R";
+    if (channel == "g") return "G";
+    if (channel == "b") return "B";
+    if (channel == "a") return "A";
+    return "";
+}
+
+ImVec4 ChannelPolicyColor(LayerChannelPolicy policy) {
+    switch (policy) {
+        case LayerChannelPolicy::ChannelSafe:
+            return ImVec4(0.42f, 0.72f, 0.56f, 1.0f);
+        case LayerChannelPolicy::ChannelUsefulWithWarning:
+            return ImVec4(0.88f, 0.70f, 0.34f, 1.0f);
+        case LayerChannelPolicy::FullImagePreferred:
+        case LayerChannelPolicy::FullImageOnly:
+        case LayerChannelPolicy::ReworkBeforeExpose:
+            return ImVec4(0.95f, 0.55f, 0.38f, 1.0f);
+    }
+    return ImVec4(0.80f, 0.80f, 0.80f, 1.0f);
+}
+
+void RenderLayerMetadataNotes(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node,
+    float controlWidth) {
+    const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
+    if (!descriptor) {
+        return;
+    }
+
+    const std::string channel = graph.ResolveSocketChannel(node.id, EditorNodeGraph::kImageOutputSocketId);
+    const bool hasChannel = !channel.empty();
+    const bool lifecycleNeedsNote = descriptor->lifecycleStatus != LayerLifecycleStatus::Stable;
+    if (!hasChannel && !lifecycleNeedsNote) {
+        return;
+    }
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(120.0f, controlWidth));
+    if (hasChannel) {
+        ImGui::TextColored(
+            ChannelPolicyColor(descriptor->channelPolicy),
+            "Channel stream: %s (%s)",
+            ChannelDisplayName(channel),
+            LayerRegistry::ChannelPolicyLabel(descriptor->channelPolicy));
+        if (descriptor->channelPolicy != LayerChannelPolicy::ChannelSafe &&
+            descriptor->channelNote &&
+            descriptor->channelNote[0] != '\0') {
+            ImGui::TextDisabled("%s", descriptor->channelNote);
+        }
+    }
+
+    if (lifecycleNeedsNote) {
+        ImGui::TextColored(
+            ImVec4(0.90f, 0.68f, 0.32f, 1.0f),
+            "Status: %s",
+            LayerRegistry::LifecycleStatusLabel(descriptor->lifecycleStatus));
+        if (descriptor->lifecycleNote && descriptor->lifecycleNote[0] != '\0') {
+            ImGui::TextDisabled("%s", descriptor->lifecycleNote);
+        }
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+}
+
 float NodeControlWidthForScale(float logicalWidth, float uiScale) {
     return std::max(18.0f, logicalWidth * uiScale);
 }
@@ -450,12 +558,14 @@ ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& 
     const ImVec4 maskBase(0.71f, 0.64f, 0.82f, 1.0f);
     const ImVec4 analysisBase(0.76f, 0.68f, 0.57f, 1.0f);
     const ImVec4 valueBase(0.66f, 0.73f, 0.73f, 1.0f);
+    const ImVec4 rawBase(0.62f, 0.77f, 0.66f, 1.0f);
     ImVec4 base = imageBase;
     switch (type) {
         case EditorNodeGraph::SocketType::Image: base = imageBase; break;
         case EditorNodeGraph::SocketType::Mask: base = maskBase; break;
         case EditorNodeGraph::SocketType::Analysis: base = analysisBase; break;
         case EditorNodeGraph::SocketType::Value: base = valueBase; break;
+        case EditorNodeGraph::SocketType::Raw: base = rawBase; break;
     }
     return ImGui::ColorConvertFloat4ToU32(BlendColor(base, familyStyle.accent, 0.38f));
 }
@@ -574,6 +684,9 @@ std::string EllipsizeLabel(const std::string& value, float maxWidth) {
 const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
     switch (kind) {
         case EditorNodeGraph::NodeKind::Image: return "Image";
+        case EditorNodeGraph::NodeKind::RawSource: return "RAW";
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "RAW Denoise";
+        case EditorNodeGraph::NodeKind::RawDevelop: return "RAW Develop";
         case EditorNodeGraph::NodeKind::Layer: return "Layer";
         case EditorNodeGraph::NodeKind::Output: return "Output";
         case EditorNodeGraph::NodeKind::Composite: return "Composite";
@@ -584,6 +697,8 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::MaskUtility: return "Mask Utility";
         case EditorNodeGraph::NodeKind::ImageToMask: return "Image To Mask";
         case EditorNodeGraph::NodeKind::ImageGenerator: return "Generator";
+        case EditorNodeGraph::NodeKind::ChannelSplit: return "Channel Split";
+        case EditorNodeGraph::NodeKind::ChannelCombine: return "Channel Combine";
     }
     return "Node";
 }
@@ -681,6 +796,139 @@ float DistancePointToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
 
 } // namespace
 
+bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromNodeId, const std::string& fromSocketId, int toNodeId) {
+    if (!editor) {
+        return false;
+    }
+    EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
+    const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
+    if (!from || !to) {
+        return false;
+    }
+
+    EditorNodeGraph::SocketDefinition fromSocket;
+    if (!graph.FindSocket(fromNodeId, fromSocketId, &fromSocket)) {
+        return false;
+    }
+
+    // Heuristic: If carrying specific color channel, prioritize exact matching channel socket first!
+    std::unordered_set<int> visited;
+    std::string channel = GetUpstreamChannel(graph, fromNodeId, fromSocketId, visited);
+    if (!channel.empty()) {
+        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
+            if (socket.direction == EditorNodeGraph::SocketDirection::Input && socket.id == channel) {
+                std::string error;
+                if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Determine the preferred target socket type
+    EditorNodeGraph::SocketType preferredType = fromSocket.type;
+    if (from->kind == EditorNodeGraph::NodeKind::ChannelSplit) {
+        preferredType = EditorNodeGraph::SocketType::Image;
+    }
+
+    // 1. Try to connect to an input socket of the preferred type first (Exact match)
+    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
+        if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
+            continue;
+        }
+        if (socket.type == preferredType) {
+            std::string error;
+            if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Try to connect to any other input socket (Cross-type match)
+    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
+        if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
+            continue;
+        }
+        if (socket.type != preferredType) {
+            std::string error;
+            if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromNodeId, int toNodeId, const std::string& toSocketId) {
+    if (!editor) {
+        return false;
+    }
+    EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    const EditorNodeGraph::Node* from = graph.FindNode(fromNodeId);
+    const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
+    if (!from || !to) {
+        return false;
+    }
+
+    EditorNodeGraph::SocketDefinition toSocket;
+    if (!graph.FindSocket(toNodeId, toSocketId, &toSocket)) {
+        return false;
+    }
+
+    // Heuristic: If toSocketId is channel, prioritize connecting from matching channel output on source node (like ChannelSplit)
+    if (toSocketId == "r" || toSocketId == "g" || toSocketId == "b" || toSocketId == "a") {
+        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
+            if (socket.direction == EditorNodeGraph::SocketDirection::Output && socket.id == toSocketId) {
+                std::string error;
+                if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Determine the preferred source socket type
+    EditorNodeGraph::SocketType preferredType = toSocket.type;
+    if (to->kind == EditorNodeGraph::NodeKind::ChannelSplit && toSocketId == EditorNodeGraph::kImageInputSocketId) {
+        preferredType = EditorNodeGraph::SocketType::Image;
+    }
+
+    // 1. Try to connect to an output socket of the preferred type first (Exact match)
+    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
+        if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
+            continue;
+        }
+        if (socket.type == preferredType) {
+            std::string error;
+            if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Try to connect to any other output socket (Cross-type match)
+    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
+        if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
+            continue;
+        }
+        if (socket.type != preferredType) {
+            std::string error;
+            if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+std::string EditorNodeGraphUI::GetUpstreamChannel(const EditorNodeGraph::Graph& graph, int nodeId, const std::string& socketId, std::unordered_set<int>& visited) {
+    (void)visited;
+    return graph.ResolveSocketChannel(nodeId, socketId);
+}
+
 void EditorNodeGraphUI::Initialize() {}
 
 bool EditorNodeGraphUI::IsGraphCanvasHovered() const {
@@ -696,6 +944,10 @@ EditorNodeGraphUI::GraphMouseOwner EditorNodeGraphUI::ResolveMouseOwner(
     const EditorNodeGraph::Link& hoveredLink) const {
     (void)graph;
     if (!graphHovered) {
+        return GraphMouseOwner::None;
+    }
+
+    if (ImGui::IsAnyItemHovered() && hoveredNodeId <= 0 && !hoveredInput.IsValid() && !hoveredOutput.IsValid()) {
         return GraphMouseOwner::None;
     }
 
@@ -719,9 +971,7 @@ EditorNodeGraphUI::GraphMouseOwner EditorNodeGraphUI::ResolveMouseOwner(
                 cache->contentRect.Contains(mouse) ||
                 (cache->contentUsedRect.IsValid() && cache->contentUsedRect.Contains(mouse));
             const ImGuiContext* context = ImGui::GetCurrentContext();
-            const ImGuiIO& io = ImGui::GetIO();
             const bool overRealWidget = (context && (context->HoveredId != 0 || context->ActiveId != 0)) ||
-                io.WantCaptureMouse ||
                 ImGui::IsAnyItemHovered() ||
                 ImGui::IsAnyItemActive();
             if (overContent && overRealWidget) {
@@ -741,6 +991,32 @@ EditorNodeGraphUI::GraphMouseOwner EditorNodeGraphUI::ResolveMouseOwner(
 void EditorNodeGraphUI::Render(EditorModule* editor) {
     m_ActiveEditor = editor;
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    bool draggingMask = false;
+    if (m_DragOutputNodeId > 0) {
+        EditorNodeGraph::SocketDefinition sock;
+        if (graph.FindSocket(m_DragOutputNodeId, m_DragOutputSocketId, &sock)) {
+            std::unordered_set<int> visited;
+            std::string channel = GetUpstreamChannel(graph, m_DragOutputNodeId, m_DragOutputSocketId, visited);
+            if (sock.type == EditorNodeGraph::SocketType::Mask || 
+                sock.id == "r" || sock.id == "g" || sock.id == "b" || sock.id == "a" ||
+                !channel.empty()) {
+                draggingMask = true;
+            }
+        }
+    } else if (m_DragInputNodeId > 0) {
+        EditorNodeGraph::SocketDefinition sock;
+        if (graph.FindSocket(m_DragInputNodeId, m_DragInputSocketId, &sock)) {
+            std::unordered_set<int> visited;
+            std::string channel = GetUpstreamChannel(graph, m_DragInputNodeId, m_DragInputSocketId, visited);
+            if (sock.type == EditorNodeGraph::SocketType::Mask || 
+                sock.id == "r" || sock.id == "g" || sock.id == "b" || sock.id == "a" ||
+                !channel.empty()) {
+                draggingMask = true;
+            }
+        }
+    }
+    graph.SetForceOutputFourPins(draggingMask);
+
     m_NodeContentActive = false;
     m_NodeContentHovered = false;
     m_GraphInteractionBlocked = false;
@@ -754,6 +1030,18 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     const ImVec2 canvasSize = ImVec2(std::max(320.0f, available.x), std::max(320.0f, available.y));
     ImGui::Dummy(canvasSize);
 
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ADD_NODE_DRAG_PAYLOAD")) {
+            const NodeBrowserEntry* entry = *static_cast<const NodeBrowserEntry**>(payload->Data);
+            if (entry) {
+                ImVec2 dropPos = ImGui::GetIO().MousePos;
+                EditorNodeGraph::Vec2 graphPos = ScreenToGraph(ToGraphVec2(dropPos));
+                AddNodeFromBrowserEntry(editor, *entry, graphPos);
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
     const ImVec2 canvasMin = ImGui::GetItemRectMin();
     const ImVec2 canvasMax = ImGui::GetItemRectMax();
     m_CanvasOrigin = ToGraphVec2(canvasMin);
@@ -762,45 +1050,66 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     editor->ApplyGraphAutoFocusFrame(canvasSize.x, canvasSize.y, m_Pan.x, m_Pan.y, m_Zoom);
     editor->SetGraphDropTargetRect(canvasMin.x, canvasMin.y, canvasMax.x, canvasMax.y);
     editor->SetGraphViewTransform(canvasMin.x, canvasMin.y, m_Pan.x, m_Pan.y, m_Zoom);
-    const bool graphHovered = IsGraphCanvasHovered();
-    if ((graphHovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) &&
-        !m_NodeBrowserOpen &&
-        editor->CanConsumeEditorCommandKeys() &&
-        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
-        ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
-        const std::vector<int>& selectedIds = graph.GetSelectedNodeIds();
-        if (selectedIds.size() == 1) {
-            int selectedNodeId = selectedIds.front();
-            if (const EditorNodeGraph::Node* selectedNode = graph.FindNode(selectedNodeId)) {
-                // Clear any existing push state just in case
-                m_PushedSourceNodeId = -1;
-                m_PushDistance = 0.0f;
-                m_PushedNodeIds.clear();
+    bool graphHovered = IsGraphCanvasHovered();
+    if (graphHovered) {
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        float drawersWidth = std::max(editor->GetLeftPanelWidthAnim(), editor->GetNodesPanelWidthAnim());
+        if (mousePos.x >= canvasMin.x && mousePos.x <= canvasMin.x + drawersWidth) {
+            graphHovered = false;
+        }
+    }
 
-                // Push downstream nodes in the chain
-                std::vector<int> downstreamIds = graph.GetDownstreamRenderNodeIds(selectedNodeId);
-                m_PushDistance = 340.0f;
-                m_PushedSourceNodeId = selectedNodeId;
-                for (int id : downstreamIds) {
-                    if (id != selectedNodeId) {
-                        if (EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
-                            dsNode->position.x += m_PushDistance;
-                            m_PushedNodeIds.push_back(id);
+    // Robust raw Tab key press detection to bypass ImGui's internal text input focus interception/consumption
+    static bool lastTabDown = false;
+    bool tabPressed = false;
+    if (ImGui::IsKeyDown(ImGuiKey_Tab)) {
+        if (!lastTabDown) {
+            tabPressed = true;
+        }
+        lastTabDown = true;
+    } else {
+        lastTabDown = false;
+    }
+
+    if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && tabPressed) {
+        
+        if (m_NodeBrowserOpen) {
+            CloseNodeBrowser();
+        } else if (editor->CanConsumeEditorCommandKeys() && (graphHovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))) {
+            const std::vector<int>& selectedIds = graph.GetSelectedNodeIds();
+            if (selectedIds.size() == 1) {
+                int selectedNodeId = selectedIds.front();
+                if (const EditorNodeGraph::Node* selectedNode = graph.FindNode(selectedNodeId)) {
+                    // Clear any existing push state just in case
+                    m_PushedSourceNodeId = -1;
+                    m_PushDistance = 0.0f;
+                    m_PushedNodeIds.clear();
+
+                    // Push downstream nodes in the chain
+                    std::vector<int> downstreamIds = graph.GetDownstreamRenderNodeIds(selectedNodeId);
+                    m_PushDistance = 340.0f;
+                    m_PushedSourceNodeId = selectedNodeId;
+                    for (int id : downstreamIds) {
+                        if (id != selectedNodeId) {
+                            if (EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
+                                dsNode->position.x += m_PushDistance;
+                                m_PushedNodeIds.push_back(id);
+                            }
                         }
                     }
-                }
-                // Refresh node layouts immediately so rendering aligns perfectly on the next draw call
-                for (int id : m_PushedNodeIds) {
-                    if (const EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
-                        RefreshNodeLayoutCache(graph, *dsNode);
+                    // Refresh node layouts immediately so rendering aligns perfectly on the next draw call
+                    for (int id : m_PushedNodeIds) {
+                        if (const EditorNodeGraph::Node* dsNode = graph.FindNode(id)) {
+                            RefreshNodeLayoutCache(graph, *dsNode);
+                        }
                     }
+                    
+                    EditorNodeGraph::Vec2 spawnPos = { selectedNode->position.x + m_PushDistance, selectedNode->position.y };
+                    OpenNodeBrowser(NodeBrowserMode::GeneralAdd, spawnPos);
                 }
-                
-                EditorNodeGraph::Vec2 spawnPos = { selectedNode->position.x + m_PushDistance, selectedNode->position.y };
-                OpenNodeBrowser(NodeBrowserMode::GeneralAdd, spawnPos);
+            } else {
+                OpenNodeBrowser(NodeBrowserMode::GeneralAdd, ScreenToGraph(ToGraphVec2(ImGui::GetMousePos())));
             }
-        } else {
-            OpenNodeBrowser(NodeBrowserMode::GeneralAdd, ScreenToGraph(ToGraphVec2(ImGui::GetMousePos())));
         }
     }
     if (graphHovered && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && ImGui::GetIO().MouseWheel != 0.0f) {
@@ -845,6 +1154,7 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
         }
     }
     graphSplitter.SetCurrentChannel(drawList, 0);
+    RenderGroups(editor, graph);
     RenderLinks(graph);
     graphSplitter.Merge(drawList);
 
@@ -1045,6 +1355,13 @@ bool EditorNodeGraphUI::IsPointInNodeDraggableRegion(int nodeId, const ImVec2& p
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& node) const {
+    if (node.kind == EditorNodeGraph::NodeKind::Output ||
+        node.kind == EditorNodeGraph::NodeKind::ChannelSplit ||
+        node.kind == EditorNodeGraph::NodeKind::ChannelCombine ||
+        HasAdvancedLayerSurface(m_ActiveEditor, node)) {
+        return EditorNodeGraph::Vec2{ 90.0f, 90.0f };
+    }
+
     NodeLayoutMetrics metrics = MetricsForNode(node);
     ApplyLayerSurfaceMetrics(m_ActiveEditor, node, metrics);
     const float measuredLayerHeight = [&]() -> float {
@@ -1080,8 +1397,117 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     const ImVec2 min = layout->frameRect.min;
     const ImVec2 max = layout->frameRect.max;
     const bool selected = graph.IsNodeSelected(node.id);
-    const bool expanded = node.expanded;
     const float uiScale = NodeUiScaleFromZoom(m_Zoom);
+    const float pinRadius = PinRadiusForZoom(m_Zoom);
+
+    const bool isSquareNode = (node.kind == EditorNodeGraph::NodeKind::Output) ||
+        (node.kind == EditorNodeGraph::NodeKind::ChannelSplit) ||
+        (node.kind == EditorNodeGraph::NodeKind::ChannelCombine) ||
+        (node.kind != EditorNodeGraph::NodeKind::RawSource && HasAdvancedLayerSurface(editor, node));
+
+    if (isSquareNode) {
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const float frameRounding = std::max(4.0f, 8.0f * uiScale);
+        const float borderThickness = selected ? std::max(1.4f, 2.0f * uiScale) : std::max(0.95f, 1.15f * uiScale);
+        
+        const ImVec4 fillColor = BlendColor(familyStyle.fill, ImVec4(0.10f, 0.12f, 0.13f, familyStyle.fill.w), 0.18f);
+        const ImVec4 borderColor = selected
+            ? BlendColor(familyStyle.accent, ImVec4(0.94f, 0.96f, 0.98f, 1.0f), 0.42f)
+            : familyStyle.border;
+            
+        drawList->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(fillColor), frameRounding);
+        drawList->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(borderColor), frameRounding, 0, borderThickness);
+        
+        // Custom compact labels for square nodes
+        std::string squareLabel = "Output";
+        if (node.kind == EditorNodeGraph::NodeKind::Layer) {
+            squareLabel = CompactAdvancedLayerLabel(node);
+        } else if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
+            squareLabel = "RAW Denoise";
+        } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+            squareLabel = "Develop";
+        } else if (node.kind == EditorNodeGraph::NodeKind::ChannelSplit) {
+            squareLabel = "Split";
+        } else if (node.kind == EditorNodeGraph::NodeKind::ChannelCombine) {
+            squareLabel = "Combine";
+        }
+
+        const float fontSize = ImGui::GetFontSize() * uiScale;
+        ImVec2 textSize = ImGui::CalcTextSize(squareLabel.c_str());
+        ImVec2 scaledTextSize = ImVec2(textSize.x * uiScale, textSize.y * uiScale);
+        
+        bool isOutputFourPins = false;
+        if (node.kind == EditorNodeGraph::NodeKind::Output) {
+            for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
+                if (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a") {
+                    isOutputFourPins = true;
+                    break;
+                }
+            }
+        }
+
+        ImVec2 textPos = ImVec2(
+            isOutputFourPins ? min.x + (max.x - min.x) * 0.54f - scaledTextSize.x * 0.5f : min.x + (max.x - min.x - scaledTextSize.x) * 0.5f,
+            min.y + (max.y - min.y - scaledTextSize.y) * 0.5f
+        );
+        
+        drawList->AddText(
+            ImGui::GetFont(),
+            fontSize,
+            textPos,
+            ImGui::ColorConvertFloat4ToU32(familyStyle.text),
+            squareLabel.c_str());
+            
+        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
+            const SocketAnchor* anchor = FindSocketAnchor(*layout, socket.id, socket.direction);
+            if (anchor) {
+                const ImVec2 pin = anchor->screenPos;
+                const bool hoveredSocket = (socket.direction == EditorNodeGraph::SocketDirection::Input)
+                    ? (m_HoveredInputNodeId == node.id && m_HoveredInputSocketId == socket.id)
+                    : (m_HoveredOutputNodeId == node.id && m_HoveredOutputSocketId == socket.id);
+                
+                ImU32 baseColor = TypedSocketColor(socket.type, familyStyle);
+                if (socket.id == "r") baseColor = IM_COL32(255, 64, 64, 255);
+                else if (socket.id == "g") baseColor = IM_COL32(64, 255, 64, 255);
+                else if (socket.id == "b") baseColor = IM_COL32(64, 128, 255, 255);
+                else if (socket.id == "a") baseColor = IM_COL32(230, 230, 230, 255);
+
+                drawList->AddCircleFilled(pin, pinRadius, hoveredSocket ? IM_COL32(255, 255, 255, 255) : baseColor);
+
+                const bool isChannelSocket = socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a";
+                if (isSquareNode && isChannelSocket) {
+                    std::string labelText = socket.label;
+                    if (labelText == "A (Generated)") {
+                        labelText = "A (Gen)";
+                    }
+                    ImVec2 pinLabelPos;
+                    if (socket.direction == EditorNodeGraph::SocketDirection::Input) {
+                        pinLabelPos = ImVec2(pin.x + pinRadius * 2.2f, pin.y - fontSize * 0.45f);
+                        drawList->AddText(ImGui::GetFont(), fontSize * 0.72f, pinLabelPos, baseColor, labelText.c_str());
+                    } else {
+                        ImVec2 labelSize = ImGui::CalcTextSize(labelText.c_str());
+                        float scaledLabelWidth = labelSize.x * 0.72f;
+                        pinLabelPos = ImVec2(pin.x - pinRadius * 2.2f - scaledLabelWidth, pin.y - fontSize * 0.45f);
+                        drawList->AddText(ImGui::GetFont(), fontSize * 0.72f, pinLabelPos, baseColor, labelText.c_str());
+                    }
+                }
+
+                if (hoveredSocket) {
+                    ImGui::BeginTooltip();
+                    if (socket.id == "a" && socket.label == "A (Generated)") {
+                        ImGui::Text("Alpha (Generated Opaque - Original image has no alpha)");
+                    } else {
+                        ImGui::Text("%s", socket.label.c_str());
+                    }
+                    ImGui::EndTooltip();
+                }
+            }
+        }
+        
+        return;
+    }
+
+    const bool expanded = node.expanded;
     const bool richExpandedSurface = node.kind == EditorNodeGraph::NodeKind::Layer && editor->LayerUsesRichNodeSurface(node.layerIndex);
     const NodeSurfaceSpec nodeSurfaceSpec = node.kind == EditorNodeGraph::NodeKind::Layer
         ? editor->GetLayerNodeSurfaceSpec(node.layerIndex)
@@ -1095,7 +1521,6 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     const float logicalControlWidth = controlWidth / std::max(0.001f, uiScale);
     const float logicalSafeContentWidth = safeContentWidth / std::max(0.001f, uiScale);
     const ImVec2 previewSize = NodePreviewSizeForScale(metrics, uiScale);
-    const float pinRadius = PinRadiusForZoom(m_Zoom);
     const float frameRounding = std::max(4.0f, 8.0f * uiScale);
     const float borderThickness = selected ? std::max(1.4f, 2.0f * uiScale) : std::max(0.95f, 1.15f * uiScale);
     const float headerY = metrics.headerInsetY * uiScale;
@@ -1176,8 +1601,13 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             case EditorNodeGraph::NodeKind::Preview:
                 return node.title.empty() ? "Preview" : node.title;
             case EditorNodeGraph::NodeKind::Image:
+            case EditorNodeGraph::NodeKind::RawSource:
+            case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            case EditorNodeGraph::NodeKind::RawDevelop:
             case EditorNodeGraph::NodeKind::Output:
             case EditorNodeGraph::NodeKind::Composite:
+            case EditorNodeGraph::NodeKind::ChannelSplit:
+            case EditorNodeGraph::NodeKind::ChannelCombine:
                 return node.title.empty() ? NodeKindLabel(node.kind) : node.title;
         }
         return node.title.empty() ? NodeKindLabel(node.kind) : node.title;
@@ -1280,32 +1710,30 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     if (node.kind == EditorNodeGraph::NodeKind::Layer) {
         auto& layers = editor->GetLayers();
         if (node.layerIndex >= 0 && node.layerIndex < static_cast<int>(layers.size())) {
-            const nlohmann::json before = layers[node.layerIndex]->Serialize();
-            if (richExpandedSurface) {
-                NodeSurfaceContext surfaceContext;
-                surfaceContext.nodeId = node.id;
-                surfaceContext.availableWidth = controlWidth;
-                surfaceContext.safeContentWidth = safeContentWidth;
-                surfaceContext.logicalAvailableWidth = logicalControlWidth;
-                surfaceContext.logicalSafeContentWidth = logicalSafeContentWidth;
-                surfaceContext.layoutScale = uiScale;
-                surfaceContext.contentScale = contentScale;
-                surfaceContext.itemGap = itemGap;
-                surfaceContext.sectionGap = sectionGap;
-                surfaceContext.focused = selected;
-                surfaceContext.density = nodeSurfaceSpec.density;
-                surfaceContext.canvasToolActive = editor->GetCanvasToolOwnerNodeId() == node.id;
-                surfaceContext.canvasToolStatusText = editor->GetCanvasToolStatusText().empty()
-                    ? nullptr
-                    : editor->GetCanvasToolStatusText().c_str();
-                layers[node.layerIndex]->RenderExpandedNodeSurface(editor, surfaceContext);
-            } else {
-                layers[node.layerIndex]->RenderUI(editor);
-            }
-            const nlohmann::json after = layers[node.layerIndex]->Serialize();
-            if (before != after) {
-                editor->MarkRenderDirty(node.id);
-            }
+            editor->RenderLayerControlsWithDirtyTracking(node, [&](LayerBase& layer) {
+                RenderLayerMetadataNotes(graph, node, controlWidth);
+                if (richExpandedSurface) {
+                    NodeSurfaceContext surfaceContext;
+                    surfaceContext.nodeId = node.id;
+                    surfaceContext.availableWidth = controlWidth;
+                    surfaceContext.safeContentWidth = safeContentWidth;
+                    surfaceContext.logicalAvailableWidth = logicalControlWidth;
+                    surfaceContext.logicalSafeContentWidth = logicalSafeContentWidth;
+                    surfaceContext.layoutScale = uiScale;
+                    surfaceContext.contentScale = contentScale;
+                    surfaceContext.itemGap = itemGap;
+                    surfaceContext.sectionGap = sectionGap;
+                    surfaceContext.focused = selected;
+                    surfaceContext.density = nodeSurfaceSpec.density;
+                    surfaceContext.canvasToolActive = editor->GetCanvasToolOwnerNodeId() == node.id;
+                    surfaceContext.canvasToolStatusText = editor->GetCanvasToolStatusText().empty()
+                        ? nullptr
+                        : editor->GetCanvasToolStatusText().c_str();
+                    layer.RenderExpandedNodeSurface(editor, surfaceContext);
+                } else {
+                    layer.RenderUI(editor);
+                }
+            });
         } else {
             ImGui::TextDisabled("Layer unavailable");
         }
@@ -1331,8 +1759,26 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             ImGui::TextDisabled("%d x %d", node.image.width, node.image.height);
         }
         ImGui::TextDisabled("%s", graph.GetActiveImageNodeId() == node.id ? "Active image" : "Unconnected image");
+    } else if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
+        editor->RenderRawSourceControls(node, controlWidth, false);
+    } else if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
+        editor->RenderRawNeuralDenoiseControls(node, controlWidth, false);
+    } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        editor->RenderRawDevelopControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::Output) {
         ImGui::TextDisabled("%s", graph.IsOutputConnected() ? "Connected to output chain" : "Output is not connected");
+        if (editor->OutputPathNeedsViewTransform(node.id)) {
+            ImGui::TextWrapped("Scene-referred HDR input may clip at Output. Add or reconnect through View Transform for display compression.");
+        }
+        if (graph.IsOutputConnected()) {
+            RenderTextureStats outputStats = editor->GetPipeline().GetOutputTextureStats();
+            if (outputStats.valid) {
+                ImGui::TextDisabled("Rendered RGB %.3f to %.3f", outputStats.minRgb, outputStats.maxRgb);
+                ImGui::TextDisabled("HDR > 1.0: %.1f%%   Display-edge pixels: %.1f%%",
+                    outputStats.hdrPixelPercent,
+                    outputStats.displayClipPercent);
+            }
+        }
         ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
         ImGui::BeginDisabled(!graph.IsOutputConnected() || editor->IsExportBusy());
         if (ImGui::Button("Export", ImVec2(controlWidth, 0.0f))) {
@@ -1631,17 +2077,140 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         const bool maskLink = link.fromSocketId == EditorNodeGraph::kMaskOutputSocketId ||
             link.toSocketId == EditorNodeGraph::kMaskInputSocketId ||
             link.toSocketId == EditorNodeGraph::kMixFactorSocketId;
+
+        ImU32 lineColor = selected ? IM_COL32(255, 255, 255, 255) : (maskLink ? IM_COL32(130, 230, 170, 230) : (scopeLink ? IM_COL32(130, 230, 170, 230) : IM_COL32(120, 170, 255, 230)));
+        if (!selected) {
+            std::unordered_set<int> visited;
+            std::string channel = GetUpstreamChannel(graph, link.fromNodeId, link.fromSocketId, visited);
+            if (channel.empty()) {
+                channel = (link.toSocketId == "r" || link.toSocketId == "g" || link.toSocketId == "b" || link.toSocketId == "a") ? link.toSocketId : "";
+            }
+            if (channel == "r") lineColor = IM_COL32(255, 64, 64, 210);
+            else if (channel == "g") lineColor = IM_COL32(64, 255, 64, 210);
+            else if (channel == "b") lineColor = IM_COL32(64, 128, 255, 210);
+            else if (channel == "a") lineColor = IM_COL32(220, 220, 220, 210);
+        }
+
         drawList->AddBezierCubic(
             p1,
             ImVec2(p1.x + handle, p1.y),
             ImVec2(p2.x - handle, p2.y),
             p2,
-            selected ? IM_COL32(255, 255, 255, 255) : (maskLink ? IM_COL32(130, 230, 170, 230) : (scopeLink ? IM_COL32(130, 230, 170, 230) : IM_COL32(120, 170, 255, 230))),
+            lineColor,
             (selected ? 4.5f : 3.0f) * thicknessScale);
     }
 }
 
+static bool IsPointInRect(const EditorNodeGraph::Vec2& pt, const EditorNodeGraph::Vec2& min, const EditorNodeGraph::Vec2& max) {
+    return pt.x >= min.x && pt.x <= max.x && pt.y >= min.y && pt.y <= max.y;
+}
+
+void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph) {
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    auto& groups = graph.GetGroups();
+
+    for (auto& group : groups) {
+        ImVec2 minPos = ToImVec2(GraphToScreen(group.position));
+        ImVec2 maxPos = ToImVec2(GraphToScreen({group.position.x + group.size.x, group.position.y + group.size.y}));
+
+        float rounding = 8.0f * m_Zoom;
+
+        bool isHovered = (m_HoveredGroupId == group.id);
+        bool isEditing = (m_EditingGroupId == group.id);
+        bool isDragged = (m_DragGroupId == group.id);
+        bool isResized = (m_ResizingGroupId == group.id);
+
+        ImU32 bgColor;
+        ImU32 borderColor;
+        ImU32 headerColor;
+
+        if (isDragged || isResized) {
+            bgColor = IM_COL32(24, 30, 48, 140);
+            borderColor = IM_COL32(90, 160, 255, 230);
+            headerColor = IM_COL32(42, 54, 80, 240);
+        } else {
+            bgColor = IM_COL32(18, 22, 33, 90);
+            borderColor = IM_COL32(66, 120, 180, 120);
+            headerColor = IM_COL32(32, 40, 56, 190);
+        }
+
+        // Draw background
+        drawList->AddRectFilled(minPos, maxPos, bgColor, rounding);
+
+        // Draw header bar (28.0f graph units height)
+        ImVec2 headerMin = minPos;
+        ImVec2 headerMax = ImVec2(maxPos.x, minPos.y + 28.0f * m_Zoom);
+        drawList->AddRectFilled(headerMin, headerMax, headerColor, rounding, ImDrawFlags_RoundCornersTop);
+
+        // Draw border
+        drawList->AddRect(minPos, maxPos, borderColor, rounding, 0, std::max(1.0f, 2.0f * m_Zoom));
+
+        // Draw resize corner
+        if (isHovered || isResized) {
+            drawList->AddTriangleFilled(
+                ImVec2(maxPos.x - 4.0f * m_Zoom, maxPos.y - 12.0f * m_Zoom),
+                ImVec2(maxPos.x - 12.0f * m_Zoom, maxPos.y - 4.0f * m_Zoom),
+                ImVec2(maxPos.x - 4.0f * m_Zoom, maxPos.y - 4.0f * m_Zoom),
+                borderColor);
+        }
+
+        // Draw header title or rename box
+        if (isEditing) {
+            ImGui::PushID(group.id);
+            
+            float inputWidth = (group.size.x - 16.0f) * m_Zoom;
+            
+            ImGui::SetCursorScreenPos(ImVec2(minPos.x + 8.0f * m_Zoom, minPos.y + 4.0f * m_Zoom));
+            ImGui::SetNextItemWidth(inputWidth);
+            
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+            
+            if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::IsAnyItemActive()) {
+                ImGui::SetKeyboardFocusHere();
+            }
+            
+            if (ImGui::InputText("##rename", m_GroupRenameBuffer, sizeof(m_GroupRenameBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                group.title = m_GroupRenameBuffer;
+                m_EditingGroupId = -1;
+            }
+            
+            if (ImGui::IsItemDeactivated()) {
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    group.title = m_GroupRenameBuffer;
+                }
+                m_EditingGroupId = -1;
+            }
+            
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
+        } else {
+            ImVec2 textPos = ImVec2(minPos.x + 8.0f * m_Zoom, minPos.y + 6.0f * m_Zoom);
+            float titleFontSize = ImGui::GetFontSize() * m_Zoom;
+            drawList->AddText(
+                ImGui::GetFont(),
+                titleFontSize,
+                textPos,
+                IM_COL32(255, 255, 255, 220),
+                group.title.c_str());
+        }
+    }
+}
+
 void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph) {
+    if (m_EditingGroupId > 0) {
+        m_GraphInteractionBlocked = true;
+        m_MouseOwner = GraphMouseOwner::Popup;
+        m_BoxSelecting = false;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            m_EditingGroupId = -1;
+        }
+        return;
+    }
+
     const bool graphHovered = IsGraphCanvasHovered();
     const EditorNodeGraph::Vec2 mouse = ToGraphVec2(ImGui::GetMousePos());
     const SocketHit hoveredInput = graphHovered ? FindInputPinAt(graph, mouse) : SocketHit{};
@@ -1673,6 +2242,112 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     const bool ownerIsContent = m_MouseOwner == GraphMouseOwner::NodeContent || m_MouseOwner == GraphMouseOwner::Popup;
     const bool ownerIsLink = m_MouseOwner == GraphMouseOwner::Link;
     m_GraphInteractionBlocked = ownerIsContent;
+
+    // Intercept Canvas clicks to handle group box selection, resizing, and dragging
+    int hitGroupId = -1;
+    bool hitResize = false;
+    bool hitHeader = false;
+    bool hitBackground = false;
+    
+    if (graphHovered && m_MouseOwner == GraphMouseOwner::Canvas) {
+        const EditorNodeGraph::Vec2 mouseGraph = ScreenToGraph(mouse);
+        auto& mutableGraph = editor->GetNodeGraph();
+        const auto& groups = mutableGraph.GetGroups();
+        for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
+            const auto& group = *it;
+            EditorNodeGraph::Vec2 groupMin = group.position;
+            EditorNodeGraph::Vec2 groupMax = {group.position.x + group.size.x, group.position.y + group.size.y};
+            EditorNodeGraph::Vec2 headerMax = {group.position.x + group.size.x, group.position.y + 28.0f};
+            EditorNodeGraph::Vec2 resizeMin = {group.position.x + group.size.x - 16.0f, group.position.y + group.size.y - 16.0f};
+            
+            if (IsPointInRect(mouseGraph, resizeMin, groupMax)) {
+                hitGroupId = group.id;
+                hitResize = true;
+                break;
+            } else if (IsPointInRect(mouseGraph, groupMin, headerMax)) {
+                hitGroupId = group.id;
+                hitHeader = true;
+                break;
+            } else if (IsPointInRect(mouseGraph, groupMin, groupMax)) {
+                hitGroupId = group.id;
+                hitBackground = true;
+                break;
+            }
+        }
+    }
+
+    m_HoveredGroupId = hitGroupId;
+
+    if (hitGroupId > 0) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (hitResize) {
+                m_ResizingGroupId = hitGroupId;
+            } else {
+                m_DragGroupId = hitGroupId;
+            }
+            m_BoxSelecting = false;
+        }
+        
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && hitHeader) {
+            m_EditingGroupId = hitGroupId;
+            if (const auto* g = editor->GetNodeGraph().FindGroup(hitGroupId)) {
+                strncpy_s(m_GroupRenameBuffer, g->title.c_str(), sizeof(m_GroupRenameBuffer) - 1);
+            }
+            m_DragGroupId = -1;
+            m_ResizingGroupId = -1;
+        }
+    }
+
+    if (m_ResizingGroupId > 0) {
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            const ImVec2 delta = ImGui::GetIO().MouseDelta;
+            if (std::isfinite(delta.x) && std::isfinite(delta.y) && m_Zoom > 0.0001f) {
+                if (auto* group = editor->GetNodeGraph().FindGroup(m_ResizingGroupId)) {
+                    group->size.x += delta.x / m_Zoom;
+                    group->size.y += delta.y / m_Zoom;
+                    group->size.x = std::max(100.0f, group->size.x);
+                    group->size.y = std::max(80.0f, group->size.y);
+                }
+            }
+        }
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            m_ResizingGroupId = -1;
+        }
+        return;
+    }
+
+    if (m_DragGroupId > 0) {
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            const ImVec2 delta = ImGui::GetIO().MouseDelta;
+            if (std::isfinite(delta.x) && std::isfinite(delta.y) && m_Zoom > 0.0001f) {
+                if (auto* group = editor->GetNodeGraph().FindGroup(m_DragGroupId)) {
+                    float dx = delta.x / m_Zoom;
+                    float dy = delta.y / m_Zoom;
+                    
+                    // Shift contained nodes
+                    for (auto& node : editor->GetNodeGraph().GetNodes()) {
+                        if (node.position.x >= group->position.x &&
+                            node.position.x <= group->position.x + group->size.x &&
+                            node.position.y >= group->position.y &&
+                            node.position.y <= group->position.y + group->size.y) {
+                            
+                            node.position.x += dx;
+                            node.position.y += dy;
+                            node.position = ClampGraphPosition(node.position);
+                        }
+                    }
+                    
+                    // Shift group position
+                    group->position.x += dx;
+                    group->position.y += dy;
+                }
+            }
+        }
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            m_DragGroupId = -1;
+        }
+        return;
+    }
 
     if (graphHovered && !anyPopupOpen && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
         editor->CancelGraphAutoFocusTracking();
@@ -1721,7 +2396,20 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             const ImVec2 p1 = ToImVec2(OutputPinScreenPos(*from, m_DragOutputSocketId));
             const ImVec2 p2 = ImGui::GetMousePos();
             const float handle = std::max(60.0f, (p2.x - p1.x) * 0.45f);
-            drawList->AddBezierCubic(p1, ImVec2(p1.x + handle, p1.y), ImVec2(p2.x - handle, p2.y), p2, IM_COL32(255, 255, 255, 210), std::max(1.2f, 2.5f * NodeUiScaleFromZoom(m_Zoom)));
+
+            ImU32 dragColor = IM_COL32(255, 255, 255, 210);
+            if (m_DragOutputSocketId == "r") dragColor = IM_COL32(255, 64, 64, 210);
+            else if (m_DragOutputSocketId == "g") dragColor = IM_COL32(64, 255, 64, 210);
+            else if (m_DragOutputSocketId == "b") dragColor = IM_COL32(64, 128, 255, 210);
+            else if (m_DragOutputSocketId == "a") dragColor = IM_COL32(220, 220, 220, 210);
+            else {
+                EditorNodeGraph::SocketDefinition sock;
+                if (graph.FindSocket(m_DragOutputNodeId, m_DragOutputSocketId, &sock) && sock.type == EditorNodeGraph::SocketType::Mask) {
+                    dragColor = IM_COL32(130, 230, 170, 230);
+                }
+            }
+
+            drawList->AddBezierCubic(p1, ImVec2(p1.x + handle, p1.y), ImVec2(p2.x - handle, p2.y), p2, dragColor, std::max(1.2f, 2.5f * NodeUiScaleFromZoom(m_Zoom)));
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -1729,6 +2417,12 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 std::string error;
                 if (!editor->ConnectGraphSockets(m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId, &error)) {
                     m_StatusMessage = error;
+                } else {
+                    m_StatusMessage.clear();
+                }
+            } else if (hoveredNodeId > 0) {
+                if (!EditorNodeGraphUI::ConnectOutputToBestInput(editor, m_DragOutputNodeId, m_DragOutputSocketId, hoveredNodeId)) {
+                    m_StatusMessage = "No compatible input socket found on target node.";
                 } else {
                     m_StatusMessage.clear();
                 }
@@ -1750,7 +2444,20 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             const ImVec2 p1 = ImGui::GetMousePos();
             const ImVec2 p2 = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
             const float handle = std::max(60.0f, (p2.x - p1.x) * 0.45f);
-            drawList->AddBezierCubic(p1, ImVec2(p1.x + handle, p1.y), ImVec2(p2.x - handle, p2.y), p2, IM_COL32(255, 255, 255, 210), std::max(1.2f, 2.5f * NodeUiScaleFromZoom(m_Zoom)));
+
+            ImU32 dragColor = IM_COL32(255, 255, 255, 210);
+            if (m_DragInputSocketId == "r") dragColor = IM_COL32(255, 64, 64, 210);
+            else if (m_DragInputSocketId == "g") dragColor = IM_COL32(64, 255, 64, 210);
+            else if (m_DragInputSocketId == "b") dragColor = IM_COL32(64, 128, 255, 210);
+            else if (m_DragInputSocketId == "a") dragColor = IM_COL32(220, 220, 220, 210);
+            else {
+                EditorNodeGraph::SocketDefinition sock;
+                if (graph.FindSocket(m_DragInputNodeId, m_DragInputSocketId, &sock) && sock.type == EditorNodeGraph::SocketType::Mask) {
+                    dragColor = IM_COL32(130, 230, 170, 230);
+                }
+            }
+
+            drawList->AddBezierCubic(p1, ImVec2(p1.x + handle, p1.y), ImVec2(p2.x - handle, p2.y), p2, dragColor, std::max(1.2f, 2.5f * NodeUiScaleFromZoom(m_Zoom)));
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -1758,6 +2465,12 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 std::string error;
                 if (!editor->ConnectGraphSockets(hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId, &error)) {
                     m_StatusMessage = error;
+                } else {
+                    m_StatusMessage.clear();
+                }
+            } else if (hoveredNodeId > 0) {
+                if (!EditorNodeGraphUI::ConnectBestOutputToInput(editor, hoveredNodeId, m_DragInputNodeId, m_DragInputSocketId)) {
+                    m_StatusMessage = "No compatible output socket found on target node.";
                 } else {
                     m_StatusMessage.clear();
                 }
@@ -1813,7 +2526,15 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     if (m_MouseOwner == GraphMouseOwner::NodeHeader && hoveredNodeId > 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
         if (node) {
+            if (node->kind == EditorNodeGraph::NodeKind::Output) {
+                return;
+            }
             TouchNodeFront(node->id);
+            if (HasAdvancedLayerSurface(editor, *node)) {
+                editor->SwitchToComplexNodeSubWindow(node->id);
+                return;
+            }
+
             const bool expanding = !node->expanded;
             node->expanded = !node->expanded;
             editor->SelectGraphNode(node->id);
@@ -1902,7 +2623,15 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
 
     if (editor->CanConsumeEditorCommandKeys() &&
         (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
-        if (editor->DeleteSelectedGraphLink()) {
+        if (m_HoveredGroupId > 0) {
+            if (editor->GetNodeGraph().RemoveGroup(m_HoveredGroupId)) {
+                m_StatusMessage = "Group deleted.";
+            }
+            if (m_EditingGroupId == m_HoveredGroupId) m_EditingGroupId = -1;
+            if (m_DragGroupId == m_HoveredGroupId) m_DragGroupId = -1;
+            if (m_ResizingGroupId == m_HoveredGroupId) m_ResizingGroupId = -1;
+            m_HoveredGroupId = -1;
+        } else if (editor->DeleteSelectedGraphLink()) {
             m_StatusMessage = "Link deleted.";
         } else if (editor->DeleteSelectedGraphNodes()) {
             m_StatusMessage = "Node deleted.";
@@ -1921,6 +2650,36 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         }
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
             DuplicateSelectedNodes(editor);
+        }
+        if (!ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && !ImGui::GetIO().KeyAlt &&
+            ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+            const auto& selectedIds = editor->GetNodeGraph().GetSelectedNodeIds();
+            if (!selectedIds.empty()) {
+                float minX = std::numeric_limits<float>::max();
+                float minY = std::numeric_limits<float>::max();
+                float maxX = -std::numeric_limits<float>::max();
+                float maxY = -std::numeric_limits<float>::max();
+                bool hasNodes = false;
+                for (int nodeId : selectedIds) {
+                    if (const auto* node = editor->GetNodeGraph().FindNode(nodeId)) {
+                        EditorNodeGraph::Vec2 size = NodeSize(*node);
+                        minX = std::min(minX, node->position.x);
+                        minY = std::min(minY, node->position.y);
+                        maxX = std::max(maxX, node->position.x + size.x);
+                        maxY = std::max(maxY, node->position.y + size.y);
+                        hasNodes = true;
+                    }
+                }
+                if (hasNodes) {
+                    float padding = 45.0f;
+                    float x = minX - padding;
+                    float y = minY - padding;
+                    float w = (maxX - minX) + padding * 2.0f;
+                    float h = (maxY - minY) + padding * 2.0f;
+                    
+                    editor->GetNodeGraph().AddGroup("New Group", { x, y }, { w, h });
+                }
+            }
         }
     }
 }
@@ -2147,6 +2906,7 @@ bool DecodePngBytesClipboard(const std::vector<unsigned char>& pngBytes, EditorN
     payload.width = width;
     payload.height = height;
     payload.channels = 4;
+    payload.originalChannels = channels;
     stbi_image_free(pixels);
     return true;
 }
@@ -2197,6 +2957,7 @@ void EditorNodeGraphUI::CopySelectedNodes(EditorModule* editor) {
             item["width"] = node->image.width;
             item["height"] = node->image.height;
             item["channels"] = node->image.channels;
+            item["originalChannels"] = node->image.originalChannels;
             item["pngBytes"] = nlohmann::json::binary(node->image.pngBytes);
         } else if (node->kind == EditorNodeGraph::NodeKind::Layer) {
             const auto& layers = editor->GetLayers();
@@ -2234,11 +2995,29 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
     float offsetX = m_ClipboardPasteCount * 40.0f;
     float offsetY = m_ClipboardPasteCount * 40.0f;
 
+    const ImVec2 mousePos = ImGui::GetMousePos();
+    const bool mouseInsideCanvas =
+        mousePos.x >= m_CanvasMin.x && mousePos.x <= m_CanvasMax.x &&
+        mousePos.y >= m_CanvasMin.y && mousePos.y <= m_CanvasMax.y;
+    const bool useCursorPos = mouseInsideCanvas;
+    float minX = std::numeric_limits<float>::max();
+    float minY = std::numeric_limits<float>::max();
+    EditorNodeGraph::Vec2 cursorGraphPos {};
+
+    const auto& nodesJson = m_Clipboard["nodes"];
+    if (useCursorPos) {
+        cursorGraphPos = ScreenToGraph(ToGraphVec2(mousePos));
+        for (const auto& item : nodesJson) {
+            if (!item.is_object()) continue;
+            minX = std::min(minX, item.value("x", 0.0f));
+            minY = std::min(minY, item.value("y", 0.0f));
+        }
+    }
+
     auto& graph = editor->GetNodeGraph();
     std::map<int, int> oldIdToNewId;
     std::vector<int> newlyPastedNodeIds;
 
-    const auto& nodesJson = m_Clipboard["nodes"];
     for (const auto& item : nodesJson) {
         if (!item.is_object()) continue;
 
@@ -2253,8 +3032,19 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
         node.layerType = static_cast<LayerType>(item.value("layerType", 0));
         node.typeId = item.value("typeId", "");
         node.title = item.value("title", "");
-        node.position.x = item.value("x", 0.0f) + offsetX;
-        node.position.y = item.value("y", 0.0f) + offsetY;
+
+        float newX = 0.0f;
+        float newY = 0.0f;
+        if (useCursorPos && minX != std::numeric_limits<float>::max()) {
+            newX = cursorGraphPos.x + (item.value("x", 0.0f) - minX);
+            newY = cursorGraphPos.y + (item.value("y", 0.0f) - minY);
+        } else {
+            newX = item.value("x", 0.0f) + offsetX;
+            newY = item.value("y", 0.0f) + offsetY;
+        }
+        node.position.x = newX;
+        node.position.y = newY;
+
         node.expanded = item.value("expanded", false);
         node.scopeKind = static_cast<EditorNodeGraph::ScopeKind>(item.value("scopeKind", 0));
         node.maskKind = static_cast<EditorNodeGraph::MaskGeneratorKind>(item.value("maskKind", 0));
@@ -2274,6 +3064,7 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
             node.image.width = item.value("width", 0);
             node.image.height = item.value("height", 0);
             node.image.channels = item.value("channels", 4);
+            node.image.originalChannels = item.value("originalChannels", 4);
             if (item.contains("pngBytes")) {
                 const auto& bin = item["pngBytes"];
                 if (bin.is_binary()) {
@@ -2334,4 +3125,3 @@ void EditorNodeGraphUI::DuplicateSelectedNodes(EditorModule* editor) {
     CopySelectedNodes(editor);
     PasteNodes(editor);
 }
-

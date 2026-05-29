@@ -1,19 +1,24 @@
 #pragma once
 
 #include "Editor/LayerRegistry.h"
+#include "NeuralDenoise/NeuralDenoiseTypes.h"
+#include "Raw/RawImageData.h"
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace EditorNodeGraph {
 
 inline constexpr const char* kImageInputSocketId = "imageIn";
+inline constexpr const char* kRawInputSocketId = "rawIn";
 inline constexpr const char* kMixInputASocketId = "imageA";
 inline constexpr const char* kMixInputBSocketId = "imageB";
 inline constexpr const char* kMixFactorSocketId = "factor";
 inline constexpr const char* kMaskInputSocketId = "maskIn";
 inline constexpr const char* kImageOutputSocketId = "imageOut";
+inline constexpr const char* kRawOutputSocketId = "rawOut";
 inline constexpr const char* kMaskOutputSocketId = "maskOut";
 inline constexpr const char* kMaskUtilityInputSocketId = "maskIn";
 inline constexpr const char* kImageToMaskInputSocketId = "imageIn";
@@ -27,6 +32,9 @@ struct Vec2 {
 
 enum class NodeKind {
     Image,
+    RawSource,
+    RawNeuralDenoise,
+    RawDevelop,
     Layer,
     Output,
     Composite,
@@ -36,7 +44,9 @@ enum class NodeKind {
     Preview,
     MaskUtility,
     ImageToMask,
-    ImageGenerator
+    ImageGenerator,
+    ChannelSplit,
+    ChannelCombine
 };
 
 enum class ScopeKind {
@@ -82,7 +92,8 @@ enum class SocketType {
     Image,
     Mask,
     Value,
-    Analysis
+    Analysis,
+    Raw
 };
 
 enum class SocketDirection {
@@ -108,6 +119,21 @@ struct ImagePayload {
     int width = 0;
     int height = 0;
     int channels = 4;
+    int originalChannels = 4;
+};
+
+struct RawSourcePayload {
+    std::string label;
+    std::string sourcePath;
+    Raw::RawMetadata metadata;
+};
+
+struct RawDevelopPayload {
+    Raw::RawDevelopSettings settings;
+};
+
+struct RawNeuralDenoisePayload {
+    NeuralDenoise::NeuralDenoiseSettings settings;
 };
 
 struct MaskGeneratorSettings {
@@ -155,7 +181,7 @@ struct Node {
     std::string typeId;
     std::string title;
     Vec2 position;
-    bool expanded = false;
+    bool expanded = true;
     ScopeKind scopeKind = ScopeKind::Histogram;
     MaskGeneratorKind maskKind = MaskGeneratorKind::Solid;
     MaskGeneratorSettings maskSettings;
@@ -168,6 +194,9 @@ struct Node {
     MixBlendMode mixBlendMode = MixBlendMode::Normal;
     float mixFactor = 0.5f;
     ImagePayload image;
+    RawSourcePayload rawSource;
+    RawNeuralDenoisePayload rawNeuralDenoise;
+    RawDevelopPayload rawDevelop;
 };
 
 struct Link {
@@ -175,6 +204,13 @@ struct Link {
     std::string fromSocketId;
     int toNodeId = 0;
     std::string toSocketId;
+};
+
+struct NodeGroup {
+    int id = 0;
+    std::string title = "New Group";
+    Vec2 position;
+    Vec2 size;
 };
 
 struct CompletedChainInfo {
@@ -202,6 +238,9 @@ public:
     void SyncLayerNodes(int layerCount);
 
     Node* AddImageNode(ImagePayload payload, Vec2 position);
+    Node* AddRawSourceNode(RawSourcePayload payload, Vec2 position);
+    Node* AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 position);
+    Node* AddRawDevelopNode(RawDevelopPayload payload, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
     Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
     Node* AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position);
@@ -210,6 +249,8 @@ public:
     Node* AddImageGeneratorNode(ImageGeneratorKind generatorKind, Vec2 position);
     Node* AddMixNode(Vec2 position);
     Node* AddPreviewNode(Vec2 position);
+    Node* AddChannelSplitNode(Vec2 position);
+    Node* AddChannelCombineNode(Vec2 position);
     Node* AddOutputNode(Vec2 position, bool makePrimary = false);
     Node* AddCompositeNode(Vec2 position);
     Node* EnsureOutputNode();
@@ -225,10 +266,19 @@ public:
     const std::vector<Link>& GetLinks() const { return m_Links; }
     std::vector<Link>& GetLinks() { return m_Links; }
 
+    NodeGroup* AddGroup(std::string title, Vec2 position, Vec2 size);
+    bool RemoveGroup(int groupId);
+    NodeGroup* FindGroup(int groupId);
+    const NodeGroup* FindGroup(int groupId) const;
+    std::vector<NodeGroup>& GetGroups() { return m_Groups; }
+    const std::vector<NodeGroup>& GetGroups() const { return m_Groups; }
+
     void SelectNode(int nodeId, bool additive = false);
     int GetSelectedNodeId() const { return m_SelectedNodeId; }
     bool IsNodeSelected(int nodeId) const;
     void ClearSelection();
+    void SetForceOutputFourPins(bool force) { m_ForceOutputFourPins = force; }
+    bool IsOutputFourPinsForced() const { return m_ForceOutputFourPins; }
     void SelectNodesInRect(Vec2 min, Vec2 max, bool additive = false);
     void SelectNodesInRect(
         Vec2 min,
@@ -268,6 +318,8 @@ public:
     void SetOutputNodeId(int nodeId) { m_OutputNodeId = nodeId; }
     int GetNextNodeId() const { return m_NextNodeId; }
     void SetNextNodeId(int nextNodeId) { m_NextNodeId = nextNodeId; }
+    int GetNextGroupId() const { return m_NextGroupId; }
+    void SetNextGroupId(int nextGroupId) { m_NextGroupId = nextGroupId; }
     void RebuildLinks();
     void AutoLayout();
     ValidationResult Validate() const;
@@ -281,6 +333,9 @@ public:
     bool FindSocket(int nodeId, const std::string& socketId, SocketDefinition* outSocket = nullptr) const;
     std::string DefaultInputSocket(const Node& node) const;
     std::string DefaultOutputSocket(const Node& node) const;
+    std::string ResolveSocketChannel(int nodeId, const std::string& socketId) const;
+    int ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId) const;
+    int ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const;
     const Link* FindInputLink(int nodeId, const std::string& socketId = kImageInputSocketId) const;
     const Link* FindAnyInputLink(int nodeId, const std::string& socketId) const;
     const Link* FindOutputLink(int nodeId, const std::string& socketId = kImageOutputSocketId) const;
@@ -301,13 +356,16 @@ private:
 
     std::vector<Node> m_Nodes;
     std::vector<Link> m_Links;
+    std::vector<NodeGroup> m_Groups;
     int m_NextNodeId = 1;
+    int m_NextGroupId = 1;
     int m_SelectedNodeId = -1;
     std::vector<int> m_SelectedNodeIds;
     Link m_SelectedLink;
     bool m_HasSelectedLink = false;
     int m_ActiveImageNodeId = -1;
     int m_OutputNodeId = -1;
+    bool m_ForceOutputFourPins = false;
     mutable std::uint64_t m_StructureRevision = 1;
     mutable std::uint64_t m_CompletedChainsCacheRevision = 0;
     mutable std::vector<CompletedChainInfo> m_CompletedChainsCache;

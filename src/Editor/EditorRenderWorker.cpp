@@ -151,6 +151,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 RenderGraphSnapshot graph = snapshot.graph;
                 if (request.maskInput) {
                     graph.outputNodeId = request.sourceNodeId;
+                    graph.outputSocketId = request.sourceSocketId;
                 } else {
                     const int syntheticOutputId = -100000 - request.previewNodeId;
                     RenderGraphNode outputNode;

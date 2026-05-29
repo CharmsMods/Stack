@@ -18,6 +18,7 @@ namespace StackAppearance {
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -193,9 +194,11 @@ public:
     bool IsGraphOutputConnected() const { return m_NodeGraph.IsOutputConnected(); }
     void PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool AddCompositeImageChainFromFile(const std::string& path);
     bool AddCompositeLibraryAssetChain(const std::string& assetFileName);
     bool AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind generatorKind);
+    bool AddFullRawTreeToSource(int rawSourceNodeId);
     bool ConnectGraphImageNode(int nodeId);
     bool ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
     bool ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
@@ -211,7 +214,14 @@ public:
     void AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind generatorKind, EditorNodeGraph::Vec2 graphPosition);
     void AddMixNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddChannelSplitNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void RenderRawSourceControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderRawDevelopControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void AutoLayoutGraph();
     void DisconnectGraphOutput();
     void SetGraphDropTargetRect(float minX, float minY, float maxX, float maxY);
@@ -231,6 +241,11 @@ public:
     bool HandleGraphFileDrop(const std::vector<std::string>& paths, float screenX, float screenY);
     std::vector<unsigned char> GetScopePixelsForNode(int nodeId, int& outW, int& outH);
     std::vector<unsigned char> GetPreviewPixelsForNode(int nodeId, int& outW, int& outH);
+    bool ProbeViewTransformInputStats(int viewTransformNodeId, RenderTextureStats& outStats) const;
+    bool OutputPathNeedsViewTransform(int outputNodeId) const;
+    bool SelectedLayerInputContainsViewTransform() const;
+    bool RenderLayerControlsWithDirtyTracking(EditorNodeGraph::Node& node, const std::function<void(LayerBase&)>& renderControls);
+    void MarkSelectedLayerRenderDirty();
     void RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId);
     void MarkRenderDirty(int touchedNodeId = -1);
     RenderGraphSnapshot BuildGraphSnapshot() const;
@@ -258,6 +273,10 @@ public:
 
     const std::string& GetCurrentProjectFileName() const { return m_CurrentProjectFileName; }
     void SetCurrentProjectFileName(const std::string& fileName) { m_CurrentProjectFileName = fileName; }
+
+    bool IsDirty() const { return m_Dirty; }
+    void ClearDirty() { m_Dirty = false; }
+    void MarkDirty() { m_Dirty = true; }
 
     int GetSelectedLayerIndex() const { return m_SelectedLayerIndex; }
     void SetSelectedLayerIndex(int idx) { SelectLayer(idx); }
@@ -313,11 +332,15 @@ public:
     enum class EditorSubWindow {
         NodeGraph = 0,
         ExportSettings = 1,
-        Settings = 2
+        Settings = 2,
+        ComplexNode = 3
     };
     EditorSubWindow GetActiveSubWindow() const { return m_ActiveSubWindow; }
+    int GetActiveComplexNodeId() const { return m_ActiveComplexNodeId; }
+    int GetTargetComplexNodeId() const { return m_TargetComplexNodeId; }
     float GetSubWindowTransitionAlpha() const { return m_SubWindowTransitionAlpha; }
     void SwitchToSubWindow(EditorSubWindow target);
+    void SwitchToComplexNodeSubWindow(int nodeId);
     void MoveCompositeOutputZOrder(int draggedOutputNodeId, int targetOutputNodeId);
     float GetLeftPanelWidthAnim() const { return m_LeftPanelWidthAnim; }
     ViewportMode GetViewportMode() const;
@@ -382,8 +405,10 @@ public:
     CompositeFloatRect GetCompositeViewWorldRect(const ImVec2& canvasSize) const;
     void UseCompositeViewAsExportBounds(const ImVec2& canvasSize);
     bool BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
+    bool BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) const;
     void ClampCompositeViewPanToContent(const ImVec2& canvasSize);
     void RefreshGraphLayerMetadata();
+    float GetNodesPanelWidthAnim() const { return m_NodesPanelWidthAnim; }
 
 private:
     struct PendingGraphDropImportRequest {
@@ -404,14 +429,22 @@ private:
     EditorRenderWorker m_RenderWorker;
     EditorSubWindow m_ActiveSubWindow = EditorSubWindow::NodeGraph;
     EditorSubWindow m_TargetSubWindow = EditorSubWindow::NodeGraph;
+    int m_ActiveComplexNodeId = -1;
+    int m_TargetComplexNodeId = -1;
     float m_SubWindowTransitionAlpha = 1.0f;
     bool m_SubWindowTransitionFadingOut = false;
     unsigned int m_NodeGraphIconTexture = 0;
     unsigned int m_ExportIconTexture = 0;
     unsigned int m_SettingsIconTexture = 0;
+    unsigned int m_BackgroundRemoverIconTexture = 0;
+    unsigned int m_ColorGradeIconTexture = 0;
     bool m_LeftPanelExpanded = false;
     float m_LeftPanelWidthAnim = 0.0f;
+    float m_NodesPanelWidthAnim = 0.0f;
     bool m_TexturesLoaded = false;
+    std::map<int, double> m_ToolbarButtonSpawnTimes;
+    double m_SpacebarPressTime = 0.0;
+    bool m_SpacebarHeld = false;
 
     void LoadResourceTextures();
     void RenderFloatingToolbar();
@@ -425,6 +458,8 @@ private:
     bool m_RenderOnlyUpToActive = false;
     std::string m_CurrentProjectName = "";
     std::string m_CurrentProjectFileName = "";
+    bool m_Dirty = false;
+    double m_LastUserActionTime = 0.0;
     float m_GraphDropMinX = 0.0f;
     float m_GraphDropMinY = 0.0f;
     float m_GraphDropMaxX = 0.0f;
@@ -482,6 +517,9 @@ private:
     std::uint64_t m_NodeDirtyGenerationCounter = 1;
     std::unordered_map<int, std::uint64_t> m_NodeDirtyGenerations;
     float m_LeftPaneWidth = 0.0f;
+    float m_LastUserNodeGraphWidth = 0.0f;
+    EditorSubWindow m_LastSplitTargetSubWindow = EditorSubWindow::NodeGraph;
+    int m_LastSplitTargetComplexNodeId = -1;
     bool m_DraggingSplitHandle = false;
     bool m_SplitHandlePressed = false;
     bool m_SplitHandleMoved = false;
@@ -568,7 +606,13 @@ private:
     void EnterSingleOutputPreviewMode();
     void ClearCompositeTransientInteractionState();
     void TogglePartialSplitTargets(float workspaceWidth, float minLeftWidth, float maxLeftWidth, bool compositeViewportMode);
+    void HandleSpacebarPress(float workspaceWidth, float paneHeight, float minLeftWidth, float maxLeftWidth, float splitGap);
+    void HandleSpacebarLongPress(float workspaceWidth, float paneHeight, float minLeftWidth, float maxLeftWidth, float splitGap);
     bool AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
     bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
     bool AddGraphImageChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
@@ -578,6 +622,9 @@ private:
     std::size_t BuildCompositeChainFingerprint(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(int outputNodeId) const;
+    bool TryCopyImageNodePixels(int sourceNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
+    bool TryResolveReferenceSourcePixels(int nodeId, const std::string& socketId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
+    bool TryResolveReferenceSourcePixelsForOutput(int outputNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
     bool CompletedChainSourceUsesScalableGenerator(int outputNodeId) const;
     bool CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const;
     void ResetToBlankProject();

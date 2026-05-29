@@ -1,9 +1,9 @@
 # Build outputs and generated project files
-/build/
-/build_*/
+/build*/
 /bin/
 /out/
 /install/
+/outputs/
 /CMakeFiles/
 /CMakeCache.txt
 /*.sln
@@ -43,6 +43,22 @@ imgui.ini
 migrate*.ps1
 migrate*.py
 tools/migrate*.py
+/*.txt
+
+# Large raw image test files
+*.ARW
+*.arw
+*.DNG
+*.dng
+
+# Neural Denoise, AI models, and ONNX/CUDA runtimes
+/src/NeuralDenoise/
+/tools/neural_denoise/
+/src/Editor/Layers/*NeuralDenoise*
+/src/Editor/Layers/*SceneDenoise*
+/denoise/
+*.onnx
+*.onnx.data
 
 # Logs, temp files, package outputs
 *.log

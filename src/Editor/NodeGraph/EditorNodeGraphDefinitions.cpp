@@ -58,6 +58,15 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Image:
             node.title = node.image.label.empty() ? "Image" : node.image.label;
             break;
+        case EditorNodeGraph::NodeKind::RawSource:
+            node.title = node.rawSource.label.empty() ? "RAW" : node.rawSource.label;
+            break;
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            node.title = "RAW/CFA Neural Denoise";
+            break;
+        case EditorNodeGraph::NodeKind::RawDevelop:
+            node.title = "RAW Develop";
+            break;
         case EditorNodeGraph::NodeKind::Layer: {
             const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
             node.typeId = descriptor ? descriptor->typeId : "";
@@ -93,6 +102,12 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Mix:
             node.title = "Mix";
             break;
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+            node.title = "Channel Split";
+            break;
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            node.title = "Channel Combine";
+            break;
     }
 }
 
@@ -112,6 +127,17 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
 
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Image:
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::RawSource:
+            add(EditorNodeGraph::kRawOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
+            add(EditorNodeGraph::kRawOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::RawDevelop:
+            add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::Layer:
@@ -150,6 +176,20 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kMixFactorSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Factor", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add("r", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "R", false, true);
+            add("g", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "G", false, true);
+            add("b", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "B", false, true);
+            add("a", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "A", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            add("r", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "R", true, true);
+            add("g", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "G", true, true);
+            add("b", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "B", true, true);
+            add("a", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "A", true, true);
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            break;
     }
 
     return sockets;
@@ -159,7 +199,13 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Output:
+        case EditorNodeGraph::NodeKind::ChannelSplit:
             return EditorNodeGraph::kImageInputSocketId;
+        case EditorNodeGraph::NodeKind::RawDevelop:
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            return EditorNodeGraph::kRawInputSocketId;
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            return "r";
         case EditorNodeGraph::NodeKind::Composite:
             break;
         case EditorNodeGraph::NodeKind::Mix:
@@ -174,6 +220,7 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
             return EditorNodeGraph::kImageInputSocketId;
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::Image:
             break;
     }
@@ -183,10 +230,17 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
 std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Image:
+        case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::ChannelCombine:
             return EditorNodeGraph::kImageOutputSocketId;
+        case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            return EditorNodeGraph::kRawOutputSocketId;
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+            return "r";
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::ImageToMask:
@@ -204,10 +258,19 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     std::vector<NodeCatalogEntry> entries;
     entries.push_back({ EditorNodeGraph::NodeKind::Output, 0, "Output", "Input / Output" });
     for (const LayerDescriptor& descriptor : LayerRegistry::GetAllDescriptors()) {
+        if (!LayerRegistry::ShouldShowInNodeBrowser(descriptor)) {
+            continue;
+        }
+        std::string label = descriptor.displayName ? descriptor.displayName : "Layer";
+        if (descriptor.lifecycleStatus == LayerLifecycleStatus::Experimental) {
+            label += " (Experimental)";
+        } else if (descriptor.lifecycleStatus == LayerLifecycleStatus::NeedsFix) {
+            label += " (Needs Fix)";
+        }
         entries.push_back({
             EditorNodeGraph::NodeKind::Layer,
             static_cast<int>(descriptor.type),
-            descriptor.displayName ? descriptor.displayName : "Layer",
+            label,
             descriptor.categoryName ? descriptor.categoryName : "Layers"
         });
     }
@@ -215,6 +278,8 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back({ EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::Vectorscope), "Vectorscope", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::RGBParade), "RGB Parade", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::Preview, 0, "Preview", "Input / Output" });
+    entries.push_back({ EditorNodeGraph::NodeKind::RawNeuralDenoise, 0, "RAW/CFA Neural Denoise", "Input / Output" });
+    entries.push_back({ EditorNodeGraph::NodeKind::RawDevelop, 0, "RAW Develop", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Solid), "Solid Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::LinearGradient), "Linear Gradient Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RadialGradient), "Radial Gradient Mask", "Masks" });
@@ -229,6 +294,8 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Circle), "Circle", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Text), "Text", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::Mix, 0, "Blend", "Composite" });
+    entries.push_back({ EditorNodeGraph::NodeKind::ChannelSplit, 0, "Channel Split", "Channels" });
+    entries.push_back({ EditorNodeGraph::NodeKind::ChannelCombine, 0, "Channel Combine", "Channels" });
     return entries;
 }
 

@@ -63,6 +63,7 @@ bool DecodePngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& pa
     payload.width = width;
     payload.height = height;
     payload.channels = 4;
+    payload.originalChannels = channels;
     stbi_image_free(pixels);
     return true;
 }
@@ -70,6 +71,9 @@ bool DecodePngBytes(const std::vector<unsigned char>& pngBytes, ImagePayload& pa
 std::string NodeKindToString(NodeKind kind) {
     switch (kind) {
         case NodeKind::Image: return "Image";
+        case NodeKind::RawSource: return "RawSource";
+        case NodeKind::RawNeuralDenoise: return "RawNeuralDenoise";
+        case NodeKind::RawDevelop: return "RawDevelop";
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
         case NodeKind::Composite: return "Composite";
@@ -80,8 +84,387 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::MaskUtility: return "MaskUtility";
         case NodeKind::ImageToMask: return "ImageToMask";
         case NodeKind::ImageGenerator: return "ImageGenerator";
+        case NodeKind::ChannelSplit: return "ChannelSplit";
+        case NodeKind::ChannelCombine: return "ChannelCombine";
     }
     return "Layer";
+}
+
+std::string CfaPatternToString(Raw::CfaPattern pattern) {
+    return Raw::CfaPatternName(pattern);
+}
+
+Raw::CfaPattern CfaPatternFromString(const std::string& value) {
+    if (value == "RGGB") return Raw::CfaPattern::RGGB;
+    if (value == "BGGR") return Raw::CfaPattern::BGGR;
+    if (value == "GBRG") return Raw::CfaPattern::GBRG;
+    if (value == "GRBG") return Raw::CfaPattern::GRBG;
+    return Raw::CfaPattern::Unknown;
+}
+
+std::string WhiteBalanceModeToString(Raw::WhiteBalanceMode mode) {
+    switch (mode) {
+        case Raw::WhiteBalanceMode::AsShot: return "AsShot";
+        case Raw::WhiteBalanceMode::Auto: return "Auto";
+        case Raw::WhiteBalanceMode::Neutral: return "Neutral";
+        case Raw::WhiteBalanceMode::Manual: return "Manual";
+    }
+    return "AsShot";
+}
+
+Raw::WhiteBalanceMode WhiteBalanceModeFromString(const std::string& value) {
+    if (value == "Auto") return Raw::WhiteBalanceMode::Auto;
+    if (value == "Neutral") return Raw::WhiteBalanceMode::Neutral;
+    if (value == "Manual") return Raw::WhiteBalanceMode::Manual;
+    return Raw::WhiteBalanceMode::AsShot;
+}
+
+std::string DemosaicMethodToString(Raw::DemosaicMethod method) {
+    return method == Raw::DemosaicMethod::QualityPlaceholder ? "QualityPlaceholder" : "Bilinear";
+}
+
+Raw::DemosaicMethod DemosaicMethodFromString(const std::string& value) {
+    return value == "QualityPlaceholder" ? Raw::DemosaicMethod::QualityPlaceholder : Raw::DemosaicMethod::Bilinear;
+}
+
+std::string HighlightModeToString(Raw::HighlightReconstructionMode mode) {
+    switch (mode) {
+        case Raw::HighlightReconstructionMode::Off: return "Off";
+        case Raw::HighlightReconstructionMode::ClipNeutral: return "ClipNeutral";
+        case Raw::HighlightReconstructionMode::Luminance: return "Luminance";
+        case Raw::HighlightReconstructionMode::ColorReconstruction: return "ColorReconstruction";
+    }
+    return "Off";
+}
+
+Raw::HighlightReconstructionMode HighlightModeFromString(const std::string& value) {
+    if (value == "ClipNeutral") return Raw::HighlightReconstructionMode::ClipNeutral;
+    if (value == "Luminance") return Raw::HighlightReconstructionMode::Luminance;
+    if (value == "ColorReconstruction") return Raw::HighlightReconstructionMode::ColorReconstruction;
+    return Raw::HighlightReconstructionMode::Off;
+}
+
+std::string RawDebugViewToString(Raw::RawDebugView view) {
+    switch (view) {
+        case Raw::RawDebugView::FinalOutput: return "FinalOutput";
+        case Raw::RawDebugView::NormalizedMosaic: return "NormalizedMosaic";
+        case Raw::RawDebugView::CfaFalseColor: return "CfaFalseColor";
+        case Raw::RawDebugView::DemosaicedCameraRgb: return "DemosaicedCameraRgb";
+        case Raw::RawDebugView::WhiteBalancedCameraRgb: return "WhiteBalancedCameraRgb";
+        case Raw::RawDebugView::CameraTransformedRgb: return "CameraTransformedRgb";
+        case Raw::RawDebugView::ClippedRawChannels: return "ClippedRawChannels";
+        case Raw::RawDebugView::PreDenoiseMosaic: return "PreDenoiseMosaic";
+        case Raw::RawDebugView::PostDenoiseMosaic: return "PostDenoiseMosaic";
+        case Raw::RawDebugView::HotPixelMask: return "HotPixelMask";
+        case Raw::RawDebugView::DenoiseDifference: return "DenoiseDifference";
+    }
+    return "FinalOutput";
+}
+
+Raw::RawDebugView RawDebugViewFromString(const std::string& value) {
+    if (value == "NormalizedMosaic") return Raw::RawDebugView::NormalizedMosaic;
+    if (value == "CfaFalseColor") return Raw::RawDebugView::CfaFalseColor;
+    if (value == "DemosaicedCameraRgb") return Raw::RawDebugView::DemosaicedCameraRgb;
+    if (value == "WhiteBalancedCameraRgb") return Raw::RawDebugView::WhiteBalancedCameraRgb;
+    if (value == "CameraTransformedRgb") return Raw::RawDebugView::CameraTransformedRgb;
+    if (value == "ClippedRawChannels") return Raw::RawDebugView::ClippedRawChannels;
+    if (value == "PreDenoiseMosaic") return Raw::RawDebugView::PreDenoiseMosaic;
+    if (value == "PostDenoiseMosaic") return Raw::RawDebugView::PostDenoiseMosaic;
+    if (value == "HotPixelMask") return Raw::RawDebugView::HotPixelMask;
+    if (value == "DenoiseDifference") return Raw::RawDebugView::DenoiseDifference;
+    return Raw::RawDebugView::FinalOutput;
+}
+
+std::string RawPixelLayoutToString(Raw::RawPixelLayout layout) {
+    switch (layout) {
+        case Raw::RawPixelLayout::MosaicBayer: return "MosaicBayer";
+        case Raw::RawPixelLayout::LinearRgb: return "LinearRgb";
+        case Raw::RawPixelLayout::Unknown:
+        default:
+            return "Unknown";
+    }
+}
+
+Raw::RawPixelLayout RawPixelLayoutFromString(const std::string& value) {
+    if (value == "MosaicBayer" || value == "Mosaic RAW") return Raw::RawPixelLayout::MosaicBayer;
+    if (value == "LinearRgb" || value == "Linear RGB") return Raw::RawPixelLayout::LinearRgb;
+    return Raw::RawPixelLayout::Unknown;
+}
+
+std::string RawSampleFormatToString(Raw::RawSampleFormat format) {
+    switch (format) {
+        case Raw::RawSampleFormat::UInt16: return "UInt16";
+        case Raw::RawSampleFormat::Float32: return "Float32";
+        case Raw::RawSampleFormat::Unknown:
+        default:
+            return "Unknown";
+    }
+}
+
+Raw::RawSampleFormat RawSampleFormatFromString(const std::string& value) {
+    if (value == "UInt16") return Raw::RawSampleFormat::UInt16;
+    if (value == "Float32") return Raw::RawSampleFormat::Float32;
+    return Raw::RawSampleFormat::Unknown;
+}
+
+std::string RawCameraTransformSourceToString(Raw::RawCameraTransformSource source) {
+    switch (source) {
+        case Raw::RawCameraTransformSource::LibRawRgbCam: return "LibRawRgbCam";
+        case Raw::RawCameraTransformSource::DngAuto: return "DngAuto";
+        case Raw::RawCameraTransformSource::DngForwardMatrix1: return "DngForwardMatrix1";
+        case Raw::RawCameraTransformSource::DngForwardMatrix2: return "DngForwardMatrix2";
+        case Raw::RawCameraTransformSource::DngColorMatrixInverse: return "DngColorMatrixInverse";
+    }
+    return "DngAuto";
+}
+
+Raw::RawCameraTransformSource RawCameraTransformSourceFromString(const std::string& value) {
+    if (value == "LibRawRgbCam" || value == "LibRaw rgb_cam") return Raw::RawCameraTransformSource::LibRawRgbCam;
+    if (value == "DngAuto" || value == "DNG Auto") return Raw::RawCameraTransformSource::DngAuto;
+    if (value == "DngForwardMatrix1" || value == "DNG ForwardMatrix 1") return Raw::RawCameraTransformSource::DngForwardMatrix1;
+    if (value == "DngForwardMatrix2" || value == "DNG ForwardMatrix 2") return Raw::RawCameraTransformSource::DngForwardMatrix2;
+    if (value == "DngColorMatrixInverse" || value == "DNG ColorMatrix inverse") return Raw::RawCameraTransformSource::DngColorMatrixInverse;
+    return Raw::RawCameraTransformSource::DngAuto;
+}
+
+nlohmann::json SerializeRawMetadata(const Raw::RawMetadata& metadata) {
+    return {
+        { "sourcePath", metadata.sourcePath },
+        { "cameraMake", metadata.cameraMake },
+        { "cameraModel", metadata.cameraModel },
+        { "dngUniqueCameraModel", metadata.dngUniqueCameraModel },
+        { "rawWidth", metadata.rawWidth },
+        { "rawHeight", metadata.rawHeight },
+        { "visibleWidth", metadata.visibleWidth },
+        { "visibleHeight", metadata.visibleHeight },
+        { "leftMargin", metadata.leftMargin },
+        { "topMargin", metadata.topMargin },
+        { "orientation", metadata.orientation },
+        { "bitDepth", metadata.bitDepth },
+        { "cfaPattern", CfaPatternToString(metadata.cfaPattern) },
+        { "pixelLayout", RawPixelLayoutToString(metadata.pixelLayout) },
+        { "isDng", metadata.isDng },
+        { "dngTypeStatus", metadata.dngTypeStatus },
+        { "linearChannels", metadata.linearChannels },
+        { "linearSampleFormat", RawSampleFormatToString(metadata.linearSampleFormat) },
+        { "mosaiced", metadata.mosaiced },
+        { "blackLevel", metadata.blackLevel },
+        { "perChannelBlack", metadata.perChannelBlack },
+        { "whiteLevel", metadata.whiteLevel },
+        { "blackLevelSource", metadata.blackLevelSource },
+        { "whiteLevelSource", metadata.whiteLevelSource },
+        { "whiteBalanceSource", metadata.whiteBalanceSource },
+        { "cameraMatrixSource", metadata.cameraMatrixSource },
+        { "rawMinimum", metadata.rawMinimum },
+        { "rawMaximum", metadata.rawMaximum },
+        { "defaultWhiteClipPercent", metadata.defaultWhiteClipPercent },
+        { "cameraWhiteBalance", metadata.cameraWhiteBalance },
+        { "daylightWhiteBalance", metadata.daylightWhiteBalance },
+        { "cameraToSrgb", metadata.cameraToSrgb },
+        { "hasCameraMatrix", metadata.hasCameraMatrix },
+        { "dngAsShotNeutral", metadata.dngAsShotNeutral },
+        { "hasDngAsShotNeutral", metadata.hasDngAsShotNeutral },
+        { "dngColorMatrix1", metadata.dngColorMatrix1 },
+        { "dngColorMatrix2", metadata.dngColorMatrix2 },
+        { "dngForwardMatrix1", metadata.dngForwardMatrix1 },
+        { "dngForwardMatrix2", metadata.dngForwardMatrix2 },
+        { "hasDngColorMatrix1", metadata.hasDngColorMatrix1 },
+        { "hasDngColorMatrix2", metadata.hasDngColorMatrix2 },
+        { "hasDngForwardMatrix1", metadata.hasDngForwardMatrix1 },
+        { "hasDngForwardMatrix2", metadata.hasDngForwardMatrix2 },
+        { "dngIlluminant1", metadata.dngIlluminant1 },
+        { "dngIlluminant2", metadata.dngIlluminant2 },
+        { "dngCompression", metadata.dngCompression },
+        { "dngPhotometricInterpretation", metadata.dngPhotometricInterpretation },
+        { "dngCfaLayout", metadata.dngCfaLayout },
+        { "dngCfaRepeatPatternDim", metadata.dngCfaRepeatPatternDim },
+        { "dngCfaPattern", metadata.dngCfaPattern },
+        { "dngCfaPlaneColor", metadata.dngCfaPlaneColor },
+        { "dngBlackLevelRepeatDim", metadata.dngBlackLevelRepeatDim },
+        { "dngBlackLevelPattern", metadata.dngBlackLevelPattern },
+        { "dngAnalogBalance", metadata.dngAnalogBalance },
+        { "hasDngAnalogBalance", metadata.hasDngAnalogBalance },
+        { "dngCameraCalibration1", metadata.dngCameraCalibration1 },
+        { "dngCameraCalibration2", metadata.dngCameraCalibration2 },
+        { "hasDngCameraCalibration1", metadata.hasDngCameraCalibration1 },
+        { "hasDngCameraCalibration2", metadata.hasDngCameraCalibration2 },
+        { "dngBaselineExposure", metadata.dngBaselineExposure },
+        { "hasDngBaselineExposure", metadata.hasDngBaselineExposure },
+        { "dngGainMapCount", metadata.dngGainMapCount },
+        { "dngUnsupportedOpcodeCount", metadata.dngUnsupportedOpcodeCount },
+        { "uploadFormat", metadata.uploadFormat },
+        { "warnings", metadata.warnings },
+        { "error", metadata.error }
+    };
+}
+
+Raw::RawMetadata DeserializeRawMetadata(const nlohmann::json& value) {
+    Raw::RawMetadata metadata;
+    if (!value.is_object()) return metadata;
+    metadata.sourcePath = value.value("sourcePath", metadata.sourcePath);
+    metadata.cameraMake = value.value("cameraMake", metadata.cameraMake);
+    metadata.cameraModel = value.value("cameraModel", metadata.cameraModel);
+    metadata.dngUniqueCameraModel = value.value("dngUniqueCameraModel", metadata.dngUniqueCameraModel);
+    metadata.rawWidth = value.value("rawWidth", metadata.rawWidth);
+    metadata.rawHeight = value.value("rawHeight", metadata.rawHeight);
+    metadata.visibleWidth = value.value("visibleWidth", metadata.visibleWidth);
+    metadata.visibleHeight = value.value("visibleHeight", metadata.visibleHeight);
+    metadata.leftMargin = value.value("leftMargin", metadata.leftMargin);
+    metadata.topMargin = value.value("topMargin", metadata.topMargin);
+    metadata.orientation = value.value("orientation", metadata.orientation);
+    metadata.bitDepth = value.value("bitDepth", metadata.bitDepth);
+    metadata.cfaPattern = CfaPatternFromString(value.value("cfaPattern", std::string("Unknown")));
+    metadata.pixelLayout = RawPixelLayoutFromString(value.value("pixelLayout", std::string("Unknown")));
+    metadata.isDng = value.value("isDng", metadata.isDng);
+    metadata.dngTypeStatus = value.value("dngTypeStatus", metadata.dngTypeStatus);
+    metadata.linearChannels = value.value("linearChannels", metadata.linearChannels);
+    metadata.linearSampleFormat = RawSampleFormatFromString(value.value("linearSampleFormat", std::string("Unknown")));
+    metadata.mosaiced = value.value("mosaiced", metadata.mosaiced);
+    if (metadata.pixelLayout == Raw::RawPixelLayout::Unknown && metadata.mosaiced) {
+        metadata.pixelLayout = Raw::RawPixelLayout::MosaicBayer;
+    }
+    metadata.blackLevel = value.value("blackLevel", metadata.blackLevel);
+    metadata.whiteLevel = value.value("whiteLevel", metadata.whiteLevel);
+    metadata.blackLevelSource = value.value("blackLevelSource", metadata.blackLevelSource);
+    metadata.whiteLevelSource = value.value("whiteLevelSource", metadata.whiteLevelSource);
+    metadata.whiteBalanceSource = value.value("whiteBalanceSource", metadata.whiteBalanceSource);
+    metadata.cameraMatrixSource = value.value("cameraMatrixSource", metadata.cameraMatrixSource);
+    metadata.rawMinimum = value.value("rawMinimum", metadata.rawMinimum);
+    metadata.rawMaximum = value.value("rawMaximum", metadata.rawMaximum);
+    metadata.defaultWhiteClipPercent = value.value("defaultWhiteClipPercent", metadata.defaultWhiteClipPercent);
+    metadata.hasCameraMatrix = value.value("hasCameraMatrix", metadata.hasCameraMatrix);
+    metadata.hasDngAsShotNeutral = value.value("hasDngAsShotNeutral", metadata.hasDngAsShotNeutral);
+    metadata.hasDngColorMatrix1 = value.value("hasDngColorMatrix1", metadata.hasDngColorMatrix1);
+    metadata.hasDngColorMatrix2 = value.value("hasDngColorMatrix2", metadata.hasDngColorMatrix2);
+    metadata.hasDngForwardMatrix1 = value.value("hasDngForwardMatrix1", metadata.hasDngForwardMatrix1);
+    metadata.hasDngForwardMatrix2 = value.value("hasDngForwardMatrix2", metadata.hasDngForwardMatrix2);
+    metadata.dngIlluminant1 = value.value("dngIlluminant1", metadata.dngIlluminant1);
+    metadata.dngIlluminant2 = value.value("dngIlluminant2", metadata.dngIlluminant2);
+    metadata.dngCompression = value.value("dngCompression", metadata.dngCompression);
+    metadata.dngPhotometricInterpretation = value.value("dngPhotometricInterpretation", metadata.dngPhotometricInterpretation);
+    metadata.dngCfaLayout = value.value("dngCfaLayout", metadata.dngCfaLayout);
+    metadata.hasDngAnalogBalance = value.value("hasDngAnalogBalance", metadata.hasDngAnalogBalance);
+    metadata.hasDngCameraCalibration1 = value.value("hasDngCameraCalibration1", metadata.hasDngCameraCalibration1);
+    metadata.hasDngCameraCalibration2 = value.value("hasDngCameraCalibration2", metadata.hasDngCameraCalibration2);
+    metadata.dngBaselineExposure = value.value("dngBaselineExposure", metadata.dngBaselineExposure);
+    metadata.hasDngBaselineExposure = value.value("hasDngBaselineExposure", metadata.hasDngBaselineExposure);
+    metadata.dngGainMapCount = value.value("dngGainMapCount", metadata.dngGainMapCount);
+    metadata.dngUnsupportedOpcodeCount = value.value("dngUnsupportedOpcodeCount", metadata.dngUnsupportedOpcodeCount);
+    metadata.uploadFormat = value.value("uploadFormat", metadata.uploadFormat);
+    metadata.error = value.value("error", metadata.error);
+    const auto copyArray = [](const nlohmann::json& arrayJson, auto& target) {
+        if (!arrayJson.is_array()) return;
+        for (std::size_t i = 0; i < target.size() && i < arrayJson.size(); ++i) {
+            target[i] = arrayJson[i].get<float>();
+        }
+    };
+    copyArray(value.value("perChannelBlack", nlohmann::json::array()), metadata.perChannelBlack);
+    copyArray(value.value("cameraWhiteBalance", nlohmann::json::array()), metadata.cameraWhiteBalance);
+    copyArray(value.value("daylightWhiteBalance", nlohmann::json::array()), metadata.daylightWhiteBalance);
+    copyArray(value.value("cameraToSrgb", value.value("cameraToXyz", nlohmann::json::array())), metadata.cameraToSrgb);
+    copyArray(value.value("dngAsShotNeutral", nlohmann::json::array()), metadata.dngAsShotNeutral);
+    copyArray(value.value("dngColorMatrix1", nlohmann::json::array()), metadata.dngColorMatrix1);
+    copyArray(value.value("dngColorMatrix2", nlohmann::json::array()), metadata.dngColorMatrix2);
+    copyArray(value.value("dngForwardMatrix1", nlohmann::json::array()), metadata.dngForwardMatrix1);
+    copyArray(value.value("dngForwardMatrix2", nlohmann::json::array()), metadata.dngForwardMatrix2);
+    copyArray(value.value("dngBlackLevelPattern", nlohmann::json::array()), metadata.dngBlackLevelPattern);
+    copyArray(value.value("dngAnalogBalance", nlohmann::json::array()), metadata.dngAnalogBalance);
+    copyArray(value.value("dngCameraCalibration1", nlohmann::json::array()), metadata.dngCameraCalibration1);
+    copyArray(value.value("dngCameraCalibration2", nlohmann::json::array()), metadata.dngCameraCalibration2);
+    const auto copyIntArray = [](const nlohmann::json& arrayJson, auto& target) {
+        if (!arrayJson.is_array()) return;
+        for (std::size_t i = 0; i < target.size() && i < arrayJson.size(); ++i) {
+            target[i] = arrayJson[i].get<int>();
+        }
+    };
+    copyIntArray(value.value("dngCfaRepeatPatternDim", nlohmann::json::array()), metadata.dngCfaRepeatPatternDim);
+    copyIntArray(value.value("dngCfaPattern", nlohmann::json::array()), metadata.dngCfaPattern);
+    copyIntArray(value.value("dngCfaPlaneColor", nlohmann::json::array()), metadata.dngCfaPlaneColor);
+    copyIntArray(value.value("dngBlackLevelRepeatDim", nlohmann::json::array()), metadata.dngBlackLevelRepeatDim);
+    const nlohmann::json warnings = value.value("warnings", nlohmann::json::array());
+    if (warnings.is_array()) {
+        for (const nlohmann::json& warning : warnings) {
+            if (warning.is_string()) metadata.warnings.push_back(warning.get<std::string>());
+        }
+    }
+    return metadata;
+}
+
+nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
+    return {
+        { "exposureStops", settings.exposureStops },
+        { "whiteBalanceMode", WhiteBalanceModeToString(settings.whiteBalanceMode) },
+        { "manualWhiteBalance", settings.manualWhiteBalance },
+        { "overrideBlackLevel", settings.overrideBlackLevel },
+        { "blackLevelOverride", settings.blackLevelOverride },
+        { "overrideWhiteLevel", settings.overrideWhiteLevel },
+        { "whiteLevelOverride", settings.whiteLevelOverride },
+        { "highlightMode", HighlightModeToString(settings.highlightMode) },
+        { "highlightStrength", settings.highlightStrength },
+        { "highlightThreshold", settings.highlightThreshold },
+        { "demosaicMethod", DemosaicMethodToString(settings.demosaicMethod) },
+        { "cameraTransformEnabled", settings.cameraTransformEnabled },
+        { "cameraTransformSource", RawCameraTransformSourceToString(settings.cameraTransformSource) },
+        { "debugView", RawDebugViewToString(settings.debugView) },
+        { "debugBypassCameraTransform", settings.debugBypassCameraTransform },
+        { "debugTransposeCameraMatrix", settings.debugTransposeCameraMatrix },
+        { "rotationDegrees", settings.rotationDegrees },
+        { "rotateToFitFrame", settings.rotateToFitFrame },
+        { "mosaicDenoiseEnabled", settings.mosaicDenoise.enabled },
+        { "mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression },
+        { "mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold },
+        { "mosaicDenoiseLumaStrength", settings.mosaicDenoise.lumaStrength },
+        { "mosaicDenoiseChromaStrength", settings.mosaicDenoise.chromaStrength },
+        { "mosaicDenoiseRadius", settings.mosaicDenoise.radius },
+        { "mosaicDenoiseEdgeProtection", settings.mosaicDenoise.edgeProtection },
+        { "mosaicDenoiseIterations", settings.mosaicDenoise.iterations }
+    };
+}
+
+Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
+    Raw::RawDevelopSettings settings;
+    if (!value.is_object()) return settings;
+    settings.exposureStops = value.value("exposureStops", settings.exposureStops);
+    settings.whiteBalanceMode = WhiteBalanceModeFromString(value.value("whiteBalanceMode", std::string("AsShot")));
+    settings.overrideBlackLevel = value.value("overrideBlackLevel", settings.overrideBlackLevel);
+    settings.blackLevelOverride = value.value("blackLevelOverride", settings.blackLevelOverride);
+    settings.overrideWhiteLevel = value.value("overrideWhiteLevel", settings.overrideWhiteLevel);
+    settings.whiteLevelOverride = value.value("whiteLevelOverride", settings.whiteLevelOverride);
+    settings.highlightMode = HighlightModeFromString(value.value("highlightMode", std::string("Off")));
+    settings.highlightStrength = value.value("highlightStrength", settings.highlightStrength);
+    settings.highlightThreshold = value.value("highlightThreshold", settings.highlightThreshold);
+    settings.demosaicMethod = DemosaicMethodFromString(value.value("demosaicMethod", std::string("Bilinear")));
+    settings.cameraTransformEnabled = value.value("cameraTransformEnabled", settings.cameraTransformEnabled);
+    settings.cameraTransformSource = RawCameraTransformSourceFromString(value.value("cameraTransformSource", std::string("DngAuto")));
+    settings.debugView = RawDebugViewFromString(value.value("debugView", std::string("FinalOutput")));
+    if (value.value("debugShowNormalizedMosaic", false)) {
+        settings.debugView = Raw::RawDebugView::NormalizedMosaic;
+    }
+    settings.debugBypassCameraTransform = value.value("debugBypassCameraTransform", settings.debugBypassCameraTransform);
+    settings.debugTransposeCameraMatrix = value.value("debugTransposeCameraMatrix", settings.debugTransposeCameraMatrix);
+    settings.rotationDegrees = value.value("rotationDegrees", settings.rotationDegrees);
+    settings.rotateToFitFrame = value.value("rotateToFitFrame", settings.rotateToFitFrame);
+    settings.mosaicDenoise.enabled = value.value("mosaicDenoiseEnabled", settings.mosaicDenoise.enabled);
+    settings.mosaicDenoise.hotPixelSuppression = value.value("mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression);
+    settings.mosaicDenoise.hotPixelThreshold = value.value("mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold);
+    settings.mosaicDenoise.lumaStrength = value.value("mosaicDenoiseLumaStrength", settings.mosaicDenoise.lumaStrength);
+    settings.mosaicDenoise.chromaStrength = value.value("mosaicDenoiseChromaStrength", settings.mosaicDenoise.chromaStrength);
+    settings.mosaicDenoise.radius = value.value("mosaicDenoiseRadius", settings.mosaicDenoise.radius);
+    settings.mosaicDenoise.edgeProtection = value.value("mosaicDenoiseEdgeProtection", settings.mosaicDenoise.edgeProtection);
+    settings.mosaicDenoise.iterations = value.value("mosaicDenoiseIterations", settings.mosaicDenoise.iterations);
+    settings.mosaicDenoise.hotPixelThreshold = std::clamp(settings.mosaicDenoise.hotPixelThreshold, 0.001f, 1.0f);
+    settings.mosaicDenoise.lumaStrength = std::clamp(settings.mosaicDenoise.lumaStrength, 0.0f, 1.0f);
+    settings.mosaicDenoise.chromaStrength = std::clamp(settings.mosaicDenoise.chromaStrength, 0.0f, 1.0f);
+    settings.mosaicDenoise.radius = std::clamp(settings.mosaicDenoise.radius, 1, 4);
+    settings.mosaicDenoise.edgeProtection = std::clamp(settings.mosaicDenoise.edgeProtection, 0.0f, 1.0f);
+    settings.mosaicDenoise.iterations = std::clamp(settings.mosaicDenoise.iterations, 1, 2);
+    const nlohmann::json wb = value.value("manualWhiteBalance", nlohmann::json::array());
+    if (wb.is_array()) {
+        for (std::size_t i = 0; i < settings.manualWhiteBalance.size() && i < wb.size(); ++i) {
+            settings.manualWhiteBalance[i] = wb[i].get<float>();
+        }
+    }
+    return settings;
 }
 
 std::string ScopeKindToString(ScopeKind kind) {
@@ -269,6 +652,18 @@ MixBlendMode MixBlendModeFromString(const std::string& value) {
     return MixBlendMode::Normal;
 }
 
+std::string ImageToMaskKindToString(ImageToMaskKind kind) {
+    switch (kind) {
+        case ImageToMaskKind::Luminance: return "Luminance";
+    }
+    return "Luminance";
+}
+
+ImageToMaskKind ImageToMaskKindFromString(const std::string& value) {
+    (void)value;
+    return ImageToMaskKind::Luminance;
+}
+
 std::vector<unsigned char> ReadBinaryJson(const nlohmann::json& value) {
     if (!value.is_binary()) {
         return {};
@@ -298,6 +693,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
     nlohmann::json graphJson = nlohmann::json::object();
     graphJson["version"] = 3;
     graphJson["nextNodeId"] = graph.GetNextNodeId();
+    graphJson["nextGroupId"] = graph.GetNextGroupId();
     graphJson["selectedNodeId"] = graph.GetSelectedNodeId();
     graphJson["activeImageNodeId"] = graph.GetActiveImageNodeId();
     graphJson["outputNodeId"] = graph.GetOutputNodeId();
@@ -319,7 +715,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["maskSettings"] = SerializeMaskSettings(node.maskSettings);
         item["maskUtilityKind"] = MaskUtilityKindToString(node.maskUtilityKind);
         item["maskUtilitySettings"] = SerializeMaskUtilitySettings(node.maskUtilitySettings);
-        item["imageToMaskKind"] = "Luminance";
+        item["imageToMaskKind"] = ImageToMaskKindToString(node.imageToMaskKind);
         item["imageToMaskSettings"] = SerializeImageToMaskSettings(node.imageToMaskSettings);
         item["imageGeneratorKind"] = ImageGeneratorKindToString(node.imageGeneratorKind);
         item["imageGeneratorSettings"] = SerializeImageGeneratorSettings(node.imageGeneratorSettings);
@@ -332,7 +728,16 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["width"] = node.image.width;
             item["height"] = node.image.height;
             item["channels"] = node.image.channels;
+            item["originalChannels"] = node.image.originalChannels;
             item["pngBytes"] = nlohmann::json::binary(node.image.pngBytes);
+        } else if (node.kind == NodeKind::RawSource) {
+            item["label"] = node.rawSource.label;
+            item["sourcePath"] = node.rawSource.sourcePath;
+            item["rawMetadata"] = SerializeRawMetadata(node.rawSource.metadata);
+        } else if (node.kind == NodeKind::RawNeuralDenoise) {
+            item["neuralDenoiseSettings"] = NeuralDenoise::SerializeSettings(node.rawNeuralDenoise.settings);
+        } else if (node.kind == NodeKind::RawDevelop) {
+            item["rawSettings"] = SerializeRawSettings(node.rawDevelop.settings);
         }
 
         nodesJson.push_back(std::move(item));
@@ -349,6 +754,19 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         });
     }
     graphJson["links"] = std::move(linksJson);
+
+    nlohmann::json groupsJson = nlohmann::json::array();
+    for (const NodeGroup& group : graph.GetGroups()) {
+        groupsJson.push_back({
+            { "id", group.id },
+            { "title", group.title },
+            { "x", group.position.x },
+            { "y", group.position.y },
+            { "width", group.size.x },
+            { "height", group.size.y }
+        });
+    }
+    graphJson["groups"] = std::move(groupsJson);
 
     root["nodeGraph"] = std::move(graphJson);
     return root;
@@ -413,7 +831,25 @@ void DeserializeGraphPayload(
             node.image.label = item.value("label", node.title.empty() ? std::string("Image") : node.title);
             node.image.sourcePath = item.value("sourcePath", std::string());
             DecodePngBytes(ReadBinaryJson(item.value("pngBytes", nlohmann::json())), node.image);
+            node.image.originalChannels = item.value("originalChannels", node.image.originalChannels);
             if (node.title.empty()) node.title = node.image.label.empty() ? "Image" : node.image.label;
+        } else if (kind == "RawSource") {
+            node.kind = NodeKind::RawSource;
+            node.rawSource.label = item.value("label", node.title.empty() ? std::string("RAW") : node.title);
+            node.rawSource.sourcePath = item.value("sourcePath", std::string());
+            node.rawSource.metadata = DeserializeRawMetadata(item.value("rawMetadata", nlohmann::json::object()));
+            if (node.rawSource.metadata.sourcePath.empty()) {
+                node.rawSource.metadata.sourcePath = node.rawSource.sourcePath;
+            }
+            if (node.title.empty()) node.title = node.rawSource.label.empty() ? "RAW" : node.rawSource.label;
+        } else if (kind == "RawNeuralDenoise") {
+            node.kind = NodeKind::RawNeuralDenoise;
+            node.rawNeuralDenoise.settings = NeuralDenoise::DeserializeSettings(item.value("neuralDenoiseSettings", nlohmann::json::object()));
+            if (node.title.empty()) node.title = "RAW/CFA Neural Denoise";
+        } else if (kind == "RawDevelop") {
+            node.kind = NodeKind::RawDevelop;
+            node.rawDevelop.settings = DeserializeRawSettings(item.value("rawSettings", nlohmann::json::object()));
+            if (node.title.empty()) node.title = "RAW Develop";
         } else if (kind == "Output") {
             node.kind = NodeKind::Output;
             if (node.title.empty()) node.title = "Output";
@@ -457,7 +893,7 @@ void DeserializeGraphPayload(
             }
         } else if (kind == "ImageToMask") {
             node.kind = NodeKind::ImageToMask;
-            node.imageToMaskKind = ImageToMaskKind::Luminance;
+            node.imageToMaskKind = ImageToMaskKindFromString(item.value("imageToMaskKind", std::string("Luminance")));
             node.imageToMaskSettings = DeserializeImageToMaskSettings(item.value("imageToMaskSettings", nlohmann::json::object()));
             if (node.title.empty()) {
                 node.title = "Luminance Mask";
@@ -474,6 +910,16 @@ void DeserializeGraphPayload(
                     case ImageGeneratorKind::Circle: node.title = "Circle"; break;
                     case ImageGeneratorKind::Text: node.title = "Text"; break;
                 }
+            }
+        } else if (kind == "ChannelSplit") {
+            node.kind = NodeKind::ChannelSplit;
+            if (node.title.empty()) {
+                node.title = "Channel Split";
+            }
+        } else if (kind == "ChannelCombine") {
+            node.kind = NodeKind::ChannelCombine;
+            if (node.title.empty()) {
+                node.title = "Channel Combine";
             }
         } else {
             node.kind = NodeKind::Layer;
@@ -537,6 +983,24 @@ void DeserializeGraphPayload(
     if (graph.GetLinks().empty() && graph.GetActiveImageNodeId() > 0) {
         graph.RebuildLinks();
     }
+
+    const nlohmann::json groupsJson = graphJson.value("groups", nlohmann::json::array());
+    int maxGroupId = 0;
+    if (groupsJson.is_array()) {
+        for (const nlohmann::json& item : groupsJson) {
+            if (!item.is_object()) continue;
+            NodeGroup group;
+            group.id = item.value("id", 0);
+            group.title = item.value("title", "New Group");
+            group.position.x = item.value("x", 0.0f);
+            group.position.y = item.value("y", 0.0f);
+            group.size.x = item.value("width", 200.0f);
+            group.size.y = item.value("height", 150.0f);
+            maxGroupId = std::max(maxGroupId, group.id);
+            graph.GetGroups().push_back(std::move(group));
+        }
+    }
+    graph.SetNextGroupId(std::max(maxGroupId + 1, graphJson.value("nextGroupId", maxGroupId + 1)));
 
     graph.EnsureOutputNode();
     graph.SyncLayerNodes(layerCount);

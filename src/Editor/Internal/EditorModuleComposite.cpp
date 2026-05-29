@@ -1,6 +1,7 @@
 #include "Editor/EditorModule.h"
 
 #include "Library/LibraryManager.h"
+#include "Raw/RawLoader.h"
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
@@ -244,6 +245,9 @@ const EditorModule::CompositeSceneItem* EditorModule::FindCompositeSceneItem(int
 }
 
 bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition) {
+    if (Raw::RawLoader::IsRawPath(path)) {
+        return AddGraphRawChainFromFile(path, sourcePosition);
+    }
     const int completedBefore = GetCompletedChainCount();
     if (!AddImageNodeFromFile(path, sourcePosition)) {
         return false;
@@ -258,6 +262,45 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
 
     std::string errorMessage;
     if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
+        return false;
+    }
+    if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
+        EnsureCompositeNode();
+    }
+    EnsureCompositeSceneState(m_LastCompositeCanvasSize);
+    MoveCompositeOutputToFront(outputNodeId);
+    m_CompositeSelectedOutputNodeId = outputNodeId;
+    return true;
+}
+
+bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition) {
+    const int completedBefore = GetCompletedChainCount();
+    if (!AddRawSourceNodeFromFile(path, sourcePosition)) {
+        return false;
+    }
+
+    const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
+    if (sourceNodeId <= 0) {
+        return false;
+    }
+
+    AddRawDevelopNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + 250.0f, sourcePosition.y });
+    const int developNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddLayerNodeAt(LayerType::ToneCurve, EditorNodeGraph::Vec2{ sourcePosition.x + 500.0f, sourcePosition.y });
+    const int toneNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + 750.0f, sourcePosition.y });
+    const int viewNodeId = m_NodeGraph.GetSelectedNodeId();
+    EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 1000.0f, sourcePosition.y });
+    if (developNodeId <= 0 || toneNodeId <= 0 || viewNodeId <= 0 || !outputNode) {
+        return false;
+    }
+    const int outputNodeId = outputNode->id;
+
+    std::string errorMessage;
+    if (!ConnectGraphSockets(sourceNodeId, EditorNodeGraph::kRawOutputSocketId, developNodeId, EditorNodeGraph::kRawInputSocketId, &errorMessage) ||
+        !ConnectGraphSockets(developNodeId, EditorNodeGraph::kImageOutputSocketId, toneNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) ||
+        !ConnectGraphSockets(toneNodeId, EditorNodeGraph::kImageOutputSocketId, viewNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) ||
+        !ConnectGraphSockets(viewNodeId, EditorNodeGraph::kImageOutputSocketId, outputNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage)) {
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -609,7 +652,9 @@ std::vector<unsigned char> EditorModule::GetCompositePixelsForOutputNode(int out
     int sourceH = 0;
     int sourceCh = 4;
 
-    if (chainIt != m_CachedCompletedChains.end()) {
+    if (TryResolveReferenceSourcePixelsForOutput(outputNodeId, sourcePixels, sourceW, sourceH, sourceCh)) {
+        // Use the output's reference canvas when channels come from multiple sources.
+    } else if (chainIt != m_CachedCompletedChains.end()) {
         const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
         if (sourceNode &&
             sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
@@ -718,7 +763,11 @@ bool EditorModule::CompletedChainSourceUsesScalableGenerator(int outputNodeId) c
         return false;
     }
 
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
+    int sourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
+    if (sourceNodeId <= 0) {
+        sourceNodeId = chainIt->info.sourceNodeId;
+    }
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
     if (!sourceNode || sourceNode->kind != EditorNodeGraph::NodeKind::ImageGenerator) {
         return false;
     }
@@ -740,7 +789,11 @@ bool EditorModule::CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) co
         return false;
     }
 
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
+    int sourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
+    if (sourceNodeId <= 0) {
+        sourceNodeId = chainIt->info.sourceNodeId;
+    }
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
     if (!sourceNode || sourceNode->kind != EditorNodeGraph::NodeKind::ImageGenerator) {
         return false;
     }

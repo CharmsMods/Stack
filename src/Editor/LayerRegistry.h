@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 enum class LayerType {
@@ -15,6 +16,11 @@ enum class LayerType {
     Sharpen,
     ColorGrade,
     HDR,
+    ToneMapper,
+    ToneCurve,
+    ShadowsHighlights,
+    ToneEqualizer,
+    ViewTransform,
     Crop,
     Rotate,
     Flip,
@@ -44,6 +50,8 @@ enum class LayerType {
     ImageBreaks,
     AnalogVideo,
     BilateralFilter,
+    SceneDenoise,
+    LinearRgbNeuralDenoise,
     NonLocalMeansDenoise,
     MedianDenoise,
     MeanDenoise,
@@ -59,6 +67,22 @@ enum class LayerType {
     TextOverlay
 };
 
+enum class LayerLifecycleStatus {
+    Stable,
+    NeedsFix,
+    Experimental,
+    Deprecated,
+    Hidden
+};
+
+enum class LayerChannelPolicy {
+    ChannelSafe,
+    ChannelUsefulWithWarning,
+    FullImagePreferred,
+    FullImageOnly,
+    ReworkBeforeExpose
+};
+
 struct LayerDescriptor {
     LayerType type;
     const char* typeId;
@@ -68,6 +92,42 @@ struct LayerDescriptor {
     const char* description;
     std::vector<const char*> legacyTypeIds;
     std::function<std::shared_ptr<LayerBase>()> create;
+    LayerLifecycleStatus lifecycleStatus = LayerLifecycleStatus::Stable;
+    LayerChannelPolicy channelPolicy = LayerChannelPolicy::FullImagePreferred;
+    bool visibleInNodeBrowser = true;
+    const char* lifecycleNote = "";
+    const char* channelNote = "";
+    std::vector<const char*> tags;
+
+    LayerDescriptor(
+        LayerType type,
+        const char* typeId,
+        const char* displayName,
+        const char* libraryDisplayName,
+        const char* categoryName,
+        const char* description,
+        std::vector<const char*> legacyTypeIds,
+        std::function<std::shared_ptr<LayerBase>()> create,
+        LayerLifecycleStatus lifecycleStatus = LayerLifecycleStatus::Stable,
+        LayerChannelPolicy channelPolicy = LayerChannelPolicy::FullImagePreferred,
+        bool visibleInNodeBrowser = true,
+        const char* lifecycleNote = "",
+        const char* channelNote = "",
+        std::vector<const char*> tags = {})
+        : type(type),
+          typeId(typeId),
+          displayName(displayName),
+          libraryDisplayName(libraryDisplayName),
+          categoryName(categoryName),
+          description(description),
+          legacyTypeIds(std::move(legacyTypeIds)),
+          create(std::move(create)),
+          lifecycleStatus(lifecycleStatus),
+          channelPolicy(channelPolicy),
+          visibleInNodeBrowser(visibleInNodeBrowser),
+          lifecycleNote(lifecycleNote),
+          channelNote(channelNote),
+          tags(std::move(tags)) {}
 };
 
 namespace LayerRegistry {
@@ -82,6 +142,9 @@ std::map<std::string, std::vector<const LayerDescriptor*>> GetDescriptorsByCateg
 
 std::string GetDisplayNameFromTypeId(const std::string& typeId);
 std::string GetLibraryDisplayNameFromTypeId(const std::string& typeId);
+const char* LifecycleStatusLabel(LayerLifecycleStatus status);
+const char* ChannelPolicyLabel(LayerChannelPolicy policy);
+bool ShouldShowInNodeBrowser(const LayerDescriptor& descriptor);
 
 bool ValidateRegistry(std::vector<std::string>* errors = nullptr);
 

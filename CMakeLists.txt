@@ -19,6 +19,7 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
+option(STACK_ENABLE_LIBRAW "Enable LibRaw-backed Sony ARW RAW loading" ON)
 
 set(STACK_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps")
 if (EXISTS "${STACK_DEPS_DIR}/glfw-src/CMakeLists.txt")
@@ -48,6 +49,39 @@ FetchContent_Declare(
     GIT_TAG docking
 )
 FetchContent_MakeAvailable(imgui)
+
+# 3. LibRaw (RAW file unpacking / metadata only)
+if (STACK_ENABLE_LIBRAW)
+    message(STATUS "Fetching LibRaw...")
+    FetchContent_Declare(
+        libraw
+        GIT_REPOSITORY https://github.com/LibRaw/LibRaw.git
+        GIT_TAG b860248a89d9082b8e0a1e202e516f46af9adb29
+    )
+    FetchContent_MakeAvailable(libraw)
+    FetchContent_GetProperties(libraw)
+    file(GLOB_RECURSE STACK_LIBRAW_SOURCES CONFIGURE_DEPENDS
+        "${libraw_SOURCE_DIR}/src/*.cpp"
+    )
+    list(FILTER STACK_LIBRAW_SOURCES EXCLUDE REGEX "_ph\\.cpp$")
+    add_library(stack_libraw SHARED ${STACK_LIBRAW_SOURCES})
+    set_target_properties(stack_libraw PROPERTIES
+        OUTPUT_NAME libraw
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libraw-import"
+        ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/libraw-import"
+        ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/libraw-import"
+    )
+    target_include_directories(stack_libraw PUBLIC
+        "${libraw_SOURCE_DIR}"
+    )
+    target_compile_definitions(stack_libraw PRIVATE LIBRAW_BUILDLIB)
+    if (MSVC)
+        target_compile_options(stack_libraw PRIVATE /wd4244 /wd4267 /wd4996)
+    endif()
+endif()
 
 # (REMOVED FETCHCONTENT FOR JSON)
 
@@ -100,6 +134,10 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
     "src/*.h"
 )
 
+# Legacy aggregate layer implementations were replaced by split, registry-backed
+# nodes. Keep the files in the tree for migration reference, but do not compile them.
+list(FILTER SRC_FILES EXCLUDE REGEX "/src/Editor/Layers/(AdjustmentsLayer|BlurLayer|CompressionLayer|CorruptionLayer|CropTransformLayer|DenoisingLayer|DitherLayer|EdgeEffectsLayer|HeatwaveLayer)\\.(cpp|h)$")
+
 add_executable(${PROJECT_NAME} ${SRC_FILES})
 add_dependencies(${PROJECT_NAME} BakeAssets BakeTabIcons BakeFonts)
 
@@ -114,6 +152,28 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     imgui_core
 )
 
+if (STACK_ENABLE_LIBRAW)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_ENABLE_LIBRAW=1)
+    target_link_libraries(${PROJECT_NAME} PRIVATE stack_libraw)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/THIRD_PARTY_NOTICES.md"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${libraw_SOURCE_DIR}/LICENSE.LGPL"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-LGPL-2.1.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${libraw_SOURCE_DIR}/LICENSE.CDDL"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-CDDL-1.0.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${libraw_SOURCE_DIR}/COPYRIGHT"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-COPYRIGHT.txt"
+        VERBATIM
+    )
+endif()
+
 # Link OpenGL based on platform
 if (WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32)
@@ -122,5 +182,3 @@ elseif (APPLE)
 elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
-
-

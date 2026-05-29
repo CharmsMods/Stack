@@ -4,10 +4,24 @@
 #include "Renderer/FullscreenQuad.h"
 #include "Editor/Layers/LayerBase.h"
 #include "Renderer/MaskRenderTypes.h"
+#include "Raw/RawGpuPipeline.h"
 #include <cstddef>
 #include <unordered_map>
 #include <vector>
 #include <memory>
+
+struct RenderTextureStats {
+    bool valid = false;
+    float minRgb = 0.0f;
+    float maxRgb = 0.0f;
+    float minLuma = 0.0f;
+    float maxLuma = 0.0f;
+    float p01Luma = 0.0f;
+    float p50Luma = 0.0f;
+    float p99Luma = 0.0f;
+    float hdrPixelPercent = 0.0f;
+    float displayClipPercent = 0.0f;
+};
 
 // The sequential rendering pipeline. 
 // Enforces the core architectural rule: Layer N+1 only sees Layer N's output.
@@ -37,16 +51,20 @@ public:
     // Returns the final output texture ID for display in the ImGui viewport
     unsigned int GetOutputTexture() const { return m_OutputTexture; }
     unsigned int GetSourceTexture() const { return m_SourceTexture; }
+    unsigned int GetCompareSourceTexture() const { return m_GraphSourceTexture != 0 ? m_GraphSourceTexture : m_SourceTexture; }
     int GetCanvasWidth() const { return m_Width; }
     int GetCanvasHeight() const { return m_Height; }
     bool HasSourceImage() const { return m_SourceTexture != 0; }
     
     // Read final output pixels (usually for thumbnails)
     std::vector<unsigned char> GetOutputPixels(int& outW, int& outH);
+    // Read compare source pixels
+    std::vector<unsigned char> GetCompareSourcePixels(int& outW, int& outH);
     // Read original source pixels
     std::vector<unsigned char> GetSourcePixels(int& outW, int& outH);
     // Read downsampled pixels for scopes (fast)
     std::vector<unsigned char> GetScopesPixels(int& outW, int& outH);
+    RenderTextureStats GetOutputTextureStats();
 
     // Read-only access to raw source pixels
     const std::vector<unsigned char>& GetSourcePixelsRaw() const { return m_SourcePixels; }
@@ -74,27 +92,37 @@ private:
     unsigned int m_PongFBO;
     unsigned int m_OutputTexture;   // Points to whichever is the final result
     unsigned int m_ExternalOutputTexture;
+    unsigned int m_GraphSourceTexture;
     unsigned int m_MaskProgram;
     unsigned int m_MaskBlendProgram;
     unsigned int m_MixProgram;
     unsigned int m_MaskUtilityProgram;
     unsigned int m_ImageToMaskProgram;
     unsigned int m_ImageGeneratorProgram;
+    unsigned int m_ChannelSplitProgram;
+    unsigned int m_ChannelCombineProgram;
     std::vector<unsigned char> m_SourcePixels;
     std::size_t m_SourceFingerprint = 0;
-    std::unordered_map<int, CachedGraphTexture> m_GraphImageCache;
-    std::unordered_map<int, CachedGraphTexture> m_GraphMaskCache;
-
+    std::unordered_map<std::string, CachedGraphTexture> m_GraphImageCache;
+    std::unordered_map<std::string, CachedGraphTexture> m_GraphMaskCache;
+    std::unordered_map<int, Raw::RawGpuPipeline> m_RawPipelines;
+    std::unordered_map<int, Raw::RawImageData> m_RawDataCache;
+    std::unordered_map<int, std::string> m_RawDataCachePaths;
+ 
     void CleanupFBOs();
-    void DestroyGraphCache(std::unordered_map<int, CachedGraphTexture>& cache);
+    void DestroyGraphCache(std::unordered_map<std::string, CachedGraphTexture>& cache);
     void InvalidateGraphCaches();
     void EnsureMaskPrograms();
     void EnsureMixProgram();
     void EnsureUtilityPrograms();
+    void EnsureChannelPrograms();
     unsigned int GenerateMaskTexture(const RenderMaskSource& mask);
     unsigned int GenerateImageTexture(const RenderGraphNode& node);
     void RenderMaskUtility(unsigned int inputMask, const RenderGraphNode& node, unsigned int targetFBO);
     void RenderImageToMask(unsigned int inputImage, const RenderGraphNode& node, unsigned int targetFBO);
     void RenderMaskBlend(unsigned int originalTexture, unsigned int processedTexture, unsigned int maskTexture, unsigned int targetFBO);
     void RenderMixBlend(unsigned int textureA, unsigned int textureB, unsigned int factorTexture, float factor, RenderMixBlendMode mode, unsigned int targetFBO);
+    void RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO);
+    void RenderChannelCombine(unsigned int texR, unsigned int texG, unsigned int texB, unsigned int texA,
+                            bool hasR, bool hasG, bool hasB, bool hasA, unsigned int targetFBO);
 };

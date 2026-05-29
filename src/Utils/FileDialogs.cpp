@@ -18,7 +18,11 @@ std::string OpenImageFileDialog(const char* title) {
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = nullptr;
+#ifdef STACK_ENABLE_LIBRAW
+    ofn.lpstrFilter = "Image / RAW Files\0*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif;*.arw;*.ARW;*.dng;*.DNG\0All Files\0*.*\0";
+#else
     ofn.lpstrFilter = "Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif\0All Files\0*.*\0";
+#endif
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;

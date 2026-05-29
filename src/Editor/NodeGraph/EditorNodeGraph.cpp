@@ -2,9 +2,22 @@
 #include "EditorNodeGraphDefinitions.h"
 
 #include <algorithm>
+#include <functional>
 
 namespace EditorNodeGraph {
 namespace {
+
+bool IsChannelSocketId(const std::string& socketId) {
+    return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
+}
+
+const char* ChannelLabel(const std::string& socketId) {
+    if (socketId == "r") return "R";
+    if (socketId == "g") return "G";
+    if (socketId == "b") return "B";
+    if (socketId == "a") return "A";
+    return "";
+}
 
 Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
     Link link;
@@ -20,13 +33,16 @@ Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeI
 void Graph::Clear() {
     m_Nodes.clear();
     m_Links.clear();
+    m_Groups.clear();
     m_NextNodeId = 1;
+    m_NextGroupId = 1;
     m_SelectedNodeId = -1;
     m_SelectedNodeIds.clear();
     m_SelectedLink = {};
     m_HasSelectedLink = false;
     m_ActiveImageNodeId = -1;
     m_OutputNodeId = -1;
+    m_ForceOutputFourPins = false;
     TouchStructure();
 }
 
@@ -112,6 +128,42 @@ Node* Graph::AddImageNode(ImagePayload payload, Vec2 position) {
     node.kind = NodeKind::Image;
     node.position = position;
     node.image = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddRawSourceNode(RawSourcePayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawSource;
+    node.position = position;
+    node.rawSource = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawNeuralDenoise;
+    node.position = position;
+    node.rawNeuralDenoise = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddRawDevelopNode(RawDevelopPayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawDevelop;
+    node.position = position;
+    node.rawDevelop = std::move(payload);
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
     TouchStructure();
@@ -211,6 +263,28 @@ Node* Graph::AddPreviewNode(Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
     node.kind = NodeKind::Preview;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddChannelSplitNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::ChannelSplit;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddChannelCombineNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::ChannelCombine;
     node.position = position;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
@@ -323,6 +397,65 @@ const Node* Graph::FindNodeByLayerIndex(int layerIndex) const {
 }
 
 std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOnly) const {
+    if (node.kind == NodeKind::Output) {
+        bool useFourPins = m_ForceOutputFourPins;
+        if (!useFourPins) {
+            for (const Link& link : m_Links) {
+                if (link.toNodeId == node.id &&
+                    (IsChannelSocketId(link.toSocketId) ||
+                     (link.toSocketId == kImageInputSocketId && !ResolveSocketChannel(link.fromNodeId, link.fromSocketId).empty()))) {
+                    useFourPins = true;
+                    break;
+                }
+            }
+        }
+
+        std::vector<SocketDefinition> sockets;
+        auto add = [&](const char* id, SocketDirection direction, SocketType type, const char* label, bool optional, bool visible) {
+            if (visibleOnly && !visible) {
+                return;
+            }
+            sockets.push_back(SocketDefinition{ id, node.id, direction, type, label, optional, visible });
+        };
+
+        if (useFourPins) {
+            add("r", SocketDirection::Input, SocketType::Mask, "R", true, true);
+            add("g", SocketDirection::Input, SocketType::Mask, "G", true, true);
+            add("b", SocketDirection::Input, SocketType::Mask, "B", true, true);
+            add("a", SocketDirection::Input, SocketType::Mask, "A", true, true);
+            add(kImageInputSocketId, SocketDirection::Input, SocketType::Image, "Image", false, false);
+        } else {
+            add(kImageInputSocketId, SocketDirection::Input, SocketType::Image, "Image", false, true);
+            add("r", SocketDirection::Input, SocketType::Mask, "R", true, false);
+            add("g", SocketDirection::Input, SocketType::Mask, "G", true, false);
+            add("b", SocketDirection::Input, SocketType::Mask, "B", true, false);
+            add("a", SocketDirection::Input, SocketType::Mask, "A", true, false);
+        }
+        return sockets;
+    }
+
+    if (node.kind == NodeKind::ChannelSplit) {
+        std::vector<SocketDefinition> sockets = EditorNodeGraphDefinitions::BuildSockets(node, visibleOnly);
+        bool hasAlpha = true;
+        const Link* inputLink = FindAnyInputLink(node.id, kImageInputSocketId);
+        if (inputLink) {
+            const Node* upstreamNode = FindNode(inputLink->fromNodeId);
+            if (upstreamNode && upstreamNode->kind == NodeKind::Image) {
+                if (upstreamNode->image.originalChannels < 4) {
+                    hasAlpha = false;
+                }
+            }
+        }
+        if (!hasAlpha) {
+            for (SocketDefinition& socket : sockets) {
+                if (socket.id == "a") {
+                    socket.label = "A (Generated)";
+                }
+            }
+        }
+        return sockets;
+    }
+
     return EditorNodeGraphDefinitions::BuildSockets(node, visibleOnly);
 }
 
@@ -330,6 +463,20 @@ bool Graph::FindSocket(int nodeId, const std::string& socketId, SocketDefinition
     const Node* node = FindNode(nodeId);
     if (!node) {
         return false;
+    }
+    if (node->kind == NodeKind::Output && IsChannelSocketId(socketId)) {
+        if (outSocket) {
+            *outSocket = SocketDefinition{
+                socketId,
+                node->id,
+                SocketDirection::Input,
+                SocketType::Mask,
+                ChannelLabel(socketId),
+                true,
+                true
+            };
+        }
+        return true;
     }
     for (const SocketDefinition& socket : GetSockets(*node)) {
         if (socket.id == socketId) {
@@ -350,9 +497,124 @@ std::string Graph::DefaultOutputSocket(const Node& node) const {
     return EditorNodeGraphDefinitions::DefaultOutputSocket(node);
 }
 
+std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId) const {
+    std::unordered_set<int> visited;
+    std::function<std::string(int, const std::string&)> resolve = [&](int currentNodeId, const std::string& currentSocketId) -> std::string {
+        if (IsChannelSocketId(currentSocketId)) {
+            return currentSocketId;
+        }
+        if (!visited.insert(currentNodeId).second) {
+            return {};
+        }
+
+        const Node* node = FindNode(currentNodeId);
+        if (!node) {
+            return {};
+        }
+
+        const char* upstreamSocketId = nullptr;
+        if (node->kind == NodeKind::Layer && currentSocketId == kImageOutputSocketId) {
+            upstreamSocketId = kImageInputSocketId;
+        } else if (node->kind == NodeKind::MaskUtility && currentSocketId == kMaskOutputSocketId) {
+            upstreamSocketId = kMaskUtilityInputSocketId;
+        } else if (node->kind == NodeKind::ImageToMask && currentSocketId == kMaskOutputSocketId) {
+            upstreamSocketId = kImageToMaskInputSocketId;
+        }
+
+        if (!upstreamSocketId) {
+            return {};
+        }
+        const Link* upstream = FindAnyInputLink(currentNodeId, upstreamSocketId);
+        return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : std::string();
+    };
+    return resolve(nodeId, socketId);
+}
+
+int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId) const {
+    std::unordered_set<int> visited;
+    std::function<int(int, const std::string&)> resolve = [&](int currentNodeId, const std::string& currentSocketId) -> int {
+        if (!visited.insert(currentNodeId).second) {
+            return -1;
+        }
+
+        const Node* node = FindNode(currentNodeId);
+        if (!node) {
+            return -1;
+        }
+
+        switch (node->kind) {
+            case NodeKind::Image:
+            case NodeKind::RawSource:
+            case NodeKind::ImageGenerator:
+            case NodeKind::MaskGenerator:
+                return currentNodeId;
+            case NodeKind::RawDevelop:
+                return currentNodeId;
+            case NodeKind::RawNeuralDenoise: {
+                const Link* upstream = FindInputLink(currentNodeId, kRawInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::Layer: {
+                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::Mix: {
+                const Link* inputA = FindInputLink(currentNodeId, kMixInputASocketId);
+                if (inputA) {
+                    const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
+                    if (sourceId > 0) return sourceId;
+                }
+                const Link* inputB = FindInputLink(currentNodeId, kMixInputBSocketId);
+                return inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
+            }
+            case NodeKind::ChannelSplit: {
+                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::ChannelCombine:
+            case NodeKind::Output: {
+                if (currentSocketId == kImageInputSocketId) {
+                    if (const Link* input = FindInputLink(currentNodeId, kImageInputSocketId)) {
+                        return resolve(input->fromNodeId, input->fromSocketId);
+                    }
+                }
+                for (const char* channelSocketId : { "r", "g", "b", "a" }) {
+                    if (const Link* channelInput = FindInputLink(currentNodeId, channelSocketId)) {
+                        const int sourceId = resolve(channelInput->fromNodeId, channelInput->fromSocketId);
+                        if (sourceId > 0) return sourceId;
+                    }
+                }
+                return -1;
+            }
+            case NodeKind::MaskUtility: {
+                const Link* upstream = FindInputLink(currentNodeId, kMaskUtilityInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::ImageToMask: {
+                const Link* upstream = FindInputLink(currentNodeId, kImageToMaskInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::Composite:
+            case NodeKind::Scope:
+            case NodeKind::Preview:
+                return -1;
+        }
+        return -1;
+    };
+    return resolve(nodeId, socketId);
+}
+
+int Graph::ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const {
+    const Node* output = FindNode(outputNodeId);
+    if (!output || output->kind != NodeKind::Output) {
+        return -1;
+    }
+    return ResolveReferenceSourceNodeId(outputNodeId, kImageInputSocketId);
+}
+
 void Graph::ConnectImageToOutput(int nodeId) {
     const Node* node = FindNode(nodeId);
-    if (!node || node->kind != NodeKind::Image) {
+    if (!node || (node->kind != NodeKind::Image && node->kind != NodeKind::RawDevelop)) {
         return;
     }
 
@@ -428,6 +690,43 @@ int Graph::AllocateNodeId() {
 
 Vec2 Graph::DefaultLayerPosition(int layerIndex) const {
     return Vec2{ 260.0f + static_cast<float>(layerIndex) * 220.0f, 120.0f };
+}
+
+NodeGroup* Graph::AddGroup(std::string title, Vec2 position, Vec2 size) {
+    NodeGroup group;
+    group.id = m_NextGroupId++;
+    group.title = title;
+    group.position = position;
+    group.size = size;
+    m_Groups.push_back(std::move(group));
+    TouchStructure();
+    return &m_Groups.back();
+}
+
+bool Graph::RemoveGroup(int groupId) {
+    auto it = std::remove_if(m_Groups.begin(), m_Groups.end(), [groupId](const NodeGroup& g) {
+        return g.id == groupId;
+    });
+    if (it != m_Groups.end()) {
+        m_Groups.erase(it, m_Groups.end());
+        TouchStructure();
+        return true;
+    }
+    return false;
+}
+
+NodeGroup* Graph::FindGroup(int groupId) {
+    auto it = std::find_if(m_Groups.begin(), m_Groups.end(), [groupId](const NodeGroup& g) {
+        return g.id == groupId;
+    });
+    return it != m_Groups.end() ? &(*it) : nullptr;
+}
+
+const NodeGroup* Graph::FindGroup(int groupId) const {
+    auto it = std::find_if(m_Groups.begin(), m_Groups.end(), [groupId](const NodeGroup& g) {
+        return g.id == groupId;
+    });
+    return it != m_Groups.end() ? &(*it) : nullptr;
 }
 
 } // namespace EditorNodeGraph

@@ -78,8 +78,18 @@ void EditorViewport::Render(EditorModule* editor) {
 
         ImGui::InvisibleButton("CompositeCanvasSurface", avail);
         const bool hovered = !inputBlocked && ImGui::IsItemHovered();
+        const bool canvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         if (hovered && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
             editor->ToggleCompositeExportBoundsEditMode();
+        }
+        if ((hovered || canvasFocused) && editor->CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_T, false)) {
+            const auto& settings = editor->GetCompositeSnapSettings();
+            if (settings.enabled) {
+                editor->ApplyCompositeSnapModePreset(EditorModule::CompositeSnapModePreset::Off);
+            } else {
+                editor->ApplyCompositeSnapModePreset(EditorModule::CompositeSnapModePreset::Full);
+            }
+            editor->MarkDirty();
         }
         const ImVec2 canvasCenter((canvasMin.x + canvasMax.x) * 0.5f, (canvasMin.y + canvasMax.y) * 0.5f);
         const ImVec2 mousePos = ImGui::GetMousePos();
@@ -89,7 +99,8 @@ void EditorViewport::Render(EditorModule* editor) {
             editor->GetCompositeViewPanX(),
             editor->GetCompositeViewPanY(),
             mousePos);
-        const bool exportBoundsEditMode = editor->IsCompositeExportBoundsEditMode();
+        const bool isExportSettingsActive = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ExportSettings;
+        const bool exportBoundsEditMode = editor->IsCompositeExportBoundsEditMode() || isExportSettingsActive;
         EditorModule::CompositeFloatRect exportBounds {};
         bool hasExportBounds = false;
         if (exportBoundsEditMode) {
@@ -109,18 +120,20 @@ void EditorViewport::Render(EditorModule* editor) {
         m_CompositeSnapGuides.clear();
 
         const EditorModule::CompositeSceneItem* hoveredItem = nullptr;
-        for (int outputNodeId : editor->GetCompositeZOrder()) {
-            const EditorModule::CompositeSceneItem* candidate = editor->FindCompositeSceneItem(outputNodeId);
-            if (!candidate || !candidate->visible || candidate->texture == 0) {
-                continue;
-            }
-            if (PointInQuad(ComputeSceneQuadWorld(*candidate), mouseWorld)) {
-                hoveredItem = candidate;
-                break;
+        if (!isExportSettingsActive) {
+            for (int outputNodeId : editor->GetCompositeZOrder()) {
+                const EditorModule::CompositeSceneItem* candidate = editor->FindCompositeSceneItem(outputNodeId);
+                if (!candidate || !candidate->visible || candidate->texture == 0) {
+                    continue;
+                }
+                if (PointInQuad(ComputeSceneQuadWorld(*candidate), mouseWorld)) {
+                    hoveredItem = candidate;
+                    break;
+                }
             }
         }
         const EditorModule::CompositeSceneItem* selectedItem = editor->FindCompositeSceneItem(editor->GetCompositeSelectedOutputNodeId());
-        if (selectedItem && editor->CanConsumeEditorCommandKeys()) {
+        if (selectedItem && (canvasFocused || hovered) && editor->CanConsumeEditorCommandKeys()) {
             if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
                 editor->SetCompositeResizeMode(EditorModule::CompositeResizeMode::Stretch);
             }
@@ -129,6 +142,38 @@ void EditorViewport::Render(EditorModule* editor) {
                     editor->ToggleCompositeScaleOriginMode();
                 } else {
                     editor->SetCompositeResizeMode(EditorModule::CompositeResizeMode::Scale);
+                }
+            }
+            
+            // Z-Order Keyboard Navigation (Up/Down Arrow keys)
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+                const std::vector<int>& zOrder = editor->GetCompositeZOrder();
+                int selectedId = selectedItem->outputNodeId;
+                int selectedIdx = -1;
+                for (int idx = 0; idx < static_cast<int>(zOrder.size()); ++idx) {
+                    if (zOrder[idx] == selectedId) {
+                        selectedIdx = idx;
+                        break;
+                    }
+                }
+                if (selectedIdx > 0) {
+                    editor->MoveCompositeOutputToIndex(selectedId, selectedIdx - 1);
+                    editor->MarkDirty();
+                }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+                const std::vector<int>& zOrder = editor->GetCompositeZOrder();
+                int selectedId = selectedItem->outputNodeId;
+                int selectedIdx = -1;
+                for (int idx = 0; idx < static_cast<int>(zOrder.size()); ++idx) {
+                    if (zOrder[idx] == selectedId) {
+                        selectedIdx = idx;
+                        break;
+                    }
+                }
+                if (selectedIdx != -1 && selectedIdx < static_cast<int>(zOrder.size()) - 1) {
+                    editor->MoveCompositeOutputToIndex(selectedId, selectedIdx + 1);
+                    editor->MarkDirty();
                 }
             }
         }
@@ -227,7 +272,8 @@ void EditorViewport::Render(EditorModule* editor) {
             editor->ClampCompositeViewPanToContent(avail);
         }
 
-        if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        const bool isEditingComplexNode = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode;
+        if (!editor->IsPickingColor() && !isEditingComplexNode && !isExportSettingsActive && hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
             ImGui::OpenPopup("CompositeCanvasContext");
         }
 
@@ -264,7 +310,55 @@ void EditorViewport::Render(EditorModule* editor) {
             exportRightCenter = ImVec2(exportBottomRight.x, (exportTopLeft.y + exportBottomRight.y) * 0.5f);
         }
 
-        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        // ── Force Selection & Sample Color in Picking State ──────────────────────
+        int activeNodeId = editor->GetActiveComplexNodeId();
+        int targetOutputNodeId = -1;
+        if (activeNodeId > 0) {
+            for (const auto& chain : editor->GetNodeGraph().GetCompletedChains()) {
+                for (int nid : chain.nodeIds) {
+                    if (nid == activeNodeId) {
+                        targetOutputNodeId = chain.outputNodeId;
+                        break;
+                    }
+                }
+                if (targetOutputNodeId > 0) break;
+            }
+        }
+
+        if (editor->IsPickingColor() || isEditingComplexNode) {
+            if (targetOutputNodeId > 0 && editor->GetCompositeSelectedOutputNodeId() != targetOutputNodeId) {
+                editor->SetCompositeSelectedOutputNodeId(targetOutputNodeId);
+            }
+            if (hovered) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && targetOutputNodeId > 0) {
+                    const auto* item = editor->FindCompositeSceneItem(targetOutputNodeId);
+                    if (item && !item->rgbaPixels.empty()) {
+                        AffineTransform2D inverse = EditorViewportHelpers::Inverse(EditorViewportHelpers::BuildLocalTransform(*item));
+                        ImVec2 localPoint = EditorViewportHelpers::TransformPoint(inverse, mouseWorld);
+                        
+                        const float baseWidth = item->isScalable ? 256.0f : static_cast<float>(item->textureWidth);
+                        const float baseHeight = item->isScalable ? 256.0f : static_cast<float>(item->textureHeight);
+                        
+                        if (localPoint.x >= 0.0f && localPoint.x <= baseWidth && localPoint.y >= 0.0f && localPoint.y <= baseHeight) {
+                            int px = std::clamp(static_cast<int>((localPoint.x / baseWidth) * item->textureWidth), 0, item->textureWidth - 1);
+                            int py = std::clamp(static_cast<int>((localPoint.y / baseHeight) * item->textureHeight), 0, item->textureHeight - 1);
+                            
+                            int ch = 4;
+                            int idx = (py * item->textureWidth + px) * ch;
+                            if (idx >= 0 && static_cast<size_t>(idx + 2) < item->rgbaPixels.size()) {
+                                float r = item->rgbaPixels[idx] / 255.0f;
+                                float g = item->rgbaPixels[idx + 1] / 255.0f;
+                                float b = item->rgbaPixels[idx + 2] / 255.0f;
+                                editor->OnColorPicked(r, g, b);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!editor->IsPickingColor() && !isEditingComplexNode && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             m_ActiveExportHandle = ExportHandleType::None;
             m_ActiveSceneHandle = SceneHandleType::None;
             m_ActiveSceneOutputNodeId = -1;
@@ -310,7 +404,7 @@ void EditorViewport::Render(EditorModule* editor) {
                 }
             }
 
-            if (m_ActiveExportHandle != ExportHandleType::None) {
+            if (isExportSettingsActive || m_ActiveExportHandle != ExportHandleType::None) {
                 editor->ClearCompositeSelection();
             } else {
                 const EditorModule::CompositeSceneItem* activeSelectedItem = editor->FindCompositeSceneItem(editor->GetCompositeSelectedOutputNodeId());
@@ -803,31 +897,38 @@ void EditorViewport::Render(EditorModule* editor) {
                 screenQuad[2],
                 screenQuad[3]);
 
+            const bool isEditingComplexNode = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode;
             if (editor->GetCompositeSelectedOutputNodeId() == item->outputNodeId) {
-                drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(225, 240, 247, 235), 2.0f);
-                const ImVec2 topCenter = Midpoint(screenQuad[0], screenQuad[1]);
-                const ImVec2 rightCenter = Midpoint(screenQuad[1], screenQuad[2]);
-                const ImVec2 bottomCenter = Midpoint(screenQuad[2], screenQuad[3]);
-                const ImVec2 leftCenter = Midpoint(screenQuad[3], screenQuad[0]);
-                const ImVec2 center = Midpoint(screenQuad[0], screenQuad[2]);
-                const ImVec2 outward = NormalizeOrZero(ImVec2(topCenter.x - center.x, topCenter.y - center.y));
-                const ImVec2 rotateHandle = ImVec2(topCenter.x + outward.x * 30.0f, topCenter.y + outward.y * 30.0f);
-                drawList->AddLine(topCenter, rotateHandle, IM_COL32(225, 240, 247, 200), 1.5f);
-                auto drawHandle = [&](const ImVec2& point, const ImU32 fillColor, const float radius) {
-                    drawList->AddCircleFilled(point, radius, fillColor, 20);
-                    drawList->AddCircle(point, radius, IM_COL32(10, 14, 18, 255), 20, 1.5f);
-                };
-                const ImU32 resizeFill = IM_COL32(230, 238, 244, 245);
-                drawHandle(screenQuad[0], resizeFill, 5.0f);
-                drawHandle(screenQuad[1], resizeFill, 5.0f);
-                drawHandle(screenQuad[2], resizeFill, 5.0f);
-                drawHandle(screenQuad[3], resizeFill, 5.0f);
-                drawHandle(topCenter, resizeFill, 4.5f);
-                drawHandle(rightCenter, resizeFill, 4.5f);
-                drawHandle(bottomCenter, resizeFill, 4.5f);
-                drawHandle(leftCenter, resizeFill, 4.5f);
-                drawHandle(rotateHandle, IM_COL32(120, 196, 255, 245), 6.0f);
-            } else if (hoveredItem && hoveredItem->outputNodeId == item->outputNodeId) {
+                if (isExportSettingsActive) {
+                    // Locked: render no selection handles or borders
+                } else if (editor->IsPickingColor() || isEditingComplexNode) {
+                    drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(95, 165, 255, 200), 2.0f);
+                } else {
+                    drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(225, 240, 247, 235), 2.0f);
+                    const ImVec2 topCenter = Midpoint(screenQuad[0], screenQuad[1]);
+                    const ImVec2 rightCenter = Midpoint(screenQuad[1], screenQuad[2]);
+                    const ImVec2 bottomCenter = Midpoint(screenQuad[2], screenQuad[3]);
+                    const ImVec2 leftCenter = Midpoint(screenQuad[3], screenQuad[0]);
+                    const ImVec2 center = Midpoint(screenQuad[0], screenQuad[2]);
+                    const ImVec2 outward = NormalizeOrZero(ImVec2(topCenter.x - center.x, topCenter.y - center.y));
+                    const ImVec2 rotateHandle = ImVec2(topCenter.x + outward.x * 30.0f, topCenter.y + outward.y * 30.0f);
+                    drawList->AddLine(topCenter, rotateHandle, IM_COL32(225, 240, 247, 200), 1.5f);
+                    auto drawHandle = [&](const ImVec2& point, const ImU32 fillColor, const float radius) {
+                        drawList->AddCircleFilled(point, radius, fillColor, 20);
+                        drawList->AddCircle(point, radius, IM_COL32(10, 14, 18, 255), 20, 1.5f);
+                    };
+                    const ImU32 resizeFill = IM_COL32(230, 238, 244, 245);
+                    drawHandle(screenQuad[0], resizeFill, 5.0f);
+                    drawHandle(screenQuad[1], resizeFill, 5.0f);
+                    drawHandle(screenQuad[2], resizeFill, 5.0f);
+                    drawHandle(screenQuad[3], resizeFill, 5.0f);
+                    drawHandle(topCenter, resizeFill, 4.5f);
+                    drawHandle(rightCenter, resizeFill, 4.5f);
+                    drawHandle(bottomCenter, resizeFill, 4.5f);
+                    drawHandle(leftCenter, resizeFill, 4.5f);
+                    drawHandle(rotateHandle, IM_COL32(120, 196, 255, 245), 6.0f);
+                }
+            } else if (!editor->IsPickingColor() && !isEditingComplexNode && !isExportSettingsActive && hoveredItem && hoveredItem->outputNodeId == item->outputNodeId) {
                 drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(154, 199, 224, 150), 1.0f);
             }
         }
@@ -916,12 +1017,19 @@ void EditorViewport::Render(EditorModule* editor) {
         return;
     }
 
-    if (!pipeline.HasSourceImage() || !editor->GetNodeGraph().IsOutputConnected() || pipeline.GetOutputTexture() == 0) {
-        const char* emptyMessage = editor->IsEditorRenderBusy()
-            ? "Rendering editor output..."
-            : (editor->GetNodeGraph().GetActiveImageNodeId() > 0
+    const bool outputConnected = editor->GetNodeGraph().IsOutputConnected();
+    const bool hasOutputTexture = pipeline.GetOutputTexture() != 0;
+    if (!outputConnected || !hasOutputTexture) {
+        const char* emptyMessage = nullptr;
+        if (editor->IsEditorRenderBusy()) {
+            emptyMessage = "Rendering editor output...";
+        } else if (!outputConnected) {
+            emptyMessage = editor->GetNodeGraph().GetActiveImageNodeId() > 0
                 ? "Connect the graph to the output to preview it."
-                : "Drop an image into the graph or press Tab to start.");
+                : "Drop an image into the graph or press Tab to start.";
+        } else {
+            emptyMessage = "Graph render produced no output.";
+        }
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const ImVec2 textSize = ImGui::CalcTextSize(emptyMessage);
         ImGui::SetCursorPos(ImVec2(
@@ -1125,10 +1233,12 @@ void EditorViewport::Render(EditorModule* editor) {
     drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
                               ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32_WHITE, kImageRounding);
 
-    unsigned int sourceTex = pipeline.GetSourceTexture();
+    unsigned int sourceTex = pipeline.GetCompareSourceTexture();
     if (currentFactor > 0.001f) {
-        drawList->AddImageRounded((ImTextureID)(intptr_t)sourceTex, imageMin, imageMax,
-                                  ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
-                                  IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f)), kImageRounding);
+        if (sourceTex != 0 && sourceTex != outputTex) {
+            drawList->AddImageRounded((ImTextureID)(intptr_t)sourceTex, imageMin, imageMax,
+                                      ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
+                                      IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f)), kImageRounding);
+        }
     }
 }
