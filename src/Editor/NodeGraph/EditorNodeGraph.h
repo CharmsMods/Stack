@@ -35,6 +35,8 @@ enum class NodeKind {
     RawSource,
     RawNeuralDenoise,
     RawDevelop,
+    RawDetailAutoMask,
+    RawDetailFusion,
     Layer,
     Output,
     Composite,
@@ -136,6 +138,14 @@ struct RawNeuralDenoisePayload {
     NeuralDenoise::NeuralDenoiseSettings settings;
 };
 
+struct RawDetailFusionPayload {
+    Raw::RawDetailFusionSettings settings;
+};
+
+struct RawDetailAutoMaskPayload {
+    Raw::RawDetailFusionSettings settings;
+};
+
 struct MaskGeneratorSettings {
     float value = 1.0f;
     float angle = 0.0f;
@@ -193,10 +203,13 @@ struct Node {
     ImageGeneratorSettings imageGeneratorSettings;
     MixBlendMode mixBlendMode = MixBlendMode::Normal;
     float mixFactor = 0.5f;
+    bool outputEnabled = true;
     ImagePayload image;
     RawSourcePayload rawSource;
     RawNeuralDenoisePayload rawNeuralDenoise;
     RawDevelopPayload rawDevelop;
+    RawDetailAutoMaskPayload rawDetailAutoMask;
+    RawDetailFusionPayload rawDetailFusion;
 };
 
 struct Link {
@@ -241,6 +254,8 @@ public:
     Node* AddRawSourceNode(RawSourcePayload payload, Vec2 position);
     Node* AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 position);
     Node* AddRawDevelopNode(RawDevelopPayload payload, Vec2 position);
+    Node* AddRawDetailAutoMaskNode(RawDetailAutoMaskPayload payload, Vec2 position);
+    Node* AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
     Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
     Node* AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position);
@@ -296,6 +311,7 @@ public:
     void DisconnectOutput();
     bool TryConnect(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
     bool TryConnectSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
+    bool SetOutputNodeEnabled(int nodeId, bool enabled);
     bool RemoveNode(int nodeId);
     bool RemoveLink(int fromNodeId, int toNodeId);
     bool RemoveLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId);

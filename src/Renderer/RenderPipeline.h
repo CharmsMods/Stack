@@ -79,6 +79,24 @@ private:
         bool owned = false;
     };
 
+    struct AutoGainSceneStats {
+        bool valid = false;
+        float shadowPercentile = 0.02f;
+        float midtonePercentile = 0.18f;
+        float highlightPercentile = 0.85f;
+        float clippingRatio = 0.0f;
+        float channelSaturationRatio = 0.0f;
+        float estimatedNoiseFloor = 0.002f;
+        float textureConfidence = 0.5f;
+        float recommendedMinEv = -1.0f;
+        float recommendedMaxEv = 4.0f;
+        float recommendedBaseEv = 0.0f;
+        float recommendedNoiseProtection = 0.55f;
+        float recommendedHighlightProtection = 0.85f;
+        float recommendedShadowLiftLimit = 0.70f;
+        float recommendedTarget = 0.42f;
+    };
+
     FullscreenQuad m_Quad;
 
     int m_Width;
@@ -101,10 +119,16 @@ private:
     unsigned int m_ImageGeneratorProgram;
     unsigned int m_ChannelSplitProgram;
     unsigned int m_ChannelCombineProgram;
+    unsigned int m_RawDetailFusionAnalysisProgram;
+    unsigned int m_RawDetailFusionMetricsProgram;
+    unsigned int m_RawDetailFusionSmoothProgram;
+    unsigned int m_RawDetailFusionApplyProgram;
+    unsigned int m_AutoGainStatsProgram;
     std::vector<unsigned char> m_SourcePixels;
     std::size_t m_SourceFingerprint = 0;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphImageCache;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphMaskCache;
+    std::unordered_map<std::size_t, AutoGainSceneStats> m_AutoGainSceneStatsCache;
     std::unordered_map<int, Raw::RawGpuPipeline> m_RawPipelines;
     std::unordered_map<int, Raw::RawImageData> m_RawDataCache;
     std::unordered_map<int, std::string> m_RawDataCachePaths;
@@ -116,6 +140,10 @@ private:
     void EnsureMixProgram();
     void EnsureUtilityPrograms();
     void EnsureChannelPrograms();
+    void EnsureRawDetailFusionPrograms();
+    void EnsureAutoGainStatsProgram();
+    AutoGainSceneStats ComputeAutoGainSceneStats(unsigned int inputTexture);
+    Raw::RawDetailFusionSettings ResolveAutoGainEffectiveSettings(unsigned int inputTexture, const Raw::RawDetailFusionSettings& settings);
     unsigned int GenerateMaskTexture(const RenderMaskSource& mask);
     unsigned int GenerateImageTexture(const RenderGraphNode& node);
     void RenderMaskUtility(unsigned int inputMask, const RenderGraphNode& node, unsigned int targetFBO);
@@ -125,4 +153,6 @@ private:
     void RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO);
     void RenderChannelCombine(unsigned int texR, unsigned int texG, unsigned int texB, unsigned int texA,
                             bool hasR, bool hasG, bool hasB, bool hasA, unsigned int targetFBO);
+    unsigned int RenderRawDetailAutoMask(unsigned int inputTexture, const RenderGraphNode& node, unsigned int manualMaskTexture = 0, bool debugPreview = false);
+    unsigned int RenderRawDetailFusion(unsigned int inputTexture, unsigned int maskTexture, const Raw::RawDetailFusionSettings& settings);
 };

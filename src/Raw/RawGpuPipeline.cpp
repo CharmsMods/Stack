@@ -36,6 +36,8 @@ uniform ivec2 uVisibleSize;
 uniform ivec2 uCropOrigin;
 uniform int uOrientation;
 uniform int uRotateToFitFrame;
+uniform int uFlipHorizontally;
+uniform int uFlipVertically;
 uniform int uCfaPattern;
 uniform float uBlackLevel;
 uniform vec4 uChannelBlack;
@@ -48,6 +50,14 @@ uniform float uExposure;
 uniform int uHighlightMode;
 uniform float uHighlightStrength;
 uniform float uHighlightThreshold;
+uniform int uDemosaicMethod;
+uniform float uFalseColorSuppression;
+uniform float uDefringeStrength;
+uniform float uHighlightEdgeCleanup;
+uniform int uChromaRadius;
+uniform float uPreserveRealColor;
+uniform float uLateralRedCyan;
+uniform float uLateralBlueYellow;
 uniform int uMosaicDenoiseEnabled;
 uniform int uMosaicHotPixelSuppression;
 uniform float uMosaicHotPixelThreshold;
@@ -199,6 +209,9 @@ vec3 cfaDebugColor(ivec2 visibleP) {
     return vec3(0.05, 1.0, 0.05);
 }
 
+vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP);
+vec3 reconstructHighlights(vec3 rgb, vec3 clipMask);
+
 vec3 bilinearDemosaic(ivec2 rawP, ivec2 visibleP) {
     float c = rawAt(rawP, visibleP);
     int color = cfaAt(visibleP);
@@ -224,6 +237,179 @@ vec3 bilinearDemosaic(ivec2 rawP, ivec2 visibleP) {
     float red = horizontalRed ? (l + r) * 0.5 : (u + d) * 0.5;
     float blue = horizontalRed ? (u + d) * 0.5 : (l + r) * 0.5;
     return vec3(red, c, blue);
+}
+
+float edgeDirectedGreenAt(ivec2 rawP, ivec2 visibleP) {
+    float c = rawAt(rawP, visibleP);
+    if (cfaAt(visibleP) == 1) {
+        return c;
+    }
+    float l = rawAt(rawP + ivec2(-1, 0), visibleP + ivec2(-1, 0));
+    float r = rawAt(rawP + ivec2( 1, 0), visibleP + ivec2( 1, 0));
+    float u = rawAt(rawP + ivec2( 0,-1), visibleP + ivec2( 0,-1));
+    float d = rawAt(rawP + ivec2( 0, 1), visibleP + ivec2( 0, 1));
+    float l2 = rawAt(rawP + ivec2(-2, 0), visibleP + ivec2(-2, 0));
+    float r2 = rawAt(rawP + ivec2( 2, 0), visibleP + ivec2( 2, 0));
+    float u2 = rawAt(rawP + ivec2( 0,-2), visibleP + ivec2( 0,-2));
+    float d2 = rawAt(rawP + ivec2( 0, 2), visibleP + ivec2( 0, 2));
+    float h = (l + r) * 0.5;
+    float v = (u + d) * 0.5;
+    float hGrad = abs(l - r) + abs(l2 - c) + abs(r2 - c);
+    float vGrad = abs(u - d) + abs(u2 - c) + abs(d2 - c);
+    float t = smoothstep(-0.04, 0.04, hGrad - vGrad);
+    return mix(h, v, t);
+}
+
+float colorDifferenceAt(ivec2 rawP, ivec2 visibleP, int targetColor) {
+    if (cfaAt(visibleP) != targetColor) {
+        return 0.0;
+    }
+    return rawAt(rawP, visibleP) - edgeDirectedGreenAt(rawP, visibleP);
+}
+
+float interpolatedColorDifference(ivec2 rawP, ivec2 visibleP, int targetColor) {
+    int color = cfaAt(visibleP);
+    float sum = 0.0;
+    float weightSum = 0.0;
+    if (color == 1) {
+        bool horizontalTarget =
+            cfaAt(visibleP + ivec2(-1, 0)) == targetColor ||
+            cfaAt(visibleP + ivec2( 1, 0)) == targetColor;
+        ivec2 a = horizontalTarget ? ivec2(-1, 0) : ivec2(0, -1);
+        ivec2 b = horizontalTarget ? ivec2( 1, 0) : ivec2(0,  1);
+        sum += colorDifferenceAt(rawP + a, visibleP + a, targetColor);
+        sum += colorDifferenceAt(rawP + b, visibleP + b, targetColor);
+        weightSum += 2.0;
+    } else {
+        ivec2 offsets[4] = ivec2[4](ivec2(-1,-1), ivec2(1,-1), ivec2(-1,1), ivec2(1,1));
+        for (int i = 0; i < 4; ++i) {
+            ivec2 o = offsets[i];
+            sum += colorDifferenceAt(rawP + o, visibleP + o, targetColor);
+            weightSum += 1.0;
+        }
+    }
+    return weightSum > 0.0 ? sum / weightSum : 0.0;
+}
+
+)GLSL"
+R"GLSL(
+vec3 qualityDemosaic(ivec2 rawP, ivec2 visibleP) {
+    int color = cfaAt(visibleP);
+    float green = edgeDirectedGreenAt(rawP, visibleP);
+    float red = green;
+    float blue = green;
+    if (color == 0) {
+        red = rawAt(rawP, visibleP);
+        blue = green + interpolatedColorDifference(rawP, visibleP, 2);
+    } else if (color == 2) {
+        blue = rawAt(rawP, visibleP);
+        red = green + interpolatedColorDifference(rawP, visibleP, 0);
+    } else {
+        red = green + interpolatedColorDifference(rawP, visibleP, 0);
+        blue = green + interpolatedColorDifference(rawP, visibleP, 2);
+    }
+    return max(vec3(red, green, blue), vec3(0.0));
+}
+
+vec3 rawDemosaicAt(ivec2 rawP, ivec2 visibleP) {
+    return uDemosaicMethod == 1 ? qualityDemosaic(rawP, visibleP) : bilinearDemosaic(rawP, visibleP);
+}
+
+vec3 clippedMaskAtUv(vec2 uv) {
+    vec2 q = clamp(uv, vec2(0.0), vec2(0.999999));
+    ivec2 visibleP = ivec2(clamp(q * vec2(uVisibleSize), vec2(0.0), vec2(uVisibleSize) - vec2(1.0)));
+    ivec2 rawP = uCropOrigin + visibleP;
+    return clippedDemosaicMask(rawP, visibleP);
+}
+
+vec3 rawDemosaicAtUv(vec2 uv) {
+    vec2 q = clamp(uv, vec2(0.0), vec2(0.999999));
+    ivec2 visibleP = ivec2(clamp(q * vec2(uVisibleSize), vec2(0.0), vec2(uVisibleSize) - vec2(1.0)));
+    ivec2 rawP = uCropOrigin + visibleP;
+    return rawDemosaicAt(rawP, visibleP);
+}
+
+vec3 developedCameraRgbAtUv(vec2 uv) {
+    vec3 rgb = rawDemosaicAtUv(uv);
+    rgb = reconstructHighlights(rgb, clippedMaskAtUv(uv));
+    return rgb * uWhiteBalance;
+}
+
+float lumaOf(vec3 rgb) {
+    return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 applyLateralCa(vec2 visibleUv, vec3 rgb) {
+    vec2 centered = visibleUv - vec2(0.5);
+    float len = length(centered);
+    if (len <= 0.0001 || (abs(uLateralRedCyan) <= 0.0001 && abs(uLateralBlueYellow) <= 0.0001)) {
+        return rgb;
+    }
+    vec2 dir = centered / len;
+    vec2 pixelStep = dir / max(vec2(uVisibleSize), vec2(1.0));
+    if (abs(uLateralRedCyan) > 0.0001) {
+        rgb.r = rawDemosaicAtUv(visibleUv + pixelStep * uLateralRedCyan).r;
+    }
+    if (abs(uLateralBlueYellow) > 0.0001) {
+        rgb.b = rawDemosaicAtUv(visibleUv + pixelStep * uLateralBlueYellow).b;
+    }
+    return rgb;
+}
+
+vec3 cleanupColorEdges(vec2 visibleUv, vec3 rgb, vec3 clipMask, out float falseColorMask, out float defringeMask, out float highlightEdgeMask) {
+    falseColorMask = 0.0;
+    defringeMask = 0.0;
+    highlightEdgeMask = 0.0;
+    float enabled = max(max(uFalseColorSuppression, uDefringeStrength), uHighlightEdgeCleanup);
+    if (enabled <= 0.0001) {
+        return rgb;
+    }
+
+    int radius = clamp(uChromaRadius, 1, 3);
+    float centerLum = max(lumaOf(rgb), 0.00003);
+    vec3 centerChroma = rgb - vec3(centerLum);
+    vec3 chromaSum = vec3(0.0);
+    float weightSum = 0.0;
+    float maxLogEdge = 0.0;
+    vec2 texel = 1.0 / max(vec2(uVisibleSize), vec2(1.0));
+    float r = float(radius);
+    for (int i = 0; i < 8; ++i) {
+        vec2 o = vec2(0.0);
+        if (i == 0) o = vec2(-r, 0.0);
+        else if (i == 1) o = vec2(r, 0.0);
+        else if (i == 2) o = vec2(0.0, -r);
+        else if (i == 3) o = vec2(0.0, r);
+        else if (i == 4) o = vec2(-r, -r);
+        else if (i == 5) o = vec2(r, -r);
+        else if (i == 6) o = vec2(-r, r);
+        else o = vec2(r, r);
+        vec2 uv = visibleUv + o * texel;
+        vec3 sampleRgb = developedCameraRgbAtUv(uv);
+        float sampleLum = max(lumaOf(sampleRgb), 0.00003);
+        float spatial = exp(-dot(o, o) * 0.22);
+        chromaSum += (sampleRgb - vec3(sampleLum)) * spatial;
+        weightSum += spatial;
+        maxLogEdge = max(maxLogEdge, abs(log2(sampleLum) - log2(centerLum)));
+    }
+    vec3 meanChroma = weightSum > 0.0 ? chromaSum / weightSum : centerChroma;
+    float centerChromaMag = length(centerChroma);
+    float meanChromaMag = length(meanChroma);
+    float chromaDelta = length(centerChroma - meanChroma);
+    float lumaEdge = smoothstep(0.12, 1.35, maxLogEdge);
+    float chromaSpike = smoothstep(0.015 + centerLum * 0.025, 0.12 + centerLum * 0.16, chromaDelta);
+    float highChroma = smoothstep(0.010 + centerLum * 0.03, 0.20 + centerLum * 0.20, centerChromaMag);
+    float coherence = 0.0;
+    if (centerChromaMag > 0.0001 && meanChromaMag > 0.0001) {
+        coherence = clamp(dot(centerChroma / centerChromaMag, meanChroma / meanChromaMag), -1.0, 1.0);
+    }
+    float suspiciousHue = mix(1.0, 1.0 - smoothstep(0.15, 0.85, coherence), clamp(uPreserveRealColor, 0.0, 1.0));
+    falseColorMask = clamp(lumaEdge * chromaSpike * suspiciousHue, 0.0, 1.0);
+    defringeMask = clamp(lumaEdge * highChroma * suspiciousHue, 0.0, 1.0);
+    highlightEdgeMask = clamp(lumaEdge * max(max(clipMask.r, clipMask.g), clipMask.b), 0.0, 1.0);
+    vec3 targetChroma = mix(meanChroma, vec3(0.0), highlightEdgeMask * 0.65);
+    float cleanup = max(max(falseColorMask * uFalseColorSuppression, defringeMask * uDefringeStrength), highlightEdgeMask * uHighlightEdgeCleanup);
+    vec3 cleaned = vec3(centerLum) + mix(centerChroma, targetChroma, clamp(cleanup, 0.0, 1.0));
+    return max(cleaned, vec3(0.0));
 }
 
 vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP) {
@@ -288,8 +474,12 @@ vec3 reconstructHighlights(vec3 rgb, vec3 clipMask) {
     return mix(rgb, repaired, strength);
 }
 
+)GLSL"
+R"GLSL(
 vec2 orientVisibleUv(vec2 uv) {
     vec2 q = clamp(uv, vec2(0.0), vec2(0.999999));
+    if (uFlipHorizontally != 0) q.x = 1.0 - q.x;
+    if (uFlipVertically != 0) q.y = 1.0 - q.y;
     if (uOrientation == 2) {
         return vec2(1.0 - q.x, q.y);
     }
@@ -354,7 +544,8 @@ void main() {
         return;
     }
 
-    vec3 rgb = bilinearDemosaic(rawP, visibleP);
+    vec3 rgb = rawDemosaicAt(rawP, visibleP);
+    rgb = applyLateralCa(visibleUv, rgb);
     vec3 clipMask = clippedDemosaicMask(rawP, visibleP);
     rgb = reconstructHighlights(rgb, clipMask);
     if (uDebugView == 3) {
@@ -363,6 +554,22 @@ void main() {
     }
 
     rgb *= uWhiteBalance;
+    float falseColorMask = 0.0;
+    float defringeMask = 0.0;
+    float highlightEdgeMask = 0.0;
+    rgb = cleanupColorEdges(visibleUv, rgb, clipMask, falseColorMask, defringeMask, highlightEdgeMask);
+    if (uDebugView == 11) {
+        FragColor = vec4(vec3(falseColorMask), 1.0);
+        return;
+    }
+    if (uDebugView == 12) {
+        FragColor = vec4(vec3(defringeMask), 1.0);
+        return;
+    }
+    if (uDebugView == 13) {
+        FragColor = vec4(vec3(highlightEdgeMask), 1.0);
+        return;
+    }
     if (uDebugView == 4) {
         FragColor = vec4(rgb, 1.0);
         return;
@@ -390,6 +597,8 @@ uniform sampler2D uLinearRgb;
 uniform ivec2 uVisibleSize;
 uniform int uOrientation;
 uniform int uRotateToFitFrame;
+uniform int uFlipHorizontally;
+uniform int uFlipVertically;
 uniform mat3 uCameraToWorking;
 uniform int uUseCameraTransform;
 uniform int uDebugView;
@@ -397,6 +606,8 @@ uniform float uExposure;
 
 vec2 orientVisibleUv(vec2 uv) {
     vec2 q = clamp(uv, vec2(0.0), vec2(0.999999));
+    if (uFlipHorizontally != 0) q.x = 1.0 - q.x;
+    if (uFlipVertically != 0) q.y = 1.0 - q.y;
     if (uOrientation == 2) {
         return vec2(1.0 - q.x, q.y);
     }
@@ -484,6 +695,9 @@ int DebugViewUniform(RawDebugView view) {
         case RawDebugView::PostDenoiseMosaic: return 8;
         case RawDebugView::HotPixelMask: return 9;
         case RawDebugView::DenoiseDifference: return 10;
+        case RawDebugView::FalseColorMask: return 11;
+        case RawDebugView::DefringeMask: return 12;
+        case RawDebugView::HighlightEdgeMask: return 13;
     }
     return 0;
 }
@@ -1127,6 +1341,8 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         glUniform2i(glGetUniformLocation(m_LinearProgram, "uVisibleSize"), visibleWidth, visibleHeight);
         glUniform1i(glGetUniformLocation(m_LinearProgram, "uOrientation"), effectiveOrientation);
         glUniform1i(glGetUniformLocation(m_LinearProgram, "uRotateToFitFrame"), settings.rotateToFitFrame ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_LinearProgram, "uFlipHorizontally"), settings.flipHorizontally ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_LinearProgram, "uFlipVertically"), settings.flipVertically ? 1 : 0);
         glUniformMatrix3fv(glGetUniformLocation(m_LinearProgram, "uCameraToWorking"), 1, settings.debugTransposeCameraMatrix ? GL_FALSE : GL_TRUE, cameraToWorking.data());
         glUniform1i(glGetUniformLocation(m_LinearProgram, "uUseCameraTransform"), settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
         glUniform1i(glGetUniformLocation(m_LinearProgram, "uDebugView"), DebugViewUniform(settings.debugView));
@@ -1213,6 +1429,8 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glUniform2i(glGetUniformLocation(m_Program, "uCropOrigin"), std::max(0, metadata.leftMargin), std::max(0, metadata.topMargin));
     glUniform1i(glGetUniformLocation(m_Program, "uOrientation"), effectiveOrientation);
     glUniform1i(glGetUniformLocation(m_Program, "uRotateToFitFrame"), settings.rotateToFitFrame ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_Program, "uFlipHorizontally"), settings.flipHorizontally ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_Program, "uFlipVertically"), settings.flipVertically ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uCfaPattern"), PatternUniform(metadata.cfaPattern));
     glUniform1f(glGetUniformLocation(m_Program, "uBlackLevel"), black);
     glUniform4f(glGetUniformLocation(m_Program, "uChannelBlack"),
@@ -1229,6 +1447,14 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glUniform1i(glGetUniformLocation(m_Program, "uHighlightMode"), static_cast<int>(settings.highlightMode));
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightStrength"), settings.highlightStrength);
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightThreshold"), settings.highlightThreshold);
+    glUniform1i(glGetUniformLocation(m_Program, "uDemosaicMethod"), static_cast<int>(settings.demosaicMethod));
+    glUniform1f(glGetUniformLocation(m_Program, "uFalseColorSuppression"), settings.falseColorSuppression);
+    glUniform1f(glGetUniformLocation(m_Program, "uDefringeStrength"), settings.defringeStrength);
+    glUniform1f(glGetUniformLocation(m_Program, "uHighlightEdgeCleanup"), settings.highlightEdgeCleanup);
+    glUniform1i(glGetUniformLocation(m_Program, "uChromaRadius"), std::clamp(settings.chromaRadius, 1, 3));
+    glUniform1f(glGetUniformLocation(m_Program, "uPreserveRealColor"), settings.preserveRealColor);
+    glUniform1f(glGetUniformLocation(m_Program, "uLateralRedCyan"), settings.lateralRedCyan);
+    glUniform1f(glGetUniformLocation(m_Program, "uLateralBlueYellow"), settings.lateralBlueYellow);
     glUniform1i(glGetUniformLocation(m_Program, "uMosaicDenoiseEnabled"), settings.mosaicDenoise.enabled ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uMosaicHotPixelSuppression"), settings.mosaicDenoise.hotPixelSuppression ? 1 : 0);
     glUniform1f(glGetUniformLocation(m_Program, "uMosaicHotPixelThreshold"), settings.mosaicDenoise.hotPixelThreshold);

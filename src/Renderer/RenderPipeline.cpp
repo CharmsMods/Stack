@@ -12,6 +12,7 @@
 #include <limits>
 #include <functional>
 #include <iostream>
+#include <numeric>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -50,6 +51,26 @@ std::size_t HashJson(const nlohmann::json& value) {
 
 float Clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
+}
+
+float SafeLog2(float value) {
+    return std::log2(std::max(value, 0.000001f));
+}
+
+float PercentileFromSorted(const std::vector<float>& sorted, float percentile) {
+    if (sorted.empty()) {
+        return 0.0f;
+    }
+    const float p = std::clamp(percentile, 0.0f, 1.0f);
+    const float scaled = p * static_cast<float>(sorted.size() - 1);
+    const std::size_t lo = static_cast<std::size_t>(std::floor(scaled));
+    const std::size_t hi = std::min<std::size_t>(lo + 1, sorted.size() - 1);
+    const float t = scaled - static_cast<float>(lo);
+    return sorted[lo] * (1.0f - t) + sorted[hi] * t;
+}
+
+float LerpFloat(float a, float b, float t) {
+    return a + (b - a) * t;
 }
 
 std::vector<int> Utf8ToCodepoints(const std::string& text) {
@@ -387,7 +408,9 @@ RenderPipeline::RenderPipeline()
       m_PingFBO(0), m_PongFBO(0), m_OutputTexture(0), m_ExternalOutputTexture(0), m_GraphSourceTexture(0),
       m_MaskProgram(0), m_MaskBlendProgram(0), m_MixProgram(0),
       m_MaskUtilityProgram(0), m_ImageToMaskProgram(0), m_ImageGeneratorProgram(0),
-      m_ChannelSplitProgram(0), m_ChannelCombineProgram(0)
+      m_ChannelSplitProgram(0), m_ChannelCombineProgram(0),
+      m_RawDetailFusionAnalysisProgram(0), m_RawDetailFusionMetricsProgram(0), m_RawDetailFusionSmoothProgram(0), m_RawDetailFusionApplyProgram(0),
+      m_AutoGainStatsProgram(0)
 {}
 
 RenderPipeline::~RenderPipeline() {
@@ -403,6 +426,11 @@ RenderPipeline::~RenderPipeline() {
     if (m_ImageGeneratorProgram) glDeleteProgram(m_ImageGeneratorProgram);
     if (m_ChannelSplitProgram) glDeleteProgram(m_ChannelSplitProgram);
     if (m_ChannelCombineProgram) glDeleteProgram(m_ChannelCombineProgram);
+    if (m_RawDetailFusionAnalysisProgram) glDeleteProgram(m_RawDetailFusionAnalysisProgram);
+    if (m_RawDetailFusionMetricsProgram) glDeleteProgram(m_RawDetailFusionMetricsProgram);
+    if (m_RawDetailFusionSmoothProgram) glDeleteProgram(m_RawDetailFusionSmoothProgram);
+    if (m_RawDetailFusionApplyProgram) glDeleteProgram(m_RawDetailFusionApplyProgram);
+    if (m_AutoGainStatsProgram) glDeleteProgram(m_AutoGainStatsProgram);
 }
 
 void RenderPipeline::Initialize() {
@@ -428,6 +456,7 @@ void RenderPipeline::DestroyGraphCache(std::unordered_map<std::string, CachedGra
 void RenderPipeline::InvalidateGraphCaches() {
     DestroyGraphCache(m_GraphImageCache);
     DestroyGraphCache(m_GraphMaskCache);
+    m_AutoGainSceneStatsCache.clear();
 }
 
 void RenderPipeline::Resize(int width, int height) {
@@ -1220,8 +1249,831 @@ void RenderPipeline::RenderChannelCombine(unsigned int texR, unsigned int texG, 
     glActiveTexture(GL_TEXTURE0);
 }
 
+void RenderPipeline::EnsureAutoGainStatsProgram() {
+    if (m_AutoGainStatsProgram) {
+        return;
+    }
+
+    static const char* vertexSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTex;
+        out vec2 vTexCoord;
+        void main() {
+            vTexCoord = aTex;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }
+    )";
+
+    static const char* fragmentSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uInputImage;
+        uniform vec2 uSourceTexelSize;
+
+        float luma(vec3 rgb) {
+            return dot(max(rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        float logLuma(vec2 uv) {
+            return log2(max(luma(texture(uInputImage, uv).rgb), 0.00003));
+        }
+
+        void main() {
+            vec3 rgb = max(texture(uInputImage, vTexCoord).rgb, vec3(0.0));
+            float lum = luma(rgb);
+            float maxChannel = max(max(rgb.r, rgb.g), rgb.b);
+            float minChannel = min(min(rgb.r, rgb.g), rgb.b);
+            float saturation = maxChannel > 0.00003 ? (maxChannel - minChannel) / maxChannel : 0.0;
+            float gx = abs(logLuma(vTexCoord + vec2(uSourceTexelSize.x, 0.0)) - logLuma(vTexCoord - vec2(uSourceTexelSize.x, 0.0)));
+            float gy = abs(logLuma(vTexCoord + vec2(0.0, uSourceTexelSize.y)) - logLuma(vTexCoord - vec2(0.0, uSourceTexelSize.y)));
+            float textureProxy = clamp((gx + gy) * 0.5, 0.0, 1.0);
+            FragColor = vec4(lum, maxChannel, saturation, textureProxy);
+        }
+    )";
+
+    m_AutoGainStatsProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
+}
+
+RenderPipeline::AutoGainSceneStats RenderPipeline::ComputeAutoGainSceneStats(unsigned int inputTexture) {
+    AutoGainSceneStats fallback;
+    if (!inputTexture || m_Width <= 0 || m_Height <= 0) {
+        return fallback;
+    }
+
+    std::size_t cacheKey = HashValue(inputTexture);
+    HashCombine(cacheKey, HashValue(m_Width));
+    HashCombine(cacheKey, HashValue(m_Height));
+    if (const auto cached = m_AutoGainSceneStatsCache.find(cacheKey);
+        cached != m_AutoGainSceneStatsCache.end()) {
+        return cached->second;
+    }
+
+    EnsureAutoGainStatsProgram();
+    if (!m_AutoGainStatsProgram) {
+        return fallback;
+    }
+
+    const int statsWidth = std::clamp(m_Width / 32, 64, 160);
+    const int statsHeight = std::clamp(m_Height / 32, 36, 120);
+    const unsigned int statsTexture = GLHelpers::CreateEmptyTexture(statsWidth, statsHeight);
+    if (!statsTexture) {
+        return fallback;
+    }
+    const unsigned int statsFbo = GLHelpers::CreateFBO(statsTexture);
+    glBindFramebuffer(GL_FRAMEBUFFER, statsFbo);
+    glViewport(0, 0, statsWidth, statsHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_AutoGainStatsProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, inputTexture);
+    glUniform1i(glGetUniformLocation(m_AutoGainStatsProgram, "uInputImage"), 0);
+    glUniform2f(glGetUniformLocation(m_AutoGainStatsProgram, "uSourceTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
+    m_Quad.Draw();
+
+    std::vector<float> pixels(static_cast<std::size_t>(statsWidth) * static_cast<std::size_t>(statsHeight) * 4u, 0.0f);
+    glReadPixels(0, 0, statsWidth, statsHeight, GL_RGBA, GL_FLOAT, pixels.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE0);
+    glDeleteFramebuffers(1, &statsFbo);
+    glDeleteTextures(1, &statsTexture);
+
+    std::vector<float> lumas;
+    lumas.reserve(pixels.size() / 4);
+    float clipped = 0.0f;
+    float saturated = 0.0f;
+    float textureSum = 0.0f;
+    float darkTextureSum = 0.0f;
+    float darkCount = 0.0f;
+    for (std::size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        const float lum = pixels[i + 0];
+        const float maxChannel = pixels[i + 1];
+        const float saturation = pixels[i + 2];
+        const float texture = pixels[i + 3];
+        if (!std::isfinite(lum) || lum <= 0.0f) {
+            continue;
+        }
+        lumas.push_back(lum);
+        clipped += maxChannel > 1.0f ? 1.0f : 0.0f;
+        saturated += (maxChannel > 0.35f && saturation > 0.58f) ? 1.0f : 0.0f;
+        textureSum += std::clamp(texture, 0.0f, 1.0f);
+        if (lum < 0.08f) {
+            darkTextureSum += std::clamp(texture, 0.0f, 1.0f);
+            darkCount += 1.0f;
+        }
+    }
+
+    AutoGainSceneStats stats = fallback;
+    if (lumas.size() < 16) {
+        m_AutoGainSceneStatsCache[cacheKey] = stats;
+        return stats;
+    }
+    std::sort(lumas.begin(), lumas.end());
+    const float count = static_cast<float>(lumas.size());
+    stats.shadowPercentile = std::max(PercentileFromSorted(lumas, 0.10f), 0.00001f);
+    stats.midtonePercentile = std::max(PercentileFromSorted(lumas, 0.50f), 0.00001f);
+    stats.highlightPercentile = std::max(PercentileFromSorted(lumas, 0.98f), 0.00001f);
+    const float p01 = std::max(PercentileFromSorted(lumas, 0.01f), 0.000001f);
+    const float p05 = std::max(PercentileFromSorted(lumas, 0.05f), 0.000001f);
+    stats.clippingRatio = Clamp01(clipped / count);
+    stats.channelSaturationRatio = Clamp01(saturated / count);
+    stats.textureConfidence = Clamp01(textureSum / count);
+
+    const float darkTexture = darkCount > 0.0f ? darkTextureSum / darkCount : stats.textureConfidence;
+    stats.estimatedNoiseFloor = std::clamp(std::max(p01, p05 * 0.45f) * (1.0f + darkTexture * 2.25f), 0.00003f, 0.08f);
+    const float noiseRisk = Clamp01((stats.estimatedNoiseFloor * 5.5f) / std::max(stats.shadowPercentile, 0.00003f));
+    const float highlightPressure = Clamp01(std::max(stats.clippingRatio * 8.0f, stats.channelSaturationRatio * 2.5f) +
+        std::max(0.0f, SafeLog2(stats.highlightPercentile / 0.85f)) * 0.30f);
+
+    const float target = 0.42f;
+    stats.recommendedBaseEv = std::clamp(SafeLog2(target / stats.midtonePercentile), -2.0f, 3.0f);
+    const float highlightTarget = LerpFloat(0.88f, 0.68f, highlightPressure);
+    stats.recommendedMinEv = std::clamp(SafeLog2(highlightTarget / stats.highlightPercentile) - highlightPressure * 0.45f, -6.0f, 1.25f);
+    const float shadowTarget = LerpFloat(0.22f, 0.38f, 1.0f - noiseRisk);
+    float maxLift = SafeLog2(shadowTarget / std::max(stats.shadowPercentile, stats.estimatedNoiseFloor * 6.0f));
+    maxLift *= LerpFloat(1.0f, 0.62f, noiseRisk);
+    stats.recommendedMaxEv = std::clamp(maxLift, 0.75f, 6.5f);
+    if (stats.recommendedMaxEv < stats.recommendedMinEv + 0.25f) {
+        stats.recommendedMaxEv = std::min(8.0f, stats.recommendedMinEv + 0.25f);
+    }
+    stats.recommendedNoiseProtection = Clamp01(0.30f + noiseRisk * 0.62f + darkTexture * 0.22f);
+    stats.recommendedHighlightProtection = Clamp01(0.58f + highlightPressure * 0.36f + stats.channelSaturationRatio * 0.20f);
+    stats.recommendedShadowLiftLimit = Clamp01(0.88f - noiseRisk * 0.48f);
+    stats.recommendedTarget = std::clamp(target + LerpFloat(0.03f, -0.08f, highlightPressure) - noiseRisk * 0.04f, 0.28f, 0.55f);
+    stats.valid = true;
+
+    m_AutoGainSceneStatsCache[cacheKey] = stats;
+    return stats;
+}
+
+Raw::RawDetailFusionSettings RenderPipeline::ResolveAutoGainEffectiveSettings(
+    unsigned int inputTexture,
+    const Raw::RawDetailFusionSettings& settings) {
+    Raw::RawDetailFusionSettings effective = settings;
+    if (!settings.autoSafetyEnabled) {
+        return effective;
+    }
+
+    const AutoGainSceneStats stats = ComputeAutoGainSceneStats(inputTexture);
+    if (!stats.valid) {
+        return effective;
+    }
+
+    effective.minEv = settings.overrideMinEv
+        ? settings.minEv
+        : std::clamp(stats.recommendedMinEv + settings.minEvBias, -8.0f, 2.0f);
+    effective.maxEv = settings.overrideMaxEv
+        ? settings.maxEv
+        : std::clamp(stats.recommendedMaxEv + settings.maxEvBias, -2.0f, 8.0f);
+    if (effective.maxEv < effective.minEv + 0.25f) {
+        effective.maxEv = std::min(8.0f, effective.minEv + 0.25f);
+    }
+    effective.baseEv = settings.overrideBaseEv
+        ? settings.baseEv
+        : std::clamp(stats.recommendedBaseEv + settings.baseEvBias, -8.0f, 8.0f);
+    effective.noiseProtection = settings.overrideNoiseProtection
+        ? settings.noiseProtection
+        : Clamp01(stats.recommendedNoiseProtection + settings.noiseProtectionBias);
+    effective.highlightProtection = settings.overrideHighlightProtection
+        ? settings.highlightProtection
+        : Clamp01(stats.recommendedHighlightProtection + settings.highlightProtectionBias);
+    effective.shadowLiftLimit = settings.overrideShadowLiftLimit
+        ? settings.shadowLiftLimit
+        : Clamp01(stats.recommendedShadowLiftLimit + settings.shadowLiftLimitBias);
+    effective.wellExposedTarget = settings.overrideWellExposedTarget
+        ? settings.wellExposedTarget
+        : std::clamp(stats.recommendedTarget + settings.wellExposedTargetBias, 0.05f, 0.95f);
+    return effective;
+}
+
+void RenderPipeline::EnsureRawDetailFusionPrograms() {
+    static const char* vertexSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTex;
+        out vec2 vTexCoord;
+        void main() {
+            vTexCoord = aTex;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }
+    )";
+
+    static const char* metricsFragSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uInputImage;
+        uniform float uSmoothGradientProtection;
+        uniform float uTextureSensitivity;
+        uniform float uSkyBias;
+        uniform float uEstimatedNoiseFloor;
+        uniform float uAutoNoiseProtection;
+        uniform float uAutoHighlightProtection;
+        uniform float uChannelSaturationRisk;
+        uniform vec2 uTexelSize;
+
+        vec3 rgbAt(vec2 uv) {
+            return max(texture(uInputImage, uv).rgb, vec3(0.0));
+        }
+
+        float luma(vec3 rgb) {
+            return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        float lumaAt(vec2 uv) {
+            return luma(rgbAt(uv));
+        }
+
+        float logLumaAt(vec2 uv) {
+            return log2(max(lumaAt(uv), 0.00003));
+        }
+
+        void main() {
+            vec3 centerRgb = rgbAt(vTexCoord);
+            float centerLum = luma(centerRgb);
+            float centerLog = log2(max(centerLum, 0.00003));
+            vec2 texel = uTexelSize;
+
+            float l = logLumaAt(vTexCoord - vec2(texel.x, 0.0));
+            float r = logLumaAt(vTexCoord + vec2(texel.x, 0.0));
+            float d = logLumaAt(vTexCoord - vec2(0.0, texel.y));
+            float u = logLumaAt(vTexCoord + vec2(0.0, texel.y));
+            float l2 = logLumaAt(vTexCoord - vec2(texel.x * 2.0, 0.0));
+            float r2 = logLumaAt(vTexCoord + vec2(texel.x * 2.0, 0.0));
+            float d2 = logLumaAt(vTexCoord - vec2(0.0, texel.y * 2.0));
+            float u2 = logLumaAt(vTexCoord + vec2(0.0, texel.y * 2.0));
+
+            float gradient = length(vec2(r - l, u - d));
+            float second = abs(l - centerLog * 2.0 + r) + abs(d - centerLog * 2.0 + u);
+            float broadGradient = length(vec2(r2 - l2, u2 - d2));
+            float broadSecond = abs(l2 - centerLog * 2.0 + r2) + abs(d2 - centerLog * 2.0 + u2);
+
+            vec3 meanRgb = vec3(0.0);
+            float meanLum = 0.0;
+            float meanLog = 0.0;
+            float samples = 0.0;
+            for (int y = -2; y <= 2; ++y) {
+                for (int x = -2; x <= 2; ++x) {
+                    vec2 uv = vTexCoord + vec2(x, y) * texel;
+                    vec3 rgb = rgbAt(uv);
+                    float lum = luma(rgb);
+                    meanRgb += rgb;
+                    meanLum += lum;
+                    meanLog += log2(max(lum, 0.00003));
+                    samples += 1.0;
+                }
+            }
+            meanRgb /= max(samples, 1.0);
+            meanLum /= max(samples, 1.0);
+            meanLog /= max(samples, 1.0);
+
+            float variance = 0.0;
+            float chromaVariance = 0.0;
+            for (int y = -2; y <= 2; ++y) {
+                for (int x = -2; x <= 2; ++x) {
+                    vec2 uv = vTexCoord + vec2(x, y) * texel;
+                    vec3 rgb = rgbAt(uv);
+                    float logLum = log2(max(luma(rgb), 0.00003));
+                    variance += pow(logLum - meanLog, 2.0);
+                    chromaVariance += length((rgb - vec3(luma(rgb))) - (meanRgb - vec3(meanLum)));
+                }
+            }
+            variance /= max(samples, 1.0);
+            chromaVariance /= max(samples, 1.0);
+
+            float textureSensitivity = clamp(uTextureSensitivity, 0.0, 1.0);
+            float smoothProtect = clamp(uSmoothGradientProtection, 0.0, 1.0);
+            float skyBias = clamp(uSkyBias, 0.0, 1.0);
+
+            float trueEdge = smoothstep(mix(0.08, 0.025, textureSensitivity), mix(0.42, 0.15, textureSensitivity), gradient + second * 3.25);
+            trueEdge = max(trueEdge, smoothstep(0.18, 0.95, broadSecond * 4.0));
+
+            float textureDetail = smoothstep(mix(0.010, 0.003, textureSensitivity), mix(0.090, 0.030, textureSensitivity), sqrt(max(variance, 0.0)) + second * 1.5);
+            textureDetail *= 1.0 - smoothstep(0.035, 0.22, broadGradient) * 0.55;
+
+            float lowTexture = 1.0 - smoothstep(mix(0.005, 0.018, textureSensitivity), mix(0.060, 0.16, textureSensitivity), sqrt(max(variance, 0.0)) + chromaVariance);
+            float rampLike = smoothstep(0.010, 0.18, broadGradient) * (1.0 - smoothstep(0.050, 0.34, broadSecond * 2.0));
+            float lowSaturation = 1.0 - smoothstep(0.08, 0.42, length(centerRgb - vec3(centerLum)));
+            float blueSkyHint = smoothstep(0.0, 0.14, centerRgb.b - max(centerRgb.r, centerRgb.g) * 0.72);
+            float brightEnough = smoothstep(0.010, 0.22, centerLum);
+            float smoothGradient = max(lowTexture * rampLike, lowTexture * mix(lowSaturation, max(lowSaturation, blueSkyHint), skyBias) * brightEnough);
+            smoothGradient = clamp(smoothGradient * mix(0.35, 1.35, smoothProtect) * (1.0 - trueEdge * 0.92), 0.0, 1.0);
+
+            float debandRisk = smoothGradient * (1.0 - textureDetail) * smoothstep(0.012, 0.30, broadGradient);
+            float centerChroma = length(centerRgb - vec3(centerLum));
+            float maxChannel = max(max(centerRgb.r, centerRgb.g), centerRgb.b);
+            float minChannel = min(min(centerRgb.r, centerRgb.g), centerRgb.b);
+            float saturation = maxChannel > 0.00003 ? (maxChannel - minChannel) / maxChannel : 0.0;
+            float shadowNoise = (1.0 - smoothstep(uEstimatedNoiseFloor * 2.0, uEstimatedNoiseFloor * 9.0, centerLum)) *
+                (1.0 - trueEdge * 0.65);
+            float sceneSaturationRisk = smoothstep(0.35, 0.92, saturation) * smoothstep(0.18, 1.08, maxChannel);
+            float chromaArtifact = trueEdge *
+                smoothstep(0.010 + centerLum * 0.025, 0.16 + centerLum * 0.20, centerChroma + chromaVariance * 1.8) *
+                (1.0 - smoothstep(0.08, 0.85, lowTexture));
+            chromaArtifact = max(chromaArtifact, sceneSaturationRisk * clamp(uChannelSaturationRisk, 0.0, 1.0) * 0.75);
+            textureDetail *= 1.0 - chromaArtifact * mix(0.45, 0.85, clamp(uAutoHighlightProtection, 0.0, 1.0));
+            textureDetail *= 1.0 - shadowNoise * mix(0.25, 0.95, clamp(uAutoNoiseProtection, 0.0, 1.0));
+            FragColor = vec4(clamp(trueEdge, 0.0, 1.0), clamp(textureDetail, 0.0, 1.0), smoothGradient, clamp(max(max(debandRisk, chromaArtifact), shadowNoise * 0.75), 0.0, 1.0));
+        }
+    )";
+
+    static const char* analysisFragSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uInputImage;
+        uniform sampler2D uMetrics;
+        uniform sampler2D uManualMask;
+        uniform int uHasManualMask;
+        uniform int uMode;
+        uniform float uMinEv;
+        uniform float uMaxEv;
+        uniform float uBaseEv;
+        uniform int uSampleCount;
+        uniform float uHighlightProtection;
+        uniform float uShadowLiftLimit;
+        uniform float uNoiseProtection;
+        uniform float uDetailWeight;
+        uniform float uWellExposedTarget;
+        uniform float uSmoothGradientProtection;
+        uniform float uSkyBias;
+        uniform float uEstimatedNoiseFloor;
+        uniform float uChannelSaturationRisk;
+        uniform float uClippingRatio;
+        uniform int uInvertMask;
+        uniform float uMaskBlackPoint;
+        uniform float uMaskWhitePoint;
+        uniform float uMaskGamma;
+        uniform float uManualBlend;
+        uniform vec2 uTexelSize;
+
+        float lumaAt(vec2 uv) {
+            vec3 rgb = max(texture(uInputImage, uv).rgb, vec3(0.0));
+            return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        vec3 rgbAt(vec2 uv) {
+            return max(texture(uInputImage, uv).rgb, vec3(0.0));
+        }
+
+        float shapedMask() {
+            float v = uHasManualMask != 0 ? texture(uManualMask, vTexCoord).r : 0.5;
+            float denom = max(uMaskWhitePoint - uMaskBlackPoint, 0.0001);
+            v = clamp((v - uMaskBlackPoint) / denom, 0.0, 1.0);
+            v = pow(v, 1.0 / max(uMaskGamma, 0.001));
+            if (uInvertMask != 0) v = 1.0 - v;
+            return v;
+        }
+
+        void main() {
+            vec3 centerRgb = rgbAt(vTexCoord);
+            float lum = dot(centerRgb, vec3(0.2126, 0.7152, 0.0722));
+            float maxChannel = max(max(centerRgb.r, centerRgb.g), centerRgb.b);
+            float minChannel = min(min(centerRgb.r, centerRgb.g), centerRgb.b);
+            float channelDominance = maxChannel > 0.00003 ? (maxChannel - minChannel) / maxChannel : 0.0;
+            float saturatedBright = smoothstep(0.45, 0.92, channelDominance) * smoothstep(0.28, 1.08, maxChannel);
+            float globalHighlightPressure = clamp(uClippingRatio * 8.0 + uChannelSaturationRisk * 2.2, 0.0, 1.0);
+            vec4 metrics = texture(uMetrics, vTexCoord);
+            float trueEdge = clamp(metrics.r, 0.0, 1.0);
+            float textureDetail = clamp(metrics.g, 0.0, 1.0);
+            float smoothGradient = clamp(metrics.b, 0.0, 1.0);
+            float chromaArtifact = clamp(metrics.a, 0.0, 1.0);
+            float smoothProtect = clamp(uSmoothGradientProtection, 0.0, 1.0);
+
+            int count = clamp(uSampleCount, 2, 33);
+            float evSpan = max(0.0001, uMaxEv - uMinEv);
+            float minAbsEv = min(uMinEv, uMaxEv) + uBaseEv;
+            float maxAbsEv = max(uMinEv, uMaxEv) + uBaseEv;
+            float target = clamp(uWellExposedTarget, 0.02, 1.5);
+            float safeLum = max(lum, 0.00003);
+            float targetEv = clamp(log2(target / safeLum), minAbsEv, maxAbsEv);
+            float originalClipRisk = smoothstep(0.70, 1.05, lum);
+            float weightedEv = 0.0;
+            float weightSum = 0.0;
+            float bestEv = uBaseEv;
+            float bestScore = -1.0;
+            float highlightSafety = 1.0;
+            float shadowProtection = 1.0;
+            for (int i = 0; i < 33; ++i) {
+                if (i >= count) break;
+                float t = count <= 1 ? 0.5 : float(i) / float(count - 1);
+                float ev = mix(uMinEv, uMaxEv, t) + uBaseEv;
+                float exposed = lum * exp2(ev);
+                float clipRisk = smoothstep(0.82, 1.18, exposed);
+                float adaptiveNoiseFloor = max(0.00003, uEstimatedNoiseFloor);
+                float deepShadow = 1.0 - smoothstep(adaptiveNoiseFloor * 1.5, mix(adaptiveNoiseFloor * 5.0, adaptiveNoiseFloor * 18.0, clamp(uNoiseProtection, 0.0, 1.0)), lum);
+                float blackRisk = 1.0 - smoothstep(0.004, mix(0.018, 0.12, clamp(uNoiseProtection, 0.0, 1.0)), exposed);
+                float stopError = log2(max(exposed, 0.00003) / target);
+                float well = exp(-pow(stopError * 0.92, 2.0));
+                float saturatedClipRisk = max(clipRisk, saturatedBright * mix(0.35, 1.0, globalHighlightPressure));
+                float protect = mix(1.0, 1.0 - saturatedClipRisk, clamp(uHighlightProtection, 0.0, 1.0));
+                float positiveLift = smoothstep(0.0, max(0.001, maxAbsEv), max(ev, 0.0));
+                float shadow = 1.0 - deepShadow * positiveLift * clamp(uShadowLiftLimit, 0.0, 1.0) * mix(0.45, 0.82, clamp(uNoiseProtection, 0.0, 1.0));
+                float targetPrior = exp(-pow((ev - targetEv) * 0.55, 2.0));
+                float detailVisibility = smoothstep(0.010, 0.160, exposed) * (1.0 - clipRisk);
+                float reliableTexture = textureDetail * (1.0 - deepShadow * clamp(uNoiseProtection, 0.0, 1.0)) * (1.0 - saturatedBright * 0.70);
+                float detailGain = mix(1.0, mix(0.85, 1.35, detailVisibility), clamp(uDetailWeight, 0.0, 1.0) * reliableTexture * (1.0 - chromaArtifact * 0.80));
+                float gradientStability = mix(1.0, 1.0 - max(smoothGradient * 0.65, chromaArtifact * 0.55), smoothProtect);
+                float edgeStability = mix(1.0, 1.0 - trueEdge * 0.25, clamp(uSkyBias, 0.0, 1.0));
+                float score = max(0.00001, well * protect * shadow * detailGain * gradientStability * edgeStability * mix(0.75, 1.75, targetPrior));
+                weightedEv += ev * score;
+                weightSum += score;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestEv = ev;
+                    highlightSafety = 1.0 - clipRisk;
+                    shadowProtection = 1.0 - blackRisk;
+                }
+            }
+            float autoEv = weightSum > 0.0 ? weightedEv / weightSum : uBaseEv;
+            float liftNeed = smoothstep(0.0, target, target - lum);
+            float highlightRoom = 1.0 - smoothstep(0.60, 1.0, lum);
+            autoEv = mix(autoEv, bestEv, mix(0.35, 0.12, smoothGradient * smoothProtect));
+            float smoothLiftLimit = mix(1.0, 0.55, smoothGradient * smoothProtect);
+            autoEv = mix(autoEv, targetEv, liftNeed * highlightRoom * (1.0 - originalClipRisk) * 0.65 * smoothLiftLimit);
+            autoEv = mix(autoEv, uBaseEv + clamp(targetEv - uBaseEv, -1.5, 1.5), smoothGradient * smoothProtect * 0.18);
+            float manualEv = mix(uMinEv, uMaxEv, shapedMask()) + uBaseEv;
+            float ev = autoEv;
+            if (uMode == 0) {
+                ev = manualEv;
+            } else if (uMode == 2) {
+                ev = mix(autoEv, manualEv, clamp(uManualBlend, 0.0, 1.0));
+            }
+            ev = clamp(ev, minAbsEv, maxAbsEv);
+            float evNorm = clamp((ev - (uMinEv + uBaseEv)) / evSpan, 0.0, 1.0);
+            float confidence = clamp(weightSum / max(0.0001, float(count)), 0.0, 1.0);
+            float sampleNorm = clamp((bestEv - (uMinEv + uBaseEv)) / evSpan, 0.0, 1.0);
+            FragColor = vec4(evNorm, confidence, highlightSafety, mix(shadowProtection, sampleNorm, 0.45));
+        }
+    )";
+
+    static const char* smoothFragSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uAnalysis;
+        uniform sampler2D uMetrics;
+        uniform sampler2D uInputImage;
+        uniform int uRadius;
+        uniform int uSmoothAreaRadius;
+        uniform float uEdgeAwareness;
+        uniform float uHaloGuard;
+        uniform float uSmoothGradientProtection;
+        uniform float uMaskDebandDither;
+        uniform vec2 uTexelSize;
+
+        float lumaAt(vec2 uv) {
+            vec3 rgb = max(texture(uInputImage, uv).rgb, vec3(0.0));
+            return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        float logLumaAt(vec2 uv) {
+            return log2(max(lumaAt(uv), 0.00003));
+        }
+
+        void main() {
+            vec4 center = texture(uAnalysis, vTexCoord);
+            vec4 centerMetrics = texture(uMetrics, vTexCoord);
+            int radius = clamp(uRadius, 0, 16);
+            int smoothAreaRadius = clamp(uSmoothAreaRadius, 0, 32);
+            float smoothGradient = clamp(centerMetrics.b, 0.0, 1.0);
+            float smoothProtect = clamp(uSmoothGradientProtection, 0.0, 1.0);
+            int effectiveRadius = max(radius, int(round(float(smoothAreaRadius) * smoothGradient * smoothProtect)));
+            if (effectiveRadius <= 0) {
+                FragColor = center;
+                return;
+            }
+            float centerLum = lumaAt(vTexCoord);
+            float centerLogLum = logLumaAt(vTexCoord);
+            float edgeAware = clamp(uEdgeAwareness, 0.0, 1.0);
+            float haloGuard = clamp(uHaloGuard, 0.0, 1.0);
+            float localEdge = max(centerMetrics.r, clamp((abs(logLumaAt(vTexCoord + vec2(uTexelSize.x, 0.0)) - logLumaAt(vTexCoord - vec2(uTexelSize.x, 0.0))) +
+                abs(logLumaAt(vTexCoord + vec2(0.0, uTexelSize.y)) - logLumaAt(vTexCoord - vec2(0.0, uTexelSize.y)))) * 0.55, 0.0, 1.0));
+            float edgeScale = mix(2.2, 0.22, edgeAware);
+            float linearEdgeScale = mix(0.55, 0.035, edgeAware);
+            float haloScale = mix(3.0, 0.75, haloGuard);
+            float smoothRadiusScale = mix(1.0, mix(1.0, 0.20, localEdge), haloGuard);
+            smoothRadiusScale *= mix(1.0, 1.85, smoothGradient * smoothProtect);
+            float sum = 0.0;
+            float weightSum = 0.0;
+            for (int y = -32; y <= 32; ++y) {
+                for (int x = -32; x <= 32; ++x) {
+                    if (abs(x) > effectiveRadius || abs(y) > effectiveRadius) continue;
+                    vec2 uv = vTexCoord + vec2(x, y) * uTexelSize;
+                    vec4 sampleMetrics = texture(uMetrics, uv);
+                    float distance2 = float(x * x + y * y);
+                    float spatial = exp(-distance2 / max(1.0, float(effectiveRadius * effectiveRadius) * smoothRadiusScale) * haloScale);
+                    float logDiff = abs(logLumaAt(uv) - centerLogLum);
+                    float linearDiff = abs(lumaAt(uv) - centerLum);
+                    float sameSmoothRegion = 1.0 - abs(clamp(sampleMetrics.b, 0.0, 1.0) - smoothGradient);
+                    float edgeStop = max(localEdge, clamp(sampleMetrics.r, 0.0, 1.0));
+                    float rangeW = exp(-logDiff / max(0.0001, edgeScale)) *
+                        exp(-linearDiff / max(0.0001, linearEdgeScale));
+                    rangeW = mix(rangeW, max(rangeW, 0.35 + sameSmoothRegion * 0.45), smoothGradient * smoothProtect * (1.0 - edgeStop));
+                    rangeW *= 1.0 - smoothstep(mix(3.0, 0.75, edgeAware), mix(5.0, 1.55, edgeAware), logDiff) * haloGuard;
+                    rangeW *= 1.0 - edgeStop * haloGuard * 0.75;
+                    float w = spatial * rangeW;
+                    sum += texture(uAnalysis, uv).r * w;
+                    weightSum += w;
+                }
+            }
+            float smoothed = weightSum > 0.0 ? sum / weightSum : center.r;
+            float preserve = smoothstep(0.12, 0.88, localEdge) * haloGuard;
+            preserve *= 1.0 - smoothGradient * smoothProtect * 0.75;
+            center.r = mix(smoothed, center.r, preserve);
+            if (uMaskDebandDither > 0.0 && centerMetrics.a > 0.0) {
+                float n = fract(sin(dot(vTexCoord * vec2(8192.0, 4096.0), vec2(12.9898, 78.233))) * 43758.5453);
+                center.r = clamp(center.r + (n - 0.5) * uMaskDebandDither * centerMetrics.a * 0.006, 0.0, 1.0);
+            }
+            FragColor = center;
+        }
+    )";
+
+    static const char* applyFragSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uInputImage;
+        uniform sampler2D uExposureMap;
+        uniform sampler2D uMetrics;
+        uniform int uHasMask;
+        uniform float uMinEv;
+        uniform float uMaxEv;
+        uniform float uBaseEv;
+        uniform float uStrength;
+        uniform float uEstimatedNoiseFloor;
+        uniform float uChannelSaturationRisk;
+        uniform int uDebugView;
+        uniform int uMaskOutput;
+
+        void main() {
+            vec4 inputColor = texture(uInputImage, vTexCoord);
+            vec4 map = texture(uExposureMap, vTexCoord);
+            vec4 metrics = texture(uMetrics, vTexCoord);
+            float ev = uHasMask != 0 ? mix(uMinEv + uBaseEv, uMaxEv + uBaseEv, clamp(map.r, 0.0, 1.0)) : 0.0;
+            float gain = exp2(ev * clamp(uStrength, 0.0, 2.0));
+            vec3 fused = max(inputColor.rgb, vec3(0.0)) * gain;
+            if (uMaskOutput != 0 || uDebugView == 1) {
+                FragColor = vec4(vec3(map.r), 1.0);
+            } else if (uDebugView == 2) {
+                FragColor = vec4(vec3(map.g), 1.0);
+            } else if (uDebugView == 3) {
+                FragColor = vec4(vec3(map.b), 1.0);
+            } else if (uDebugView == 4) {
+                FragColor = vec4(vec3(map.a), 1.0);
+            } else if (uDebugView == 5) {
+                float bands = floor(map.r * 8.999) / 8.0;
+                FragColor = vec4(bands, 1.0 - bands, abs(0.5 - bands) * 2.0, 1.0);
+            } else if (uDebugView == 6) {
+                FragColor = vec4(vec3(metrics.b), 1.0);
+            } else if (uDebugView == 7) {
+                FragColor = vec4(vec3(metrics.r), 1.0);
+            } else if (uDebugView == 8) {
+                FragColor = vec4(vec3(metrics.g), 1.0);
+            } else if (uDebugView == 9) {
+                FragColor = vec4(vec3(metrics.a), 1.0);
+            } else if (uDebugView == 10) {
+                float rangePreview = clamp((uMaxEv - uMinEv) / 12.0, 0.0, 1.0);
+                FragColor = vec4(map.r, rangePreview, clamp((uBaseEv + 4.0) / 8.0, 0.0, 1.0), 1.0);
+            } else if (uDebugView == 11) {
+                float lum = dot(max(inputColor.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+                float snr = smoothstep(uEstimatedNoiseFloor * 2.0, uEstimatedNoiseFloor * 18.0, lum);
+                FragColor = vec4(vec3(snr * (1.0 - metrics.a * 0.45)), 1.0);
+            } else if (uDebugView == 12) {
+                FragColor = vec4(vec3(map.b), 1.0);
+            } else if (uDebugView == 13) {
+                float maxChannel = max(max(inputColor.r, inputColor.g), inputColor.b);
+                float minChannel = min(min(inputColor.r, inputColor.g), inputColor.b);
+                float sat = maxChannel > 0.00003 ? (maxChannel - minChannel) / maxChannel : 0.0;
+                FragColor = vec4(vec3(clamp(max(sat, uChannelSaturationRisk) * smoothstep(0.25, 1.05, maxChannel), 0.0, 1.0)), 1.0);
+            } else if (uDebugView == 14) {
+                FragColor = vec4(vec3(clamp(metrics.a * (1.0 - metrics.g), 0.0, 1.0)), 1.0);
+            } else {
+                FragColor = vec4(fused, inputColor.a);
+            }
+        }
+    )";
+
+    if (!m_RawDetailFusionAnalysisProgram) {
+        m_RawDetailFusionAnalysisProgram = GLHelpers::CreateShaderProgram(vertexSrc, analysisFragSrc);
+    }
+    if (!m_RawDetailFusionMetricsProgram) {
+        m_RawDetailFusionMetricsProgram = GLHelpers::CreateShaderProgram(vertexSrc, metricsFragSrc);
+    }
+    if (!m_RawDetailFusionSmoothProgram) {
+        m_RawDetailFusionSmoothProgram = GLHelpers::CreateShaderProgram(vertexSrc, smoothFragSrc);
+    }
+    if (!m_RawDetailFusionApplyProgram) {
+        m_RawDetailFusionApplyProgram = GLHelpers::CreateShaderProgram(vertexSrc, applyFragSrc);
+    }
+}
+
+unsigned int RenderPipeline::RenderRawDetailAutoMask(
+    unsigned int inputTexture,
+    const RenderGraphNode& node,
+    unsigned int manualMaskTexture,
+    bool debugPreview) {
+    EnsureRawDetailFusionPrograms();
+    if (!inputTexture || !m_RawDetailFusionAnalysisProgram || !m_RawDetailFusionMetricsProgram ||
+        !m_RawDetailFusionSmoothProgram || (debugPreview && !m_RawDetailFusionApplyProgram)) {
+        return 0;
+    }
+    const Raw::RawDetailFusionSettings& settings = node.kind == RenderGraphNodeKind::RawDetailFusion
+        ? node.rawDetailFusion.settings
+        : node.rawDetailAutoMask.settings;
+    const AutoGainSceneStats sceneStats = ComputeAutoGainSceneStats(inputTexture);
+    const Raw::RawDetailFusionSettings effectiveSettings = ResolveAutoGainEffectiveSettings(inputTexture, settings);
+    const unsigned int metricsTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    const unsigned int analysisTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    const unsigned int smoothTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    if (!metricsTexture || !analysisTexture || !smoothTexture) {
+        if (metricsTexture) glDeleteTextures(1, &metricsTexture);
+        if (analysisTexture) glDeleteTextures(1, &analysisTexture);
+        if (smoothTexture) glDeleteTextures(1, &smoothTexture);
+        return 0;
+    }
+
+    auto renderPass = [&](unsigned int texture, const std::function<void(unsigned int)>& fn) {
+        unsigned int fbo = GLHelpers::CreateFBO(texture);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glViewport(0, 0, m_Width, m_Height);
+        glClear(GL_COLOR_BUFFER_BIT);
+        fn(fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+    };
+
+    renderPass(metricsTexture, [&](unsigned int) {
+        glUseProgram(m_RawDetailFusionMetricsProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, inputTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uInputImage"), 0);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uSmoothGradientProtection"), settings.smoothGradientProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uTextureSensitivity"), settings.textureSensitivity);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uSkyBias"), settings.skyBias);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uEstimatedNoiseFloor"), sceneStats.estimatedNoiseFloor);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uAutoNoiseProtection"), effectiveSettings.noiseProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uAutoHighlightProtection"), effectiveSettings.highlightProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uChannelSaturationRisk"), sceneStats.channelSaturationRatio);
+        glUniform2f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
+        m_Quad.Draw();
+    });
+
+    renderPass(analysisTexture, [&](unsigned int) {
+        glUseProgram(m_RawDetailFusionAnalysisProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, inputTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uInputImage"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, metricsTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMetrics"), 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, manualMaskTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uManualMask"), 2);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uHasManualMask"), manualMaskTexture ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMode"),
+            static_cast<int>(manualMaskTexture ? Raw::RawDetailFusionMode::Hybrid : Raw::RawDetailFusionMode::AutoAnalyze));
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMinEv"), effectiveSettings.minEv);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMaxEv"), effectiveSettings.maxEv);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uBaseEv"), effectiveSettings.baseEv);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uSampleCount"), std::clamp(effectiveSettings.sampleCount, 2, 33));
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uHighlightProtection"), effectiveSettings.highlightProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uShadowLiftLimit"), effectiveSettings.shadowLiftLimit);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uNoiseProtection"), effectiveSettings.noiseProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uDetailWeight"), settings.detailWeight);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uWellExposedTarget"), effectiveSettings.wellExposedTarget);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uSmoothGradientProtection"), settings.smoothGradientProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uSkyBias"), settings.skyBias);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uEstimatedNoiseFloor"), sceneStats.estimatedNoiseFloor);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uChannelSaturationRisk"), sceneStats.channelSaturationRatio);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uClippingRatio"), sceneStats.clippingRatio);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uInvertMask"), settings.invertMask ? 1 : 0);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMaskBlackPoint"), settings.maskBlackPoint);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMaskWhitePoint"), settings.maskWhitePoint);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMaskGamma"), settings.maskGamma);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uManualBlend"), settings.manualBlend);
+        glUniform2f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
+        m_Quad.Draw();
+    });
+
+    renderPass(smoothTexture, [&](unsigned int) {
+        glUseProgram(m_RawDetailFusionSmoothProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, analysisTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uAnalysis"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, metricsTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uMetrics"), 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, inputTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uInputImage"), 2);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uRadius"), std::clamp(settings.smoothnessRadius, 0, 16));
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uSmoothAreaRadius"), std::clamp(settings.smoothAreaRadius, 0, 32));
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uEdgeAwareness"), settings.edgeAwareness);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uHaloGuard"), settings.haloGuard);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uSmoothGradientProtection"), settings.smoothGradientProtection);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uMaskDebandDither"), settings.maskDebandDither);
+        glUniform2f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
+        m_Quad.Draw();
+    });
+
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE0);
+    if (debugPreview) {
+        const unsigned int previewTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+        if (previewTexture) {
+            renderPass(previewTexture, [&](unsigned int) {
+                glUseProgram(m_RawDetailFusionApplyProgram);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, inputTexture);
+                glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uInputImage"), 0);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, smoothTexture);
+                glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uExposureMap"), 1);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, metricsTexture);
+                glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMetrics"), 2);
+                glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uHasMask"), 1);
+                glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMinEv"), effectiveSettings.minEv);
+                glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMaxEv"), effectiveSettings.maxEv);
+                glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uBaseEv"), effectiveSettings.baseEv);
+                glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uStrength"), effectiveSettings.strength);
+                glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uEstimatedNoiseFloor"), sceneStats.estimatedNoiseFloor);
+                glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uChannelSaturationRisk"), sceneStats.channelSaturationRatio);
+                glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uDebugView"), static_cast<int>(settings.debugView));
+                glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMaskOutput"), 1);
+                m_Quad.Draw();
+            });
+            glDeleteTextures(1, &smoothTexture);
+            glDeleteTextures(1, &analysisTexture);
+            glDeleteTextures(1, &metricsTexture);
+            glUseProgram(0);
+            glActiveTexture(GL_TEXTURE0);
+            return previewTexture;
+        }
+    }
+    glDeleteTextures(1, &analysisTexture);
+    glDeleteTextures(1, &metricsTexture);
+    return smoothTexture;
+}
+
+unsigned int RenderPipeline::RenderRawDetailFusion(
+    unsigned int inputTexture,
+    unsigned int maskTexture,
+    const Raw::RawDetailFusionSettings& settings) {
+    EnsureRawDetailFusionPrograms();
+    if (!inputTexture || !m_RawDetailFusionApplyProgram) {
+        return 0;
+    }
+    const unsigned int outputTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    if (!outputTexture) {
+        return 0;
+    }
+    const AutoGainSceneStats sceneStats = ComputeAutoGainSceneStats(inputTexture);
+    const Raw::RawDetailFusionSettings effectiveSettings = ResolveAutoGainEffectiveSettings(inputTexture, settings);
+    auto renderPass = [&](unsigned int texture, const std::function<void(unsigned int)>& fn) {
+        unsigned int fbo = GLHelpers::CreateFBO(texture);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glViewport(0, 0, m_Width, m_Height);
+        glClear(GL_COLOR_BUFFER_BIT);
+        fn(fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+    };
+
+    renderPass(outputTexture, [&](unsigned int) {
+        glUseProgram(m_RawDetailFusionApplyProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, inputTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uInputImage"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, maskTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uExposureMap"), 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, maskTexture);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMetrics"), 2);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uHasMask"), maskTexture ? 1 : 0);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMinEv"), effectiveSettings.minEv);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMaxEv"), effectiveSettings.maxEv);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uBaseEv"), effectiveSettings.baseEv);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uStrength"), effectiveSettings.strength);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uEstimatedNoiseFloor"), sceneStats.estimatedNoiseFloor);
+        glUniform1f(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uChannelSaturationRisk"), sceneStats.channelSaturationRatio);
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uDebugView"), static_cast<int>(Raw::RawDetailFusionDebugView::FinalImage));
+        glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMaskOutput"), 0);
+        m_Quad.Draw();
+    });
+
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE0);
+    return outputTexture;
+}
+
 void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
     m_GraphSourceTexture = 0;
+    m_AutoGainSceneStatsCache.clear();
     if (!m_SourceTexture || m_Width == 0 || m_Height == 0 || graph.outputNodeId <= 0) {
         m_OutputTexture = m_SourceTexture;
         return;
@@ -1276,6 +2128,14 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
             case RenderGraphNodeKind::ImageGenerator:
             case RenderGraphNodeKind::RawDevelop:
                 return node.nodeId;
+            case RenderGraphNodeKind::RawDetailFusion: {
+                const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
+            }
+            case RenderGraphNodeKind::RawDetailAutoMask: {
+                const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
+            }
             case RenderGraphNodeKind::RawNeuralDenoise: {
                 const RenderGraphLink* input = findInputLink(node.nodeId, "rawIn");
                 return input ? findReferenceSourceNode(input->fromNodeId) : -1;
@@ -1309,6 +2169,37 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
             default:
                 return -1;
         }
+    };
+
+    std::function<int(int, const std::string&)> findRawDetailAutoMaskSource = [&](int nodeId, const std::string& socketId) -> int {
+        const auto nodeIt = nodes.find(nodeId);
+        if (nodeIt == nodes.end() || !nodeIt->second) {
+            return -1;
+        }
+        const RenderGraphNode& node = *nodeIt->second;
+        if (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") {
+            return node.nodeId;
+        }
+        if (node.kind == RenderGraphNodeKind::MaskUtility && socketId == "maskOut") {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "maskIn");
+            return input ? findRawDetailAutoMaskSource(input->fromNodeId, input->fromSocketId) : -1;
+        }
+        return -1;
+    };
+
+    auto resolveRawDetailFusionApplySettings = [&](const RenderGraphNode& node) {
+        Raw::RawDetailFusionSettings settings = node.rawDetailFusion.settings;
+        if (const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn")) {
+            const int autoMaskNodeId = findRawDetailAutoMaskSource(maskLink->fromNodeId, maskLink->fromSocketId);
+            const auto autoIt = nodes.find(autoMaskNodeId);
+            if (autoIt != nodes.end() && autoIt->second) {
+                const Raw::RawDetailFusionSettings& autoSettings = autoIt->second->rawDetailAutoMask.settings;
+                settings.minEv = autoSettings.minEv;
+                settings.maxEv = autoSettings.maxEv;
+                settings.baseEv = autoSettings.baseEv;
+            }
+        }
+        return settings;
     };
 
     std::unordered_map<std::string, unsigned int> imageCache;
@@ -1379,6 +2270,8 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         if (node.kind == RenderGraphNodeKind::Image ||
             node.kind == RenderGraphNodeKind::RawNeuralDenoise ||
             node.kind == RenderGraphNodeKind::RawDevelop ||
+            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId != "maskOut") ||
+            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId != "maskOut") ||
             node.kind == RenderGraphNodeKind::Layer ||
             node.kind == RenderGraphNodeKind::Mix ||
             node.kind == RenderGraphNodeKind::ImageGenerator ||
@@ -1433,6 +2326,97 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
             HashCombine(fingerprint, HashValue(m_Width));
             HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask) {
+            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
+            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
+            const Raw::RawDetailFusionSettings& settings = node.rawDetailAutoMask.settings;
+            HashCombine(fingerprint, HashValue(static_cast<int>(settings.mode)));
+            HashCombine(fingerprint, HashValue(static_cast<int>(settings.debugView)));
+            HashCombine(fingerprint, HashValue(settings.autoSafetyEnabled));
+            HashCombine(fingerprint, HashValue(settings.overrideMinEv));
+            HashCombine(fingerprint, HashValue(settings.overrideMaxEv));
+            HashCombine(fingerprint, HashValue(settings.overrideBaseEv));
+            HashCombine(fingerprint, HashValue(settings.overrideNoiseProtection));
+            HashCombine(fingerprint, HashValue(settings.overrideHighlightProtection));
+            HashCombine(fingerprint, HashValue(settings.overrideShadowLiftLimit));
+            HashCombine(fingerprint, HashValue(settings.overrideWellExposedTarget));
+            HashCombine(fingerprint, HashValue(settings.minEvBias));
+            HashCombine(fingerprint, HashValue(settings.maxEvBias));
+            HashCombine(fingerprint, HashValue(settings.baseEvBias));
+            HashCombine(fingerprint, HashValue(settings.noiseProtectionBias));
+            HashCombine(fingerprint, HashValue(settings.highlightProtectionBias));
+            HashCombine(fingerprint, HashValue(settings.shadowLiftLimitBias));
+            HashCombine(fingerprint, HashValue(settings.wellExposedTargetBias));
+            HashCombine(fingerprint, HashValue(settings.minEv));
+            HashCombine(fingerprint, HashValue(settings.maxEv));
+            HashCombine(fingerprint, HashValue(settings.baseEv));
+            HashCombine(fingerprint, HashValue(settings.strength));
+            HashCombine(fingerprint, HashValue(settings.sampleCount));
+            HashCombine(fingerprint, HashValue(settings.highlightProtection));
+            HashCombine(fingerprint, HashValue(settings.shadowLiftLimit));
+            HashCombine(fingerprint, HashValue(settings.noiseProtection));
+            HashCombine(fingerprint, HashValue(settings.detailWeight));
+            HashCombine(fingerprint, HashValue(settings.wellExposedTarget));
+            HashCombine(fingerprint, HashValue(settings.smoothGradientProtection));
+            HashCombine(fingerprint, HashValue(settings.textureSensitivity));
+            HashCombine(fingerprint, HashValue(settings.skyBias));
+            HashCombine(fingerprint, HashValue(settings.invertMask));
+            HashCombine(fingerprint, HashValue(settings.maskBlackPoint));
+            HashCombine(fingerprint, HashValue(settings.maskWhitePoint));
+            HashCombine(fingerprint, HashValue(settings.maskGamma));
+            HashCombine(fingerprint, HashValue(settings.smoothnessRadius));
+            HashCombine(fingerprint, HashValue(settings.smoothAreaRadius));
+            HashCombine(fingerprint, HashValue(settings.edgeAwareness));
+            HashCombine(fingerprint, HashValue(settings.haloGuard));
+            HashCombine(fingerprint, HashValue(settings.maskDebandDither));
+            HashCombine(fingerprint, HashValue(settings.manualBlend));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
+            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
+            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
+            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
+            HashCombine(fingerprint, maskLink ? fingerprintMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0);
+            const Raw::RawDetailFusionSettings& settings = node.rawDetailFusion.settings;
+            HashCombine(fingerprint, HashValue(settings.autoSafetyEnabled));
+            HashCombine(fingerprint, HashValue(settings.overrideMinEv));
+            HashCombine(fingerprint, HashValue(settings.overrideMaxEv));
+            HashCombine(fingerprint, HashValue(settings.overrideBaseEv));
+            HashCombine(fingerprint, HashValue(settings.overrideNoiseProtection));
+            HashCombine(fingerprint, HashValue(settings.overrideHighlightProtection));
+            HashCombine(fingerprint, HashValue(settings.overrideShadowLiftLimit));
+            HashCombine(fingerprint, HashValue(settings.overrideWellExposedTarget));
+            HashCombine(fingerprint, HashValue(settings.minEvBias));
+            HashCombine(fingerprint, HashValue(settings.maxEvBias));
+            HashCombine(fingerprint, HashValue(settings.baseEvBias));
+            HashCombine(fingerprint, HashValue(settings.noiseProtectionBias));
+            HashCombine(fingerprint, HashValue(settings.highlightProtectionBias));
+            HashCombine(fingerprint, HashValue(settings.shadowLiftLimitBias));
+            HashCombine(fingerprint, HashValue(settings.wellExposedTargetBias));
+            HashCombine(fingerprint, HashValue(settings.minEv));
+            HashCombine(fingerprint, HashValue(settings.maxEv));
+            HashCombine(fingerprint, HashValue(settings.baseEv));
+            HashCombine(fingerprint, HashValue(settings.sampleCount));
+            HashCombine(fingerprint, HashValue(settings.highlightProtection));
+            HashCombine(fingerprint, HashValue(settings.shadowLiftLimit));
+            HashCombine(fingerprint, HashValue(settings.noiseProtection));
+            HashCombine(fingerprint, HashValue(settings.detailWeight));
+            HashCombine(fingerprint, HashValue(settings.wellExposedTarget));
+            HashCombine(fingerprint, HashValue(settings.smoothGradientProtection));
+            HashCombine(fingerprint, HashValue(settings.textureSensitivity));
+            HashCombine(fingerprint, HashValue(settings.skyBias));
+            HashCombine(fingerprint, HashValue(settings.invertMask));
+            HashCombine(fingerprint, HashValue(settings.maskBlackPoint));
+            HashCombine(fingerprint, HashValue(settings.maskWhitePoint));
+            HashCombine(fingerprint, HashValue(settings.maskGamma));
+            HashCombine(fingerprint, HashValue(settings.smoothnessRadius));
+            HashCombine(fingerprint, HashValue(settings.smoothAreaRadius));
+            HashCombine(fingerprint, HashValue(settings.edgeAwareness));
+            HashCombine(fingerprint, HashValue(settings.haloGuard));
+            HashCombine(fingerprint, HashValue(settings.maskDebandDither));
+            HashCombine(fingerprint, HashValue(settings.manualBlend));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
         }
 
         fingerprintingMasks.erase(key);
@@ -1461,7 +2445,9 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         if (node.kind == RenderGraphNodeKind::MaskGenerator ||
             node.kind == RenderGraphNodeKind::MaskUtility ||
             node.kind == RenderGraphNodeKind::ImageToMask ||
-            node.kind == RenderGraphNodeKind::ChannelSplit) {
+            node.kind == RenderGraphNodeKind::ChannelSplit ||
+            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
+            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             std::size_t maskFp = fingerprintMask(nodeId, socketId);
             fingerprintingImages.erase(key);
             imageFingerprintCache[key] = maskFp;
@@ -1522,6 +2508,15 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.debugView)));
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.rotationDegrees));
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.rotateToFitFrame));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.flipHorizontally));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.flipVertically));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.falseColorSuppression));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.defringeStrength));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.highlightEdgeCleanup));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.chromaRadius));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.preserveRealColor));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.lateralRedCyan));
+            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.lateralBlueYellow));
             HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.cameraTransformSource)));
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.enabled));
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.hotPixelSuppression));
@@ -1531,6 +2526,37 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.radius));
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.edgeProtection));
             HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.iterations));
+        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
+            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
+            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
+            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
+            HashCombine(fingerprint, fingerprintMask(node.nodeId, "maskOut"));
+            const Raw::RawDetailFusionSettings settings = resolveRawDetailFusionApplySettings(node);
+            HashCombine(fingerprint, HashValue(settings.autoSafetyEnabled));
+            HashCombine(fingerprint, HashValue(settings.overrideMinEv));
+            HashCombine(fingerprint, HashValue(settings.overrideMaxEv));
+            HashCombine(fingerprint, HashValue(settings.overrideBaseEv));
+            HashCombine(fingerprint, HashValue(settings.overrideNoiseProtection));
+            HashCombine(fingerprint, HashValue(settings.overrideHighlightProtection));
+            HashCombine(fingerprint, HashValue(settings.overrideShadowLiftLimit));
+            HashCombine(fingerprint, HashValue(settings.overrideWellExposedTarget));
+            HashCombine(fingerprint, HashValue(settings.minEvBias));
+            HashCombine(fingerprint, HashValue(settings.maxEvBias));
+            HashCombine(fingerprint, HashValue(settings.baseEvBias));
+            HashCombine(fingerprint, HashValue(settings.noiseProtectionBias));
+            HashCombine(fingerprint, HashValue(settings.highlightProtectionBias));
+            HashCombine(fingerprint, HashValue(settings.shadowLiftLimitBias));
+            HashCombine(fingerprint, HashValue(settings.wellExposedTargetBias));
+            HashCombine(fingerprint, HashValue(settings.minEv));
+            HashCombine(fingerprint, HashValue(settings.maxEv));
+            HashCombine(fingerprint, HashValue(settings.baseEv));
+            HashCombine(fingerprint, HashValue(settings.noiseProtection));
+            HashCombine(fingerprint, HashValue(settings.highlightProtection));
+            HashCombine(fingerprint, HashValue(settings.shadowLiftLimit));
+            HashCombine(fingerprint, HashValue(settings.wellExposedTarget));
+            HashCombine(fingerprint, HashValue(settings.strength));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
         } else if (node.kind == RenderGraphNodeKind::ImageGenerator) {
             HashCombine(fingerprint, HashValue(static_cast<int>(node.imageGeneratorKind)));
             for (float channel : node.imageGeneratorSettings.colorA) {
@@ -1617,6 +2643,8 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         if (node.kind == RenderGraphNodeKind::Image ||
             node.kind == RenderGraphNodeKind::RawNeuralDenoise ||
             node.kind == RenderGraphNodeKind::RawDevelop ||
+            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId != "maskOut") ||
+            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId != "maskOut") ||
             node.kind == RenderGraphNodeKind::Layer ||
             node.kind == RenderGraphNodeKind::Mix ||
             node.kind == RenderGraphNodeKind::ImageGenerator ||
@@ -1697,6 +2725,28 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                 });
                 resultOwned = result != 0;
             }
+        } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
+            if (inputImage) {
+                const bool debugPreview = graph.autoGainMaskPreview &&
+                    graph.outputNodeId == node.nodeId &&
+                    graph.outputSocketId == "maskOut";
+                result = RenderRawDetailAutoMask(inputImage, node, 0, debugPreview);
+                resultOwned = result != 0;
+            }
+        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
+            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
+            const unsigned int manualMask = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
+            if (inputImage) {
+                const bool debugPreview = graph.autoGainMaskPreview &&
+                    graph.outputNodeId == node.nodeId &&
+                    graph.outputSocketId == "maskOut";
+                result = RenderRawDetailAutoMask(inputImage, node, manualMask, debugPreview);
+                resultOwned = result != 0;
+            }
         }
 
         if (result) {
@@ -1729,7 +2779,9 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         if (node.kind == RenderGraphNodeKind::MaskGenerator ||
             node.kind == RenderGraphNodeKind::MaskUtility ||
             node.kind == RenderGraphNodeKind::ImageToMask ||
-            node.kind == RenderGraphNodeKind::ChannelSplit) {
+            node.kind == RenderGraphNodeKind::ChannelSplit ||
+            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
+            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             unsigned int maskTex = evalMask(nodeId, socketId);
             visitingImages.erase(key);
             return maskTex;
@@ -1817,6 +2869,14 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
                     std::cerr << "[RAW] Load failed for source node " << rawSource->nodeId
                               << " (" << path << "): " << error << "\n";
                 }
+            }
+        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
+            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
+            const unsigned int generatedMask = inputImage ? evalMask(node.nodeId, "maskOut") : 0;
+            if (inputImage) {
+                result = RenderRawDetailFusion(inputImage, generatedMask, resolveRawDetailFusionApplySettings(node));
+                resultOwned = result != 0;
             }
         } else if (node.kind == RenderGraphNodeKind::ImageGenerator) {
             result = GenerateImageTexture(node);
@@ -1924,7 +2984,9 @@ void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
         (outputIt->second->kind == RenderGraphNodeKind::MaskGenerator ||
          outputIt->second->kind == RenderGraphNodeKind::MaskUtility ||
          outputIt->second->kind == RenderGraphNodeKind::ImageToMask ||
-         outputIt->second->kind == RenderGraphNodeKind::ChannelSplit)) {
+         outputIt->second->kind == RenderGraphNodeKind::ChannelSplit ||
+         (outputIt->second->kind == RenderGraphNodeKind::RawDetailAutoMask && graph.outputSocketId == "maskOut") ||
+         (outputIt->second->kind == RenderGraphNodeKind::RawDetailFusion && graph.outputSocketId == "maskOut"))) {
         finalTexture = evalMask(graph.outputNodeId, graph.outputSocketId);
     } else {
         finalTexture = evalImage(graph.outputNodeId, graph.outputSocketId);

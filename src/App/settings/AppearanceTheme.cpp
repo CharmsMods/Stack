@@ -720,8 +720,174 @@ ThemeDefinition BuildSolarizedLightTheme() {
     return theme;
 }
 
+ThemeDefinition BuildYellowDarkTheme() {
+    ThemeDefinition theme;
+    theme.id = kYellowDarkPresetId;
+    theme.displayName = "Yellow Dark";
+    theme.readOnly = true;
+    theme.textScale = 1.0f;
+
+    const ImVec4 background = MakeColor(0.102f, 0.094f, 0.078f, 1.0f);
+    const ImVec4 windowBackground = MakeColor(0.141f, 0.133f, 0.110f, 1.0f);
+    const ImVec4 surfaceBackground = MakeColor(0.180f, 0.169f, 0.141f, 1.0f);
+    const ImVec4 surfaceElevated = MakeColor(0.220f, 0.208f, 0.173f, 1.0f);
+    const ImVec4 border = MakeColor(0.322f, 0.298f, 0.243f, 0.92f);
+    const ImVec4 accent = MakeColor(1.000f, 0.831f, 0.000f, 1.0f);
+    const ImVec4 accentDarker = MakeColor(0.922f, 0.765f, 0.000f, 1.0f);
+    const ImVec4 text = MakeColor(0.961f, 0.949f, 0.902f, 1.0f);
+    const ImVec4 textMuted = MakeColor(0.639f, 0.620f, 0.541f, 1.0f);
+
+    theme.colors.fill(background);
+    theme.colors[ImGuiCol_Text] = text;
+    theme.colors[ImGuiCol_TextDisabled] = textMuted;
+    theme.colors[ImGuiCol_WindowBg] = windowBackground;
+    theme.colors[ImGuiCol_ChildBg] = surfaceBackground;
+    theme.colors[ImGuiCol_PopupBg] = windowBackground;
+    theme.colors[ImGuiCol_Border] = border;
+    theme.colors[ImGuiCol_BorderShadow] = MakeColor(0.0f, 0.0f, 0.0f, 0.0f);
+    theme.colors[ImGuiCol_FrameBg] = surfaceBackground;
+    theme.colors[ImGuiCol_FrameBgHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_FrameBgActive] = Blend(surfaceElevated, accentDarker, 0.22f);
+    theme.colors[ImGuiCol_TitleBg] = windowBackground;
+    theme.colors[ImGuiCol_TitleBgActive] = surfaceElevated;
+    theme.colors[ImGuiCol_TitleBgCollapsed] = windowBackground;
+    theme.colors[ImGuiCol_MenuBarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarGrab] = border;
+    theme.colors[ImGuiCol_ScrollbarGrabHovered] = accent;
+    theme.colors[ImGuiCol_ScrollbarGrabActive] = accentDarker;
+    theme.colors[ImGuiCol_CheckMark] = accent;
+    theme.colors[ImGuiCol_SliderGrab] = Blend(accent, windowBackground, 0.15f);
+    theme.colors[ImGuiCol_SliderGrabActive] = accentDarker;
+    theme.colors[ImGuiCol_Button] = surfaceBackground;
+    theme.colors[ImGuiCol_ButtonHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_ButtonActive] = Blend(surfaceElevated, accentDarker, 0.24f);
+    theme.colors[ImGuiCol_Header] = surfaceBackground;
+    theme.colors[ImGuiCol_HeaderHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_HeaderActive] = Blend(surfaceElevated, accentDarker, 0.20f);
+    theme.colors[ImGuiCol_Separator] = border;
+    theme.colors[ImGuiCol_SeparatorHovered] = accent;
+    theme.colors[ImGuiCol_SeparatorActive] = accentDarker;
+    theme.colors[ImGuiCol_ResizeGrip] = border;
+    theme.colors[ImGuiCol_ResizeGripHovered] = accent;
+    theme.colors[ImGuiCol_ResizeGripActive] = accentDarker;
+    theme.colors[ImGuiCol_Tab] = windowBackground;
+    theme.colors[ImGuiCol_TabHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_TabActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TabUnfocused] = windowBackground;
+    theme.colors[ImGuiCol_TabUnfocusedActive] = surfaceBackground;
+    theme.colors[ImGuiCol_DockingPreview] = accent;
+    theme.colors[ImGuiCol_DockingEmptyBg] = background;
+    theme.colors[ImGuiCol_PlotLines] = accent;
+    theme.colors[ImGuiCol_PlotLinesHovered] = accentDarker;
+    theme.colors[ImGuiCol_PlotHistogram] = accent;
+    theme.colors[ImGuiCol_PlotHistogramHovered] = accentDarker;
+    theme.colors[ImGuiCol_TableHeaderBg] = surfaceBackground;
+    theme.colors[ImGuiCol_TableBorderStrong] = border;
+    theme.colors[ImGuiCol_TableBorderLight] = Blend(border, background, 0.45f);
+    theme.colors[ImGuiCol_TableRowBg] = windowBackground;
+    theme.colors[ImGuiCol_TableRowBgAlt] = surfaceBackground;
+    theme.colors[ImGuiCol_TextSelectedBg] = Blend(accent, background, 0.82f);
+    theme.colors[ImGuiCol_DragDropTarget] = accent;
+    theme.colors[ImGuiCol_NavHighlight] = accent;
+    theme.colors[ImGuiCol_NavWindowingHighlight] = Blend(accent, background, 0.3f);
+    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.02f, 0.02f, 0.03f, 0.65f);
+    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.02f, 0.02f, 0.03f, 0.55f);
+    theme.colors[ImGuiCol_TextLink] = accent;
+    theme.colors[ImGuiCol_TabDimmed] = windowBackground;
+    theme.colors[ImGuiCol_TabDimmedSelected] = Blend(surfaceBackground, windowBackground, 0.22f);
+    theme.colors[ImGuiCol_TabDimmedSelectedOverline] = accentDarker;
+    theme.colors[ImGuiCol_TabSelectedOverline] = accent;
+    ApplyCommonThemeStyle(theme);
+
+    return theme;
+}
+
+ThemeDefinition BuildYellowLightTheme() {
+    ThemeDefinition theme;
+    theme.id = kYellowLightPresetId;
+    theme.displayName = "Yellow Light";
+    theme.readOnly = true;
+    theme.textScale = 1.0f;
+
+    const ImVec4 background = MakeColor(0.992f, 0.988f, 0.957f, 1.0f);
+    const ImVec4 windowBackground = MakeColor(1.000f, 0.992f, 0.973f, 1.0f);
+    const ImVec4 surfaceBackground = MakeColor(0.961f, 0.949f, 0.882f, 1.0f);
+    const ImVec4 surfaceElevated = MakeColor(0.922f, 0.902f, 0.820f, 1.0f);
+    const ImVec4 border = MakeColor(0.820f, 0.796f, 0.659f, 0.92f);
+    const ImVec4 accent = MakeColor(1.000f, 0.831f, 0.000f, 1.0f);
+    const ImVec4 accentDarker = MakeColor(0.922f, 0.765f, 0.000f, 1.0f);
+    const ImVec4 text = MakeColor(0.220f, 0.204f, 0.157f, 1.0f);
+    const ImVec4 textMuted = MakeColor(0.522f, 0.486f, 0.392f, 1.0f);
+
+    theme.colors.fill(background);
+    theme.colors[ImGuiCol_Text] = text;
+    theme.colors[ImGuiCol_TextDisabled] = textMuted;
+    theme.colors[ImGuiCol_WindowBg] = windowBackground;
+    theme.colors[ImGuiCol_ChildBg] = surfaceBackground;
+    theme.colors[ImGuiCol_PopupBg] = windowBackground;
+    theme.colors[ImGuiCol_Border] = border;
+    theme.colors[ImGuiCol_BorderShadow] = MakeColor(0.0f, 0.0f, 0.0f, 0.0f);
+    theme.colors[ImGuiCol_FrameBg] = surfaceBackground;
+    theme.colors[ImGuiCol_FrameBgHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_FrameBgActive] = Blend(surfaceElevated, accentDarker, 0.16f);
+    theme.colors[ImGuiCol_TitleBg] = windowBackground;
+    theme.colors[ImGuiCol_TitleBgActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TitleBgCollapsed] = windowBackground;
+    theme.colors[ImGuiCol_MenuBarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarBg] = background;
+    theme.colors[ImGuiCol_ScrollbarGrab] = border;
+    theme.colors[ImGuiCol_ScrollbarGrabHovered] = accent;
+    theme.colors[ImGuiCol_ScrollbarGrabActive] = accentDarker;
+    theme.colors[ImGuiCol_CheckMark] = accent;
+    theme.colors[ImGuiCol_SliderGrab] = Blend(accent, background, 0.10f);
+    theme.colors[ImGuiCol_SliderGrabActive] = accentDarker;
+    theme.colors[ImGuiCol_Button] = surfaceBackground;
+    theme.colors[ImGuiCol_ButtonHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_ButtonActive] = Blend(surfaceElevated, accentDarker, 0.18f);
+    theme.colors[ImGuiCol_Header] = surfaceBackground;
+    theme.colors[ImGuiCol_HeaderHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_HeaderActive] = Blend(surfaceElevated, accentDarker, 0.16f);
+    theme.colors[ImGuiCol_Separator] = border;
+    theme.colors[ImGuiCol_SeparatorHovered] = accent;
+    theme.colors[ImGuiCol_SeparatorActive] = accentDarker;
+    theme.colors[ImGuiCol_ResizeGrip] = border;
+    theme.colors[ImGuiCol_ResizeGripHovered] = accent;
+    theme.colors[ImGuiCol_ResizeGripActive] = accentDarker;
+    theme.colors[ImGuiCol_Tab] = windowBackground;
+    theme.colors[ImGuiCol_TabHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_TabActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TabUnfocused] = windowBackground;
+    theme.colors[ImGuiCol_TabUnfocusedActive] = surfaceBackground;
+    theme.colors[ImGuiCol_DockingPreview] = accent;
+    theme.colors[ImGuiCol_DockingEmptyBg] = background;
+    theme.colors[ImGuiCol_PlotLines] = accent;
+    theme.colors[ImGuiCol_PlotLinesHovered] = accentDarker;
+    theme.colors[ImGuiCol_PlotHistogram] = accent;
+    theme.colors[ImGuiCol_PlotHistogramHovered] = accentDarker;
+    theme.colors[ImGuiCol_TableHeaderBg] = surfaceBackground;
+    theme.colors[ImGuiCol_TableBorderStrong] = border;
+    theme.colors[ImGuiCol_TableBorderLight] = Blend(border, background, 0.35f);
+    theme.colors[ImGuiCol_TableRowBg] = windowBackground;
+    theme.colors[ImGuiCol_TableRowBgAlt] = background;
+    theme.colors[ImGuiCol_TextSelectedBg] = Blend(accent, background, 0.82f);
+    theme.colors[ImGuiCol_DragDropTarget] = accent;
+    theme.colors[ImGuiCol_NavHighlight] = accent;
+    theme.colors[ImGuiCol_NavWindowingHighlight] = Blend(accent, background, 0.25f);
+    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.86f, 0.88f, 0.91f, 0.40f);
+    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.86f, 0.88f, 0.91f, 0.28f);
+    theme.colors[ImGuiCol_TextLink] = accent;
+    theme.colors[ImGuiCol_TabDimmed] = windowBackground;
+    theme.colors[ImGuiCol_TabDimmedSelected] = Blend(surfaceBackground, windowBackground, 0.22f);
+    theme.colors[ImGuiCol_TabDimmedSelectedOverline] = accentDarker;
+    theme.colors[ImGuiCol_TabSelectedOverline] = accent;
+    ApplyCommonThemeStyle(theme);
+
+    return theme;
+}
+
 std::vector<ThemeDefinition> BuildFactoryThemesInternal() {
-    return { BuildDarkTheme(), BuildLightTheme(), BuildSolarizedTheme(), BuildSolarizedLightTheme() };
+    return { BuildDarkTheme(), BuildLightTheme(), BuildSolarizedTheme(), BuildSolarizedLightTheme(), BuildYellowDarkTheme(), BuildYellowLightTheme() };
 }
 
 ThemeDefinition BuildFactoryTheme() {

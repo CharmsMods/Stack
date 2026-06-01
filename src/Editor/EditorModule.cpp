@@ -1,6 +1,7 @@
 #include "EditorModule.h"
 
 #include "Async/TaskSystem.h"
+#include "NodeGraph/EditorNodeGraphDefinitions.h"
 #include "NodeGraph/EditorNodeGraphSerializer.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
@@ -245,6 +246,22 @@ int ResolveRawDevelopOrientation(const Raw::RawMetadata& metadata, const Raw::Ra
     return effectiveOrientation;
 }
 
+std::shared_ptr<LayerBase> CloneLayerInstance(const std::shared_ptr<LayerBase>& source) {
+    if (!source) {
+        return nullptr;
+    }
+    const nlohmann::json layerJson = source->Serialize();
+    const std::string typeId = layerJson.value("type", std::string());
+    std::shared_ptr<LayerBase> clone = LayerRegistry::CreateLayerFromTypeId(typeId);
+    if (!clone) {
+        return nullptr;
+    }
+    clone->InitializeGL();
+    clone->Deserialize(layerJson);
+    clone->SetVisible(source->IsVisible());
+    return clone;
+}
+
 struct GraphReconnectPlan {
     int fromNodeId = 0;
     std::string fromSocketId;
@@ -289,6 +306,14 @@ ScenePathState AnalyzeScenePathFromNode(
         case EditorNodeGraph::NodeKind::RawDevelop:
             state.sceneReferred = true;
             mergeInput(EditorNodeGraph::kRawInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+            state.sceneReferred = true;
+            mergeInput(EditorNodeGraph::kImageInputSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            state.sceneReferred = true;
+            mergeInput(EditorNodeGraph::kImageInputSocketId);
             break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             mergeInput(EditorNodeGraph::kRawInputSocketId);
@@ -549,12 +574,15 @@ RenderImageGeneratorSettings ToRenderImageGeneratorSettings(const EditorNodeGrap
 bool IsMaskOutputNode(EditorNodeGraph::NodeKind kind) {
     return kind == EditorNodeGraph::NodeKind::MaskGenerator ||
         kind == EditorNodeGraph::NodeKind::MaskUtility ||
-        kind == EditorNodeGraph::NodeKind::ImageToMask;
+        kind == EditorNodeGraph::NodeKind::ImageToMask ||
+        kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
+        kind == EditorNodeGraph::NodeKind::RawDetailFusion;
 }
 
 bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
     return kind == EditorNodeGraph::NodeKind::Image ||
         kind == EditorNodeGraph::NodeKind::RawDevelop ||
+        kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
         kind == EditorNodeGraph::NodeKind::ImageGenerator ||
         kind == EditorNodeGraph::NodeKind::Layer ||
         kind == EditorNodeGraph::NodeKind::Mix ||
@@ -575,6 +603,12 @@ bool ConnectionUsesImageAsRenderSource(
     }
 
     if (to->kind == EditorNodeGraph::NodeKind::Layer && toSocketId == EditorNodeGraph::kImageInputSocketId) {
+        return true;
+    }
+    if (to->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && toSocketId == EditorNodeGraph::kImageInputSocketId) {
+        return true;
+    }
+    if (to->kind == EditorNodeGraph::NodeKind::RawDetailFusion && toSocketId == EditorNodeGraph::kImageInputSocketId) {
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::Output && toSocketId == EditorNodeGraph::kImageInputSocketId) {
@@ -717,6 +751,7 @@ void EditorModule::ResetToBlankProject() {
     m_PreviewRequestedGenerations.clear();
     m_PreviewCompletedGenerations.clear();
     m_ScopeDisplayedRevisions.clear();
+    ResetRenderSubmissionState();
     m_Pipeline.Clear();
     m_CompositePreviewPipeline.Clear();
     SetCurrentProjectName("");
@@ -724,6 +759,16 @@ void EditorModule::ResetToBlankProject() {
     MarkRenderDirty();
     ClearDirty();
     m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
+}
+
+void EditorModule::ResetRenderSubmissionState() {
+    ++m_RenderGeneration;
+    m_RenderPending = false;
+    m_RenderDirty = true;
+    m_LastCompletedRenderGeneration = 0;
+    m_LastSubmittedRenderRevision = 0;
+    m_Viewport.ResetSinglePreviewState();
+    m_HoverFade = 0.0f;
 }
 
 void EditorModule::RenderProjectLifecyclePopups() {
@@ -906,7 +951,9 @@ bool EditorModule::NodeUsesRichNodeSurface(int nodeId) const {
         ((node->kind == EditorNodeGraph::NodeKind::Layer && LayerUsesRichNodeSurface(node->layerIndex)) ||
          node->kind == EditorNodeGraph::NodeKind::RawSource ||
          node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-         node->kind == EditorNodeGraph::NodeKind::RawDevelop);
+         node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
+         node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
+         node->kind == EditorNodeGraph::NodeKind::RawDetailFusion);
 }
 
 NodeSurfaceSpec EditorModule::GetLayerNodeSurfaceSpec(int layerIndex) const {
@@ -930,7 +977,9 @@ NodeSurfaceSpec EditorModule::GetNodeSurfaceSpec(int nodeId) const {
         return spec;
     }
     if (node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-        node->kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
+        node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
+        node->kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
         NodeSurfaceSpec spec;
         spec.presentation = NodeSurfacePresentation::RichExpandedSurface;
         spec.density = NodeSurfaceDensity::Dense;
@@ -1104,6 +1153,95 @@ bool EditorModule::AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPaylo
     return node != nullptr;
 }
 
+void EditorModule::AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::RawDetailAutoMaskPayload payload;
+    AddRawDetailAutoMaskNodeFromPayload(std::move(payload), graphPosition);
+}
+
+bool EditorModule::AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDetailAutoMaskNode(std::move(payload), graphPosition);
+    if (node) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+    return node != nullptr;
+}
+
+void EditorModule::AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition) {
+    const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
+    const bool selectedHasImageOutput = selected &&
+        (selected->kind == EditorNodeGraph::NodeKind::Image ||
+         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
+         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
+         selected->kind == EditorNodeGraph::NodeKind::Layer ||
+         selected->kind == EditorNodeGraph::NodeKind::Mix ||
+         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
+         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
+    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
+
+    EditorNodeGraph::RawDetailFusionPayload fusionPayload;
+    EditorNodeGraph::Node* fusionNode = m_NodeGraph.AddRawDetailFusionNode(std::move(fusionPayload), graphPosition);
+    if (!fusionNode) {
+        return;
+    }
+    const int fusionNodeId = fusionNode->id;
+
+    std::string errorMessage;
+    if (upstreamNodeId > 0) {
+        ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, fusionNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
+    }
+    SelectGraphNode(fusionNodeId);
+    MarkRenderDirty(fusionNodeId);
+}
+
+bool EditorModule::AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition) {
+    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDetailFusionNode(std::move(payload), graphPosition);
+    if (node) {
+        SelectGraphNode(node->id);
+        MarkRenderDirty(node->id);
+    }
+    return node != nullptr;
+}
+
+bool EditorModule::ConvertRawDetailFusionToHybrid(int fusionNodeId) {
+    EditorNodeGraph::Node* fusionNode = m_NodeGraph.FindNode(fusionNodeId);
+    if (!fusionNode || fusionNode->kind != EditorNodeGraph::NodeKind::RawDetailFusion) {
+        return false;
+    }
+    const EditorNodeGraph::Link* maskInput = m_NodeGraph.FindInputLink(fusionNodeId, EditorNodeGraph::kMaskInputSocketId);
+    if (!maskInput) {
+        return false;
+    }
+    const EditorNodeGraph::Node* autoMaskNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
+    if (!autoMaskNode || autoMaskNode->kind != EditorNodeGraph::NodeKind::RawDetailAutoMask ||
+        maskInput->fromSocketId != EditorNodeGraph::kMaskOutputSocketId) {
+        return false;
+    }
+    const int autoMaskNodeId = autoMaskNode->id;
+    const EditorNodeGraph::Vec2 autoMaskPosition = autoMaskNode->position;
+    const EditorNodeGraph::Vec2 fusionPosition = fusionNode->position;
+
+    const EditorNodeGraph::Vec2 pos{
+        (autoMaskPosition.x + fusionPosition.x) * 0.5f,
+        autoMaskPosition.y
+    };
+    EditorNodeGraph::Node* levelsNode = m_NodeGraph.AddMaskUtilityNode(EditorNodeGraph::MaskUtilityKind::Levels, pos);
+    if (!levelsNode) {
+        return false;
+    }
+
+    std::string errorMessage;
+    if (!ConnectGraphSockets(autoMaskNodeId, EditorNodeGraph::kMaskOutputSocketId, levelsNode->id, EditorNodeGraph::kMaskUtilityInputSocketId, &errorMessage)) {
+        return false;
+    }
+    if (!ConnectGraphSockets(levelsNode->id, EditorNodeGraph::kMaskOutputSocketId, fusionNodeId, EditorNodeGraph::kMaskInputSocketId, &errorMessage)) {
+        return false;
+    }
+    SelectGraphNode(levelsNode->id);
+    MarkRenderDirty(fusionNodeId);
+    return true;
+}
+
 bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
     const EditorNodeGraph::Node* rawSourceNode = m_NodeGraph.FindNode(rawSourceNodeId);
     if (!rawSourceNode || rawSourceNode->kind != EditorNodeGraph::NodeKind::RawSource) {
@@ -1146,6 +1284,155 @@ bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
 
     MarkRenderDirty(rawSourceNodeId);
     SelectGraphNode(outputNodeId);
+    return true;
+}
+
+bool EditorModule::SplitLayerNodeIntoChannels(int layerNodeId) {
+    EditorNodeGraph::Node* layerNode = m_NodeGraph.FindNode(layerNodeId);
+    if (!layerNode || layerNode->kind != EditorNodeGraph::NodeKind::Layer) {
+        return false;
+    }
+    if (layerNode->layerIndex < 0 || layerNode->layerIndex >= static_cast<int>(m_Layers.size())) {
+        return false;
+    }
+
+    const EditorNodeGraph::Link* imageInput = m_NodeGraph.FindInputLink(layerNodeId, EditorNodeGraph::kImageInputSocketId);
+    if (!imageInput) {
+        return false;
+    }
+
+    std::vector<EditorNodeGraph::Link> outputLinks;
+    std::vector<EditorNodeGraph::Link> maskLinks;
+    for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
+        if (link.fromNodeId == layerNodeId && link.fromSocketId == EditorNodeGraph::kImageOutputSocketId) {
+            outputLinks.push_back(link);
+        } else if (link.toNodeId == layerNodeId && link.toSocketId == EditorNodeGraph::kMaskInputSocketId) {
+            maskLinks.push_back(link);
+        }
+    }
+    if (outputLinks.empty()) {
+        return false;
+    }
+
+    const EditorNodeGraph::Vec2 originalPos = layerNode->position;
+    const int originalLayerIndex = layerNode->layerIndex;
+    const LayerType originalLayerType = layerNode->layerType;
+    const std::string originalTypeId = layerNode->typeId;
+    const std::shared_ptr<LayerBase> originalLayer = m_Layers[originalLayerIndex];
+    if (!originalLayer) {
+        return false;
+    }
+
+    ClearGraphAutoFocusIfTrackedNode(layerNodeId);
+    if (m_CanvasToolOwnerNodeId == layerNodeId) {
+        CancelCanvasTool();
+    }
+
+    for (const int downstreamNodeId : m_NodeGraph.GetDownstreamRenderNodeIds(layerNodeId)) {
+        if (downstreamNodeId == layerNodeId) {
+            continue;
+        }
+        if (EditorNodeGraph::Node* downstream = m_NodeGraph.FindNode(downstreamNodeId)) {
+            downstream->position.x += 620.0f;
+        }
+    }
+
+    RemoveLayer(originalLayerIndex);
+
+    AddChannelSplitNodeAt(EditorNodeGraph::Vec2{ originalPos.x - 250.0f, originalPos.y });
+    const int splitNodeId = m_NodeGraph.GetSelectedNodeId();
+    AddChannelCombineNodeAt(EditorNodeGraph::Vec2{ originalPos.x + 370.0f, originalPos.y });
+    const int combineNodeId = m_NodeGraph.GetSelectedNodeId();
+    if (splitNodeId <= 0 || combineNodeId <= 0) {
+        return false;
+    }
+
+    std::array<int, 4> cloneNodeIds{ -1, -1, -1, -1 };
+    constexpr const char* kChannels[4] = { "r", "g", "b", "a" };
+    constexpr float kRowOffsets[4] = { -240.0f, -80.0f, 80.0f, 240.0f };
+    for (int i = 0; i < 4; ++i) {
+        std::shared_ptr<LayerBase> cloneLayer = CloneLayerInstance(originalLayer);
+        if (!cloneLayer) {
+            return false;
+        }
+        const int newLayerIndex = static_cast<int>(m_Layers.size());
+        m_Layers.push_back(cloneLayer);
+        EditorNodeGraph::Node* cloneNode = m_NodeGraph.AddLayerNode(
+            originalLayerType,
+            newLayerIndex,
+            EditorNodeGraph::Vec2{ originalPos.x + 60.0f, originalPos.y + kRowOffsets[i] });
+        if (!cloneNode) {
+            return false;
+        }
+        cloneNode->typeId = originalTypeId;
+        cloneNodeIds[i] = cloneNode->id;
+    }
+
+    std::string errorMessage;
+    if (!ConnectGraphSockets(imageInput->fromNodeId, imageInput->fromSocketId, splitNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage)) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!ConnectGraphSockets(splitNodeId, kChannels[i], cloneNodeIds[i], EditorNodeGraph::kImageInputSocketId, &errorMessage)) {
+            return false;
+        }
+        if (!ConnectGraphSockets(cloneNodeIds[i], EditorNodeGraph::kImageOutputSocketId, combineNodeId, kChannels[i], &errorMessage)) {
+            return false;
+        }
+    }
+
+    for (const EditorNodeGraph::Link& maskLink : maskLinks) {
+        for (int cloneNodeId : cloneNodeIds) {
+            if (!ConnectGraphSockets(maskLink.fromNodeId, maskLink.fromSocketId, cloneNodeId, maskLink.toSocketId, &errorMessage)) {
+                return false;
+            }
+        }
+    }
+
+    for (const EditorNodeGraph::Link& outputLink : outputLinks) {
+        if (outputLink.toNodeId == combineNodeId) {
+            continue;
+        }
+        if (!ConnectGraphSockets(combineNodeId, EditorNodeGraph::kImageOutputSocketId, outputLink.toNodeId, outputLink.toSocketId, &errorMessage)) {
+            return false;
+        }
+    }
+
+    RefreshGraphLayerMetadata();
+    SelectGraphNode(combineNodeId);
+    MarkRenderDirty(combineNodeId);
+    return true;
+}
+
+bool EditorModule::ToggleOutputNodeEnabled(int outputNodeId) {
+    EditorNodeGraph::Node* outputNode = m_NodeGraph.FindNode(outputNodeId);
+    if (!outputNode || outputNode->kind != EditorNodeGraph::NodeKind::Output) {
+        return false;
+    }
+
+    const bool enabled = !outputNode->outputEnabled;
+    if (!m_NodeGraph.SetOutputNodeEnabled(outputNodeId, enabled)) {
+        return false;
+    }
+
+    outputNode = m_NodeGraph.FindNode(outputNodeId);
+    if (!outputNode) {
+        return false;
+    }
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(*outputNode);
+
+    if (!outputNode->outputEnabled && m_CompositeSelectedOutputNodeId == outputNodeId) {
+        int replacementOutputNodeId = m_NodeGraph.ResolvePreviewOutputNodeId();
+        if (replacementOutputNodeId == outputNodeId) {
+            replacementOutputNodeId = -1;
+        }
+        m_CompositeSelectedOutputNodeId = replacementOutputNodeId;
+    }
+    if (!m_NodeGraph.IsOutputConnected()) {
+        m_Pipeline.ClearOutput();
+    }
+    EnsureCompositeSceneState(m_LastCompositeCanvasSize);
+    MarkRenderDirty(outputNodeId);
     return true;
 }
 
@@ -1779,6 +2066,14 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshot() const {
             case EditorNodeGraph::NodeKind::RawDevelop:
                 renderNode.kind = RenderGraphNodeKind::RawDevelop;
                 renderNode.rawDevelop.settings = node.rawDevelop.settings;
+                break;
+            case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+                renderNode.kind = RenderGraphNodeKind::RawDetailAutoMask;
+                renderNode.rawDetailAutoMask.settings = node.rawDetailAutoMask.settings;
+                break;
+            case EditorNodeGraph::NodeKind::RawDetailFusion:
+                renderNode.kind = RenderGraphNodeKind::RawDetailFusion;
+                renderNode.rawDetailFusion.settings = node.rawDetailFusion.settings;
                 break;
             case EditorNodeGraph::NodeKind::Layer:
                 renderNode.kind = RenderGraphNodeKind::Layer;
@@ -2656,7 +2951,49 @@ int EditorModule::GetConnectedOutputCount() const {
     return m_CachedConnectedOutputCount;
 }
 
+bool EditorModule::CanToggleActiveAutoGainMaskPreview() const {
+    if (GetViewportMode() != ViewportMode::SingleOutputPreview ||
+        m_ActiveSubWindow != EditorSubWindow::ComplexNode) {
+        return false;
+    }
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(m_ActiveComplexNodeId);
+    return node && node->kind == EditorNodeGraph::NodeKind::RawDetailFusion;
+}
+
+void EditorModule::ToggleActiveAutoGainMaskPreview() {
+    if (!CanToggleActiveAutoGainMaskPreview()) {
+        ClearAutoGainMaskPreview();
+        return;
+    }
+    const int nodeId = m_ActiveComplexNodeId;
+    m_AutoGainMaskPreviewNodeId = (m_AutoGainMaskPreviewNodeId == nodeId) ? -1 : nodeId;
+    m_RenderDirty = true;
+    ++m_RenderRevision;
+    m_LastRenderDirtyTime = ImGui::GetTime();
+}
+
+void EditorModule::ClearAutoGainMaskPreview() {
+    if (m_AutoGainMaskPreviewNodeId <= 0) {
+        return;
+    }
+    m_AutoGainMaskPreviewNodeId = -1;
+    m_RenderDirty = true;
+    ++m_RenderRevision;
+    m_LastRenderDirtyTime = ImGui::GetTime();
+}
+
 std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(previewNodeId);
+    if (node && node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+        const EditorNodeGraph::Link* input =
+            m_NodeGraph.FindInputLink(previewNodeId, EditorNodeGraph::kImageInputSocketId);
+        if (!input) {
+            return 0;
+        }
+        return std::max<std::uint64_t>(
+            1,
+            std::max(GetNodeDirtyGeneration(previewNodeId), GetNodeDirtyGeneration(input->fromNodeId)));
+    }
     const EditorNodeGraph::Link* input =
         m_NodeGraph.FindAnyInputLink(previewNodeId, EditorNodeGraph::kPreviewInputSocketId);
     if (!input) {

@@ -477,6 +477,16 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
         ImGui::EndChild();
         return;
     }
+    if (node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+        editor->RenderRawDetailAutoMaskControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
+        editor->RenderRawDetailFusionControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
 
     auto& layers = editor->GetLayers();
     if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(layers.size())) {

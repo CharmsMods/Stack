@@ -82,7 +82,233 @@ bool SameRawDevelopSettings(
         a.debugView == b.debugView &&
         a.rotationDegrees == b.rotationDegrees &&
         a.rotateToFitFrame == b.rotateToFitFrame &&
+        a.flipHorizontally == b.flipHorizontally &&
+        a.flipVertically == b.flipVertically &&
+        a.falseColorSuppression == b.falseColorSuppression &&
+        a.defringeStrength == b.defringeStrength &&
+        a.highlightEdgeCleanup == b.highlightEdgeCleanup &&
+        a.chromaRadius == b.chromaRadius &&
+        a.preserveRealColor == b.preserveRealColor &&
+        a.lateralRedCyan == b.lateralRedCyan &&
+        a.lateralBlueYellow == b.lateralBlueYellow &&
         SameRawMosaicDenoiseSettings(a.mosaicDenoise, b.mosaicDenoise);
+}
+
+bool SameRawDetailFusionSettings(
+    const Raw::RawDetailFusionSettings& a,
+    const Raw::RawDetailFusionSettings& b) {
+    return a.mode == b.mode &&
+        a.debugView == b.debugView &&
+        a.autoSafetyEnabled == b.autoSafetyEnabled &&
+        a.overrideMinEv == b.overrideMinEv &&
+        a.overrideMaxEv == b.overrideMaxEv &&
+        a.overrideBaseEv == b.overrideBaseEv &&
+        a.overrideNoiseProtection == b.overrideNoiseProtection &&
+        a.overrideHighlightProtection == b.overrideHighlightProtection &&
+        a.overrideShadowLiftLimit == b.overrideShadowLiftLimit &&
+        a.overrideWellExposedTarget == b.overrideWellExposedTarget &&
+        a.minEvBias == b.minEvBias &&
+        a.maxEvBias == b.maxEvBias &&
+        a.baseEvBias == b.baseEvBias &&
+        a.noiseProtectionBias == b.noiseProtectionBias &&
+        a.highlightProtectionBias == b.highlightProtectionBias &&
+        a.shadowLiftLimitBias == b.shadowLiftLimitBias &&
+        a.wellExposedTargetBias == b.wellExposedTargetBias &&
+        a.minEv == b.minEv &&
+        a.maxEv == b.maxEv &&
+        a.baseEv == b.baseEv &&
+        a.strength == b.strength &&
+        a.sampleCount == b.sampleCount &&
+        a.highlightProtection == b.highlightProtection &&
+        a.shadowLiftLimit == b.shadowLiftLimit &&
+        a.noiseProtection == b.noiseProtection &&
+        a.detailWeight == b.detailWeight &&
+        a.wellExposedTarget == b.wellExposedTarget &&
+        a.smoothGradientProtection == b.smoothGradientProtection &&
+        a.textureSensitivity == b.textureSensitivity &&
+        a.skyBias == b.skyBias &&
+        a.invertMask == b.invertMask &&
+        a.maskBlackPoint == b.maskBlackPoint &&
+        a.maskWhitePoint == b.maskWhitePoint &&
+        a.maskGamma == b.maskGamma &&
+        a.smoothnessRadius == b.smoothnessRadius &&
+        a.smoothAreaRadius == b.smoothAreaRadius &&
+        a.edgeAwareness == b.edgeAwareness &&
+        a.haloGuard == b.haloGuard &&
+        a.maskDebandDither == b.maskDebandDither &&
+        a.manualBlend == b.manualBlend;
+}
+
+void ClampRawDetailFusionSettings(Raw::RawDetailFusionSettings& settings) {
+    settings.minEv = std::clamp(settings.minEv, -8.0f, 8.0f);
+    settings.maxEv = std::clamp(settings.maxEv, settings.minEv + 0.01f, 8.0f);
+    settings.baseEv = std::clamp(settings.baseEv, -8.0f, 8.0f);
+    settings.minEvBias = std::clamp(settings.minEvBias, -3.0f, 3.0f);
+    settings.maxEvBias = std::clamp(settings.maxEvBias, -3.0f, 3.0f);
+    settings.baseEvBias = std::clamp(settings.baseEvBias, -3.0f, 3.0f);
+    settings.noiseProtectionBias = std::clamp(settings.noiseProtectionBias, -1.0f, 1.0f);
+    settings.highlightProtectionBias = std::clamp(settings.highlightProtectionBias, -1.0f, 1.0f);
+    settings.shadowLiftLimitBias = std::clamp(settings.shadowLiftLimitBias, -1.0f, 1.0f);
+    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -0.5f, 0.5f);
+    settings.strength = std::clamp(settings.strength, 0.0f, 4.0f);
+    settings.sampleCount = std::clamp(settings.sampleCount, 3, 33);
+    settings.highlightProtection = std::clamp(settings.highlightProtection, 0.0f, 1.0f);
+    settings.shadowLiftLimit = std::clamp(settings.shadowLiftLimit, 0.0f, 1.0f);
+    settings.noiseProtection = std::clamp(settings.noiseProtection, 0.0f, 1.0f);
+    settings.detailWeight = std::clamp(settings.detailWeight, 0.0f, 1.0f);
+    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.01f, 1.0f);
+    settings.smoothGradientProtection = std::clamp(settings.smoothGradientProtection, 0.0f, 1.0f);
+    settings.textureSensitivity = std::clamp(settings.textureSensitivity, 0.0f, 1.0f);
+    settings.skyBias = std::clamp(settings.skyBias, 0.0f, 1.0f);
+    settings.maskBlackPoint = std::clamp(settings.maskBlackPoint, 0.0f, 1.0f);
+    settings.maskWhitePoint = std::clamp(settings.maskWhitePoint, settings.maskBlackPoint + 0.001f, 1.0f);
+    settings.maskGamma = std::clamp(settings.maskGamma, 0.05f, 8.0f);
+    settings.smoothnessRadius = std::clamp(settings.smoothnessRadius, 0, 16);
+    settings.smoothAreaRadius = std::clamp(settings.smoothAreaRadius, 0, 32);
+    settings.edgeAwareness = std::clamp(settings.edgeAwareness, 0.0f, 1.0f);
+    settings.haloGuard = std::clamp(settings.haloGuard, 0.0f, 1.0f);
+    settings.maskDebandDither = std::clamp(settings.maskDebandDither, 0.0f, 1.0f);
+    settings.manualBlend = std::clamp(settings.manualBlend, 0.0f, 1.0f);
+}
+
+bool RenderAutoGainExposureControls(
+    Raw::RawDetailFusionSettings& settings,
+    float controlWidth,
+    const char* idPrefix,
+    bool includeStrength) {
+    bool changed = false;
+    const std::string prefix = idPrefix ? idPrefix : "AutoGain";
+    changed |= ImGuiExtras::NodeCheckbox("Auto Safety", ("##" + prefix + "AutoSafety").c_str(), &settings.autoSafetyEnabled, controlWidth);
+    if (settings.autoSafetyEnabled) {
+        ImGui::TextWrapped("Auto Safety reads the connected image and derives safe EV bounds, midtone placement, highlight protection, and noise limits. Sliders below are offsets unless an override is enabled.");
+
+        changed |= ImGuiExtras::NodeCheckbox("Override Min EV", ("##" + prefix + "OverrideMinEv").c_str(), &settings.overrideMinEv, controlWidth);
+        if (settings.overrideMinEv) {
+            changed |= ImGuiExtras::NodeSliderFloat("Min EV Override", ("##" + prefix + "MinEv").c_str(), &settings.minEv, -8.0f, 2.0f, "%.2f EV", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Min EV Bias", ("##" + prefix + "MinEvBias").c_str(), &settings.minEvBias, -3.0f, 3.0f, "%+.2f EV", controlWidth);
+        }
+
+        changed |= ImGuiExtras::NodeCheckbox("Override Max EV", ("##" + prefix + "OverrideMaxEv").c_str(), &settings.overrideMaxEv, controlWidth);
+        if (settings.overrideMaxEv) {
+            changed |= ImGuiExtras::NodeSliderFloat("Max EV Override", ("##" + prefix + "MaxEv").c_str(), &settings.maxEv, -2.0f, 8.0f, "%.2f EV", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Max EV Bias", ("##" + prefix + "MaxEvBias").c_str(), &settings.maxEvBias, -3.0f, 3.0f, "%+.2f EV", controlWidth);
+        }
+
+        changed |= ImGuiExtras::NodeCheckbox("Override Base EV", ("##" + prefix + "OverrideBaseEv").c_str(), &settings.overrideBaseEv, controlWidth);
+        if (settings.overrideBaseEv) {
+            changed |= ImGuiExtras::NodeSliderFloat("Base EV Override", ("##" + prefix + "BaseEv").c_str(), &settings.baseEv, -8.0f, 8.0f, "%.2f EV", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Base EV Bias", ("##" + prefix + "BaseEvBias").c_str(), &settings.baseEvBias, -3.0f, 3.0f, "%+.2f EV", controlWidth);
+        }
+    } else {
+        changed |= ImGuiExtras::NodeSliderFloat("Min EV", ("##" + prefix + "MinEv").c_str(), &settings.minEv, -8.0f, 2.0f, "%.2f EV", controlWidth);
+        changed |= ImGuiExtras::NodeSliderFloat("Max EV", ("##" + prefix + "MaxEv").c_str(), &settings.maxEv, -2.0f, 8.0f, "%.2f EV", controlWidth);
+        changed |= ImGuiExtras::NodeSliderFloat("Base EV", ("##" + prefix + "BaseEv").c_str(), &settings.baseEv, -8.0f, 8.0f, "%.2f EV", controlWidth);
+    }
+    if (includeStrength) {
+        changed |= ImGuiExtras::NodeSliderFloat("Strength", ("##" + prefix + "Strength").c_str(), &settings.strength, 0.0f, 2.0f, "%.2f", controlWidth);
+    }
+    changed |= ImGuiExtras::NodeSliderInt("EV Samples", ("##" + prefix + "Samples").c_str(), &settings.sampleCount, 3, 33, "%d", controlWidth);
+    if (settings.maxEv < settings.minEv + 0.01f) {
+        settings.maxEv = settings.minEv + 0.01f;
+        changed = true;
+    }
+    return changed;
+}
+
+bool RenderAutoGainAnalysisControls(
+    Raw::RawDetailFusionSettings& settings,
+    float controlWidth,
+    const char* idPrefix) {
+    bool changed = false;
+    const std::string prefix = idPrefix ? idPrefix : "AutoGain";
+    if (settings.autoSafetyEnabled) {
+        changed |= ImGuiExtras::NodeCheckbox("Override Highlight", ("##" + prefix + "OverrideHighlight").c_str(), &settings.overrideHighlightProtection, controlWidth);
+        if (settings.overrideHighlightProtection) {
+            changed |= ImGuiExtras::NodeSliderFloat("Highlight Protection", ("##" + prefix + "Highlight").c_str(), &settings.highlightProtection, 0.0f, 1.0f, "%.2f", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Highlight Bias", ("##" + prefix + "HighlightBias").c_str(), &settings.highlightProtectionBias, -1.0f, 1.0f, "%+.2f", controlWidth);
+        }
+
+        changed |= ImGuiExtras::NodeCheckbox("Override Shadow Limit", ("##" + prefix + "OverrideShadow").c_str(), &settings.overrideShadowLiftLimit, controlWidth);
+        if (settings.overrideShadowLiftLimit) {
+            changed |= ImGuiExtras::NodeSliderFloat("Shadow Lift Limit", ("##" + prefix + "ShadowLimit").c_str(), &settings.shadowLiftLimit, 0.0f, 1.0f, "%.2f", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Shadow Lift Bias", ("##" + prefix + "ShadowBias").c_str(), &settings.shadowLiftLimitBias, -1.0f, 1.0f, "%+.2f", controlWidth);
+        }
+
+        changed |= ImGuiExtras::NodeCheckbox("Override Noise", ("##" + prefix + "OverrideNoise").c_str(), &settings.overrideNoiseProtection, controlWidth);
+        if (settings.overrideNoiseProtection) {
+            changed |= ImGuiExtras::NodeSliderFloat("Noise Protection", ("##" + prefix + "Noise").c_str(), &settings.noiseProtection, 0.0f, 1.0f, "%.2f", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Noise Bias", ("##" + prefix + "NoiseBias").c_str(), &settings.noiseProtectionBias, -1.0f, 1.0f, "%+.2f", controlWidth);
+        }
+
+        changed |= ImGuiExtras::NodeCheckbox("Override Target", ("##" + prefix + "OverrideTarget").c_str(), &settings.overrideWellExposedTarget, controlWidth);
+        if (settings.overrideWellExposedTarget) {
+            changed |= ImGuiExtras::NodeSliderFloat("Well-Exposed Target", ("##" + prefix + "Target").c_str(), &settings.wellExposedTarget, 0.05f, 0.95f, "%.2f", controlWidth);
+        } else {
+            changed |= ImGuiExtras::NodeSliderFloat("Target Bias", ("##" + prefix + "TargetBias").c_str(), &settings.wellExposedTargetBias, -0.5f, 0.5f, "%+.2f", controlWidth);
+        }
+    } else {
+        changed |= ImGuiExtras::NodeSliderFloat("Highlight Protection", ("##" + prefix + "Highlight").c_str(), &settings.highlightProtection, 0.0f, 1.0f, "%.2f", controlWidth);
+        changed |= ImGuiExtras::NodeSliderFloat("Shadow Lift Limit", ("##" + prefix + "ShadowLimit").c_str(), &settings.shadowLiftLimit, 0.0f, 1.0f, "%.2f", controlWidth);
+        changed |= ImGuiExtras::NodeSliderFloat("Noise Protection", ("##" + prefix + "Noise").c_str(), &settings.noiseProtection, 0.0f, 1.0f, "%.2f", controlWidth);
+        changed |= ImGuiExtras::NodeSliderFloat("Well-Exposed Target", ("##" + prefix + "Target").c_str(), &settings.wellExposedTarget, 0.05f, 0.95f, "%.2f", controlWidth);
+    }
+    changed |= ImGuiExtras::NodeSliderFloat("Detail Weight", ("##" + prefix + "DetailWeight").c_str(), &settings.detailWeight, 0.0f, 1.0f, "%.2f", controlWidth);
+    return changed;
+}
+
+enum class RawDetailFusionWorkflow {
+    MissingMask,
+    Auto,
+    Hybrid,
+    ExternalMask
+};
+
+RawDetailFusionWorkflow ResolveRawDetailFusionWorkflow(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& fusionNode) {
+    const EditorNodeGraph::Link* maskInput = graph.FindInputLink(fusionNode.id, EditorNodeGraph::kMaskInputSocketId);
+    if (!maskInput) {
+        return RawDetailFusionWorkflow::MissingMask;
+    }
+
+    const EditorNodeGraph::Node* source = graph.FindNode(maskInput->fromNodeId);
+    if (!source) {
+        return RawDetailFusionWorkflow::ExternalMask;
+    }
+    if (source->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask &&
+        maskInput->fromSocketId == EditorNodeGraph::kMaskOutputSocketId) {
+        return RawDetailFusionWorkflow::Auto;
+    }
+
+    std::vector<int> visited;
+    const EditorNodeGraph::Link* current = maskInput;
+    while (current) {
+        if (std::find(visited.begin(), visited.end(), current->fromNodeId) != visited.end()) {
+            break;
+        }
+        visited.push_back(current->fromNodeId);
+        const EditorNodeGraph::Node* currentNode = graph.FindNode(current->fromNodeId);
+        if (!currentNode) {
+            break;
+        }
+        if (currentNode->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask &&
+            current->fromSocketId == EditorNodeGraph::kMaskOutputSocketId) {
+            return RawDetailFusionWorkflow::Hybrid;
+        }
+        if (currentNode->kind != EditorNodeGraph::NodeKind::MaskUtility ||
+            current->fromSocketId != EditorNodeGraph::kMaskOutputSocketId) {
+            break;
+        }
+        current = graph.FindInputLink(currentNode->id, EditorNodeGraph::kMaskInputSocketId);
+    }
+
+    return RawDetailFusionWorkflow::ExternalMask;
 }
 
 const EditorNodeGraph::Node* FindUpstreamRawSource(
@@ -478,6 +704,8 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
         changed = true;
     }
     changed |= ImGuiExtras::NodeCheckbox("Stretch To Fit Frame", "##RawRotateToFitFrame", &settings.rotateToFitFrame, controlWidth);
+    changed |= ImGuiExtras::NodeCheckbox("Flip Horizontally", "##RawFlipHorizontally", &settings.flipHorizontally, controlWidth);
+    changed |= ImGuiExtras::NodeCheckbox("Flip Vertically", "##RawFlipVertically", &settings.flipVertically, controlWidth);
     ImGui::TextDisabled("EXIF metadata orientation: %d", metadata.orientation);
     ImGui::TextDisabled(settings.rotateToFitFrame
         ? "Keeps the current frame size and stretches the rotated image to fit inside it."
@@ -503,7 +731,7 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("DEMOSAIC", 4.0f);
-    const char* demosaicLabels[] = { "Fast / Bilinear", "Quality Placeholder" };
+    const char* demosaicLabels[] = { "Fast / Bilinear", "Quality / Edge-Aware" };
     int demosaic = static_cast<int>(settings.demosaicMethod);
     ImGui::BeginDisabled(!demosaicEnabled);
     ImGui::SetNextItemWidth(controlWidth);
@@ -512,7 +740,29 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
         changed = true;
     }
     ImGui::EndDisabled();
-    ImGui::TextDisabled(demosaicEnabled ? "Edges: clamp to edge" : "Linear RGB DNG: demosaic skipped.");
+    ImGui::TextDisabled(demosaicEnabled ? "Quality mode reduces colored zippering around high-contrast RAW edges." : "Linear RGB DNG: demosaic skipped.");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("COLOR EDGE CLEANUP", 4.0f);
+    ImGui::BeginDisabled(!demosaicEnabled);
+    changed |= ImGuiExtras::NodeSliderFloat("False Color Suppression", "##RawFalseColorSuppression", &settings.falseColorSuppression, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Defringe Strength", "##RawDefringeStrength", &settings.defringeStrength, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Highlight Edge Cleanup", "##RawHighlightEdgeCleanup", &settings.highlightEdgeCleanup, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderInt("Chroma Radius", "##RawChromaRadius", &settings.chromaRadius, 1, 3, "%d px", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Preserve Real Color", "##RawPreserveRealColor", &settings.preserveRealColor, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Red / Cyan CA", "##RawLateralRedCyan", &settings.lateralRedCyan, -3.0f, 3.0f, "%.2f px", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Blue / Yellow CA", "##RawLateralBlueYellow", &settings.lateralBlueYellow, -3.0f, 3.0f, "%.2f px", controlWidth);
+    settings.falseColorSuppression = std::clamp(settings.falseColorSuppression, 0.0f, 1.0f);
+    settings.defringeStrength = std::clamp(settings.defringeStrength, 0.0f, 1.0f);
+    settings.highlightEdgeCleanup = std::clamp(settings.highlightEdgeCleanup, 0.0f, 1.0f);
+    settings.chromaRadius = std::clamp(settings.chromaRadius, 1, 3);
+    settings.preserveRealColor = std::clamp(settings.preserveRealColor, 0.0f, 1.0f);
+    settings.lateralRedCyan = std::clamp(settings.lateralRedCyan, -3.0f, 3.0f);
+    settings.lateralBlueYellow = std::clamp(settings.lateralBlueYellow, -3.0f, 3.0f);
+    ImGui::EndDisabled();
+    ImGui::TextDisabled(demosaicEnabled
+        ? "Chroma-only cleanup preserves luminance detail while reducing colored edge artifacts."
+        : "Linear RGB DNG: RAW color-edge cleanup is skipped.");
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW MOSAIC DENOISE, BEFORE DEMOSAIC", 4.0f);
@@ -586,7 +836,10 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
         "Pre-Denoise Mosaic",
         "Post-Denoise Mosaic",
         "Hot Pixel Mask",
-        "Denoise Difference"
+        "Denoise Difference",
+        "False Color Mask",
+        "Defringe Mask",
+        "Highlight Edge Mask"
     };
     constexpr int debugLabelCount = static_cast<int>(sizeof(debugLabels) / sizeof(debugLabels[0]));
     int debugView = static_cast<int>(settings.debugView);
@@ -624,5 +877,193 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
 
     if (!(rawSourceNode && rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource)) {
         ImGui::EndDisabled();
+    }
+}
+
+void EditorModule::RenderRawDetailAutoMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
+    (void)advanced;
+    if (node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+        return;
+    }
+
+    Raw::RawDetailFusionSettings& settings = node.rawDetailAutoMask.settings;
+    const Raw::RawDetailFusionSettings settingsBefore = settings;
+    const bool hasImageInput = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId) != nullptr;
+    bool changed = false;
+
+    settings.mode = Raw::RawDetailFusionMode::AutoAnalyze;
+    settings.strength = 1.0f;
+    settings.invertMask = false;
+    settings.maskBlackPoint = 0.0f;
+    settings.maskWhitePoint = 1.0f;
+    settings.maskGamma = 1.0f;
+    settings.manualBlend = 0.0f;
+
+    ImGuiExtras::RichSectionLabel("RAW DETAIL AUTO MASK", 4.0f);
+    ImGui::TextDisabled("Input: scene-linear image after RAW Develop");
+    ImGui::TextDisabled("Output: generated RGBA16F EV/detail mask");
+    if (!hasImageInput) {
+        ImGui::TextWrapped("Connect the Image input from RAW Develop. The generated mask keeps that developed image's aspect and orientation.");
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("AUTO EXPOSURE FIELD", 4.0f);
+    changed |= RenderAutoGainExposureControls(settings, controlWidth, "RawAutoMask", false);
+    ImGui::TextDisabled("Auto Safety derives the range from image statistics; overrides still allow -8..+8 EV.");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("ANALYSIS WEIGHTS", 4.0f);
+    changed |= RenderAutoGainAnalysisControls(settings, controlWidth, "RawAutoMask");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("SKY / SMOOTH GRADIENTS", 4.0f);
+    changed |= ImGuiExtras::NodeSliderFloat("Smooth Gradient Protection", "##RawAutoMaskSmoothGradientProtect", &settings.smoothGradientProtection, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Texture Sensitivity", "##RawAutoMaskTextureSensitivity", &settings.textureSensitivity, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Sky Bias", "##RawAutoMaskSkyBias", &settings.skyBias, 0.0f, 1.0f, "%.2f", controlWidth);
+    ImGui::TextWrapped("Protects smooth ramps from being treated like texture while still preserving tree lines and horizons.");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("SMOOTH / HALO GUARD", 4.0f);
+    changed |= ImGuiExtras::NodeSliderInt("Smoothness Radius", "##RawAutoMaskSmoothRadius", &settings.smoothnessRadius, 0, 16, "%d px", controlWidth);
+    changed |= ImGuiExtras::NodeSliderInt("Smooth Area Radius", "##RawAutoMaskSmoothAreaRadius", &settings.smoothAreaRadius, 0, 32, "%d px", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Edge Awareness", "##RawAutoMaskEdgeAware", &settings.edgeAwareness, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Halo Guard", "##RawAutoMaskHaloGuard", &settings.haloGuard, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Mask Deband Dither", "##RawAutoMaskDither", &settings.maskDebandDither, 0.0f, 1.0f, "%.2f", controlWidth);
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("DIAGNOSTICS", 4.0f);
+    const char* debugLabels[] = {
+        "Effective EV Map",
+        "Confidence Map",
+        "Highlight Safety",
+        "Shadow / Noise Protection",
+        "Sample Selection",
+        "Smooth Gradient Protection",
+        "True Edge Map",
+        "Texture Detail Map",
+        "Deband / Chroma Risk",
+        "Auto Range Map",
+        "Noise Floor / SNR",
+        "Highlight Headroom",
+        "Channel Saturation",
+        "Rejected Detail"
+    };
+    int debugView = static_cast<int>(settings.debugView);
+    if (debugView <= static_cast<int>(Raw::RawDetailFusionDebugView::FinalImage)) {
+        debugView = static_cast<int>(Raw::RawDetailFusionDebugView::ExposureMap);
+    }
+    ImGui::SetNextItemWidth(controlWidth);
+    int displayDebug = std::clamp(debugView - 1, 0, 13);
+    if (ImGui::Combo("Preview Channel", &displayDebug, debugLabels, 14)) {
+        settings.debugView = static_cast<Raw::RawDetailFusionDebugView>(std::clamp(displayDebug + 1, 1, 14));
+        changed = true;
+    }
+    ImGui::TextDisabled("The mask output remains reusable by Preview, Levels Mask, scopes, and Fusion.");
+
+    ClampRawDetailFusionSettings(settings);
+
+    if (changed || !SameRawDetailFusionSettings(settingsBefore, settings)) {
+        MarkRenderDirty(node.id);
+    }
+}
+
+void EditorModule::RenderRawDetailFusionControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
+    (void)advanced;
+    if (node.kind != EditorNodeGraph::NodeKind::RawDetailFusion) {
+        return;
+    }
+
+    Raw::RawDetailFusionSettings& settings = node.rawDetailFusion.settings;
+    const Raw::RawDetailFusionSettings settingsBefore = settings;
+    const bool hasImageInput = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId) != nullptr;
+    const bool hasHybridMask = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kMaskInputSocketId) != nullptr;
+    bool changed = false;
+
+    ImGuiExtras::RichSectionLabel("AUTO GAIN", 4.0f);
+    ImGui::TextDisabled("Input: scene-linear image after RAW Develop");
+    ImGui::TextDisabled("Output: auto-gain scene-linear RGB");
+    if (!hasImageInput) {
+        ImGui::TextWrapped("Connect the Image input. Auto gain calculates and applies its gain mask automatically when connected.");
+    }
+    ImGui::Text("Mode: %s", hasHybridMask ? "Hybrid" : "Auto");
+    ImGui::TextWrapped("With this window open, click the single-output viewport image to toggle the generated gain mask preview.");
+
+    if (ImGui::Button("Reset Auto Gain", ImVec2(controlWidth, 0.0f))) {
+        settings = Raw::RawDetailFusionSettings{};
+        changed = true;
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("EXPOSURE FIELD", 4.0f);
+    changed |= RenderAutoGainExposureControls(settings, controlWidth, "AutoGain", true);
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("AUTO ANALYSIS", 4.0f);
+    changed |= RenderAutoGainAnalysisControls(settings, controlWidth, "AutoGain");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("SKY / SMOOTH GRADIENTS", 4.0f);
+    changed |= ImGuiExtras::NodeSliderFloat("Smooth Gradient Protection", "##AutoGainSmoothGradientProtect", &settings.smoothGradientProtection, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Texture Sensitivity", "##AutoGainTextureSensitivity", &settings.textureSensitivity, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Sky Bias", "##AutoGainSkyBias", &settings.skyBias, 0.0f, 1.0f, "%.2f", controlWidth);
+    ImGui::TextWrapped("Higher protection smooths sky-like ramps so gain does not exaggerate tiny shade steps. Texture Sensitivity controls how easily foliage and fine detail are preserved.");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("SMOOTH / HALO GUARD", 4.0f);
+    changed |= ImGuiExtras::NodeSliderInt("Smoothness Radius", "##AutoGainSmoothRadius", &settings.smoothnessRadius, 0, 16, "%d px", controlWidth);
+    changed |= ImGuiExtras::NodeSliderInt("Smooth Area Radius", "##AutoGainSmoothAreaRadius", &settings.smoothAreaRadius, 0, 32, "%d px", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Edge Awareness", "##AutoGainEdgeAware", &settings.edgeAwareness, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Halo Guard", "##AutoGainHaloGuard", &settings.haloGuard, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Mask Deband Dither", "##AutoGainDither", &settings.maskDebandDither, 0.0f, 1.0f, "%.2f", controlWidth);
+    ImGui::TextWrapped("Raise Edge Awareness or Halo Guard when gain bleeds around trees, horizons, or silhouettes. Smooth Area Radius only expands smoothing where smooth-gradient protection is confident.");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("DIAGNOSTICS", 4.0f);
+    const char* debugLabels[] = {
+        "Effective EV Map",
+        "Confidence Map",
+        "Highlight Safety",
+        "Shadow / Noise Protection",
+        "Sample Selection",
+        "Smooth Gradient Protection",
+        "True Edge Map",
+        "Texture Detail Map",
+        "Deband / Chroma Risk",
+        "Auto Range Map",
+        "Noise Floor / SNR",
+        "Highlight Headroom",
+        "Channel Saturation",
+        "Rejected Detail"
+    };
+    int debugView = static_cast<int>(settings.debugView);
+    if (debugView <= static_cast<int>(Raw::RawDetailFusionDebugView::FinalImage)) {
+        debugView = static_cast<int>(Raw::RawDetailFusionDebugView::ExposureMap);
+    }
+    int displayDebug = std::clamp(debugView - 1, 0, 13);
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo("Mask Preview Channel", &displayDebug, debugLabels, 14)) {
+        settings.debugView = static_cast<Raw::RawDetailFusionDebugView>(std::clamp(displayDebug + 1, 1, 14));
+        changed = true;
+    }
+    ImGui::TextDisabled("Viewport mask preview uses this channel; normal output remains the final image.");
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("HYBRID MASK CORRECTION", 4.0f);
+    ImGui::BeginDisabled(!hasHybridMask);
+    if (!hasHybridMask) {
+        ImGui::TextDisabled("Connect a mask input to guide/correct the auto gain field.");
+    }
+    changed |= ImGuiExtras::NodeCheckbox("Invert Mask", "##AutoGainInvertMask", &settings.invertMask, controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Black Point", "##AutoGainMaskBlack", &settings.maskBlackPoint, 0.0f, 1.0f, "%.3f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("White Point", "##AutoGainMaskWhite", &settings.maskWhitePoint, 0.0f, 1.0f, "%.3f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Gamma", "##AutoGainMaskGamma", &settings.maskGamma, 0.1f, 4.0f, "%.2f", controlWidth);
+    changed |= ImGuiExtras::NodeSliderFloat("Manual Blend", "##AutoGainManualBlend", &settings.manualBlend, 0.0f, 1.0f, "%.2f", controlWidth);
+    ImGui::EndDisabled();
+
+    settings.mode = hasHybridMask ? Raw::RawDetailFusionMode::Hybrid : Raw::RawDetailFusionMode::AutoAnalyze;
+    ClampRawDetailFusionSettings(settings);
+
+    if (changed || !SameRawDetailFusionSettings(settingsBefore, settings)) {
+        MarkRenderDirty(node.id);
     }
 }

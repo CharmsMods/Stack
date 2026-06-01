@@ -63,6 +63,8 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 (node->kind == EditorNodeGraph::NodeKind::RawSource ||
                  node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
                  node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
+                 node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
+                 node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
                  node->kind == EditorNodeGraph::NodeKind::Layer) &&
                 editor->GetNodeSurfaceSpec(node->id).presentation == NodeSurfacePresentation::RichExpandedSurface;
             if (hasAdvancedEditor) {
@@ -93,6 +95,14 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     }
                 }
                 ImGui::EndDisabled();
+                if (ImGui::MenuItem(node->outputEnabled ? "Deactivate Output" : "Activate Output", "D")) {
+                    editor->ToggleOutputNodeEnabled(node->id);
+                }
+            }
+            if (node->kind == EditorNodeGraph::NodeKind::Layer) {
+                if (ImGui::MenuItem("Split")) {
+                    editor->SplitLayerNodeIntoChannels(node->id);
+                }
             }
             if (node->kind == EditorNodeGraph::NodeKind::RawSource) {
                 if (ImGui::MenuItem("Add Full Tree")) {
@@ -186,6 +196,12 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             if (ImGui::BeginMenu("Analysis")) {
                 if (ImGui::MenuItem("Preview")) {
                     editor->AddPreviewNodeAt(m_ContextGraphPos);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("RAW")) {
+                if (ImGui::MenuItem("Auto Gain")) {
+                    editor->AddRawDetailFusionNodeAt(m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }

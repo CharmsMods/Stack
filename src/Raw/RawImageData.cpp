@@ -45,7 +45,7 @@ const char* WhiteBalanceModeName(WhiteBalanceMode mode) {
 const char* DemosaicMethodName(DemosaicMethod method) {
     switch (method) {
         case DemosaicMethod::Bilinear: return "Fast / Bilinear";
-        case DemosaicMethod::QualityPlaceholder: return "Quality Placeholder";
+        case DemosaicMethod::QualityPlaceholder: return "Quality / Edge-Aware";
     }
     return "Fast / Bilinear";
 }
@@ -83,6 +83,9 @@ const char* RawDebugViewName(RawDebugView view) {
         case RawDebugView::PostDenoiseMosaic: return "Post-Denoise Mosaic";
         case RawDebugView::HotPixelMask: return "Hot Pixel Mask";
         case RawDebugView::DenoiseDifference: return "Denoise Difference";
+        case RawDebugView::FalseColorMask: return "False Color Mask";
+        case RawDebugView::DefringeMask: return "Defringe Mask";
+        case RawDebugView::HighlightEdgeMask: return "Highlight Edge Mask";
     }
     return "Final Output";
 }

@@ -150,6 +150,7 @@ nlohmann::json EditorModule::SerializePipeline() {
 }
 
 void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
+    ResetRenderSubmissionState();
     m_Pipeline.Clear();
     m_CompositePreviewPipeline.Clear();
     m_Layers.clear();
@@ -226,6 +227,7 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
         return false;
     }
 
+    ResetRenderSubmissionState();
     LoadSourceFromPixels(projectData.sourcePixels.data(), projectData.width, projectData.height, projectData.channels);
     DeserializePipeline(projectData.pipelineData);
     SetCurrentProjectName(projectData.projectName);

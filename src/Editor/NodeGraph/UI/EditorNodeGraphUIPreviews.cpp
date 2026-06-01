@@ -101,7 +101,9 @@ unsigned int EditorNodeGraphUI::UploadPreviewTexture(int nodeId, const std::vect
 }
 
 unsigned int EditorNodeGraphUI::GetGraphPreviewTexture(EditorModule* editor, const EditorNodeGraph::Node& node) {
-    if (!editor || node.kind != EditorNodeGraph::NodeKind::Preview) {
+    if (!editor ||
+        (node.kind != EditorNodeGraph::NodeKind::Preview &&
+         node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask)) {
         return 0;
     }
 

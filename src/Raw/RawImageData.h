@@ -56,7 +56,10 @@ enum class RawDebugView {
     PreDenoiseMosaic,
     PostDenoiseMosaic,
     HotPixelMask,
-    DenoiseDifference
+    DenoiseDifference,
+    FalseColorMask,
+    DefringeMask,
+    HighlightEdgeMask
 };
 
 enum class RawCameraTransformSource {
@@ -72,6 +75,30 @@ enum class HighlightReconstructionMode {
     ClipNeutral,
     Luminance,
     ColorReconstruction
+};
+
+enum class RawDetailFusionMode {
+    ManualMask,
+    AutoAnalyze,
+    Hybrid
+};
+
+enum class RawDetailFusionDebugView {
+    FinalImage,
+    ExposureMap,
+    Confidence,
+    HighlightSafety,
+    ShadowProtection,
+    SampleSelection,
+    SmoothGradient,
+    TrueEdge,
+    TextureDetail,
+    DebandRisk,
+    AutoRange,
+    NoiseFloorSnr,
+    HighlightHeadroom,
+    ChannelSaturation,
+    RejectedDetail
 };
 
 struct DngGainMapOpcode {
@@ -102,6 +129,49 @@ struct RawMosaicDenoiseSettings {
     int radius = 2;
     float edgeProtection = 0.55f;
     int iterations = 1;
+};
+
+struct RawDetailFusionSettings {
+    RawDetailFusionMode mode = RawDetailFusionMode::AutoAnalyze;
+    RawDetailFusionDebugView debugView = RawDetailFusionDebugView::FinalImage;
+    bool autoSafetyEnabled = true;
+    bool overrideMinEv = false;
+    bool overrideMaxEv = false;
+    bool overrideBaseEv = false;
+    bool overrideNoiseProtection = false;
+    bool overrideHighlightProtection = false;
+    bool overrideShadowLiftLimit = false;
+    bool overrideWellExposedTarget = false;
+    float minEvBias = 0.0f;
+    float maxEvBias = 0.0f;
+    float baseEvBias = 0.0f;
+    float noiseProtectionBias = 0.0f;
+    float highlightProtectionBias = 0.0f;
+    float shadowLiftLimitBias = 0.0f;
+    float wellExposedTargetBias = 0.0f;
+    float minEv = -4.0f;
+    float maxEv = 4.0f;
+    float baseEv = 0.0f;
+    float strength = 1.0f;
+    int sampleCount = 17;
+    float highlightProtection = 0.85f;
+    float shadowLiftLimit = 0.75f;
+    float noiseProtection = 0.45f;
+    float detailWeight = 0.55f;
+    float wellExposedTarget = 0.42f;
+    float smoothGradientProtection = 0.75f;
+    float textureSensitivity = 0.55f;
+    float skyBias = 0.55f;
+    bool invertMask = false;
+    float maskBlackPoint = 0.0f;
+    float maskWhitePoint = 1.0f;
+    float maskGamma = 1.0f;
+    int smoothnessRadius = 4;
+    int smoothAreaRadius = 10;
+    float edgeAwareness = 0.75f;
+    float haloGuard = 0.85f;
+    float maskDebandDither = 0.0f;
+    float manualBlend = 0.5f;
 };
 
 struct RawMetadata {
@@ -221,6 +291,15 @@ struct RawDevelopSettings {
     RawDebugView debugView = RawDebugView::FinalOutput;
     int rotationDegrees = 0;
     bool rotateToFitFrame = false;
+    bool flipHorizontally = false;
+    bool flipVertically = false;
+    float falseColorSuppression = 0.25f;
+    float defringeStrength = 0.30f;
+    float highlightEdgeCleanup = 0.40f;
+    int chromaRadius = 1;
+    float preserveRealColor = 0.70f;
+    float lateralRedCyan = 0.0f;
+    float lateralBlueYellow = 0.0f;
     RawMosaicDenoiseSettings mosaicDenoise;
 };
 

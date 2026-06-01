@@ -122,7 +122,9 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         const bool validMaskSource =
             ((from->kind == NodeKind::MaskGenerator ||
               from->kind == NodeKind::MaskUtility ||
-              from->kind == NodeKind::ImageToMask) && fromSocketId == kMaskOutputSocketId) ||
+              from->kind == NodeKind::ImageToMask ||
+              from->kind == NodeKind::RawDetailAutoMask ||
+              from->kind == NodeKind::RawDetailFusion) && fromSocketId == kMaskOutputSocketId) ||
             (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(fromSocketId)) ||
             (!upstreamChannel.empty() && fromSocket.type == SocketType::Image);
 
@@ -133,6 +135,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         if (isMaskToMask || isChannelImageToMask) {
             const bool validMaskTarget =
                 (to->kind == NodeKind::Layer && toSocketId == kMaskInputSocketId) ||
+                (to->kind == NodeKind::RawDetailFusion && toSocketId == kMaskInputSocketId) ||
                 (to->kind == NodeKind::Mix && toSocketId == kMixFactorSocketId) ||
                 (to->kind == NodeKind::MaskUtility && toSocketId == kMaskUtilityInputSocketId) ||
                 (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(toSocketId)) ||
@@ -144,6 +147,8 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         } else if (isMaskToImage) {
             const bool validImageTarget =
                 (to->kind == NodeKind::Layer && toSocketId == kImageInputSocketId) ||
+                (to->kind == NodeKind::RawDetailAutoMask && toSocketId == kImageInputSocketId) ||
+                (to->kind == NodeKind::RawDetailFusion && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
                 (to->kind == NodeKind::Output && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::ImageToMask && toSocketId == kImageToMaskInputSocketId) ||
@@ -186,6 +191,14 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         if (errorMessage) *errorMessage = "Image links must target the layer image input.";
         return false;
     }
+    if (to->kind == NodeKind::RawDetailAutoMask && toSocketId != kImageInputSocketId) {
+        if (errorMessage) *errorMessage = "Image links must target the RAW Detail Auto Mask image input.";
+        return false;
+    }
+    if (to->kind == NodeKind::RawDetailFusion && toSocketId != kImageInputSocketId) {
+        if (errorMessage) *errorMessage = "Image links must target the RAW Detail Fusion image input.";
+        return false;
+    }
     if (to->kind == NodeKind::Output && toSocketId != kImageInputSocketId) {
         if (errorMessage) *errorMessage = "Image links must target the output image input.";
         return false;
@@ -198,7 +211,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         if (errorMessage) *errorMessage = "Image links must target the split image input.";
         return false;
     }
-    if (to->kind != NodeKind::Layer && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit) {
+    if (to->kind != NodeKind::Layer && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit) {
         if (errorMessage) *errorMessage = "Image links must target a layer, mix node, split node, mask converter, or the output.";
         return false;
     }
@@ -251,6 +264,19 @@ bool Graph::RemoveNode(int nodeId) {
         m_ActiveImageNodeId = -1;
     }
     RefreshPrimaryOutputNode();
+    TouchStructure();
+    return true;
+}
+
+bool Graph::SetOutputNodeEnabled(int nodeId, bool enabled) {
+    Node* node = FindNode(nodeId);
+    if (!node || node->kind != NodeKind::Output) {
+        return false;
+    }
+    if (node->outputEnabled == enabled) {
+        return true;
+    }
+    node->outputEnabled = enabled;
     TouchStructure();
     return true;
 }

@@ -251,13 +251,16 @@
       position: absolute;
       right: 5%;
       bottom: 10%;
-      font-size: clamp(200px, 35vw, 600px);
-      font-weight: 700;
-      color: #000;
-      line-height: 0.85;
-      opacity: 0.08;
+      width: clamp(200px, 35vw, 600px);
+      opacity: 1;
       pointer-events: none;
       user-select: none;
+    }
+
+    .decorative-letter img {
+      width: 100%;
+      height: auto;
+      display: block;
     }
 
     /* ========== GALLERY SECTION ========== */
@@ -351,6 +354,26 @@
     }
 
 
+    /* ========== PREMIUM CHROMATIC ABERRATION SHADER ========== */
+    .menu-header {
+      filter: url(#aberration-header);
+      position: relative;
+    }
+
+    .menu-item {
+      position: relative;
+    }
+
+    .menu-item:nth-child(1) {
+      filter: url(#aberration-item-0);
+    }
+    .menu-item:nth-child(2) {
+      filter: url(#aberration-item-1);
+    }
+    .menu-item:nth-child(3) {
+      filter: url(#aberration-item-2);
+    }
+
     /* Reduced motion */
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -362,6 +385,61 @@
   </style>
 </head>
 <body>
+
+  <!-- Hidden SVG for Chromatic Aberration Filters -->
+  <svg style="position: absolute; width: 0; height: 0;" width="0" height="0" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <!-- Filter for Header -->
+      <filter id="aberration-header">
+        <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 0.8 0" in="SourceAlpha" result="red-color" />
+        <feOffset dx="0" dy="0" in="red-color" id="off-red-header" result="red-shifted" />
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0.9  0 0 0 0 1  0 0 0 0.8 0" in="SourceAlpha" result="cyan-color" />
+        <feOffset dx="0" dy="0" in="cyan-color" id="off-cyan-header" result="cyan-shifted" />
+        <feMerge>
+          <feMergeNode in="red-shifted" />
+          <feMergeNode in="cyan-shifted" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      <!-- Filters for Menu Items (3 items) -->
+      <filter id="aberration-item-0">
+        <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 0.8 0" in="SourceAlpha" result="red-color" />
+        <feOffset dx="0" dy="0" in="red-color" id="off-red-item-0" result="red-shifted" />
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0.9  0 0 0 0 1  0 0 0 0.8 0" in="SourceAlpha" result="cyan-color" />
+        <feOffset dx="0" dy="0" in="cyan-color" id="off-cyan-item-0" result="cyan-shifted" />
+        <feMerge>
+          <feMergeNode in="red-shifted" />
+          <feMergeNode in="cyan-shifted" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      <filter id="aberration-item-1">
+        <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 0.8 0" in="SourceAlpha" result="red-color" />
+        <feOffset dx="0" dy="0" in="red-color" id="off-red-item-1" result="red-shifted" />
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0.9  0 0 0 0 1  0 0 0 0.8 0" in="SourceAlpha" result="cyan-color" />
+        <feOffset dx="0" dy="0" in="cyan-color" id="off-cyan-item-1" result="cyan-shifted" />
+        <feMerge>
+          <feMergeNode in="red-shifted" />
+          <feMergeNode in="cyan-shifted" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      <filter id="aberration-item-2">
+        <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0  0 0 0 0 0  0 0 0 0.8 0" in="SourceAlpha" result="red-color" />
+        <feOffset dx="0" dy="0" in="red-color" id="off-red-item-2" result="red-shifted" />
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0.9  0 0 0 0 1  0 0 0 0.8 0" in="SourceAlpha" result="cyan-color" />
+        <feOffset dx="0" dy="0" in="cyan-color" id="off-cyan-item-2" result="cyan-shifted" />
+        <feMerge>
+          <feMergeNode in="red-shifted" />
+          <feMergeNode in="cyan-shifted" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+    </defs>
+  </svg>
 
   <!-- HERO SECTION -->
   <section class="hero">
@@ -393,7 +471,7 @@
   <!-- MENU SECTION -->
   <section class="menu-section">
     <div class="menu-container">
-      <h2 class="menu-header" id="menuHeader">Get Started</h2>
+      <h2 class="menu-header" id="menuHeader">Get</h2>
       
       <ul class="menu-list">
         <li class="menu-item" style="transition-delay: 0.1s;">
@@ -418,7 +496,7 @@
     </div>
 
     <!-- Decorative Letter -->
-    <div class="decorative-letter">S</div>
+    <div class="decorative-letter"><img src="charm-s-diagonal-final.png" alt=""></div>
   </section>
 
   <!-- GALLERY SECTION -->
@@ -463,6 +541,79 @@
 
     setupScrollAnimations();
 
+    // Interactive Chromatic Aberration Filter effect
+    function setupChromaticAberration() {
+      const menuSection = document.querySelector('.menu-section');
+      if (!menuSection) return;
+
+      const header = document.querySelector('.menu-header');
+      const items = document.querySelectorAll('.menu-item');
+
+      // Helper to update a specific filter's offsets
+      function updateFilter(redId, cyanId, shiftX, shiftY) {
+        const redOff = document.getElementById(redId);
+        const cyanOff = document.getElementById(cyanId);
+        if (redOff && cyanOff) {
+          redOff.setAttribute('dx', shiftX.toFixed(2));
+          redOff.setAttribute('dy', shiftY.toFixed(2));
+          cyanOff.setAttribute('dx', (-shiftX).toFixed(2));
+          cyanOff.setAttribute('dy', (-shiftY).toFixed(2));
+        }
+      }
+
+      menuSection.addEventListener('mousemove', (e) => {
+        const triggerRadius = 350;
+        const maxShift = 5; // Premium 5px max split shift
+
+        // Update header aberration
+        if (header) {
+          const rect = header.getBoundingClientRect();
+          const elX = rect.left + rect.width / 2;
+          const elY = rect.top + rect.height / 2;
+          const dx = e.clientX - elX;
+          const dy = e.clientY - elY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+
+          if (distance < triggerRadius) {
+            const proximity = 1 - (distance / triggerRadius);
+            const shiftX = (dx / (distance || 1)) * maxShift * proximity;
+            const shiftY = (dy / (distance || 1)) * maxShift * proximity;
+            updateFilter('off-red-header', 'off-cyan-header', shiftX, shiftY);
+          } else {
+            updateFilter('off-red-header', 'off-cyan-header', 0, 0);
+          }
+        }
+
+        // Update each item aberration
+        items.forEach((item, index) => {
+          const rect = item.getBoundingClientRect();
+          const elX = rect.left + rect.width / 2;
+          const elY = rect.top + rect.height / 2;
+          const dx = e.clientX - elX;
+          const dy = e.clientY - elY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+
+          if (distance < triggerRadius) {
+            const proximity = 1 - (distance / triggerRadius);
+            const shiftX = (dx / (distance || 1)) * maxShift * proximity;
+            const shiftY = (dy / (distance || 1)) * maxShift * proximity;
+            updateFilter(`off-red-item-${index}`, `off-cyan-item-${index}`, shiftX, shiftY);
+          } else {
+            updateFilter(`off-red-item-${index}`, `off-cyan-item-${index}`, 0, 0);
+          }
+        });
+      });
+
+      menuSection.addEventListener('mouseleave', () => {
+        updateFilter('off-red-header', 'off-cyan-header', 0, 0);
+        items.forEach((item, index) => {
+          updateFilter(`off-red-item-${index}`, `off-cyan-item-${index}`, 0, 0);
+        });
+      });
+    }
+
+    setupChromaticAberration();
+
     // GitHub Release auto-download link setup
     const GITHUB_OWNER = "CharmsMods";
     const GITHUB_REPO = "Stack";
@@ -505,12 +656,12 @@
     loadLatestRelease();
 
     // ========== GALLERY LOGIC ==========
+    // Easily add your own images by duplicating any line below!
+    // Just change the 'src' to your image filename and 'title' to your custom label.
     const galleryData = [
       { src: 'composite.png', title: 'Composite' },
       { src: 'edit.png', title: 'Editor' },
-      { src: 'raw.png', title: 'RAW Mode' },
-      { src: 'topbackground.png', title: 'Top Cover' },
-      { src: 'logo.png', title: 'Brand' }
+      { src: 'topbackground.png', title: 'Top Cover' }
     ];
 
     const gallerySection = document.getElementById('gallery');
@@ -519,7 +670,7 @@
 
     let cards = [];
     
-    // Closer spacing: 30 degrees instead of 72 degrees for a tight circular arc
+    // Spacing between cards on the wheel (in degrees)
     const angleStep = 30;
 
     // Smoothing lag variables (Lerp)
@@ -563,9 +714,9 @@
         
         progress = Math.max(0, Math.min(1, progress));
         
-        // Map scroll progress to a comfortable rotation range so all cards pass through center
-        // 5 cards at 30deg step = 120deg span. A 180deg total rotation gives a perfect full sweep.
-        targetRotation = progress * 180;
+        // 100% DYNAMIC: Calculate max rotation so first card is centered at scroll 0, and last card is centered at scroll 1
+        const maxRotation = (galleryData.length - 1) * angleStep;
+        targetRotation = progress * maxRotation;
       });
 
       // Start the smooth animation frame loop

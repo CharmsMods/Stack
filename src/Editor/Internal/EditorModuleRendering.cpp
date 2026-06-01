@@ -430,8 +430,30 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     snapshot.generation = generation;
     snapshot.graph = BuildGraphSnapshot();
     snapshot.outputConnected = GetViewportMode() == ViewportMode::SingleOutputPreview && m_NodeGraph.IsOutputConnected();
+    const bool autoGainMaskPreviewActive =
+        snapshot.outputConnected &&
+        m_ActiveSubWindow == EditorSubWindow::ComplexNode &&
+        m_ActiveComplexNodeId == m_AutoGainMaskPreviewNodeId &&
+        m_AutoGainMaskPreviewNodeId > 0 &&
+        m_NodeGraph.FindNode(m_AutoGainMaskPreviewNodeId) &&
+        m_NodeGraph.FindNode(m_AutoGainMaskPreviewNodeId)->kind == EditorNodeGraph::NodeKind::RawDetailFusion;
+    if (autoGainMaskPreviewActive) {
+        snapshot.graph.outputNodeId = m_AutoGainMaskPreviewNodeId;
+        snapshot.graph.outputSocketId = EditorNodeGraph::kMaskOutputSocketId;
+        snapshot.graph.autoGainMaskPreview = true;
+    }
     if (snapshot.outputConnected) {
-        if (TryResolveReferenceSourcePixelsForOutput(
+        if (autoGainMaskPreviewActive &&
+            TryResolveReferenceSourcePixels(
+                m_AutoGainMaskPreviewNodeId,
+                EditorNodeGraph::kMaskOutputSocketId,
+                snapshot.sourcePixels,
+                snapshot.width,
+                snapshot.height,
+                snapshot.channels)) {
+            // Use the inspected Auto Gain node's reference canvas.
+        } else if (!autoGainMaskPreviewActive &&
+            TryResolveReferenceSourcePixelsForOutput(
                 snapshot.graph.outputNodeId,
                 snapshot.sourcePixels,
                 snapshot.width,
@@ -603,15 +625,14 @@ bool EditorModule::HasPendingPreviewRefreshes() const {
     }
 
     for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind != EditorNodeGraph::NodeKind::Preview) {
+        if (node.kind != EditorNodeGraph::NodeKind::Preview &&
+            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask) {
             continue;
         }
-        const EditorNodeGraph::Link* input =
-            m_NodeGraph.FindAnyInputLink(node.id, EditorNodeGraph::kPreviewInputSocketId);
-        if (!input) {
+        if (GetPreviewNodeRevision(node.id) == 0) {
             continue;
         }
-        const std::uint64_t desiredRevision = GetNodeDirtyGeneration(input->fromNodeId);
+        const std::uint64_t desiredRevision = GetPreviewNodeRevision(node.id);
         const auto displayedIt = m_PreviewDisplayedRevisions.find(node.id);
         const std::uint64_t displayedRevision = displayedIt != m_PreviewDisplayedRevisions.end() ? displayedIt->second : 0;
         if (desiredRevision != displayedRevision) {
@@ -730,12 +751,15 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
 std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewRequests() {
     std::vector<EditorRenderWorker::PreviewRequest> requests;
     for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind != EditorNodeGraph::NodeKind::Preview) {
+        if (node.kind != EditorNodeGraph::NodeKind::Preview &&
+            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask) {
             continue;
         }
 
-        const EditorNodeGraph::Link* input =
-            m_NodeGraph.FindAnyInputLink(node.id, EditorNodeGraph::kPreviewInputSocketId);
+        const bool generatedAutoMaskPreview = node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask;
+        const EditorNodeGraph::Link* input = generatedAutoMaskPreview
+            ? m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId)
+            : m_NodeGraph.FindAnyInputLink(node.id, EditorNodeGraph::kPreviewInputSocketId);
         if (!input) {
             m_PreviewRequestedGenerations.erase(node.id);
             m_PreviewCompletedGenerations.erase(node.id);
@@ -744,7 +768,11 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         }
 
         EditorNodeGraph::SocketDefinition sourceSocket;
-        if (!m_NodeGraph.FindSocket(input->fromNodeId, input->fromSocketId, &sourceSocket)) {
+        const int sourceNodeId = generatedAutoMaskPreview ? node.id : input->fromNodeId;
+        const std::string sourceSocketId = generatedAutoMaskPreview
+            ? EditorNodeGraph::kMaskOutputSocketId
+            : input->fromSocketId;
+        if (!m_NodeGraph.FindSocket(sourceNodeId, sourceSocketId, &sourceSocket)) {
             continue;
         }
         if (sourceSocket.type != EditorNodeGraph::SocketType::Image &&
@@ -752,7 +780,10 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             continue;
         }
 
-        const std::uint64_t dirtyGeneration = std::max<std::uint64_t>(1, GetNodeDirtyGeneration(input->fromNodeId));
+        const std::uint64_t dirtyGeneration = GetPreviewNodeRevision(node.id);
+        if (dirtyGeneration == 0) {
+            continue;
+        }
         const std::uint64_t requestedGeneration =
             m_PreviewRequestedGenerations.count(node.id) ? m_PreviewRequestedGenerations[node.id] : 0;
         const std::uint64_t completedGeneration =
@@ -761,21 +792,21 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             continue;
         }
 
-        const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(input->fromNodeId);
+        const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
         if (!sourceNode) {
             continue;
         }
 
         EditorRenderWorker::PreviewRequest request;
         request.previewNodeId = node.id;
-        request.sourceNodeId = input->fromNodeId;
-        request.sourceSocketId = input->fromSocketId;
+        request.sourceNodeId = sourceNodeId;
+        request.sourceSocketId = sourceSocketId;
         request.maskInput = sourceSocket.type == EditorNodeGraph::SocketType::Mask;
         request.dirtyGeneration = dirtyGeneration;
 
         if (TryResolveReferenceSourcePixels(
-                input->fromNodeId,
-                input->fromSocketId,
+                sourceNodeId,
+                sourceSocketId,
                 request.sourcePixels,
                 request.width,
                 request.height,
@@ -1047,7 +1078,18 @@ void EditorModule::SubmitRenderIfReady() {
         snapshot.previews = std::move(previewRequests);
         m_RenderWorker.Submit(std::move(snapshot));
     } else {
-        m_Pipeline.ExecuteGraph(BuildGraphSnapshot());
+        RenderGraphSnapshot graphSnapshot = BuildGraphSnapshot();
+        if (GetViewportMode() == ViewportMode::SingleOutputPreview &&
+            m_ActiveSubWindow == EditorSubWindow::ComplexNode &&
+            m_ActiveComplexNodeId == m_AutoGainMaskPreviewNodeId &&
+            m_AutoGainMaskPreviewNodeId > 0 &&
+            m_NodeGraph.FindNode(m_AutoGainMaskPreviewNodeId) &&
+            m_NodeGraph.FindNode(m_AutoGainMaskPreviewNodeId)->kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
+            graphSnapshot.outputNodeId = m_AutoGainMaskPreviewNodeId;
+            graphSnapshot.outputSocketId = EditorNodeGraph::kMaskOutputSocketId;
+            graphSnapshot.autoGainMaskPreview = true;
+        }
+        m_Pipeline.ExecuteGraph(graphSnapshot);
         m_LastCompletedRenderGeneration = m_RenderGeneration;
     }
 }

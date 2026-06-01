@@ -1624,6 +1624,7 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
 
     editor->SetCurrentProjectName(trimmedName);
     editor->SetCurrentProjectFileName(fileName);
+    editor->ClearDirty();
 
     ++m_SaveGeneration;
     const std::uint64_t generation = m_SaveGeneration;
@@ -1711,6 +1712,9 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
             } else {
                 m_SaveTaskState = Async::TaskState::Failed;
                 m_SaveStatusText = "Failed to save the project to the library.";
+                if (editor) {
+                    editor->MarkDirty();
+                }
             }
         });
     });

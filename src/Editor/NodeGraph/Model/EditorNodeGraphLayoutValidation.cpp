@@ -182,7 +182,9 @@ ValidationResult Graph::Validate() const {
             const bool validMaskSource =
                 ((from->kind == NodeKind::MaskGenerator ||
                   from->kind == NodeKind::MaskUtility ||
-                  from->kind == NodeKind::ImageToMask) && link.fromSocketId == kMaskOutputSocketId) ||
+                  from->kind == NodeKind::ImageToMask ||
+                  from->kind == NodeKind::RawDetailAutoMask ||
+                  from->kind == NodeKind::RawDetailFusion) && link.fromSocketId == kMaskOutputSocketId) ||
                 (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(link.fromSocketId)) ||
                 (!upstreamChannel.empty() && fromSocket.type == SocketType::Image);
 
@@ -193,6 +195,7 @@ ValidationResult Graph::Validate() const {
             if (isMaskToMask || isChannelImageToMask) {
                 const bool validMaskTarget =
                     (to->kind == NodeKind::Layer && link.toSocketId == kMaskInputSocketId) ||
+                    (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kMaskInputSocketId) ||
                     (to->kind == NodeKind::Mix && link.toSocketId == kMixFactorSocketId) ||
                     (to->kind == NodeKind::MaskUtility && link.toSocketId == kMaskUtilityInputSocketId) ||
                     (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(link.toSocketId)) ||
@@ -204,6 +207,8 @@ ValidationResult Graph::Validate() const {
             } else if (isMaskToImage) {
                 const bool validImageTarget =
                     (to->kind == NodeKind::Layer && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::RawDetailAutoMask && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::Mix && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
                     (to->kind == NodeKind::Output && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::ImageToMask && link.toSocketId == kImageToMaskInputSocketId) ||
@@ -281,10 +286,12 @@ std::vector<int> Graph::GetRenderLayerNodePath(int outputNodeId) const {
             std::reverse(reversePath.begin(), reversePath.end());
             return reversePath;
         }
-        if (from->kind != NodeKind::Layer) {
+        if (from->kind != NodeKind::Layer && from->kind != NodeKind::RawDetailFusion) {
             return {};
         }
-        reversePath.push_back(from->id);
+        if (from->kind == NodeKind::Layer) {
+            reversePath.push_back(from->id);
+        }
         input = FindInputLink(from->id, kImageInputSocketId);
     }
 
@@ -319,6 +326,8 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::RawSource ||
         node.kind == NodeKind::RawNeuralDenoise ||
         node.kind == NodeKind::RawDevelop ||
+        node.kind == NodeKind::RawDetailAutoMask ||
+        node.kind == NodeKind::RawDetailFusion ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::Layer ||
         node.kind == NodeKind::Output ||

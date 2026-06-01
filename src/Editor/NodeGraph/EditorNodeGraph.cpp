@@ -170,6 +170,30 @@ Node* Graph::AddRawDevelopNode(RawDevelopPayload payload, Vec2 position) {
     return &m_Nodes.back();
 }
 
+Node* Graph::AddRawDetailAutoMaskNode(RawDetailAutoMaskPayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawDetailAutoMask;
+    node.position = position;
+    node.rawDetailAutoMask = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawDetailFusion;
+    node.position = position;
+    node.rawDetailFusion = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddLayerNode(LayerType type, int layerIndex, Vec2 position) {
     const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(type);
 
@@ -515,6 +539,11 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
         const char* upstreamSocketId = nullptr;
         if (node->kind == NodeKind::Layer && currentSocketId == kImageOutputSocketId) {
             upstreamSocketId = kImageInputSocketId;
+        } else if (node->kind == NodeKind::RawDetailFusion &&
+                   (currentSocketId == kImageOutputSocketId || currentSocketId == kMaskOutputSocketId)) {
+            upstreamSocketId = kImageInputSocketId;
+        } else if (node->kind == NodeKind::RawDetailAutoMask && currentSocketId == kMaskOutputSocketId) {
+            upstreamSocketId = kImageInputSocketId;
         } else if (node->kind == NodeKind::MaskUtility && currentSocketId == kMaskOutputSocketId) {
             upstreamSocketId = kMaskUtilityInputSocketId;
         } else if (node->kind == NodeKind::ImageToMask && currentSocketId == kMaskOutputSocketId) {
@@ -555,6 +584,14 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
             case NodeKind::Layer: {
+                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::RawDetailFusion: {
+                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::RawDetailAutoMask: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
@@ -614,7 +651,7 @@ int Graph::ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const {
 
 void Graph::ConnectImageToOutput(int nodeId) {
     const Node* node = FindNode(nodeId);
-    if (!node || (node->kind != NodeKind::Image && node->kind != NodeKind::RawDevelop)) {
+    if (!node || (node->kind != NodeKind::Image && node->kind != NodeKind::RawDevelop && node->kind != NodeKind::RawDetailFusion)) {
         return;
     }
 

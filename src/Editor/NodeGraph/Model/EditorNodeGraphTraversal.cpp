@@ -80,6 +80,16 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     valid = upstream ? visit(upstream->fromNodeId) : false;
                     break;
                 }
+                case NodeKind::RawDetailFusion: {
+                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
+                case NodeKind::RawDetailAutoMask: {
+                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
                 case NodeKind::Mix: {
                     const Link* inputA = FindInputLink(nodeId, kMixInputASocketId);
                     const Link* inputB = FindInputLink(nodeId, kMixInputBSocketId);
@@ -192,6 +202,10 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
     };
 
     for (int outputNodeId : GetOutputNodeIds()) {
+        const Node* outputNode = FindNode(outputNodeId);
+        if (!outputNode || !outputNode->outputEnabled) {
+            continue;
+        }
         CompletedChainInfo chain = collectChain(outputNodeId, collectChain);
         if (chain.outputNodeId > 0 && chain.terminalNodeId > 0 && !chain.nodeIds.empty()) {
             chains.push_back(std::move(chain));
@@ -270,6 +284,8 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::RawSource:
             case NodeKind::RawDevelop:
             case NodeKind::RawNeuralDenoise:
+            case NodeKind::RawDetailAutoMask:
+            case NodeKind::RawDetailFusion:
             case NodeKind::Layer:
             case NodeKind::Mix:
             case NodeKind::ImageGenerator:
@@ -327,6 +343,8 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
         switch (node->kind) {
             case NodeKind::Layer:
             case NodeKind::Output:
+            case NodeKind::RawDetailAutoMask:
+            case NodeKind::RawDetailFusion:
                 addInputCandidate(kImageInputSocketId);
                 break;
             case NodeKind::RawDevelop:

@@ -86,6 +86,8 @@ bool PrototypeHasCompatibleInput(
         }
         if (fromSocket.type == EditorNodeGraph::SocketType::Image) {
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
                 (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
@@ -94,6 +96,7 @@ bool PrototypeHasCompatibleInput(
             if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
         } else if (fromSocket.type == EditorNodeGraph::SocketType::Mask) {
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix && socket.id == EditorNodeGraph::kMixFactorSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::MaskUtility && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
@@ -105,6 +108,8 @@ bool PrototypeHasCompatibleInput(
 
             // Also allow mask outputs to connect to main image inputs (treating mask as grayscale image)
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
                 (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
@@ -193,6 +198,12 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::RawDevelop:
             editor->AddRawDevelopNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            editor->AddRawDetailAutoMaskNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+            editor->AddRawDetailFusionNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             editor->AddRawNeuralDenoiseNodeAt(graphPos);

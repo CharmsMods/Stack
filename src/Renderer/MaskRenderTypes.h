@@ -86,6 +86,8 @@ enum class RenderGraphNodeKind {
     RawSource,
     RawNeuralDenoise,
     RawDevelop,
+    RawDetailAutoMask,
+    RawDetailFusion,
     Layer,
     Output,
     MaskGenerator,
@@ -125,6 +127,14 @@ struct RenderGraphRawNeuralDenoisePayload {
     NeuralDenoise::NeuralDenoiseSettings settings;
 };
 
+struct RenderGraphRawDetailFusionPayload {
+    Raw::RawDetailFusionSettings settings;
+};
+
+struct RenderGraphRawDetailAutoMaskPayload {
+    Raw::RawDetailFusionSettings settings;
+};
+
 struct RenderGraphNode {
     int nodeId = -1;
     RenderGraphNodeKind kind = RenderGraphNodeKind::Image;
@@ -132,6 +142,8 @@ struct RenderGraphNode {
     RenderGraphRawSourcePayload rawSource;
     RenderGraphRawNeuralDenoisePayload rawNeuralDenoise;
     RenderGraphRawDevelopPayload rawDevelop;
+    RenderGraphRawDetailAutoMaskPayload rawDetailAutoMask;
+    RenderGraphRawDetailFusionPayload rawDetailFusion;
     nlohmann::json layerJson;
     RenderMaskGeneratorKind maskKind = RenderMaskGeneratorKind::Solid;
     RenderMaskSettings maskSettings;
@@ -155,6 +167,7 @@ struct RenderGraphLink {
 struct RenderGraphSnapshot {
     int outputNodeId = -1;
     std::string outputSocketId;
+    bool autoGainMaskPreview = false;
     std::vector<RenderGraphNode> nodes;
     std::vector<RenderGraphLink> links;
 };

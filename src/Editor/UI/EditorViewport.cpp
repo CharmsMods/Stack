@@ -1093,7 +1093,7 @@ void EditorViewport::Render(EditorModule* editor) {
 
     const ImVec2 contentCursor = ImGui::GetCursorPos();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const bool showHud = m_IsLocked || editor->IsEditorRenderBusy();
+    const bool showHud = m_IsLocked || editor->IsEditorRenderBusy() || editor->IsAutoGainMaskPreviewActive();
     if (showHud) {
         const ImVec2 hudPos = ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f);
         if (m_IsLocked) {
@@ -1104,6 +1104,12 @@ void EditorViewport::Render(EditorModule* editor) {
             drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f + busyOffsetY),
                               IM_COL32(190, 195, 205, 230),
                               "Rendering...");
+        }
+        if (editor->IsAutoGainMaskPreviewActive()) {
+            const float maskOffsetY = (m_IsLocked ? 22.0f : 0.0f) + (editor->IsEditorRenderBusy() ? 22.0f : 0.0f);
+            drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f + maskOffsetY),
+                              IM_COL32(180, 215, 255, 235),
+                              "Auto Gain mask preview - click image to return");
         }
     }
 
@@ -1214,6 +1220,12 @@ void EditorViewport::Render(EditorModule* editor) {
     const bool imageHovered = ImGui::IsItemHovered();
     const ImVec2 imageMin = ImGui::GetItemRectMin();
     const ImVec2 imageMax = ImGui::GetItemRectMax();
+    if (imageHovered && !editor->IsPickingColor() && editor->CanToggleActiveAutoGainMaskPreview()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            editor->ToggleActiveAutoGainMaskPreview();
+        }
+    }
     const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
     drawList->AddRectFilled(imageMin, imageMax, workspaceFill, kImageRounding);
     drawList->AddImageRounded((ImTextureID)(intptr_t)m_CheckerTex, imageMin, imageMax,

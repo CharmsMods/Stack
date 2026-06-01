@@ -81,6 +81,10 @@ void StyleModule::RenderUI() {
             desc = "Warm retro-inspired solarized dark mode offering superb visual comfort.";
         } else if (theme.id == "solarized-light") {
             desc = "Gentle cream-toned paper theme with soft contrast and excellent legibility.";
+        } else if (theme.id == "yellow-dark") {
+            desc = "A bold dark theme with a vibrant yellow accent for focused creativity.";
+        } else if (theme.id == "yellow-light") {
+            desc = "A bright, energetic light theme accented with vivid yellow.";
         }
 
         // Horizontal positioning

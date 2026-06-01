@@ -15,6 +15,8 @@ inline constexpr const char* kDarkPresetId = "dark";
 inline constexpr const char* kLightPresetId = "light";
 inline constexpr const char* kSolarizedPresetId = "solarized";
 inline constexpr const char* kSolarizedLightPresetId = "solarized-light";
+inline constexpr const char* kYellowDarkPresetId = "yellow-dark";
+inline constexpr const char* kYellowLightPresetId = "yellow-light";
 inline constexpr std::uint32_t kAppearanceSettingsVersion = 2;
 inline constexpr std::uint32_t kThemePresetFileVersion = 2;
 

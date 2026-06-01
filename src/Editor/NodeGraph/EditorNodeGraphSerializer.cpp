@@ -74,6 +74,8 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::RawSource: return "RawSource";
         case NodeKind::RawNeuralDenoise: return "RawNeuralDenoise";
         case NodeKind::RawDevelop: return "RawDevelop";
+        case NodeKind::RawDetailAutoMask: return "RawDetailAutoMask";
+        case NodeKind::RawDetailFusion: return "RawDetailFusion";
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
         case NodeKind::Composite: return "Composite";
@@ -157,6 +159,9 @@ std::string RawDebugViewToString(Raw::RawDebugView view) {
         case Raw::RawDebugView::PostDenoiseMosaic: return "PostDenoiseMosaic";
         case Raw::RawDebugView::HotPixelMask: return "HotPixelMask";
         case Raw::RawDebugView::DenoiseDifference: return "DenoiseDifference";
+        case Raw::RawDebugView::FalseColorMask: return "FalseColorMask";
+        case Raw::RawDebugView::DefringeMask: return "DefringeMask";
+        case Raw::RawDebugView::HighlightEdgeMask: return "HighlightEdgeMask";
     }
     return "FinalOutput";
 }
@@ -172,7 +177,64 @@ Raw::RawDebugView RawDebugViewFromString(const std::string& value) {
     if (value == "PostDenoiseMosaic") return Raw::RawDebugView::PostDenoiseMosaic;
     if (value == "HotPixelMask") return Raw::RawDebugView::HotPixelMask;
     if (value == "DenoiseDifference") return Raw::RawDebugView::DenoiseDifference;
+    if (value == "FalseColorMask" || value == "False Color Mask") return Raw::RawDebugView::FalseColorMask;
+    if (value == "DefringeMask" || value == "Defringe Mask") return Raw::RawDebugView::DefringeMask;
+    if (value == "HighlightEdgeMask" || value == "Highlight Edge Mask") return Raw::RawDebugView::HighlightEdgeMask;
     return Raw::RawDebugView::FinalOutput;
+}
+
+std::string RawDetailFusionModeToString(Raw::RawDetailFusionMode mode) {
+    switch (mode) {
+        case Raw::RawDetailFusionMode::ManualMask: return "ManualMask";
+        case Raw::RawDetailFusionMode::AutoAnalyze: return "AutoAnalyze";
+        case Raw::RawDetailFusionMode::Hybrid: return "Hybrid";
+    }
+    return "AutoAnalyze";
+}
+
+Raw::RawDetailFusionMode RawDetailFusionModeFromString(const std::string& value) {
+    if (value == "ManualMask" || value == "Manual Mask") return Raw::RawDetailFusionMode::ManualMask;
+    if (value == "Hybrid") return Raw::RawDetailFusionMode::Hybrid;
+    return Raw::RawDetailFusionMode::AutoAnalyze;
+}
+
+std::string RawDetailFusionDebugViewToString(Raw::RawDetailFusionDebugView view) {
+    switch (view) {
+        case Raw::RawDetailFusionDebugView::FinalImage: return "FinalImage";
+        case Raw::RawDetailFusionDebugView::ExposureMap: return "ExposureMap";
+        case Raw::RawDetailFusionDebugView::Confidence: return "Confidence";
+        case Raw::RawDetailFusionDebugView::HighlightSafety: return "HighlightSafety";
+        case Raw::RawDetailFusionDebugView::ShadowProtection: return "ShadowProtection";
+        case Raw::RawDetailFusionDebugView::SampleSelection: return "SampleSelection";
+        case Raw::RawDetailFusionDebugView::SmoothGradient: return "SmoothGradient";
+        case Raw::RawDetailFusionDebugView::TrueEdge: return "TrueEdge";
+        case Raw::RawDetailFusionDebugView::TextureDetail: return "TextureDetail";
+        case Raw::RawDetailFusionDebugView::DebandRisk: return "DebandRisk";
+        case Raw::RawDetailFusionDebugView::AutoRange: return "AutoRange";
+        case Raw::RawDetailFusionDebugView::NoiseFloorSnr: return "NoiseFloorSnr";
+        case Raw::RawDetailFusionDebugView::HighlightHeadroom: return "HighlightHeadroom";
+        case Raw::RawDetailFusionDebugView::ChannelSaturation: return "ChannelSaturation";
+        case Raw::RawDetailFusionDebugView::RejectedDetail: return "RejectedDetail";
+    }
+    return "FinalImage";
+}
+
+Raw::RawDetailFusionDebugView RawDetailFusionDebugViewFromString(const std::string& value) {
+    if (value == "ExposureMap" || value == "Effective EV Map") return Raw::RawDetailFusionDebugView::ExposureMap;
+    if (value == "Confidence" || value == "Confidence Map") return Raw::RawDetailFusionDebugView::Confidence;
+    if (value == "HighlightSafety" || value == "Highlight Safety") return Raw::RawDetailFusionDebugView::HighlightSafety;
+    if (value == "ShadowProtection" || value == "Shadow / Noise Protection") return Raw::RawDetailFusionDebugView::ShadowProtection;
+    if (value == "SampleSelection" || value == "Sample Selection") return Raw::RawDetailFusionDebugView::SampleSelection;
+    if (value == "SmoothGradient" || value == "Smooth Gradient Protection") return Raw::RawDetailFusionDebugView::SmoothGradient;
+    if (value == "TrueEdge" || value == "True Edge Map") return Raw::RawDetailFusionDebugView::TrueEdge;
+    if (value == "TextureDetail" || value == "Texture Detail Map") return Raw::RawDetailFusionDebugView::TextureDetail;
+    if (value == "DebandRisk" || value == "Deband Risk") return Raw::RawDetailFusionDebugView::DebandRisk;
+    if (value == "AutoRange" || value == "Auto Range Map") return Raw::RawDetailFusionDebugView::AutoRange;
+    if (value == "NoiseFloorSnr" || value == "Noise Floor / SNR") return Raw::RawDetailFusionDebugView::NoiseFloorSnr;
+    if (value == "HighlightHeadroom" || value == "Highlight Headroom") return Raw::RawDetailFusionDebugView::HighlightHeadroom;
+    if (value == "ChannelSaturation" || value == "Channel Saturation") return Raw::RawDetailFusionDebugView::ChannelSaturation;
+    if (value == "RejectedDetail" || value == "Rejected Detail") return Raw::RawDetailFusionDebugView::RejectedDetail;
+    return Raw::RawDetailFusionDebugView::FinalImage;
 }
 
 std::string RawPixelLayoutToString(Raw::RawPixelLayout layout) {
@@ -410,6 +472,15 @@ nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
         { "debugTransposeCameraMatrix", settings.debugTransposeCameraMatrix },
         { "rotationDegrees", settings.rotationDegrees },
         { "rotateToFitFrame", settings.rotateToFitFrame },
+        { "flipHorizontally", settings.flipHorizontally },
+        { "flipVertically", settings.flipVertically },
+        { "falseColorSuppression", settings.falseColorSuppression },
+        { "defringeStrength", settings.defringeStrength },
+        { "highlightEdgeCleanup", settings.highlightEdgeCleanup },
+        { "chromaRadius", settings.chromaRadius },
+        { "preserveRealColor", settings.preserveRealColor },
+        { "lateralRedCyan", settings.lateralRedCyan },
+        { "lateralBlueYellow", settings.lateralBlueYellow },
         { "mosaicDenoiseEnabled", settings.mosaicDenoise.enabled },
         { "mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression },
         { "mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold },
@@ -444,6 +515,15 @@ Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     settings.debugTransposeCameraMatrix = value.value("debugTransposeCameraMatrix", settings.debugTransposeCameraMatrix);
     settings.rotationDegrees = value.value("rotationDegrees", settings.rotationDegrees);
     settings.rotateToFitFrame = value.value("rotateToFitFrame", settings.rotateToFitFrame);
+    settings.flipHorizontally = value.value("flipHorizontally", settings.flipHorizontally);
+    settings.flipVertically = value.value("flipVertically", settings.flipVertically);
+    settings.falseColorSuppression = value.value("falseColorSuppression", settings.falseColorSuppression);
+    settings.defringeStrength = value.value("defringeStrength", settings.defringeStrength);
+    settings.highlightEdgeCleanup = value.value("highlightEdgeCleanup", settings.highlightEdgeCleanup);
+    settings.chromaRadius = value.value("chromaRadius", settings.chromaRadius);
+    settings.preserveRealColor = value.value("preserveRealColor", settings.preserveRealColor);
+    settings.lateralRedCyan = value.value("lateralRedCyan", settings.lateralRedCyan);
+    settings.lateralBlueYellow = value.value("lateralBlueYellow", settings.lateralBlueYellow);
     settings.mosaicDenoise.enabled = value.value("mosaicDenoiseEnabled", settings.mosaicDenoise.enabled);
     settings.mosaicDenoise.hotPixelSuppression = value.value("mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression);
     settings.mosaicDenoise.hotPixelThreshold = value.value("mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold);
@@ -458,12 +538,139 @@ Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     settings.mosaicDenoise.radius = std::clamp(settings.mosaicDenoise.radius, 1, 4);
     settings.mosaicDenoise.edgeProtection = std::clamp(settings.mosaicDenoise.edgeProtection, 0.0f, 1.0f);
     settings.mosaicDenoise.iterations = std::clamp(settings.mosaicDenoise.iterations, 1, 2);
+    settings.falseColorSuppression = std::clamp(settings.falseColorSuppression, 0.0f, 1.0f);
+    settings.defringeStrength = std::clamp(settings.defringeStrength, 0.0f, 1.0f);
+    settings.highlightEdgeCleanup = std::clamp(settings.highlightEdgeCleanup, 0.0f, 1.0f);
+    settings.chromaRadius = std::clamp(settings.chromaRadius, 1, 3);
+    settings.preserveRealColor = std::clamp(settings.preserveRealColor, 0.0f, 1.0f);
+    settings.lateralRedCyan = std::clamp(settings.lateralRedCyan, -3.0f, 3.0f);
+    settings.lateralBlueYellow = std::clamp(settings.lateralBlueYellow, -3.0f, 3.0f);
     const nlohmann::json wb = value.value("manualWhiteBalance", nlohmann::json::array());
     if (wb.is_array()) {
         for (std::size_t i = 0; i < settings.manualWhiteBalance.size() && i < wb.size(); ++i) {
             settings.manualWhiteBalance[i] = wb[i].get<float>();
         }
     }
+    return settings;
+}
+
+nlohmann::json SerializeRawDetailFusionSettings(const Raw::RawDetailFusionSettings& settings) {
+    return {
+        { "mode", RawDetailFusionModeToString(settings.mode) },
+        { "debugView", RawDetailFusionDebugViewToString(settings.debugView) },
+        { "autoSafetyEnabled", settings.autoSafetyEnabled },
+        { "overrideMinEv", settings.overrideMinEv },
+        { "overrideMaxEv", settings.overrideMaxEv },
+        { "overrideBaseEv", settings.overrideBaseEv },
+        { "overrideNoiseProtection", settings.overrideNoiseProtection },
+        { "overrideHighlightProtection", settings.overrideHighlightProtection },
+        { "overrideShadowLiftLimit", settings.overrideShadowLiftLimit },
+        { "overrideWellExposedTarget", settings.overrideWellExposedTarget },
+        { "minEvBias", settings.minEvBias },
+        { "maxEvBias", settings.maxEvBias },
+        { "baseEvBias", settings.baseEvBias },
+        { "noiseProtectionBias", settings.noiseProtectionBias },
+        { "highlightProtectionBias", settings.highlightProtectionBias },
+        { "shadowLiftLimitBias", settings.shadowLiftLimitBias },
+        { "wellExposedTargetBias", settings.wellExposedTargetBias },
+        { "minEv", settings.minEv },
+        { "maxEv", settings.maxEv },
+        { "baseEv", settings.baseEv },
+        { "strength", settings.strength },
+        { "sampleCount", settings.sampleCount },
+        { "highlightProtection", settings.highlightProtection },
+        { "shadowLiftLimit", settings.shadowLiftLimit },
+        { "noiseProtection", settings.noiseProtection },
+        { "detailWeight", settings.detailWeight },
+        { "wellExposedTarget", settings.wellExposedTarget },
+        { "smoothGradientProtection", settings.smoothGradientProtection },
+        { "textureSensitivity", settings.textureSensitivity },
+        { "skyBias", settings.skyBias },
+        { "invertMask", settings.invertMask },
+        { "maskBlackPoint", settings.maskBlackPoint },
+        { "maskWhitePoint", settings.maskWhitePoint },
+        { "maskGamma", settings.maskGamma },
+        { "smoothnessRadius", settings.smoothnessRadius },
+        { "smoothAreaRadius", settings.smoothAreaRadius },
+        { "edgeAwareness", settings.edgeAwareness },
+        { "haloGuard", settings.haloGuard },
+        { "maskDebandDither", settings.maskDebandDither },
+        { "manualBlend", settings.manualBlend }
+    };
+}
+
+Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::json& value) {
+    Raw::RawDetailFusionSettings settings;
+    if (!value.is_object()) return settings;
+    settings.mode = RawDetailFusionModeFromString(value.value("mode", std::string("AutoAnalyze")));
+    settings.debugView = RawDetailFusionDebugViewFromString(value.value("debugView", std::string("FinalImage")));
+    settings.autoSafetyEnabled = value.value("autoSafetyEnabled", settings.autoSafetyEnabled);
+    settings.overrideMinEv = value.value("overrideMinEv", settings.overrideMinEv);
+    settings.overrideMaxEv = value.value("overrideMaxEv", settings.overrideMaxEv);
+    settings.overrideBaseEv = value.value("overrideBaseEv", settings.overrideBaseEv);
+    settings.overrideNoiseProtection = value.value("overrideNoiseProtection", settings.overrideNoiseProtection);
+    settings.overrideHighlightProtection = value.value("overrideHighlightProtection", settings.overrideHighlightProtection);
+    settings.overrideShadowLiftLimit = value.value("overrideShadowLiftLimit", settings.overrideShadowLiftLimit);
+    settings.overrideWellExposedTarget = value.value("overrideWellExposedTarget", settings.overrideWellExposedTarget);
+    settings.minEvBias = value.value("minEvBias", settings.minEvBias);
+    settings.maxEvBias = value.value("maxEvBias", settings.maxEvBias);
+    settings.baseEvBias = value.value("baseEvBias", settings.baseEvBias);
+    settings.noiseProtectionBias = value.value("noiseProtectionBias", settings.noiseProtectionBias);
+    settings.highlightProtectionBias = value.value("highlightProtectionBias", settings.highlightProtectionBias);
+    settings.shadowLiftLimitBias = value.value("shadowLiftLimitBias", settings.shadowLiftLimitBias);
+    settings.wellExposedTargetBias = value.value("wellExposedTargetBias", settings.wellExposedTargetBias);
+    settings.minEv = value.value("minEv", settings.minEv);
+    settings.maxEv = value.value("maxEv", settings.maxEv);
+    settings.baseEv = value.value("baseEv", settings.baseEv);
+    settings.strength = value.value("strength", settings.strength);
+    settings.sampleCount = value.value("sampleCount", settings.sampleCount);
+    settings.highlightProtection = value.value("highlightProtection", settings.highlightProtection);
+    settings.shadowLiftLimit = value.value("shadowLiftLimit", settings.shadowLiftLimit);
+    settings.noiseProtection = value.value("noiseProtection", settings.noiseProtection);
+    settings.detailWeight = value.value("detailWeight", settings.detailWeight);
+    settings.wellExposedTarget = value.value("wellExposedTarget", settings.wellExposedTarget);
+    settings.smoothGradientProtection = value.value("smoothGradientProtection", settings.smoothGradientProtection);
+    settings.textureSensitivity = value.value("textureSensitivity", settings.textureSensitivity);
+    settings.skyBias = value.value("skyBias", settings.skyBias);
+    settings.invertMask = value.value("invertMask", settings.invertMask);
+    settings.maskBlackPoint = value.value("maskBlackPoint", settings.maskBlackPoint);
+    settings.maskWhitePoint = value.value("maskWhitePoint", settings.maskWhitePoint);
+    settings.maskGamma = value.value("maskGamma", settings.maskGamma);
+    settings.smoothnessRadius = value.value("smoothnessRadius", settings.smoothnessRadius);
+    settings.smoothAreaRadius = value.value("smoothAreaRadius", settings.smoothAreaRadius);
+    settings.edgeAwareness = value.value("edgeAwareness", settings.edgeAwareness);
+    settings.haloGuard = value.value("haloGuard", settings.haloGuard);
+    settings.maskDebandDither = value.value("maskDebandDither", settings.maskDebandDither);
+    settings.manualBlend = value.value("manualBlend", settings.manualBlend);
+    settings.minEv = std::clamp(settings.minEv, -8.0f, 8.0f);
+    settings.maxEv = std::clamp(settings.maxEv, settings.minEv + 0.01f, 8.0f);
+    settings.baseEv = std::clamp(settings.baseEv, -8.0f, 8.0f);
+    settings.minEvBias = std::clamp(settings.minEvBias, -3.0f, 3.0f);
+    settings.maxEvBias = std::clamp(settings.maxEvBias, -3.0f, 3.0f);
+    settings.baseEvBias = std::clamp(settings.baseEvBias, -3.0f, 3.0f);
+    settings.noiseProtectionBias = std::clamp(settings.noiseProtectionBias, -1.0f, 1.0f);
+    settings.highlightProtectionBias = std::clamp(settings.highlightProtectionBias, -1.0f, 1.0f);
+    settings.shadowLiftLimitBias = std::clamp(settings.shadowLiftLimitBias, -1.0f, 1.0f);
+    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -0.5f, 0.5f);
+    settings.strength = std::clamp(settings.strength, 0.0f, 4.0f);
+    settings.sampleCount = std::clamp(settings.sampleCount, 3, 33);
+    settings.highlightProtection = std::clamp(settings.highlightProtection, 0.0f, 1.0f);
+    settings.shadowLiftLimit = std::clamp(settings.shadowLiftLimit, 0.0f, 1.0f);
+    settings.noiseProtection = std::clamp(settings.noiseProtection, 0.0f, 1.0f);
+    settings.detailWeight = std::clamp(settings.detailWeight, 0.0f, 1.0f);
+    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.01f, 1.0f);
+    settings.smoothGradientProtection = std::clamp(settings.smoothGradientProtection, 0.0f, 1.0f);
+    settings.textureSensitivity = std::clamp(settings.textureSensitivity, 0.0f, 1.0f);
+    settings.skyBias = std::clamp(settings.skyBias, 0.0f, 1.0f);
+    settings.maskBlackPoint = std::clamp(settings.maskBlackPoint, 0.0f, 1.0f);
+    settings.maskWhitePoint = std::clamp(settings.maskWhitePoint, settings.maskBlackPoint + 0.001f, 1.0f);
+    settings.maskGamma = std::clamp(settings.maskGamma, 0.05f, 8.0f);
+    settings.smoothnessRadius = std::clamp(settings.smoothnessRadius, 0, 16);
+    settings.smoothAreaRadius = std::clamp(settings.smoothAreaRadius, 0, 32);
+    settings.edgeAwareness = std::clamp(settings.edgeAwareness, 0.0f, 1.0f);
+    settings.haloGuard = std::clamp(settings.haloGuard, 0.0f, 1.0f);
+    settings.maskDebandDither = std::clamp(settings.maskDebandDither, 0.0f, 1.0f);
+    settings.manualBlend = std::clamp(settings.manualBlend, 0.0f, 1.0f);
     return settings;
 }
 
@@ -721,6 +928,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["imageGeneratorSettings"] = SerializeImageGeneratorSettings(node.imageGeneratorSettings);
         item["mixBlendMode"] = MixBlendModeToString(node.mixBlendMode);
         item["mixFactor"] = node.mixFactor;
+        item["outputEnabled"] = node.outputEnabled;
 
         if (node.kind == NodeKind::Image) {
             item["label"] = node.image.label;
@@ -738,6 +946,10 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["neuralDenoiseSettings"] = NeuralDenoise::SerializeSettings(node.rawNeuralDenoise.settings);
         } else if (node.kind == NodeKind::RawDevelop) {
             item["rawSettings"] = SerializeRawSettings(node.rawDevelop.settings);
+        } else if (node.kind == NodeKind::RawDetailAutoMask) {
+            item["rawDetailAutoMaskSettings"] = SerializeRawDetailFusionSettings(node.rawDetailAutoMask.settings);
+        } else if (node.kind == NodeKind::RawDetailFusion) {
+            item["rawDetailFusionSettings"] = SerializeRawDetailFusionSettings(node.rawDetailFusion.settings);
         }
 
         nodesJson.push_back(std::move(item));
@@ -820,6 +1032,7 @@ void DeserializeGraphPayload(
         node.position.x = item.value("x", 0.0f);
         node.position.y = item.value("y", 0.0f);
         node.expanded = item.value("expanded", false);
+        node.outputEnabled = item.value("outputEnabled", true);
 
         const std::string kind = item.value("kind", std::string("Layer"));
         if (kind == "ExportBoundsSettings" || kind == "Composite") {
@@ -850,6 +1063,14 @@ void DeserializeGraphPayload(
             node.kind = NodeKind::RawDevelop;
             node.rawDevelop.settings = DeserializeRawSettings(item.value("rawSettings", nlohmann::json::object()));
             if (node.title.empty()) node.title = "RAW Develop";
+        } else if (kind == "RawDetailAutoMask") {
+            node.kind = NodeKind::RawDetailAutoMask;
+            node.rawDetailAutoMask.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailAutoMaskSettings", nlohmann::json::object()));
+            if (node.title.empty()) node.title = "RAW Detail Auto Mask";
+        } else if (kind == "RawDetailFusion") {
+            node.kind = NodeKind::RawDetailFusion;
+            node.rawDetailFusion.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailFusionSettings", nlohmann::json::object()));
+            if (node.title.empty() || node.title == "RAW Detail Fusion") node.title = "Auto Gain";
         } else if (kind == "Output") {
             node.kind = NodeKind::Output;
             if (node.title.empty()) node.title = "Output";
@@ -980,6 +1201,7 @@ void DeserializeGraphPayload(
             graph.TryConnectSockets(from, fromSocket, to, toSocket);
         }
     }
+
     if (graph.GetLinks().empty() && graph.GetActiveImageNodeId() > 0) {
         graph.RebuildLinks();
     }

@@ -199,6 +199,9 @@ public:
     bool AddCompositeLibraryAssetChain(const std::string& assetFileName);
     bool AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind generatorKind);
     bool AddFullRawTreeToSource(int rawSourceNodeId);
+    bool ConvertRawDetailFusionToHybrid(int fusionNodeId);
+    bool SplitLayerNodeIntoChannels(int layerNodeId);
+    bool ToggleOutputNodeEnabled(int outputNodeId);
     bool ConnectGraphImageNode(int nodeId);
     bool ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
     bool ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
@@ -218,10 +221,14 @@ public:
     void AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void RenderRawSourceControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDevelopControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderRawDetailAutoMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderRawDetailFusionControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void AutoLayoutGraph();
     void DisconnectGraphOutput();
     void SetGraphDropTargetRect(float minX, float minY, float maxX, float maxY);
@@ -345,6 +352,12 @@ public:
     float GetLeftPanelWidthAnim() const { return m_LeftPanelWidthAnim; }
     ViewportMode GetViewportMode() const;
     bool IsCompositeViewportMode() const { return GetViewportMode() == ViewportMode::CompositeCanvas; }
+    bool CanToggleActiveAutoGainMaskPreview() const;
+    bool IsAutoGainMaskPreviewActive() const {
+        return CanToggleActiveAutoGainMaskPreview() && m_AutoGainMaskPreviewNodeId == m_ActiveComplexNodeId;
+    }
+    void ToggleActiveAutoGainMaskPreview();
+    void ClearAutoGainMaskPreview();
     int GetCompletedChainCount() const;
     int GetConnectedOutputCount() const;
     const std::vector<CompositeSceneItem>& GetCompositeSceneItems() const { return m_CompositeSceneItems; }
@@ -513,6 +526,7 @@ private:
     std::uint64_t m_LastCompletedRenderGeneration = 0;
     std::uint64_t m_RenderRevision = 1;
     std::uint64_t m_LastSubmittedRenderRevision = 0;
+    int m_AutoGainMaskPreviewNodeId = -1;
     double m_LastRenderDirtyTime = 0.0;
     std::uint64_t m_NodeDirtyGenerationCounter = 1;
     std::unordered_map<int, std::uint64_t> m_NodeDirtyGenerations;
@@ -612,6 +626,8 @@ private:
     bool AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
     bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
@@ -628,6 +644,7 @@ private:
     bool CompletedChainSourceUsesScalableGenerator(int outputNodeId) const;
     bool CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const;
     void ResetToBlankProject();
+    void ResetRenderSubmissionState();
     void RenderProjectLifecyclePopups();
     StackAppearance::AppearanceManager* m_Appearance = nullptr;
 };

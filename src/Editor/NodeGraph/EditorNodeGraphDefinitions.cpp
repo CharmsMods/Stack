@@ -67,6 +67,12 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::RawDevelop:
             node.title = "RAW Develop";
             break;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            node.title = "RAW Detail Auto Mask";
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+            node.title = "Auto Gain";
+            break;
         case EditorNodeGraph::NodeKind::Layer: {
             const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
             node.typeId = descriptor ? descriptor->typeId : "";
@@ -74,7 +80,7 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             break;
         }
         case EditorNodeGraph::NodeKind::Output:
-            node.title = "Output";
+            node.title = node.outputEnabled ? "Output" : "Deactivated";
             break;
         case EditorNodeGraph::NodeKind::Composite:
             node.title = "Composite";
@@ -140,6 +146,16 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "EV Map", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Hybrid Mask", true, true);
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Gain Mask", false, true);
+            break;
         case EditorNodeGraph::NodeKind::Layer:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
             add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Mask", true, true);
@@ -198,6 +214,8 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
 std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Layer:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::ChannelSplit:
             return EditorNodeGraph::kImageInputSocketId;
@@ -231,6 +249,7 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawDevelop:
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::ImageGenerator:
@@ -244,6 +263,7 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::ImageToMask:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             return EditorNodeGraph::kMaskOutputSocketId;
         case EditorNodeGraph::NodeKind::Composite:
         case EditorNodeGraph::NodeKind::Output:
@@ -280,6 +300,7 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back({ EditorNodeGraph::NodeKind::Preview, 0, "Preview", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::RawNeuralDenoise, 0, "RAW/CFA Neural Denoise", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::RawDevelop, 0, "RAW Develop", "Input / Output" });
+    entries.push_back({ EditorNodeGraph::NodeKind::RawDetailFusion, 0, "Auto Gain", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Solid), "Solid Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::LinearGradient), "Linear Gradient Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RadialGradient), "Radial Gradient Mask", "Masks" });

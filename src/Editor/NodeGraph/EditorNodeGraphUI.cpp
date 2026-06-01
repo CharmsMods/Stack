@@ -112,6 +112,7 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::ImageToMask:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             return NodeFamily::Mask;
         case EditorNodeGraph::NodeKind::Scope:
             return NodeFamily::Scope;
@@ -156,6 +157,8 @@ bool PrototypeHasCompatibleInput(
         }
         if (fromSocket.type == EditorNodeGraph::SocketType::Image) {
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
                 (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
@@ -164,6 +167,7 @@ bool PrototypeHasCompatibleInput(
             if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
         } else if (fromSocket.type == EditorNodeGraph::SocketType::Mask) {
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix && socket.id == EditorNodeGraph::kMixFactorSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::MaskUtility && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
@@ -175,6 +179,8 @@ bool PrototypeHasCompatibleInput(
 
             // Also allow mask outputs to connect to main image inputs (treating mask as grayscale image)
             if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
+            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
                 (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
             if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
@@ -263,6 +269,12 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::RawDevelop:
             editor->AddRawDevelopNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            editor->AddRawDetailAutoMaskNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+            editor->AddRawDetailFusionNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             editor->AddRawNeuralDenoiseNodeAt(graphPos);
@@ -452,7 +464,8 @@ bool HasAdvancedLayerSurface(const EditorModule* editor, const EditorNodeGraph::
     }
     if (node.kind == EditorNodeGraph::NodeKind::RawSource ||
         node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-        node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        node.kind == EditorNodeGraph::NodeKind::RawDevelop ||
+        node.kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
         return true;
     }
     if (node.kind != EditorNodeGraph::NodeKind::Layer) {
@@ -619,6 +632,8 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             break;
         case EditorNodeGraph::NodeKind::ImageToMask:
             return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            return headerBlock + sectionGap + row + gap + metrics.previewHeight + sectionGap + metrics.minExpandedHeight + bottomPadding;
         case EditorNodeGraph::NodeKind::ImageGenerator:
             if (node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::SolidColor ||
                 node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Square ||
@@ -648,6 +663,7 @@ bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::Preview:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::ImageGenerator:
@@ -687,6 +703,8 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::RawSource: return "RAW";
         case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "RAW Denoise";
         case EditorNodeGraph::NodeKind::RawDevelop: return "RAW Develop";
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask: return "RAW Detail Auto Mask";
+        case EditorNodeGraph::NodeKind::RawDetailFusion: return "Auto Gain";
         case EditorNodeGraph::NodeKind::Layer: return "Layer";
         case EditorNodeGraph::NodeKind::Output: return "Output";
         case EditorNodeGraph::NodeKind::Composite: return "Composite";
@@ -1409,11 +1427,15 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         const float frameRounding = std::max(4.0f, 8.0f * uiScale);
         const float borderThickness = selected ? std::max(1.4f, 2.0f * uiScale) : std::max(0.95f, 1.15f * uiScale);
-        
-        const ImVec4 fillColor = BlendColor(familyStyle.fill, ImVec4(0.10f, 0.12f, 0.13f, familyStyle.fill.w), 0.18f);
-        const ImVec4 borderColor = selected
+
+        ImVec4 fillColor = BlendColor(familyStyle.fill, ImVec4(0.10f, 0.12f, 0.13f, familyStyle.fill.w), 0.18f);
+        ImVec4 borderColor = selected
             ? BlendColor(familyStyle.accent, ImVec4(0.94f, 0.96f, 0.98f, 1.0f), 0.42f)
             : familyStyle.border;
+        if (node.kind == EditorNodeGraph::NodeKind::Output && !node.outputEnabled) {
+            fillColor = ImVec4(0.26f, 0.08f, 0.08f, 1.0f);
+            borderColor = selected ? ImVec4(0.95f, 0.45f, 0.45f, 1.0f) : ImVec4(0.65f, 0.20f, 0.20f, 1.0f);
+        }
             
         drawList->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(fillColor), frameRounding);
         drawList->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(borderColor), frameRounding, 0, borderThickness);
@@ -1426,6 +1448,12 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             squareLabel = "RAW Denoise";
         } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
             squareLabel = "Develop";
+        } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+            squareLabel = "Auto Mask";
+        } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
+            squareLabel = "Auto Gain";
+        } else if (node.kind == EditorNodeGraph::NodeKind::Output && !node.outputEnabled) {
+            squareLabel = "Deactivated";
         } else if (node.kind == EditorNodeGraph::NodeKind::ChannelSplit) {
             squareLabel = "Split";
         } else if (node.kind == EditorNodeGraph::NodeKind::ChannelCombine) {
@@ -1600,10 +1628,13 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 return node.title.empty() ? "Mix" : node.title;
             case EditorNodeGraph::NodeKind::Preview:
                 return node.title.empty() ? "Preview" : node.title;
+            case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+                return node.title.empty() ? "RAW Detail Auto Mask" : node.title;
             case EditorNodeGraph::NodeKind::Image:
             case EditorNodeGraph::NodeKind::RawSource:
             case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             case EditorNodeGraph::NodeKind::RawDevelop:
+            case EditorNodeGraph::NodeKind::RawDetailFusion:
             case EditorNodeGraph::NodeKind::Output:
             case EditorNodeGraph::NodeKind::Composite:
             case EditorNodeGraph::NodeKind::ChannelSplit:
@@ -1765,12 +1796,38 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         editor->RenderRawNeuralDenoiseControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
         editor->RenderRawDevelopControls(node, controlWidth, false);
+    } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+        const unsigned int texture = GetGraphPreviewTexture(editor, node);
+        const ImVec2 graphPreviewSize = [&]() {
+            auto it = m_GraphPreviewSizes.find(node.id);
+            return it != m_GraphPreviewSizes.end() ? it->second : previewSize;
+        }();
+        const ImVec2 fittedPreviewSize = FitPreviewRect(previewSize, graphPreviewSize);
+        if (texture != 0) {
+            const float indent = std::max(0.0f, (previewSize.x - fittedPreviewSize.x) * 0.5f);
+            if (indent > 0.0f) {
+                ImGui::Dummy(ImVec2(indent, 0.0f));
+                ImGui::SameLine(0.0f, 0.0f);
+            }
+            ImGui::Image((ImTextureID)(intptr_t)texture, fittedPreviewSize, ImVec2(0, 1), ImVec2(1, 0));
+            ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
+        } else {
+            ImGui::Dummy(previewSize);
+            ImGui::TextDisabled("Auto mask preview unavailable");
+        }
+        editor->RenderRawDetailAutoMaskControls(node, controlWidth, false);
+    } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
+        editor->RenderRawDetailFusionControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::Output) {
-        ImGui::TextDisabled("%s", graph.IsOutputConnected() ? "Connected to output chain" : "Output is not connected");
-        if (editor->OutputPathNeedsViewTransform(node.id)) {
+        if (!node.outputEnabled) {
+            ImGui::TextDisabled("This output is deactivated.");
+        } else {
+            ImGui::TextDisabled("%s", graph.IsOutputConnected() ? "Connected to output chain" : "Output is not connected");
+        }
+        if (node.outputEnabled && editor->OutputPathNeedsViewTransform(node.id)) {
             ImGui::TextWrapped("Scene-referred HDR input may clip at Output. Add or reconnect through View Transform for display compression.");
         }
-        if (graph.IsOutputConnected()) {
+        if (node.outputEnabled && graph.IsOutputConnected()) {
             RenderTextureStats outputStats = editor->GetPipeline().GetOutputTextureStats();
             if (outputStats.valid) {
                 ImGui::TextDisabled("Rendered RGB %.3f to %.3f", outputStats.minRgb, outputStats.maxRgb);
@@ -1780,7 +1837,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             }
         }
         ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
-        ImGui::BeginDisabled(!graph.IsOutputConnected() || editor->IsExportBusy());
+        ImGui::BeginDisabled(!node.outputEnabled || !graph.IsOutputConnected() || editor->IsExportBusy());
         if (ImGui::Button("Export", ImVec2(controlWidth, 0.0f))) {
             const std::string path = FileDialogs::SavePngFileDialog("Export Rendered Image", "rendered_output.png");
             if (!path.empty()) {
@@ -1788,6 +1845,9 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             }
         }
         ImGui::EndDisabled();
+        if (ImGui::Button(node.outputEnabled ? "Deactivate Output" : "Activate Output", ImVec2(controlWidth, 0.0f))) {
+            editor->ToggleOutputNodeEnabled(node.id);
+        }
     } else if (node.kind == EditorNodeGraph::NodeKind::Composite) {
         ImGui::TextDisabled("%d completed chains", editor->GetCompletedChainCount());
         ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
@@ -2652,6 +2712,16 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             DuplicateSelectedNodes(editor);
         }
         if (!ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && !ImGui::GetIO().KeyAlt &&
+            ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+            const auto& selectedIds = editor->GetNodeGraph().GetSelectedNodeIds();
+            if (selectedIds.size() == 1) {
+                if (const auto* selectedNode = editor->GetNodeGraph().FindNode(selectedIds.front());
+                    selectedNode && selectedNode->kind == EditorNodeGraph::NodeKind::Output) {
+                    editor->ToggleOutputNodeEnabled(selectedNode->id);
+                }
+            }
+        }
+        if (!ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && !ImGui::GetIO().KeyAlt &&
             ImGui::IsKeyPressed(ImGuiKey_C, false)) {
             const auto& selectedIds = editor->GetNodeGraph().GetSelectedNodeIds();
             if (!selectedIds.empty()) {
@@ -2888,6 +2958,126 @@ EditorNodeGraph::ImageGeneratorSettings DeserializeImageGeneratorSettings(const 
     return settings;
 }
 
+nlohmann::json SerializeRawDetailFusionSettings(const Raw::RawDetailFusionSettings& settings) {
+    return {
+        { "mode", static_cast<int>(settings.mode) },
+        { "debugView", static_cast<int>(settings.debugView) },
+        { "autoSafetyEnabled", settings.autoSafetyEnabled },
+        { "overrideMinEv", settings.overrideMinEv },
+        { "overrideMaxEv", settings.overrideMaxEv },
+        { "overrideBaseEv", settings.overrideBaseEv },
+        { "overrideNoiseProtection", settings.overrideNoiseProtection },
+        { "overrideHighlightProtection", settings.overrideHighlightProtection },
+        { "overrideShadowLiftLimit", settings.overrideShadowLiftLimit },
+        { "overrideWellExposedTarget", settings.overrideWellExposedTarget },
+        { "minEvBias", settings.minEvBias },
+        { "maxEvBias", settings.maxEvBias },
+        { "baseEvBias", settings.baseEvBias },
+        { "noiseProtectionBias", settings.noiseProtectionBias },
+        { "highlightProtectionBias", settings.highlightProtectionBias },
+        { "shadowLiftLimitBias", settings.shadowLiftLimitBias },
+        { "wellExposedTargetBias", settings.wellExposedTargetBias },
+        { "minEv", settings.minEv },
+        { "maxEv", settings.maxEv },
+        { "baseEv", settings.baseEv },
+        { "strength", settings.strength },
+        { "sampleCount", settings.sampleCount },
+        { "highlightProtection", settings.highlightProtection },
+        { "shadowLiftLimit", settings.shadowLiftLimit },
+        { "noiseProtection", settings.noiseProtection },
+        { "detailWeight", settings.detailWeight },
+        { "wellExposedTarget", settings.wellExposedTarget },
+        { "smoothGradientProtection", settings.smoothGradientProtection },
+        { "textureSensitivity", settings.textureSensitivity },
+        { "skyBias", settings.skyBias },
+        { "invertMask", settings.invertMask },
+        { "maskBlackPoint", settings.maskBlackPoint },
+        { "maskWhitePoint", settings.maskWhitePoint },
+        { "maskGamma", settings.maskGamma },
+        { "smoothnessRadius", settings.smoothnessRadius },
+        { "smoothAreaRadius", settings.smoothAreaRadius },
+        { "edgeAwareness", settings.edgeAwareness },
+        { "haloGuard", settings.haloGuard },
+        { "maskDebandDither", settings.maskDebandDither },
+        { "manualBlend", settings.manualBlend }
+    };
+}
+
+Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::json& value) {
+    Raw::RawDetailFusionSettings settings;
+    if (!value.is_object()) return settings;
+    settings.mode = static_cast<Raw::RawDetailFusionMode>(std::clamp(value.value("mode", static_cast<int>(settings.mode)), 0, 2));
+    settings.debugView = static_cast<Raw::RawDetailFusionDebugView>(std::clamp(value.value("debugView", static_cast<int>(settings.debugView)), 0, 14));
+    settings.autoSafetyEnabled = value.value("autoSafetyEnabled", settings.autoSafetyEnabled);
+    settings.overrideMinEv = value.value("overrideMinEv", settings.overrideMinEv);
+    settings.overrideMaxEv = value.value("overrideMaxEv", settings.overrideMaxEv);
+    settings.overrideBaseEv = value.value("overrideBaseEv", settings.overrideBaseEv);
+    settings.overrideNoiseProtection = value.value("overrideNoiseProtection", settings.overrideNoiseProtection);
+    settings.overrideHighlightProtection = value.value("overrideHighlightProtection", settings.overrideHighlightProtection);
+    settings.overrideShadowLiftLimit = value.value("overrideShadowLiftLimit", settings.overrideShadowLiftLimit);
+    settings.overrideWellExposedTarget = value.value("overrideWellExposedTarget", settings.overrideWellExposedTarget);
+    settings.minEvBias = value.value("minEvBias", settings.minEvBias);
+    settings.maxEvBias = value.value("maxEvBias", settings.maxEvBias);
+    settings.baseEvBias = value.value("baseEvBias", settings.baseEvBias);
+    settings.noiseProtectionBias = value.value("noiseProtectionBias", settings.noiseProtectionBias);
+    settings.highlightProtectionBias = value.value("highlightProtectionBias", settings.highlightProtectionBias);
+    settings.shadowLiftLimitBias = value.value("shadowLiftLimitBias", settings.shadowLiftLimitBias);
+    settings.wellExposedTargetBias = value.value("wellExposedTargetBias", settings.wellExposedTargetBias);
+    settings.minEv = value.value("minEv", settings.minEv);
+    settings.maxEv = value.value("maxEv", settings.maxEv);
+    settings.baseEv = value.value("baseEv", settings.baseEv);
+    settings.strength = value.value("strength", settings.strength);
+    settings.sampleCount = value.value("sampleCount", settings.sampleCount);
+    settings.highlightProtection = value.value("highlightProtection", settings.highlightProtection);
+    settings.shadowLiftLimit = value.value("shadowLiftLimit", settings.shadowLiftLimit);
+    settings.noiseProtection = value.value("noiseProtection", settings.noiseProtection);
+    settings.detailWeight = value.value("detailWeight", settings.detailWeight);
+    settings.wellExposedTarget = value.value("wellExposedTarget", settings.wellExposedTarget);
+    settings.smoothGradientProtection = value.value("smoothGradientProtection", settings.smoothGradientProtection);
+    settings.textureSensitivity = value.value("textureSensitivity", settings.textureSensitivity);
+    settings.skyBias = value.value("skyBias", settings.skyBias);
+    settings.invertMask = value.value("invertMask", settings.invertMask);
+    settings.maskBlackPoint = value.value("maskBlackPoint", settings.maskBlackPoint);
+    settings.maskWhitePoint = value.value("maskWhitePoint", settings.maskWhitePoint);
+    settings.maskGamma = value.value("maskGamma", settings.maskGamma);
+    settings.smoothnessRadius = value.value("smoothnessRadius", settings.smoothnessRadius);
+    settings.smoothAreaRadius = value.value("smoothAreaRadius", settings.smoothAreaRadius);
+    settings.edgeAwareness = value.value("edgeAwareness", settings.edgeAwareness);
+    settings.haloGuard = value.value("haloGuard", settings.haloGuard);
+    settings.maskDebandDither = value.value("maskDebandDither", settings.maskDebandDither);
+    settings.manualBlend = value.value("manualBlend", settings.manualBlend);
+    settings.minEv = std::clamp(settings.minEv, -8.0f, 8.0f);
+    settings.maxEv = std::clamp(settings.maxEv, settings.minEv + 0.01f, 8.0f);
+    settings.baseEv = std::clamp(settings.baseEv, -8.0f, 8.0f);
+    settings.minEvBias = std::clamp(settings.minEvBias, -3.0f, 3.0f);
+    settings.maxEvBias = std::clamp(settings.maxEvBias, -3.0f, 3.0f);
+    settings.baseEvBias = std::clamp(settings.baseEvBias, -3.0f, 3.0f);
+    settings.noiseProtectionBias = std::clamp(settings.noiseProtectionBias, -1.0f, 1.0f);
+    settings.highlightProtectionBias = std::clamp(settings.highlightProtectionBias, -1.0f, 1.0f);
+    settings.shadowLiftLimitBias = std::clamp(settings.shadowLiftLimitBias, -1.0f, 1.0f);
+    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -0.5f, 0.5f);
+    settings.strength = std::clamp(settings.strength, 0.0f, 4.0f);
+    settings.sampleCount = std::clamp(settings.sampleCount, 3, 33);
+    settings.highlightProtection = std::clamp(settings.highlightProtection, 0.0f, 1.0f);
+    settings.shadowLiftLimit = std::clamp(settings.shadowLiftLimit, 0.0f, 1.0f);
+    settings.noiseProtection = std::clamp(settings.noiseProtection, 0.0f, 1.0f);
+    settings.detailWeight = std::clamp(settings.detailWeight, 0.0f, 1.0f);
+    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.01f, 1.0f);
+    settings.smoothGradientProtection = std::clamp(settings.smoothGradientProtection, 0.0f, 1.0f);
+    settings.textureSensitivity = std::clamp(settings.textureSensitivity, 0.0f, 1.0f);
+    settings.skyBias = std::clamp(settings.skyBias, 0.0f, 1.0f);
+    settings.maskBlackPoint = std::clamp(settings.maskBlackPoint, 0.0f, 1.0f);
+    settings.maskWhitePoint = std::clamp(settings.maskWhitePoint, settings.maskBlackPoint + 0.001f, 1.0f);
+    settings.maskGamma = std::clamp(settings.maskGamma, 0.05f, 8.0f);
+    settings.smoothnessRadius = std::clamp(settings.smoothnessRadius, 0, 16);
+    settings.smoothAreaRadius = std::clamp(settings.smoothAreaRadius, 0, 32);
+    settings.edgeAwareness = std::clamp(settings.edgeAwareness, 0.0f, 1.0f);
+    settings.haloGuard = std::clamp(settings.haloGuard, 0.0f, 1.0f);
+    settings.maskDebandDither = std::clamp(settings.maskDebandDither, 0.0f, 1.0f);
+    settings.manualBlend = std::clamp(settings.manualBlend, 0.0f, 1.0f);
+    return settings;
+}
+
 bool DecodePngBytesClipboard(const std::vector<unsigned char>& pngBytes, EditorNodeGraph::ImagePayload& payload) {
     if (pngBytes.empty()) {
         return false;
@@ -2964,6 +3154,10 @@ void EditorNodeGraphUI::CopySelectedNodes(EditorModule* editor) {
             if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(layers.size())) {
                 item["layerData"] = layers[node->layerIndex]->Serialize();
             }
+        } else if (node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+            item["rawDetailAutoMaskSettings"] = SerializeRawDetailFusionSettings(node->rawDetailAutoMask.settings);
+        } else if (node->kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
+            item["rawDetailFusionSettings"] = SerializeRawDetailFusionSettings(node->rawDetailFusion.settings);
         }
 
         nodesJson.push_back(item);
@@ -3084,6 +3278,10 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
                 node.layerIndex = static_cast<int>(layers.size());
                 layers.push_back(newLayer);
             }
+        } else if (kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+            node.rawDetailAutoMask.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailAutoMaskSettings", nlohmann::json::object()));
+        } else if (kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
+            node.rawDetailFusion.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailFusionSettings", nlohmann::json::object()));
         }
 
         EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
