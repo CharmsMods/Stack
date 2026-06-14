@@ -9,15 +9,35 @@ namespace ImGuiExtras {
         bool active = false;
         bool edited = false;
         bool popupOpen = false;
+        bool lastHovered = false;
+        bool lastActive = false;
+        bool lastEdited = false;
+        bool lastPopupOpen = false;
         ImGuiID id = 0;
+    };
+
+    struct GraphNodeControlScopeConfig {
+        float labelWidth = 70.0f;
+        float valueWidth = 48.0f;
+        float minSliderWidth = 78.0f;
+        float scale = 1.0f;
     };
 
     float AnimateTowards(float current, float target, float deltaTime, float speed = 18.0f);
     float EaseOutCubic(float value);
+    void BeginFrameInputRouting();
+    bool IsSliderWheelModifierActive();
+    float GetSliderWheelDelta();
     void DrawSpinner(const char* label, float radius, int thickness, ImU32 color);
+    void DrawSpinnerOnly(float radius, int thickness, ImU32 color);
+    void RenderSpinnerOnlyOverlay(float alpha = 1.0f);
     void RenderBusyOverlay(const char* message);
+    void RenderProgressOverlay(const char* message, float progress);
     void ResetNodeControlState();
     const NodeControlState& GetNodeControlState();
+    void BeginGraphNodeControlScope(const GraphNodeControlScopeConfig& config = {});
+    void EndGraphNodeControlScope();
+    bool IsGraphNodeControlScopeActive();
     void RichSectionLabel(const char* label, float spacingAfter = 0.0f);
     bool RichFullWidthButton(const char* label, float width, float height = 0.0f);
     void RichColorSwatchRow(

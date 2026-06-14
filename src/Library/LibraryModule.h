@@ -6,6 +6,7 @@ namespace StackAppearance {
 }
 #include <memory>
 #include <string>
+#include <functional>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
@@ -36,8 +37,10 @@ public:
         class EditorModule* editor,
         class CompositeModule* composite,
         StackAppearance::AppearanceManager* appearance,
-        int* activeTab = nullptr);
+        int* activeTab = nullptr,
+        std::function<void(const std::string&)> onLoadEditorProject = {});
     void RenderGlobalPopups();
+    void DismissPreviewsForProjectLoad();
     void OpenProjectPreviewByFileName(const std::string& fileName);
     const char* GetName() override { return "Library"; }
 
@@ -47,12 +50,14 @@ private:
     void RenderPreviewPopup(
         class EditorModule* editor,
         class CompositeModule* composite,
-        int* activeTab = nullptr);
+        int* activeTab = nullptr,
+        const std::function<void(const std::string&)>& onLoadEditorProject = {});
     void RenderAssetPreviewPopup(
         class EditorModule* editor,
         class CompositeModule* composite,
-        int* activeTab = nullptr);
-    void RenderConfirmLoadPopup();
+        int* activeTab = nullptr,
+        const std::function<void(const std::string&)>& onLoadEditorProject = {});
+    void RenderConfirmLoadPopup(const std::function<void(const std::string&)>& onLoadEditorProject = {});
     void RenderFolderImportPopup();
     void RenderImportConflictPopup();
     void RenderAssetConflictPopup();
@@ -101,6 +106,7 @@ private:
     class EditorModule* m_CachedEditor = nullptr;
     class CompositeModule* m_CachedComposite = nullptr;
     int* m_CachedActiveTab = nullptr;
+    std::function<void(const std::string&)> m_OnLoadEditorProject;
 
     float m_ImportStatusAlpha = 0.0f;
     float m_ExportStatusAlpha = 0.0f;
@@ -131,4 +137,8 @@ private:
 
     std::unordered_map<std::string, LibraryCardMotionState> m_ProjectCardMotion;
     std::unordered_map<std::string, LibraryCardMotionState> m_AssetCardMotion;
+
+    unsigned int m_OptionsIconTex = 0;
+    unsigned int m_AllProjectsIconTex = 0;
+    unsigned int m_AssetsIconTex = 0;
 };

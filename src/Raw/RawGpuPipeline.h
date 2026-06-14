@@ -12,9 +12,11 @@ public:
     RawGpuPipeline() = default;
     ~RawGpuPipeline();
 
-    unsigned int Render(const RawImageData& raw, const RawDevelopSettings& settings);
+    unsigned int Render(const RawImageData& raw, const RawDevelopSettings& settings, int previewMaxDimension = 0);
     void Clear();
     const std::string& GetLastError() const { return m_LastError; }
+    int GetOutputWidth() const { return m_OutputWidth; }
+    int GetOutputHeight() const { return m_OutputHeight; }
 
 private:
     unsigned int m_Program = 0;

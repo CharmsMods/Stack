@@ -70,3 +70,20 @@ dist/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local documentation, notes, and agent configurations
+/Ideas and Fixes/
+/old docs/
+/docs/
+/AGENTS.md
+
+# AI training, model inputs/outputs, and validation tools
+/Denoise Model Training/
+/tools/hdr_merge/
+
+# Website mockups and web assets
+/website/
+
+# Local testing and development files
+/tools/graph_behavior_tests.cpp
+/src/Notes/

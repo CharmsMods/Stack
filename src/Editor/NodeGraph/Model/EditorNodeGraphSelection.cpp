@@ -21,9 +21,10 @@ Vec2 DefaultSelectionSize(const Node& node) {
         : (node.kind == NodeKind::Scope ? Vec2{ 300.0f, 270.0f }
         : (node.kind == NodeKind::MaskGenerator ? Vec2{ 270.0f, 246.0f }
         : (node.kind == NodeKind::Mix ? Vec2{ 250.0f, 170.0f }
-        : (node.kind == NodeKind::Preview ? Vec2{ 266.0f, 196.0f }
+        : (node.kind == NodeKind::DataMath ? Vec2{ 250.0f, 170.0f }
+        : (node.kind == NodeKind::Preview ? Vec2{ 322.0f, 244.0f }
         : (node.kind == NodeKind::Composite ? Vec2{ 286.0f, 360.0f }
-        : Vec2{ 232.0f, 82.0f }))))));
+        : Vec2{ 232.0f, 82.0f })))))));
 }
 
 } // namespace

@@ -1,4 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
+#include "App/settings/AppearanceTheme.h"
+#include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,6 +13,18 @@ EditorNodeGraph::Vec2 ToGraphVec2(const ImVec2& value) {
 }
 
 } // namespace
+
+bool EditorNodeGraphUI::UsesFixedNodeViewport() const {
+    return false;
+}
+
+float EditorNodeGraphUI::NodeContentScale() const {
+    return EditorNodeGraphUIMetrics::NodeUiScaleFromZoom(m_Zoom);
+}
+
+float EditorNodeGraphUI::NodePinRadius() const {
+    return EditorNodeGraphUIMetrics::PinRadiusForZoom(NodeContentScale());
+}
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::ScreenToGraph(const EditorNodeGraph::Vec2& screen) const {
     return EditorNodeGraph::Vec2{
@@ -26,20 +41,30 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::GraphToScreen(const EditorNodeGraph::Ve
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeScreenSize(const EditorNodeGraph::Node& node) const {
+    return NodeViewportSizePx(node);
+}
+
+EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeViewportSizePx(const EditorNodeGraph::Node& node) const {
     const EditorNodeGraph::Vec2 size = NodeSize(node);
     return EditorNodeGraph::Vec2{ size.x * m_Zoom, size.y * m_Zoom };
+}
+
+EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeGraphFootprintSize(const EditorNodeGraph::Node& node) const {
+    return NodeSize(node);
 }
 
 void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
     const EditorNodeGraph::Vec2 mouseScreen = ToGraphVec2(ImGui::GetMousePos());
     const EditorNodeGraph::Vec2 before = ScreenToGraph(mouseScreen);
-    const float oldZoom = m_Zoom;
-    m_Zoom = std::clamp(m_Zoom * (wheel > 0.0f ? 1.12f : 1.0f / 1.12f), 0.16f, 4.5f);
-    if (std::abs(m_Zoom - oldZoom) < 0.0001f) {
+    const float baseZoom = m_SmoothZoomActive ? m_ZoomTarget : m_Zoom;
+    const float nextTarget = std::clamp(baseZoom * (wheel > 0.0f ? 1.12f : 1.0f / 1.12f), 0.16f, 4.5f);
+    if (std::abs(nextTarget - baseZoom) < 0.0001f) {
         return;
     }
-    m_Pan.x = mouseScreen.x - m_CanvasOrigin.x - before.x * m_Zoom;
-    m_Pan.y = mouseScreen.y - m_CanvasOrigin.y - before.y * m_Zoom;
+    m_ZoomTarget = nextTarget;
+    m_SmoothZoomFocusScreen = mouseScreen;
+    m_SmoothZoomFocusGraph = before;
+    m_SmoothZoomActive = true;
 }
 
 void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
@@ -53,7 +78,7 @@ void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
     float maxY = 0.0f;
     bool first = true;
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        const EditorNodeGraph::Vec2 size = NodeSize(node);
+        const EditorNodeGraph::Vec2 size = NodeGraphFootprintSize(node);
         if (first) {
             minX = node.position.x;
             minY = node.position.y;

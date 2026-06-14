@@ -13,9 +13,12 @@ namespace StackAppearance {
 #include "UI/EditorViewport.h"
 #include "Renderer/RenderPipeline.h"
 #include "Persistence/StackBinaryFormat.h"
+#include "Utils/UiNotifications.h"
 #include <imgui.h>
 #include <array>
 #include <cstdint>
+#include <cstddef>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <map>
@@ -28,10 +31,19 @@ namespace StackAppearance {
 #include "UI/EditorScopes.h"
 
 struct GLFWwindow;
+enum class ToneCurveSamplingBasis : int;
+enum class ToneCurveScopeMaskAction : int;
+class ToneCurveLayer;
 
 // The main coordinator for the Editor context.
 class EditorModule {
 public:
+    enum class DevelopCandidateFeedbackGateDecision {
+        Apply,
+        DeferRecentInteraction,
+        DropStaleInteraction
+    };
+
     enum class ViewportMode {
         SingleOutputPreview,
         CompositeCanvas
@@ -40,6 +52,7 @@ public:
     enum class CanvasToolKind {
         None,
         PickColor,
+        ToneCurveTarget,
         AdjustAberrationCenter
     };
 
@@ -144,6 +157,57 @@ public:
         std::uint64_t revision = 0;
     };
 
+    enum class HdrMergeRenderState {
+        Idle,
+        Ready,
+        Queued,
+        Rendering,
+        Rendered,
+        BlockedMissingInput,
+        IncompatibleInput,
+        Failed
+    };
+
+    struct HdrMergeInputSummary {
+        std::string socketId;
+        std::string label;
+        std::string sourceLabel;
+        std::string metadataSummary;
+        std::string normalizationSummary;
+        bool active = false;
+        bool connected = false;
+        bool compatible = true;
+        bool hasRawMetadata = false;
+        bool hasCaptureExposure = false;
+        int sourceNodeId = -1;
+        int width = 0;
+        int height = 0;
+    };
+
+    struct HdrMergeNodeStatus {
+        HdrMergeRenderState state = HdrMergeRenderState::Idle;
+        std::string message;
+        std::array<HdrMergeInputSummary, 3> inputs {};
+        Raw::HdrMergeDebugView debugView = Raw::HdrMergeDebugView::FinalImage;
+        bool feedsActiveOutput = false;
+        bool hasRenderedResult = false;
+        bool stale = false;
+        bool metadataNormalizationReady = false;
+        bool automaticReliabilityReady = false;
+        std::string normalizationMessage;
+        std::string reliabilityMessage;
+        std::string warningMessage;
+    };
+
+    struct HdrMergeConnectionTopology {
+        bool hasInput1 = false;
+        bool hasInput2 = false;
+        bool hasInput3 = false;
+        bool usesInput3 = false;
+        bool hasGap = false;
+        int activeInputCount = 0;
+    };
+
     struct PersistedCompositeSceneEntry {
         int outputNodeId = -1;
         ImVec2 position = ImVec2(0.0f, 0.0f);
@@ -170,6 +234,7 @@ public:
     
     // Called every frame by the AppShell
     void RenderUI();
+    void BeginLibraryLoadReveal();
 
     RenderPipeline& GetPipeline() { return m_Pipeline; }
     std::vector<std::shared_ptr<LayerBase>>& GetLayers() { return m_Layers; }
@@ -189,9 +254,9 @@ public:
     NodeSurfaceSpec GetLayerNodeSurfaceSpec(int layerIndex) const;
     NodeSurfaceSpec GetNodeSurfaceSpec(int nodeId) const;
 
-    EditorNodeGraph::Graph& GetNodeGraph() { return m_NodeGraph; }
-    const EditorNodeGraph::Graph& GetNodeGraph() const { return m_NodeGraph; }
-    bool IsGraphOutputConnected() const { return m_NodeGraph.IsOutputConnected(); }
+    EditorNodeGraph::Graph& GetNodeGraph();
+    const EditorNodeGraph::Graph& GetNodeGraph() const;
+    bool IsGraphOutputConnected() const;
     void PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
@@ -199,11 +264,203 @@ public:
     bool AddCompositeLibraryAssetChain(const std::string& assetFileName);
     bool AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind generatorKind);
     bool AddFullRawTreeToSource(int rawSourceNodeId);
+    static void NormalizeDevelopAutoGuidance(EditorNodeGraph::DevelopAutoGuidance& guidance);
+    static void NormalizeDevelopSubjectImportance(EditorNodeGraph::DevelopSubjectImportanceMap& importance);
+
+    struct DevelopSubjectViewportRegion {
+        int id = 0;
+        EditorNodeGraph::DevelopSubjectImportanceMode mode = EditorNodeGraph::DevelopSubjectImportanceMode::Important;
+        bool enabled = true;
+        float centerX = 0.5f;
+        float centerY = 0.5f;
+        float radiusX = 0.18f;
+        float radiusY = 0.18f;
+        float feather = 0.35f;
+        float strength = 0.75f;
+    };
+
+    struct DevelopSubjectViewportStrokePoint {
+        float x = 0.5f;
+        float y = 0.5f;
+    };
+
+    struct DevelopSubjectViewportStroke {
+        int id = 0;
+        EditorNodeGraph::DevelopSubjectImportanceMode mode = EditorNodeGraph::DevelopSubjectImportanceMode::Important;
+        bool enabled = true;
+        bool subtract = false;
+        float radius = 0.045f;
+        float feather = 0.35f;
+        float strength = 0.75f;
+        std::vector<DevelopSubjectViewportStrokePoint> points;
+    };
+
+    struct DevelopSubjectViewportMapCell {
+        float importance = 0.0f;
+        float reveal = 0.0f;
+        float protect = 0.0f;
+        float preserveMood = 0.0f;
+        float lowPriority = 0.0f;
+        float confidence = 0.0f;
+        float boundaryHint = 0.0f;
+    };
+
+    struct DevelopSubjectViewportState {
+        int nodeId = 0;
+        bool enabled = false;
+        bool showOverlay = false;
+        float overlayOpacity = 0.45f;
+        bool showInterpretedMapOverlay = false;
+        bool interpretedMapActive = false;
+        float interpretedMapOpacity = 0.32f;
+        int interpretedMapGridWidth = 0;
+        int interpretedMapGridHeight = 0;
+        bool showRefinedMapOverlay = false;
+        bool refinedMapActive = false;
+        float refinedMapOpacity = 0.36f;
+        int refinedMapGridWidth = 0;
+        int refinedMapGridHeight = 0;
+        bool brushEnabled = false;
+        bool brushSubtract = false;
+        EditorNodeGraph::DevelopSubjectImportanceMode brushMode =
+            EditorNodeGraph::DevelopSubjectImportanceMode::Important;
+        float brushRadius = 0.045f;
+        float brushFeather = 0.35f;
+        float brushStrength = 0.75f;
+        int activeRegionId = 0;
+        int activeStrokeId = 0;
+        std::vector<DevelopSubjectViewportMapCell> interpretedMapCells;
+        std::vector<DevelopSubjectViewportMapCell> refinedMapCells;
+        std::vector<DevelopSubjectViewportRegion> regions;
+        std::vector<DevelopSubjectViewportStroke> strokes;
+    };
+
+    bool GetDevelopSubjectImportanceViewportState(DevelopSubjectViewportState& outState) const;
+    bool SetDevelopSubjectImportanceActiveRegion(int nodeId, int regionId);
+    bool UpdateDevelopSubjectImportanceRegionFromViewport(
+        int nodeId,
+        int regionId,
+        float centerX,
+        float centerY,
+        float radiusX,
+        float radiusY);
+    int BeginDevelopSubjectImportanceBrushStroke(int nodeId, float x, float y);
+    bool AppendDevelopSubjectImportanceBrushStroke(int nodeId, int strokeId, float x, float y);
+    bool EndDevelopSubjectImportanceBrushStroke(int nodeId, int strokeId);
+
+    static void ApplyDevelopAutoSolve(
+        EditorNodeGraph::RawDevelopPayload& payload,
+        const Raw::RawMetadata& metadata,
+        bool queueToneCalibration = true,
+        bool rewriteRawSettings = true);
+    static std::string ResolveDevelopRenderedRefineIntentForValidation(
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& metrics,
+        EditorNodeGraph::DevelopAutoIntent intent,
+        std::string& outReason);
+    static std::string ClassifyDevelopRenderedCandidateDamageForValidation(
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& metrics,
+        EditorNodeGraph::DevelopAutoIntent intent);
+    static float ScoreDevelopRenderedCandidateRelativeToSelectedForValidation(
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& candidateMetrics,
+        float candidateStandaloneScore,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& selectedMetrics,
+        float selectedScore,
+        const std::string& activeRefineIntent,
+        std::string& outStatus,
+        std::string& outRepairMetric,
+        float& outMetricDistance,
+        float& outRepairDelta,
+        float& outRepairBonus,
+        float& outRegressionPenalty);
+    static std::string ClassifyDevelopRenderedStageBoundaryForValidation(
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& selectedFinalMetrics,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& bestFinalMetrics,
+        bool finalMetricsValid,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& selectedPreFinishMetrics,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& bestPreFinishMetrics,
+        bool preFinishMetricsValid,
+        float& outFinalDistance,
+        float& outPreFinishDistance);
+    static bool ShouldTreatDevelopRenderedCandidateAsDuplicateForValidation(
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& candidateFinalMetrics,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& representativeFinalMetrics,
+        bool candidatePreFinishValid,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& candidatePreFinishMetrics,
+        bool representativePreFinishValid,
+        const EditorRenderWorker::DevelopCandidateRenderMetrics& representativePreFinishMetrics,
+        float& outFinalDistance,
+        float& outPreFinishDistance,
+        bool& outPreFinishDistinct);
+    static bool IsDevelopCandidateRelevantToRevisionStageForValidation(
+        const std::string& candidateId,
+        const std::string& revisionStage);
+    static bool IsDevelopCandidateRelevantToRenderedRefineIntentForValidation(
+        const std::string& candidateId,
+        const std::string& refineIntent);
+    static bool IsDevelopRenderedFeedbackStopConvergedReason(
+        const std::string& stopReason);
+    static bool IsDevelopRenderedFeedbackStopConvergedForValidation(
+        const std::string& stopReason);
+    static bool CanScheduleDevelopCandidateRenderRequestForValidation(
+        std::size_t totalRequestCount,
+        std::size_t nodeRequestCount,
+        std::size_t nodeRequestBudget = 4);
+    static int ResolveDevelopCandidateMetricReadbackMaxDimensionForValidation(
+        int sourceWidth,
+        int sourceHeight);
+    static bool ShouldDeferDevelopCandidateRenderRequestForValidation(
+        double lastInteractionTime,
+        double now);
+    static double DevelopCandidateFeedbackQuietSecondsForValidation();
+    static double DevelopCandidateFeedbackQuietRemainingSecondsForValidation(
+        double lastInteractionTime,
+        double now);
+    static DevelopCandidateFeedbackGateDecision ClassifyDevelopCandidateFeedbackGateForValidation(
+        std::uint64_t resultInteractionSerial,
+        std::uint64_t currentInteractionSerial,
+        double lastInteractionTime,
+        double now);
+    static std::size_t ResolveDevelopAdaptiveRenderBudgetForValidation(
+        const nlohmann::json& toneJson,
+        std::uint64_t solveFingerprint,
+        std::uint64_t renderedFingerprint,
+        std::size_t candidateCount,
+        const std::string& activeRevisionStage,
+        const std::string& activeRefineIntent,
+        std::string& outReason,
+        bool& outExpanded,
+        bool* outNarrowed = nullptr);
+    static std::string ClassifyDevelopCandidateStageCacheForValidation(
+        const std::string& candidateRevisionStage,
+        bool rawBaseCacheHit,
+        bool preFinishCacheHit,
+        bool& outExpectationMet,
+        std::string& outExpectedBoundary,
+        std::string& outValidationStatus);
+    static int ClassifyDevelopCandidateStageScheduleForValidation(
+        const std::string& candidateRevisionStage,
+        bool selectedCandidate,
+        std::string& outExpectedDirtyBoundary,
+        std::string& outReason);
+    static RenderGraphRawDevelopPayload BuildDevelopCandidateRenderPayloadForValidation(
+        RenderGraphRawDevelopPayload payload,
+        const EditorNodeGraph::DevelopAutoGuidance& currentGuidance,
+        const EditorNodeGraph::DevelopAutoGuidance& candidateGuidance,
+        const std::string& candidateId,
+        EditorNodeGraph::DevelopAutoIntent intent);
     bool ConvertRawDetailFusionToHybrid(int fusionNodeId);
     bool SplitLayerNodeIntoChannels(int layerNodeId);
     bool ToggleOutputNodeEnabled(int outputNodeId);
     bool ConnectGraphImageNode(int nodeId);
     bool ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
+    int FindDirectDownstreamToneCurveNode(int sourceNodeId) const;
+    int FindNearestDownstreamToneCurveNode(int sourceNodeId) const;
+    bool RawDevelopNodeUsesIntegratedTone(int nodeId) const;
+    bool CanAbsorbDirectDownstreamToneFinishIntoDevelop(int sourceNodeId, std::string* reason = nullptr) const;
+    bool SelectOrCreateToneFinishAfterNode(int sourceNodeId);
+    bool AbsorbDirectDownstreamToneFinishIntoDevelop(int sourceNodeId);
+    int FindNearestUpstreamRawDevelopNode(int sourceNodeId) const;
+    bool SelectUpstreamDevelopForToneNode(int toneNodeId);
     bool ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
     bool RemoveGraphLink(int fromNodeId, int toNodeId);
     bool RemoveGraphLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId);
@@ -212,10 +469,13 @@ public:
     bool DeleteSelectedGraphNodes();
     void AddScopeNodeAt(EditorNodeGraph::ScopeKind scopeKind, EditorNodeGraph::Vec2 graphPosition);
     void AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind maskKind, EditorNodeGraph::Vec2 graphPosition);
+    void AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode combineMode, EditorNodeGraph::Vec2 graphPosition);
     void AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind utilityKind, EditorNodeGraph::Vec2 graphPosition);
+    void AddCustomMaskNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind converterKind, EditorNodeGraph::Vec2 graphPosition);
     void AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind generatorKind, EditorNodeGraph::Vec2 graphPosition);
     void AddMixNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddDataMathNodeAt(EditorNodeGraph::DataMathMode mode, EditorNodeGraph::Vec2 graphPosition);
     void AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelSplitNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition);
@@ -223,12 +483,31 @@ public:
     void AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    bool CreateToneCurveSelectionMask(
+        int toneCurveNodeId,
+        float low,
+        float high,
+        float softness,
+        const std::array<float, 4>& sampleRgba,
+        float sampleLuma,
+        float sampleU,
+        float sampleV,
+        float toneSimilarity,
+        float colorSimilarity,
+        float regionRadius,
+        float regionFeather,
+        float edgeSensitivity,
+        float localCoherence,
+        ToneCurveScopeMaskAction action);
     void RenderRawSourceControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDevelopControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDetailAutoMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDetailFusionControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderHdrMergeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderCustomMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void AutoLayoutGraph();
     void DisconnectGraphOutput();
     void SetGraphDropTargetRect(float minX, float minY, float maxX, float maxY);
@@ -249,6 +528,17 @@ public:
     std::vector<unsigned char> GetScopePixelsForNode(int nodeId, int& outW, int& outH);
     std::vector<unsigned char> GetPreviewPixelsForNode(int nodeId, int& outW, int& outH);
     bool ProbeViewTransformInputStats(int viewTransformNodeId, RenderTextureStats& outStats) const;
+    bool HasFocusedToneCurveViewportInteraction() const;
+    bool IsToneCurveTargeting() const { return m_CanvasToolKind == CanvasToolKind::ToneCurveTarget; }
+    void BeginToneCurveTargeting(int ownerNodeId, const std::string& statusText = "");
+    void ClearToneCurveViewportProbe();
+    void UpdateToneCurveViewportProbe(float u, float v);
+    void BeginToneCurveViewportTargetDrag(float u, float v);
+    void UpdateToneCurveViewportTargetDrag(float deltaCurveY);
+    void EndToneCurveViewportTargetDrag();
+    void RestoreIntegratedToneTransientState(int ownerNodeId, ToneCurveLayer& toneCurve) const;
+    void StoreIntegratedToneTransientState(int ownerNodeId, const ToneCurveLayer& toneCurve) const;
+    void ClearIntegratedToneTransientState(int ownerNodeId) const;
     bool OutputPathNeedsViewTransform(int outputNodeId) const;
     bool SelectedLayerInputContainsViewTransform() const;
     bool RenderLayerControlsWithDirtyTracking(EditorNodeGraph::Node& node, const std::function<void(LayerBase&)>& renderControls);
@@ -261,6 +551,7 @@ public:
     std::uint64_t GetPreviewNodeRevision(int previewNodeId) const;
     std::uint64_t GetScopeNodeRevision(int sourceNodeId) const;
     const GraphPreviewPixels* GetCachedPreviewPixelsForNode(int previewNodeId) const;
+    HdrMergeNodeStatus GetHdrMergeNodeStatus(int nodeId) const;
 
     // Persistence & Serialization
     nlohmann::json SerializePipeline();
@@ -311,6 +602,7 @@ public:
     Async::TaskState GetExportTaskState() const { return m_ExportTaskState; }
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
     bool IsExportBusy() const { return Async::IsBusy(m_ExportTaskState); }
+    bool ConsumeUiNotification(UiNotificationEvent& outEvent);
 
     CanvasToolKind GetCanvasToolKind() const { return m_CanvasToolKind; }
     int GetCanvasToolOwnerNodeId() const { return m_CanvasToolOwnerNodeId; }
@@ -356,6 +648,9 @@ public:
     bool IsAutoGainMaskPreviewActive() const {
         return CanToggleActiveAutoGainMaskPreview() && m_AutoGainMaskPreviewNodeId == m_ActiveComplexNodeId;
     }
+    bool HasActiveCustomMaskOverlay() const;
+    const EditorNodeGraph::CustomMaskPayload* GetActiveCustomMaskPayload() const;
+    float SampleCustomMaskForPreview(const EditorNodeGraph::CustomMaskPayload& payload, float u, float v) const;
     void ToggleActiveAutoGainMaskPreview();
     void ClearAutoGainMaskPreview();
     int GetCompletedChainCount() const;
@@ -377,10 +672,7 @@ public:
             SelectGraphNode(outputNodeId);
         }
     }
-    void ClearCompositeSelection() {
-        m_CompositeSelectedOutputNodeId = -1;
-        m_NodeGraph.ClearSelection();
-    }
+    void ClearCompositeSelection();
     CompositeSceneItem* FindCompositeSceneItem(int outputNodeId);
     const CompositeSceneItem* FindCompositeSceneItem(int outputNodeId) const;
     void EnsureCompositeSceneState(const ImVec2& canvasSize);
@@ -435,17 +727,51 @@ private:
         std::string label;
     };
 
+    struct ToneCurveViewportInteractionCache {
+        bool probeValid = false;
+        int probeSamplingBasis = 0;
+        float probeU = 0.0f;
+        float probeV = 0.0f;
+        std::array<float, 4> probeRgba { 0.0f, 0.0f, 0.0f, 1.0f };
+        bool selectionSeedValid = false;
+        float selectionSeedU = 0.0f;
+        float selectionSeedV = 0.0f;
+        float selectionSeedInputX = 0.0f;
+        float selectionSeedSceneValue = 0.0f;
+        std::array<float, 4> selectionSeedRgba { 0.0f, 0.0f, 0.0f, 1.0f };
+        int onImageDragPointIndex = -1;
+        float onImageDragAnchorInputX = 0.0f;
+        float onImageDragAnchorOutputY = 0.0f;
+    };
+
+    struct DevelopAutoGuidanceDraftState {
+        bool editing = false;
+        EditorNodeGraph::DevelopAutoGuidance guidance;
+    };
+
+    struct RawDevelopExposureDraftState {
+        bool editing = false;
+        float exposureStops = 0.0f;
+    };
+
     EditorSidebar m_Sidebar;
     EditorViewport m_Viewport;
     EditorScopes m_Scopes;
     RenderPipeline m_Pipeline;
     EditorRenderWorker m_RenderWorker;
+    std::deque<EditorRenderWorker::Result> m_DeferredRenderResults;
     EditorSubWindow m_ActiveSubWindow = EditorSubWindow::NodeGraph;
     EditorSubWindow m_TargetSubWindow = EditorSubWindow::NodeGraph;
     int m_ActiveComplexNodeId = -1;
     int m_TargetComplexNodeId = -1;
     float m_SubWindowTransitionAlpha = 1.0f;
     bool m_SubWindowTransitionFadingOut = false;
+    double m_LibraryLoadRevealStartTime = -1.0;
+    bool m_LibraryLoadRevealPendingFirstFrame = false;
+    bool m_LibraryLoadRevealLayoutPending = false;
+    float m_LibraryLoadCanvasRevealAlpha = 1.0f;
+    float m_LibraryLoadGraphRevealAlpha = 1.0f;
+    float m_LibraryLoadToolbarRevealAlpha = 1.0f;
     unsigned int m_NodeGraphIconTexture = 0;
     unsigned int m_ExportIconTexture = 0;
     unsigned int m_SettingsIconTexture = 0;
@@ -473,6 +799,7 @@ private:
     std::string m_CurrentProjectFileName = "";
     bool m_Dirty = false;
     double m_LastUserActionTime = 0.0;
+    double m_LastAutoSaveTime = -1.0;
     float m_GraphDropMinX = 0.0f;
     float m_GraphDropMinY = 0.0f;
     float m_GraphDropMaxX = 0.0f;
@@ -506,6 +833,7 @@ private:
     std::uint64_t m_GraphDropImportGeneration = 0;
     Async::TaskState m_GraphDropImportTaskState = Async::TaskState::Idle;
     std::string m_GraphDropImportStatusText;
+    std::deque<UiNotificationEvent> m_UiNotifications;
     std::vector<PendingGraphDropImportRequest> m_PendingGraphDropImports;
 
     std::uint64_t m_ExportGeneration = 0;
@@ -519,6 +847,7 @@ private:
     std::string m_CanvasToolStatusText;
     bool m_IsPickingColor = false;
     std::function<void(float, float, float)> m_ColorPickerCallback;
+    int m_LastToneCurveProbeNodeId = -1;
     bool m_RenderWorkerAvailable = false;
     bool m_RenderDirty = true;
     bool m_RenderPending = false;
@@ -528,9 +857,33 @@ private:
     std::uint64_t m_LastSubmittedRenderRevision = 0;
     int m_AutoGainMaskPreviewNodeId = -1;
     double m_LastRenderDirtyTime = 0.0;
+    double m_LastRawDevelopInteractionTime = -1.0;
+    std::uint64_t m_RawDevelopInteractionSerialCounter = 1;
+    std::unordered_map<int, double> m_RawDevelopInteractionTimes;
+    std::unordered_map<int, std::uint64_t> m_RawDevelopInteractionSerials;
+    std::unordered_map<int, double> m_DeferredDevelopCandidateFeedbackTimes;
+    mutable std::unordered_map<int, std::size_t> m_DevelopAutoSolveTriggerHashes;
+    std::unordered_map<int, std::deque<EditorNodeGraph::CustomMaskPayload>> m_CustomMaskUndoStacks;
+    std::unordered_map<int, std::deque<EditorNodeGraph::CustomMaskPayload>> m_CustomMaskRedoStacks;
+    std::unordered_set<int> m_CustomMaskPaintingNodes;
+    struct CustomMaskBrushAdjustDrag {
+        int nodeId = -1;
+        ImVec2 startMouse { 0.0f, 0.0f };
+        ImVec2 currentMouse { 0.0f, 0.0f };
+        float startSize = 48.0f;
+        float startSoftness = 0.45f;
+        float startOpacity = 1.0f;
+        bool adjusting = false;
+    };
+    CustomMaskBrushAdjustDrag m_CustomMaskBrushAdjustDrag;
+    mutable std::unordered_map<int, std::size_t> m_DevelopAutoRawSolveTriggerHashes;
+    mutable std::unordered_map<int, std::size_t> m_DevelopAutoRawCalibrationHashes;
+    std::unordered_map<int, DevelopAutoGuidanceDraftState> m_DevelopAutoGuidanceDrafts;
+    std::unordered_map<int, RawDevelopExposureDraftState> m_RawDevelopExposureDrafts;
     std::uint64_t m_NodeDirtyGenerationCounter = 1;
     std::unordered_map<int, std::uint64_t> m_NodeDirtyGenerations;
     float m_LeftPaneWidth = 0.0f;
+    bool m_NodeGraphFullscreen = false;
     float m_LastUserNodeGraphWidth = 0.0f;
     EditorSubWindow m_LastSplitTargetSubWindow = EditorSubWindow::NodeGraph;
     int m_LastSplitTargetComplexNodeId = -1;
@@ -590,15 +943,28 @@ private:
     std::unordered_map<int, GraphPreviewPixels> m_PreviewPixelCache;
     std::unordered_map<int, std::uint64_t> m_PreviewRequestedGenerations;
     std::unordered_map<int, std::uint64_t> m_PreviewCompletedGenerations;
+    std::unordered_map<int, std::uint64_t> m_HdrMergeRequestedGenerations;
+    std::unordered_map<int, std::uint64_t> m_HdrMergeCompletedGenerations;
+    std::unordered_map<int, std::string> m_HdrMergeFailureMessages;
+    std::unordered_set<int> m_HdrMergeRenderingNodeIds;
+    std::unordered_map<std::uint64_t, std::vector<int>> m_HdrMergeSubmittedNodesByGeneration;
+    mutable std::unordered_map<int, ToneCurveViewportInteractionCache> m_IntegratedToneViewportInteractionCache;
 
     void ApplyGraphLayerOrder();
     std::vector<std::shared_ptr<LayerBase>> BuildGraphRenderLayers() const;
     std::vector<RenderLayerStep> BuildGraphRenderSteps() const;
     std::vector<RenderMaskSource> BuildGraphRenderMasks() const;
-    EditorRenderWorker::Snapshot BuildRenderSnapshot(std::uint64_t generation) const;
+    EditorRenderWorker::Snapshot BuildRenderSnapshot(std::uint64_t generation);
     std::vector<EditorRenderWorker::CompositeOutputRequest> BuildCompositeOutputRequests();
     std::vector<EditorRenderWorker::PreviewRequest> BuildPreviewRequests();
+    std::vector<EditorRenderWorker::DevelopCandidateRenderRequest> BuildDevelopCandidateRenderRequests(
+        const RenderGraphSnapshot& graph,
+        int sourceWidth,
+        int sourceHeight);
     void ConsumeRenderWorkerResults();
+    void ApplyToneCurveAutoRewriteFeedback(const std::vector<ToneCurveAutoRewriteFeedback>& feedbacks);
+    void ApplyDevelopCandidateRenderFeedback(
+        const std::vector<EditorRenderWorker::DevelopCandidateRenderResult>& results);
     void SubmitRenderIfReady();
     void RefreshCompletedChainCacheIfNeeded() const;
     void RefreshCompositeMetadataCacheIfNeeded();
@@ -608,6 +974,16 @@ private:
     void PruneCompositeDirtyState();
     bool HasPendingPreviewRefreshes() const;
     bool CanRefreshPreviewLikeNodes() const;
+    bool IsRecentRawDevelopInteraction(double now = -1.0) const;
+    bool IsRecentRawDevelopInteractionForNode(int nodeId, double now, double windowSeconds) const;
+    void RecordRawDevelopInteraction(int nodeId);
+    std::uint64_t GetRawDevelopInteractionSerial(int nodeId) const;
+    void ScheduleDeferredDevelopCandidateFeedback(int nodeId, double now);
+    void RefreshDeferredDevelopCandidateFeedbackIfReady(double now);
+    bool GetDevelopCandidateFeedbackDeferredStatus(
+        int nodeId,
+        double now,
+        double& outRemainingSeconds) const;
     std::uint64_t GetNodeDirtyGeneration(int nodeId) const;
     void ClearCompositeRuntimeState();
     void ClearCompositeSceneTextures();
@@ -622,12 +998,19 @@ private:
     void TogglePartialSplitTargets(float workspaceWidth, float minLeftWidth, float maxLeftWidth, bool compositeViewportMode);
     void HandleSpacebarPress(float workspaceWidth, float paneHeight, float minLeftWidth, float maxLeftWidth, float splitGap);
     void HandleSpacebarLongPress(float workspaceWidth, float paneHeight, float minLeftWidth, float maxLeftWidth, float splitGap);
+    bool UpdateDevelopAutoState(
+        int nodeId,
+        EditorNodeGraph::RawDevelopPayload& payload,
+        const Raw::RawMetadata& metadata,
+        bool forceReanalysis,
+        bool forceFullReanalysis);
     bool AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
     bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
@@ -638,11 +1021,19 @@ private:
     std::size_t BuildCompositeChainFingerprint(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(int outputNodeId) const;
+    void QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
     bool TryCopyImageNodePixels(int sourceNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
     bool TryResolveReferenceSourcePixels(int nodeId, const std::string& socketId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
     bool TryResolveReferenceSourcePixelsForOutput(int outputNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
+    bool TryResolveReferenceSourceDimensions(int nodeId, const std::string& socketId, int& outW, int& outH) const;
+    int ResolveFocusedToneCurveNodeId() const;
+    bool SampleToneCurveViewportPixel(int toneCurveNodeId, ToneCurveSamplingBasis basis, float u, float v, std::array<float, 4>& outRgba) const;
+    void ClearTrackedToneCurveProbe();
     bool CompletedChainSourceUsesScalableGenerator(int outputNodeId) const;
     bool CompletedChainSourceKeepsFullRasterFrame(int outputNodeId) const;
+    std::vector<int> CollectHdrMergeNodesForOutput(int outputNodeId) const;
+    HdrMergeConnectionTopology ResolveHdrMergeConnectionTopology(const EditorNodeGraph::Node& node) const;
+    HdrMergeNodeStatus BuildHdrMergeNodeStatus(const EditorNodeGraph::Node& node) const;
     void ResetToBlankProject();
     void ResetRenderSubmissionState();
     void RenderProjectLifecyclePopups();

@@ -17,6 +17,8 @@ std::string OpenProjectFileDialog(const char* title = "Load Project (.stack/.com
 std::string SaveProjectFileDialog(const char* title = "Save Project (.stack)", const char* defaultFileName = "project.stack");
 std::string OpenThemePresetFileDialog(const char* title = "Import Theme Preset");
 std::string SaveThemePresetFileDialog(const char* title = "Export Theme Preset", const char* defaultFileName = "theme_preset.stacktheme.json");
+std::string OpenNoteFileDialog(const char* title = "Load Notes Document");
+std::string SaveNoteFileDialog(const char* title = "Save Notes Document", const char* defaultFileName = "notes.note");
 std::string OpenFolderDialog(const char* title = "Select Folder");
 std::vector<std::string> OpenMultipleFilesDialog(const char* title = "Select Files", const char* filter = "All Files\0*.*\0");
 

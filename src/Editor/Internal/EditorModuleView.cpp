@@ -230,6 +230,7 @@ void EditorModule::HandleSpacebarPress(
             // --- 2. SINGLE IMAGE VIEWPORT MODE: ASPECT-RATIO MAXIMUM SIZING ---
             int imgW = m_Pipeline.GetCanvasWidth();
             int imgH = m_Pipeline.GetCanvasHeight();
+            m_NodeGraphFullscreen = false;
             
             // If no image is active/loaded, fall back to default toggle behavior
             if (imgW <= 0 || imgH <= 0) {

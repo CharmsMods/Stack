@@ -3,6 +3,8 @@
 #include "Async/TaskState.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "ProjectData.h"
+#include "Utils/UiNotifications.h"
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -84,14 +86,20 @@ public:
         return instance;
     }
 
-    void RefreshLibrary(std::function<void(int current, int total, const std::string& name)> progressCallback = {});
-    void UploadLibraryTextures();
+    void RefreshLibrary(
+        std::function<void(int current, int total, const std::string& name)> progressCallback = {},
+        bool syncEmbeddedProjectAssets = false);
+    void UploadLibraryTextures(int projectBudget = 2, int assetBudget = 0);
     void TickAutoRefresh();
 
     int GetProjectCount() const;
 
-    void RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName = "");
+    void RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName = "", std::function<void(bool)> onComplete = {});
     void RequestLoadProject(const std::string& fileName, EditorModule* editor, std::function<void(bool)> onComplete = {});
+    void RequestLoadProjectDeferredApply(
+        const std::string& fileName,
+        EditorModule* editor,
+        std::function<void(bool, std::function<bool()>)> onReady);
     bool OverwriteEditorProject(
         const std::string& fileName,
         const std::string& projectName,
@@ -108,11 +116,12 @@ public:
     bool RenameProject(const std::string& fileName, const std::string& newName);
     bool DeleteProject(const std::string& fileName);
     bool DeleteAsset(const std::string& fileName);
+    bool ExportProject(const std::string& fileName, const std::string& destinationPath);
     bool ExportAsset(const std::string& fileName, const std::string& destinationPath);
 
     void RequestExportLibraryBundle(const std::string& destinationPath);
     void RequestImportLibraryBundle(const std::string& sourcePath);
-    void RequestSaveCompositeProject(const std::string& name, CompositeModule* composite, const std::string& existingFileName = "");
+    void RequestSaveCompositeProject(const std::string& name, CompositeModule* composite, const std::string& existingFileName = "", std::function<void(bool)> onComplete = {});
     void RequestLoadCompositeProject(const std::string& fileName, CompositeModule* composite, std::function<void(bool)> onComplete = {});
     void RequestLoadCompositeProjectFromPath(const std::filesystem::path& absolutePath, CompositeModule* composite, std::function<void(bool)> onComplete = {});
     void QueueLooseAssetSave(
@@ -173,6 +182,7 @@ public:
 
     Async::TaskState GetExportTaskState() const { return m_ExportTaskState; }
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
+    bool ConsumeUiNotification(UiNotificationEvent& outEvent);
 
     const std::filesystem::path& GetLibraryPath() const { return m_LibraryPath; }
     const std::filesystem::path& GetAssetsPath() const { return m_AssetsPath; }
@@ -197,6 +207,7 @@ private:
     std::uintmax_t BuildLibrarySignature() const;
     std::filesystem::path BuildAssetPathForProjectFile(const std::string& projectFileName) const;
     void QueueSavedProjectEvent(const std::string& fileName, const std::string& projectKind);
+    void QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
 
     std::vector<std::shared_ptr<ProjectEntry>> m_Projects;
     std::vector<std::shared_ptr<AssetEntry>> m_Assets;
@@ -224,6 +235,7 @@ private:
 
     std::uint64_t m_ProjectPreviewGeneration = 0;
     std::uint64_t m_AssetPreviewGeneration = 0;
+    std::deque<UiNotificationEvent> m_UiNotifications;
 
     std::vector<ImportConflict> m_PendingConflicts;
     std::vector<AssetImportConflict> m_PendingAssetConflicts;

@@ -5,11 +5,44 @@
 
 namespace {
 
+struct ScopedFramebufferState {
+    GLint framebuffer = 0;
+    GLint readFbo = 0;
+    GLint drawFbo = 0;
+    GLint readBuffer = 0;
+    GLint drawBuffer = 0;
+
+    ScopedFramebufferState() {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
+    }
+
+    void Restore() const {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
+        glReadBuffer(static_cast<GLenum>(readBuffer));
+        glDrawBuffer(static_cast<GLenum>(drawBuffer));
+    }
+};
+
 unsigned int LinkProgram(const unsigned int* shaderIds, int shaderCount) {
     unsigned int program = glCreateProgram();
     for (int i = 0; i < shaderCount; ++i) {
         glAttachShader(program, shaderIds[i]);
     }
+
+    // Most fullscreen layer shaders rely on the shared quad feeding position at
+    // attribute 0 and UVs at attribute 1. Bind the common names before link so
+    // core-profile contexts don't assign them unpredictably.
+    glBindAttribLocation(program, 0, "aPos");
+    glBindAttribLocation(program, 1, "aTexCoord");
+    glBindAttribLocation(program, 1, "aTex");
+    glBindAttribLocation(program, 1, "aUV");
+    glBindFragDataLocation(program, 0, "FragColor");
 
     glLinkProgram(program);
 
@@ -89,8 +122,15 @@ unsigned int CreateComputeProgram(const char* computeSrc) {
 }
 
 unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int height, int channels) {
-    unsigned int tex;
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    unsigned int tex = 0;
     glGenTextures(1, &tex);
+    if (tex == 0) {
+        return 0;
+    }
     glBindTexture(GL_TEXTURE_2D, tex);
 
     GLenum format = GL_RGBA;
@@ -98,6 +138,14 @@ unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int h
     else if (channels == 1) format = GL_RED;
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+    const GLenum uploadError = glGetError();
+    if (uploadError != GL_NO_ERROR) {
+        std::cerr << "[GLHelpers] Texture upload failed (" << width << "x" << height
+                  << ", channels " << channels << ", GL error " << uploadError << ").\n";
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(1, &tex);
+        return 0;
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -108,10 +156,25 @@ unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int h
 }
 
 unsigned int CreateEmptyTexture(int width, int height) {
-    unsigned int tex;
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    unsigned int tex = 0;
     glGenTextures(1, &tex);
+    if (tex == 0) {
+        return 0;
+    }
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    const GLenum allocationError = glGetError();
+    if (allocationError != GL_NO_ERROR) {
+        std::cerr << "[GLHelpers] Empty RGBA16F texture allocation failed (" << width << "x" << height
+                  << ", GL error " << allocationError << ").\n";
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(1, &tex);
+        return 0;
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -174,15 +237,28 @@ void UploadTextureArrayLayer(unsigned int texture, int layer, int width, int hei
 }
 
 unsigned int CreateFBO(unsigned int colorTexture) {
-    unsigned int fbo;
+    if (colorTexture == 0) {
+        return 0;
+    }
+
+    const ScopedFramebufferState savedState;
+    unsigned int fbo = 0;
     glGenFramebuffers(1, &fbo);
+    if (fbo == 0) {
+        return 0;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         std::cerr << "[GLHelpers] Framebuffer incomplete!\n";
+        savedState.Restore();
+        glDeleteFramebuffers(1, &fbo);
+        return 0;
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    savedState.Restore();
     return fbo;
 }
 

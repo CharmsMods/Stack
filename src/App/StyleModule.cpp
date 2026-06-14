@@ -48,7 +48,55 @@ void StyleModule::RenderUI() {
     ImGui::TextUnformatted("Select an official system theme below to customize your creative studio environment.");
     ImGui::PopStyleColor();
 
-    ImGui::Dummy(ImVec2(0.0f, 32.0f)); // Generous spacer before cards
+    ImGui::Dummy(ImVec2(0.0f, 18.0f));
+
+    ImGui::TextUnformatted("Graph Visual Mode");
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    StackAppearance::GraphVisualMode graphMode = m_Appearance->GetGraphVisualMode();
+    const StackAppearance::GraphVisualMode graphModes[] = {
+        StackAppearance::GraphVisualMode::BlackNodes,
+        StackAppearance::GraphVisualMode::Classic,
+        StackAppearance::GraphVisualMode::SpotlightPrototype
+    };
+    for (int i = 0; i < IM_ARRAYSIZE(graphModes); ++i) {
+        const StackAppearance::GraphVisualMode candidate = graphModes[i];
+        if (i > 0) {
+            ImGui::SameLine(0.0f, 10.0f);
+        }
+        const bool selected = graphMode == candidate;
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+        }
+        if (ImGui::Button(StackAppearance::GraphVisualModeLabel(candidate), ImVec2(188.0f, 0.0f))) {
+            if (m_Appearance->SetGraphVisualMode(candidate)) {
+                graphMode = candidate;
+            }
+        }
+        if (selected) {
+            ImGui::PopStyleColor(3);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", StackAppearance::GraphVisualModeDescription(candidate));
+        }
+    }
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", StackAppearance::GraphVisualModeDescription(graphMode));
+    ImGui::PopStyleColor();
+    if (graphMode == StackAppearance::GraphVisualMode::SpotlightPrototype) {
+        bool haloOutlines = m_Appearance->GetGraphSpotlightHaloOutlines();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (ImGui::Checkbox("Halo edge outlines", &haloOutlines)) {
+            m_Appearance->SetGraphSpotlightHaloOutlines(haloOutlines);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Draw a faint edge halo around spotlight nodes.");
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 26.0f)); // Generous spacer before cards
 
     // Layout variables
     float availWidth = ImGui::GetContentRegionAvail().x;

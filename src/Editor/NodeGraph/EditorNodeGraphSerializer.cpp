@@ -1,9 +1,11 @@
 #include "EditorNodeGraphSerializer.h"
 
+#include "EditorNodeGraphDefinitions.h"
 #include "Library/LibraryManager.h"
 #include "ThirdParty/stb_image.h"
 #include "ThirdParty/stb_image_write.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace EditorNodeGraph {
@@ -76,11 +78,13 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::RawDevelop: return "RawDevelop";
         case NodeKind::RawDetailAutoMask: return "RawDetailAutoMask";
         case NodeKind::RawDetailFusion: return "RawDetailFusion";
+        case NodeKind::HdrMerge: return "HdrMerge";
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
         case NodeKind::Composite: return "Composite";
         case NodeKind::Scope: return "Scope";
         case NodeKind::MaskGenerator: return "MaskGenerator";
+        case NodeKind::MaskCombine: return "MaskCombine";
         case NodeKind::Mix: return "Mix";
         case NodeKind::Preview: return "Preview";
         case NodeKind::MaskUtility: return "MaskUtility";
@@ -88,6 +92,8 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::ImageGenerator: return "ImageGenerator";
         case NodeKind::ChannelSplit: return "ChannelSplit";
         case NodeKind::ChannelCombine: return "ChannelCombine";
+        case NodeKind::CustomMask: return "CustomMask";
+        case NodeKind::DataMath: return "DataMath";
     }
     return "Layer";
 }
@@ -122,11 +128,13 @@ Raw::WhiteBalanceMode WhiteBalanceModeFromString(const std::string& value) {
 }
 
 std::string DemosaicMethodToString(Raw::DemosaicMethod method) {
-    return method == Raw::DemosaicMethod::QualityPlaceholder ? "QualityPlaceholder" : "Bilinear";
+    (void)method;
+    return "Bilinear";
 }
 
 Raw::DemosaicMethod DemosaicMethodFromString(const std::string& value) {
-    return value == "QualityPlaceholder" ? Raw::DemosaicMethod::QualityPlaceholder : Raw::DemosaicMethod::Bilinear;
+    (void)value;
+    return Raw::DemosaicMethod::Bilinear;
 }
 
 std::string HighlightModeToString(Raw::HighlightReconstructionMode mode) {
@@ -237,6 +245,109 @@ Raw::RawDetailFusionDebugView RawDetailFusionDebugViewFromString(const std::stri
     return Raw::RawDetailFusionDebugView::FinalImage;
 }
 
+std::string HdrMergeDebugViewToString(Raw::HdrMergeDebugView view) {
+    switch (view) {
+        case Raw::HdrMergeDebugView::FinalImage: return "FinalImage";
+        case Raw::HdrMergeDebugView::Contribution: return "Contribution";
+        case Raw::HdrMergeDebugView::Clipping: return "Clipping";
+        case Raw::HdrMergeDebugView::NoiseLimited: return "NoiseLimited";
+        case Raw::HdrMergeDebugView::AlignmentConfidence: return "AlignmentConfidence";
+        case Raw::HdrMergeDebugView::MotionMask: return "MotionMask";
+        case Raw::HdrMergeDebugView::RejectedSamples: return "RejectedSamples";
+    }
+    return "FinalImage";
+}
+
+Raw::HdrMergeDebugView HdrMergeDebugViewFromString(const std::string& value) {
+    if (value == "Contribution") return Raw::HdrMergeDebugView::Contribution;
+    if (value == "Clipping") return Raw::HdrMergeDebugView::Clipping;
+    if (value == "NoiseLimited" || value == "Noise / Black Limited") return Raw::HdrMergeDebugView::NoiseLimited;
+    if (value == "AlignmentConfidence" || value == "Alignment Confidence") return Raw::HdrMergeDebugView::AlignmentConfidence;
+    if (value == "MotionMask" || value == "Motion Mask") return Raw::HdrMergeDebugView::MotionMask;
+    if (value == "RejectedSamples" || value == "Rejected Samples") return Raw::HdrMergeDebugView::RejectedSamples;
+    return Raw::HdrMergeDebugView::FinalImage;
+}
+
+std::string HdrMergeAlignmentModeToString(Raw::HdrMergeAlignmentMode mode) {
+    switch (mode) {
+        case Raw::HdrMergeAlignmentMode::Off: return "Off";
+        case Raw::HdrMergeAlignmentMode::Translation: return "Translation";
+        case Raw::HdrMergeAlignmentMode::WideTranslation: return "WideTranslation";
+    }
+    return "Off";
+}
+
+Raw::HdrMergeAlignmentMode HdrMergeAlignmentModeFromString(const std::string& value) {
+    if (value == "Translation") return Raw::HdrMergeAlignmentMode::Translation;
+    if (value == "WideTranslation" || value == "Wide Translation" || value == "Handheld") {
+        return Raw::HdrMergeAlignmentMode::WideTranslation;
+    }
+    return Raw::HdrMergeAlignmentMode::Off;
+}
+
+std::string HdrMergeExposureModeToString(Raw::HdrMergeExposureMode mode) {
+    switch (mode) {
+        case Raw::HdrMergeExposureMode::Manual: return "Manual";
+        case Raw::HdrMergeExposureMode::Metadata:
+        default:
+            return "Metadata";
+    }
+}
+
+Raw::HdrMergeExposureMode HdrMergeExposureModeFromString(const std::string& value) {
+    if (value == "Manual") return Raw::HdrMergeExposureMode::Manual;
+    return Raw::HdrMergeExposureMode::Metadata;
+}
+
+std::string HdrMergeReferenceModeToString(Raw::HdrMergeReferenceMode mode) {
+    switch (mode) {
+        case Raw::HdrMergeReferenceMode::Auto: return "Auto";
+        case Raw::HdrMergeReferenceMode::Frame1: return "Frame1";
+        case Raw::HdrMergeReferenceMode::Frame2: return "Frame2";
+        case Raw::HdrMergeReferenceMode::Frame3: return "Frame3";
+    }
+    return "Auto";
+}
+
+Raw::HdrMergeReferenceMode HdrMergeReferenceModeFromString(const std::string& value) {
+    if (value == "Frame1" || value == "Frame 1") return Raw::HdrMergeReferenceMode::Frame1;
+    if (value == "Frame2" || value == "Frame 2") return Raw::HdrMergeReferenceMode::Frame2;
+    if (value == "Frame3" || value == "Frame 3") return Raw::HdrMergeReferenceMode::Frame3;
+    return Raw::HdrMergeReferenceMode::Auto;
+}
+
+std::string HdrMergeDeghostModeToString(Raw::HdrMergeDeghostMode mode) {
+    switch (mode) {
+        case Raw::HdrMergeDeghostMode::Off: return "Off";
+        case Raw::HdrMergeDeghostMode::Low: return "Low";
+        case Raw::HdrMergeDeghostMode::Medium: return "Medium";
+        case Raw::HdrMergeDeghostMode::High: return "High";
+    }
+    return "Medium";
+}
+
+Raw::HdrMergeDeghostMode HdrMergeDeghostModeFromString(const std::string& value) {
+    if (value == "Off") return Raw::HdrMergeDeghostMode::Off;
+    if (value == "Low") return Raw::HdrMergeDeghostMode::Low;
+    if (value == "High") return Raw::HdrMergeDeghostMode::High;
+    return Raw::HdrMergeDeghostMode::Low;
+}
+
+std::string HdrMergeMotionPriorityToString(Raw::HdrMergeMotionPriority mode) {
+    switch (mode) {
+        case Raw::HdrMergeMotionPriority::PreserveReference: return "PreserveReference";
+        case Raw::HdrMergeMotionPriority::AverageCleanAreas: return "AverageCleanAreas";
+    }
+    return "PreserveReference";
+}
+
+Raw::HdrMergeMotionPriority HdrMergeMotionPriorityFromString(const std::string& value) {
+    if (value == "AverageCleanAreas" || value == "Average Clean Areas") {
+        return Raw::HdrMergeMotionPriority::AverageCleanAreas;
+    }
+    return Raw::HdrMergeMotionPriority::PreserveReference;
+}
+
 std::string RawPixelLayoutToString(Raw::RawPixelLayout layout) {
     switch (layout) {
         case Raw::RawPixelLayout::MosaicBayer: return "MosaicBayer";
@@ -322,6 +433,14 @@ nlohmann::json SerializeRawMetadata(const Raw::RawMetadata& metadata) {
         { "defaultWhiteClipPercent", metadata.defaultWhiteClipPercent },
         { "cameraWhiteBalance", metadata.cameraWhiteBalance },
         { "daylightWhiteBalance", metadata.daylightWhiteBalance },
+        { "exposureTimeSeconds", metadata.exposureTimeSeconds },
+        { "isoSpeed", metadata.isoSpeed },
+        { "apertureFNumber", metadata.apertureFNumber },
+        { "captureTimestamp", metadata.captureTimestamp },
+        { "hasExposureTime", metadata.hasExposureTime },
+        { "hasIsoSpeed", metadata.hasIsoSpeed },
+        { "hasApertureFNumber", metadata.hasApertureFNumber },
+        { "hasCaptureTimestamp", metadata.hasCaptureTimestamp },
         { "cameraToSrgb", metadata.cameraToSrgb },
         { "hasCameraMatrix", metadata.hasCameraMatrix },
         { "dngAsShotNeutral", metadata.dngAsShotNeutral },
@@ -394,6 +513,14 @@ Raw::RawMetadata DeserializeRawMetadata(const nlohmann::json& value) {
     metadata.rawMinimum = value.value("rawMinimum", metadata.rawMinimum);
     metadata.rawMaximum = value.value("rawMaximum", metadata.rawMaximum);
     metadata.defaultWhiteClipPercent = value.value("defaultWhiteClipPercent", metadata.defaultWhiteClipPercent);
+    metadata.exposureTimeSeconds = value.value("exposureTimeSeconds", metadata.exposureTimeSeconds);
+    metadata.isoSpeed = value.value("isoSpeed", metadata.isoSpeed);
+    metadata.apertureFNumber = value.value("apertureFNumber", metadata.apertureFNumber);
+    metadata.captureTimestamp = value.value("captureTimestamp", metadata.captureTimestamp);
+    metadata.hasExposureTime = value.value("hasExposureTime", metadata.hasExposureTime);
+    metadata.hasIsoSpeed = value.value("hasIsoSpeed", metadata.hasIsoSpeed);
+    metadata.hasApertureFNumber = value.value("hasApertureFNumber", metadata.hasApertureFNumber);
+    metadata.hasCaptureTimestamp = value.value("hasCaptureTimestamp", metadata.hasCaptureTimestamp);
     metadata.hasCameraMatrix = value.value("hasCameraMatrix", metadata.hasCameraMatrix);
     metadata.hasDngAsShotNeutral = value.value("hasDngAsShotNeutral", metadata.hasDngAsShotNeutral);
     metadata.hasDngColorMatrix1 = value.value("hasDngColorMatrix1", metadata.hasDngColorMatrix1);
@@ -578,6 +705,7 @@ nlohmann::json SerializeRawDetailFusionSettings(const Raw::RawDetailFusionSettin
         { "baseEv", settings.baseEv },
         { "strength", settings.strength },
         { "sampleCount", settings.sampleCount },
+        { "baseRadiusPercent", settings.baseRadiusPercent },
         { "highlightProtection", settings.highlightProtection },
         { "shadowLiftLimit", settings.shadowLiftLimit },
         { "noiseProtection", settings.noiseProtection },
@@ -624,6 +752,7 @@ Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::
     settings.baseEv = value.value("baseEv", settings.baseEv);
     settings.strength = value.value("strength", settings.strength);
     settings.sampleCount = value.value("sampleCount", settings.sampleCount);
+    settings.baseRadiusPercent = value.value("baseRadiusPercent", settings.baseRadiusPercent);
     settings.highlightProtection = value.value("highlightProtection", settings.highlightProtection);
     settings.shadowLiftLimit = value.value("shadowLiftLimit", settings.shadowLiftLimit);
     settings.noiseProtection = value.value("noiseProtection", settings.noiseProtection);
@@ -642,23 +771,24 @@ Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::
     settings.haloGuard = value.value("haloGuard", settings.haloGuard);
     settings.maskDebandDither = value.value("maskDebandDither", settings.maskDebandDither);
     settings.manualBlend = value.value("manualBlend", settings.manualBlend);
-    settings.minEv = std::clamp(settings.minEv, -8.0f, 8.0f);
-    settings.maxEv = std::clamp(settings.maxEv, settings.minEv + 0.01f, 8.0f);
-    settings.baseEv = std::clamp(settings.baseEv, -8.0f, 8.0f);
-    settings.minEvBias = std::clamp(settings.minEvBias, -3.0f, 3.0f);
-    settings.maxEvBias = std::clamp(settings.maxEvBias, -3.0f, 3.0f);
-    settings.baseEvBias = std::clamp(settings.baseEvBias, -3.0f, 3.0f);
+    settings.minEv = std::clamp(settings.minEv, -2.5f, 0.5f);
+    settings.maxEv = std::clamp(settings.maxEv, std::max(settings.minEv + 0.01f, 0.25f), 2.5f);
+    settings.baseEv = std::clamp(settings.baseEv, -1.0f, 1.0f);
+    settings.minEvBias = std::clamp(settings.minEvBias, -2.0f, 2.0f);
+    settings.maxEvBias = std::clamp(settings.maxEvBias, -2.0f, 2.0f);
+    settings.baseEvBias = std::clamp(settings.baseEvBias, -1.25f, 1.25f);
     settings.noiseProtectionBias = std::clamp(settings.noiseProtectionBias, -1.0f, 1.0f);
     settings.highlightProtectionBias = std::clamp(settings.highlightProtectionBias, -1.0f, 1.0f);
     settings.shadowLiftLimitBias = std::clamp(settings.shadowLiftLimitBias, -1.0f, 1.0f);
-    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -0.5f, 0.5f);
-    settings.strength = std::clamp(settings.strength, 0.0f, 4.0f);
+    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -1.0f, 1.0f);
+    settings.strength = std::clamp(settings.strength, 0.0f, 1.25f);
     settings.sampleCount = std::clamp(settings.sampleCount, 3, 33);
+    settings.baseRadiusPercent = std::clamp(settings.baseRadiusPercent, 0.002f, 0.030f);
     settings.highlightProtection = std::clamp(settings.highlightProtection, 0.0f, 1.0f);
     settings.shadowLiftLimit = std::clamp(settings.shadowLiftLimit, 0.0f, 1.0f);
     settings.noiseProtection = std::clamp(settings.noiseProtection, 0.0f, 1.0f);
     settings.detailWeight = std::clamp(settings.detailWeight, 0.0f, 1.0f);
-    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.01f, 1.0f);
+    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.10f, 0.55f);
     settings.smoothGradientProtection = std::clamp(settings.smoothGradientProtection, 0.0f, 1.0f);
     settings.textureSensitivity = std::clamp(settings.textureSensitivity, 0.0f, 1.0f);
     settings.skyBias = std::clamp(settings.skyBias, 0.0f, 1.0f);
@@ -671,6 +801,67 @@ Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::
     settings.haloGuard = std::clamp(settings.haloGuard, 0.0f, 1.0f);
     settings.maskDebandDither = std::clamp(settings.maskDebandDither, 0.0f, 1.0f);
     settings.manualBlend = std::clamp(settings.manualBlend, 0.0f, 1.0f);
+    return settings;
+}
+
+nlohmann::json SerializeHdrMergeSettings(const Raw::HdrMergeSettings& settings) {
+    return {
+        { "debugView", HdrMergeDebugViewToString(settings.debugView) },
+        { "alignmentMode", HdrMergeAlignmentModeToString(settings.alignmentMode) },
+        { "exposureMode", HdrMergeExposureModeToString(settings.exposureMode) },
+        { "referenceMode", HdrMergeReferenceModeToString(settings.referenceMode) },
+        { "deghostMode", HdrMergeDeghostModeToString(settings.deghostMode) },
+        { "motionPriority", HdrMergeMotionPriorityToString(settings.motionPriority) },
+        { "manualExposureEv1", settings.manualExposureEv[0] },
+        { "manualExposureEv2", settings.manualExposureEv[1] },
+        { "manualExposureEv3", settings.manualExposureEv[2] },
+        { "exposureOffsetEv1", settings.exposureOffsetEv[0] },
+        { "exposureOffsetEv2", settings.exposureOffsetEv[1] },
+        { "exposureOffsetEv3", settings.exposureOffsetEv[2] },
+        { "autoReliability", settings.autoReliability },
+        { "clipThreshold", settings.clipThreshold },
+        { "clipFeather", settings.clipFeather },
+        { "blackThreshold", settings.blackThreshold },
+        { "blackFeather", settings.blackFeather },
+        { "readNoise", settings.readNoise },
+        { "noiseAware", settings.noiseAware }
+    };
+}
+
+Raw::HdrMergeSettings DeserializeHdrMergeSettings(const nlohmann::json& value) {
+    Raw::HdrMergeSettings settings;
+    if (!value.is_object()) {
+        return settings;
+    }
+    settings.debugView = HdrMergeDebugViewFromString(value.value("debugView", std::string("FinalImage")));
+    settings.alignmentMode = HdrMergeAlignmentModeFromString(value.value("alignmentMode", std::string("Off")));
+    settings.exposureMode = HdrMergeExposureModeFromString(value.value("exposureMode", std::string("Metadata")));
+    settings.referenceMode = HdrMergeReferenceModeFromString(value.value("referenceMode", std::string("Auto")));
+    settings.deghostMode = HdrMergeDeghostModeFromString(value.value("deghostMode", std::string("Low")));
+    settings.motionPriority = HdrMergeMotionPriorityFromString(value.value("motionPriority", std::string("PreserveReference")));
+    settings.frameCount = std::clamp(value.value("frameCount", settings.frameCount), 2, 3);
+    settings.manualExposureEv[0] = std::clamp(
+        value.value("manualExposureEv1", value.value("exposureEv1", settings.manualExposureEv[0])),
+        -12.0f,
+        12.0f);
+    settings.manualExposureEv[1] = std::clamp(
+        value.value("manualExposureEv2", value.value("exposureEv2", settings.manualExposureEv[1])),
+        -12.0f,
+        12.0f);
+    settings.manualExposureEv[2] = std::clamp(
+        value.value("manualExposureEv3", value.value("exposureEv3", settings.manualExposureEv[2])),
+        -12.0f,
+        12.0f);
+    settings.exposureOffsetEv[0] = std::clamp(value.value("exposureOffsetEv1", settings.exposureOffsetEv[0]), -4.0f, 4.0f);
+    settings.exposureOffsetEv[1] = std::clamp(value.value("exposureOffsetEv2", settings.exposureOffsetEv[1]), -4.0f, 4.0f);
+    settings.exposureOffsetEv[2] = std::clamp(value.value("exposureOffsetEv3", settings.exposureOffsetEv[2]), -4.0f, 4.0f);
+    settings.autoReliability = value.value("autoReliability", settings.autoReliability);
+    settings.clipThreshold = std::clamp(value.value("clipThreshold", settings.clipThreshold), 0.50f, 4.0f);
+    settings.clipFeather = std::clamp(value.value("clipFeather", settings.clipFeather), 0.001f, 1.0f);
+    settings.blackThreshold = std::clamp(value.value("blackThreshold", settings.blackThreshold), 0.0f, 0.25f);
+    settings.blackFeather = std::clamp(value.value("blackFeather", settings.blackFeather), 0.001f, 0.50f);
+    settings.readNoise = std::clamp(value.value("readNoise", settings.readNoise), 0.0f, 0.10f);
+    settings.noiseAware = value.value("noiseAware", settings.noiseAware);
     return settings;
 }
 
@@ -721,6 +912,23 @@ MaskUtilityKind MaskUtilityKindFromString(const std::string& value) {
     return MaskUtilityKind::Invert;
 }
 
+std::string MaskCombineModeToString(MaskCombineMode mode) {
+    switch (mode) {
+        case MaskCombineMode::Add: return "Add";
+        case MaskCombineMode::Subtract: return "Subtract";
+        case MaskCombineMode::Intersect: return "Intersect";
+        case MaskCombineMode::Exclude: return "Exclude";
+    }
+    return "Intersect";
+}
+
+MaskCombineMode MaskCombineModeFromString(const std::string& value) {
+    if (value == "Add") return MaskCombineMode::Add;
+    if (value == "Subtract") return MaskCombineMode::Subtract;
+    if (value == "Exclude") return MaskCombineMode::Exclude;
+    return MaskCombineMode::Intersect;
+}
+
 std::string ImageGeneratorKindToString(ImageGeneratorKind kind) {
     switch (kind) {
         case ImageGeneratorKind::SolidColor: return "SolidColor";
@@ -764,11 +972,28 @@ MaskUtilitySettings DeserializeMaskUtilitySettings(const nlohmann::json& value) 
 }
 
 nlohmann::json SerializeImageToMaskSettings(const ImageToMaskSettings& settings) {
+    nlohmann::json extraSampleRgb = nlohmann::json::array();
+    for (int i = 0; i < 4; ++i) {
+        extraSampleRgb.push_back({ settings.extraSampleRgb[i][0], settings.extraSampleRgb[i][1], settings.extraSampleRgb[i][2] });
+    }
     return {
         { "low", settings.low },
         { "high", settings.high },
         { "softness", settings.softness },
-        { "invert", settings.invert }
+        { "invert", settings.invert },
+        { "sampleCount", settings.sampleCount },
+        { "sampleRgb", { settings.sampleRgb[0], settings.sampleRgb[1], settings.sampleRgb[2] } },
+        { "sampleLuma", settings.sampleLuma },
+        { "extraSampleRgb", extraSampleRgb },
+        { "extraSampleLuma", { settings.extraSampleLuma[0], settings.extraSampleLuma[1], settings.extraSampleLuma[2], settings.extraSampleLuma[3] } },
+        { "sampleU", settings.sampleU },
+        { "sampleV", settings.sampleV },
+        { "toneSimilarity", settings.toneSimilarity },
+        { "colorSimilarity", settings.colorSimilarity },
+        { "regionRadius", settings.regionRadius },
+        { "regionFeather", settings.regionFeather },
+        { "edgeSensitivity", settings.edgeSensitivity },
+        { "localCoherence", settings.localCoherence }
     };
 }
 
@@ -779,6 +1004,37 @@ ImageToMaskSettings DeserializeImageToMaskSettings(const nlohmann::json& value) 
     settings.high = value.value("high", settings.high);
     settings.softness = value.value("softness", settings.softness);
     settings.invert = value.value("invert", settings.invert);
+    settings.sampleCount = std::clamp(value.value("sampleCount", settings.sampleCount), 1, 5);
+    if (value.contains("sampleRgb") && value["sampleRgb"].is_array() && value["sampleRgb"].size() >= 3) {
+        settings.sampleRgb[0] = value["sampleRgb"][0].get<float>();
+        settings.sampleRgb[1] = value["sampleRgb"][1].get<float>();
+        settings.sampleRgb[2] = value["sampleRgb"][2].get<float>();
+    }
+    settings.sampleLuma = value.value("sampleLuma", settings.sampleLuma);
+    if (value.contains("extraSampleRgb") && value["extraSampleRgb"].is_array()) {
+        for (std::size_t i = 0; i < std::min<std::size_t>(4, value["extraSampleRgb"].size()); ++i) {
+            const nlohmann::json& sample = value["extraSampleRgb"][i];
+            if (!sample.is_array() || sample.size() < 3) {
+                continue;
+            }
+            settings.extraSampleRgb[i][0] = sample[0].get<float>();
+            settings.extraSampleRgb[i][1] = sample[1].get<float>();
+            settings.extraSampleRgb[i][2] = sample[2].get<float>();
+        }
+    }
+    if (value.contains("extraSampleLuma") && value["extraSampleLuma"].is_array()) {
+        for (std::size_t i = 0; i < std::min<std::size_t>(4, value["extraSampleLuma"].size()); ++i) {
+            settings.extraSampleLuma[i] = value["extraSampleLuma"][i].get<float>();
+        }
+    }
+    settings.sampleU = value.value("sampleU", settings.sampleU);
+    settings.sampleV = value.value("sampleV", settings.sampleV);
+    settings.toneSimilarity = value.value("toneSimilarity", settings.toneSimilarity);
+    settings.colorSimilarity = value.value("colorSimilarity", settings.colorSimilarity);
+    settings.regionRadius = value.value("regionRadius", settings.regionRadius);
+    settings.regionFeather = value.value("regionFeather", settings.regionFeather);
+    settings.edgeSensitivity = value.value("edgeSensitivity", settings.edgeSensitivity);
+    settings.localCoherence = value.value("localCoherence", settings.localCoherence);
     return settings;
 }
 
@@ -843,6 +1099,7 @@ MaskGeneratorSettings DeserializeMaskSettings(const nlohmann::json& value) {
 std::string MixBlendModeToString(MixBlendMode mode) {
     switch (mode) {
         case MixBlendMode::Normal: return "Normal";
+        case MixBlendMode::Average: return "Average";
         case MixBlendMode::Add: return "Add";
         case MixBlendMode::Multiply: return "Multiply";
         case MixBlendMode::Screen: return "Screen";
@@ -852,6 +1109,7 @@ std::string MixBlendModeToString(MixBlendMode mode) {
 }
 
 MixBlendMode MixBlendModeFromString(const std::string& value) {
+    if (value == "Average") return MixBlendMode::Average;
     if (value == "Add") return MixBlendMode::Add;
     if (value == "Multiply") return MixBlendMode::Multiply;
     if (value == "Screen") return MixBlendMode::Screen;
@@ -859,15 +1117,68 @@ MixBlendMode MixBlendModeFromString(const std::string& value) {
     return MixBlendMode::Normal;
 }
 
+std::string DataMathModeToString(DataMathMode mode) {
+    switch (mode) {
+        case DataMathMode::Clamp: return "Clamp";
+        case DataMathMode::Add: return "Add";
+        case DataMathMode::Subtract: return "Subtract";
+        case DataMathMode::Multiply: return "Multiply";
+        case DataMathMode::Divide: return "Divide";
+        case DataMathMode::Average: return "Average";
+        case DataMathMode::Min: return "Min";
+        case DataMathMode::Max: return "Max";
+        case DataMathMode::Difference: return "Difference";
+        case DataMathMode::Remap: return "Remap";
+    }
+    return "Clamp";
+}
+
+DataMathMode DataMathModeFromString(const std::string& value) {
+    if (value == "Add") return DataMathMode::Add;
+    if (value == "Subtract") return DataMathMode::Subtract;
+    if (value == "Multiply") return DataMathMode::Multiply;
+    if (value == "Divide") return DataMathMode::Divide;
+    if (value == "Average") return DataMathMode::Average;
+    if (value == "Min" || value == "Minimum") return DataMathMode::Min;
+    if (value == "Max" || value == "Maximum") return DataMathMode::Max;
+    if (value == "Difference" || value == "AbsDiff") return DataMathMode::Difference;
+    if (value == "Remap") return DataMathMode::Remap;
+    return DataMathMode::Clamp;
+}
+
+nlohmann::json SerializeDataMathSettings(const DataMathSettings& settings) {
+    return {
+        { "constantA", settings.constantA },
+        { "constantB", settings.constantB },
+        { "minValue", settings.minValue },
+        { "maxValue", settings.maxValue },
+        { "outMin", settings.outMin },
+        { "outMax", settings.outMax }
+    };
+}
+
+DataMathSettings DeserializeDataMathSettings(const nlohmann::json& value) {
+    DataMathSettings settings;
+    if (!value.is_object()) return settings;
+    settings.constantA = value.value("constantA", settings.constantA);
+    settings.constantB = value.value("constantB", settings.constantB);
+    settings.minValue = value.value("minValue", settings.minValue);
+    settings.maxValue = value.value("maxValue", settings.maxValue);
+    settings.outMin = value.value("outMin", settings.outMin);
+    settings.outMax = value.value("outMax", settings.outMax);
+    return settings;
+}
+
 std::string ImageToMaskKindToString(ImageToMaskKind kind) {
     switch (kind) {
         case ImageToMaskKind::Luminance: return "Luminance";
+        case ImageToMaskKind::SampledRange: return "SampledRange";
     }
     return "Luminance";
 }
 
 ImageToMaskKind ImageToMaskKindFromString(const std::string& value) {
-    (void)value;
+    if (value == "SampledRange" || value == "Sampled Range") return ImageToMaskKind::SampledRange;
     return ImageToMaskKind::Luminance;
 }
 
@@ -878,6 +1189,449 @@ std::vector<unsigned char> ReadBinaryJson(const nlohmann::json& value) {
 
     const auto& binaryValue = value.get_binary();
     return std::vector<unsigned char>(binaryValue.begin(), binaryValue.end());
+}
+
+std::string CustomMaskReferenceModeToString(CustomMaskReferenceMode mode) {
+    return mode == CustomMaskReferenceMode::GraphNode ? "GraphNode" : "CustomSize";
+}
+
+CustomMaskReferenceMode CustomMaskReferenceModeFromString(const std::string& value) {
+    return value == "GraphNode" ? CustomMaskReferenceMode::GraphNode : CustomMaskReferenceMode::CustomSize;
+}
+
+std::string CustomMaskObjectTypeToString(CustomMaskObjectType type) {
+    switch (type) {
+        case CustomMaskObjectType::Rectangle: return "Rectangle";
+        case CustomMaskObjectType::Ellipse: return "Ellipse";
+        case CustomMaskObjectType::Polygon: return "Polygon";
+        case CustomMaskObjectType::FreeformPath: return "FreeformPath";
+    }
+    return "Rectangle";
+}
+
+CustomMaskObjectType CustomMaskObjectTypeFromString(const std::string& value) {
+    if (value == "Ellipse") return CustomMaskObjectType::Ellipse;
+    if (value == "Polygon") return CustomMaskObjectType::Polygon;
+    if (value == "FreeformPath") return CustomMaskObjectType::FreeformPath;
+    return CustomMaskObjectType::Rectangle;
+}
+
+std::string CustomMaskOperationToString(CustomMaskOperation operation) {
+    switch (operation) {
+        case CustomMaskOperation::Add: return "Add";
+        case CustomMaskOperation::Subtract: return "Subtract";
+        case CustomMaskOperation::Intersect: return "Intersect";
+        case CustomMaskOperation::Exclude: return "Exclude";
+    }
+    return "Add";
+}
+
+CustomMaskOperation CustomMaskOperationFromString(const std::string& value) {
+    if (value == "Subtract") return CustomMaskOperation::Subtract;
+    if (value == "Intersect") return CustomMaskOperation::Intersect;
+    if (value == "Exclude") return CustomMaskOperation::Exclude;
+    return CustomMaskOperation::Add;
+}
+
+std::string CustomMaskToolToString(CustomMaskTool tool) {
+    switch (tool) {
+        case CustomMaskTool::Brush: return "Brush";
+        case CustomMaskTool::Erase: return "Erase";
+        case CustomMaskTool::Select: return "Select";
+        case CustomMaskTool::Rectangle: return "Rectangle";
+        case CustomMaskTool::Ellipse: return "Ellipse";
+        case CustomMaskTool::Polygon: return "Polygon";
+        case CustomMaskTool::FreeformPath: return "FreeformPath";
+    }
+    return "Brush";
+}
+
+CustomMaskTool CustomMaskToolFromString(const std::string& value) {
+    if (value == "Erase") return CustomMaskTool::Erase;
+    if (value == "Select") return CustomMaskTool::Select;
+    if (value == "Rectangle") return CustomMaskTool::Rectangle;
+    if (value == "Ellipse") return CustomMaskTool::Ellipse;
+    if (value == "Polygon") return CustomMaskTool::Polygon;
+    if (value == "FreeformPath") return CustomMaskTool::FreeformPath;
+    return CustomMaskTool::Brush;
+}
+
+std::vector<unsigned char> EncodeCustomMaskRasterU16(const std::vector<float>& raster) {
+    std::vector<unsigned char> bytes;
+    bytes.resize(raster.size() * 2);
+    for (std::size_t i = 0; i < raster.size(); ++i) {
+        const float clamped = std::clamp(raster[i], 0.0f, 1.0f);
+        const auto value = static_cast<std::uint16_t>(std::lround(clamped * 65535.0f));
+        bytes[i * 2 + 0] = static_cast<unsigned char>(value & 0xffu);
+        bytes[i * 2 + 1] = static_cast<unsigned char>((value >> 8) & 0xffu);
+    }
+    return bytes;
+}
+
+std::vector<float> DecodeCustomMaskRasterU16(const std::vector<unsigned char>& bytes, int width, int height) {
+    const std::size_t expected =
+        static_cast<std::size_t>(std::max(0, width)) * static_cast<std::size_t>(std::max(0, height));
+    std::vector<float> raster(expected, 0.0f);
+    const std::size_t count = std::min(expected, bytes.size() / 2);
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::uint16_t value =
+            static_cast<std::uint16_t>(bytes[i * 2 + 0]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[i * 2 + 1]) << 8);
+        raster[i] = static_cast<float>(value) / 65535.0f;
+    }
+    return raster;
+}
+
+nlohmann::json SerializeCustomMaskObject(const CustomMaskObject& object) {
+    nlohmann::json points = nlohmann::json::array();
+    for (const Vec2& point : object.points) {
+        points.push_back({ { "x", point.x }, { "y", point.y } });
+    }
+
+    return {
+        { "id", object.id },
+        { "type", CustomMaskObjectTypeToString(object.type) },
+        { "operation", CustomMaskOperationToString(object.operation) },
+        { "points", std::move(points) },
+        { "enabled", object.enabled },
+        { "invert", object.invert },
+        { "strength", object.strength },
+        { "feather", object.feather },
+        { "blur", object.blur }
+    };
+}
+
+CustomMaskObject DeserializeCustomMaskObject(const nlohmann::json& value) {
+    CustomMaskObject object;
+    if (!value.is_object()) {
+        return object;
+    }
+    object.id = value.value("id", object.id);
+    object.type = CustomMaskObjectTypeFromString(value.value("type", std::string("Rectangle")));
+    object.operation = CustomMaskOperationFromString(value.value("operation", std::string("Add")));
+    object.enabled = value.value("enabled", object.enabled);
+    object.invert = value.value("invert", object.invert);
+    object.strength = value.value("strength", object.strength);
+    object.feather = value.value("feather", object.feather);
+    object.blur = value.value("blur", object.blur);
+    const bool legacyDefaultShapeFeather =
+        value.contains("feather") &&
+        std::abs(object.feather - 0.02f) <= 0.00001f &&
+        (object.type == CustomMaskObjectType::Rectangle ||
+         object.type == CustomMaskObjectType::Ellipse ||
+         object.type == CustomMaskObjectType::Polygon) &&
+        object.blur <= 0.00001f;
+    if (legacyDefaultShapeFeather) {
+        object.feather = 0.0f;
+    }
+    const nlohmann::json points = value.value("points", nlohmann::json::array());
+    if (points.is_array()) {
+        for (const nlohmann::json& pointJson : points) {
+            if (!pointJson.is_object()) continue;
+            Vec2 point;
+            point.x = pointJson.value("x", 0.0f);
+            point.y = pointJson.value("y", 0.0f);
+            object.points.push_back(point);
+        }
+    }
+    return object;
+}
+
+nlohmann::json SerializeCustomMaskPayload(const CustomMaskPayload& payload) {
+    nlohmann::json objects = nlohmann::json::array();
+    for (const CustomMaskObject& object : payload.objects) {
+        objects.push_back(SerializeCustomMaskObject(object));
+    }
+
+    return {
+        { "schemaVersion", payload.schemaVersion },
+        { "referenceMode", CustomMaskReferenceModeToString(payload.referenceMode) },
+        { "referenceNodeId", payload.referenceNodeId },
+        { "referenceSocketId", payload.referenceSocketId },
+        { "width", payload.width },
+        { "height", payload.height },
+        { "aspectLocked", payload.aspectLocked },
+        { "rasterFormat", "u16le-normalized" },
+        { "rasterLayer", nlohmann::json::binary(EncodeCustomMaskRasterU16(payload.rasterLayer)) },
+        { "objects", std::move(objects) },
+        { "nextObjectId", payload.nextObjectId },
+        { "globalOps", {
+            { "invert", payload.invert },
+            { "blurRadius", payload.blurRadius },
+            { "expandContract", payload.expandContract }
+        } },
+        { "editor", {
+            { "activeTool", CustomMaskToolToString(payload.activeTool) },
+            { "brushSize", payload.brushSize },
+            { "brushSoftness", payload.brushSoftness },
+            { "brushOpacity", payload.brushOpacity },
+            { "showCanvasReferenceImage", payload.showCanvasReferenceImage },
+            { "showCanvasMaskImpact", payload.showCanvasMaskImpact },
+            { "showCanvasMaskStrength", payload.showCanvasMaskStrength },
+            { "selectedObjectId", payload.selectedObjectId }
+        } }
+    };
+}
+
+CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
+    CustomMaskPayload payload;
+    if (!value.is_object()) {
+        payload.rasterLayer.assign(
+            static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height),
+            0.0f);
+        return payload;
+    }
+
+    payload.schemaVersion = value.value("schemaVersion", payload.schemaVersion);
+    payload.referenceMode = CustomMaskReferenceModeFromString(value.value("referenceMode", std::string("CustomSize")));
+    payload.referenceNodeId = value.value("referenceNodeId", payload.referenceNodeId);
+    payload.referenceSocketId = value.value("referenceSocketId", payload.referenceSocketId);
+    payload.width = std::clamp(value.value("width", payload.width), 1, 8192);
+    payload.height = std::clamp(value.value("height", payload.height), 1, 8192);
+    payload.aspectLocked = value.value("aspectLocked", payload.aspectLocked);
+    payload.rasterLayer = DecodeCustomMaskRasterU16(ReadBinaryJson(value.value("rasterLayer", nlohmann::json())), payload.width, payload.height);
+
+    const nlohmann::json objects = value.value("objects", nlohmann::json::array());
+    if (objects.is_array()) {
+        for (const nlohmann::json& objectJson : objects) {
+            payload.objects.push_back(DeserializeCustomMaskObject(objectJson));
+        }
+    }
+    payload.nextObjectId = value.value("nextObjectId", payload.nextObjectId);
+    for (const CustomMaskObject& object : payload.objects) {
+        payload.nextObjectId = std::max(payload.nextObjectId, object.id + 1);
+    }
+
+    const nlohmann::json globalOps = value.value("globalOps", nlohmann::json::object());
+    if (globalOps.is_object()) {
+        payload.invert = globalOps.value("invert", payload.invert);
+        payload.blurRadius = globalOps.value("blurRadius", payload.blurRadius);
+        payload.expandContract = globalOps.value("expandContract", payload.expandContract);
+    }
+
+    const nlohmann::json editor = value.value("editor", nlohmann::json::object());
+    if (editor.is_object()) {
+        payload.activeTool = CustomMaskToolFromString(editor.value("activeTool", std::string("Brush")));
+        payload.brushSize = editor.value("brushSize", payload.brushSize);
+        payload.brushSoftness = editor.value("brushSoftness", payload.brushSoftness);
+        payload.brushOpacity = editor.value("brushOpacity", payload.brushOpacity);
+        payload.showCanvasReferenceImage = editor.value("showCanvasReferenceImage", payload.showCanvasReferenceImage);
+        payload.showCanvasMaskImpact = editor.value("showCanvasMaskImpact", payload.showCanvasMaskImpact);
+        payload.showCanvasMaskStrength = editor.value("showCanvasMaskStrength", payload.showCanvasMaskStrength);
+        payload.selectedObjectId = editor.value("selectedObjectId", payload.selectedObjectId);
+    }
+
+    const std::size_t expected =
+        static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height);
+    if (payload.rasterLayer.size() != expected) {
+        payload.rasterLayer.assign(expected, 0.0f);
+    }
+    return payload;
+}
+
+nlohmann::json SerializeDevelopSubjectImportanceRegion(const DevelopSubjectImportanceRegion& region) {
+    return {
+        { "id", region.id },
+        { "mode", DevelopSubjectImportanceModeStableString(region.mode) },
+        { "enabled", region.enabled },
+        { "centerX", region.centerX },
+        { "centerY", region.centerY },
+        { "radiusX", region.radiusX },
+        { "radiusY", region.radiusY },
+        { "feather", region.feather },
+        { "strength", region.strength }
+    };
+}
+
+DevelopSubjectImportanceRegion DeserializeDevelopSubjectImportanceRegion(const nlohmann::json& value) {
+    DevelopSubjectImportanceRegion region;
+    if (!value.is_object()) {
+        return region;
+    }
+    region.id = value.value("id", region.id);
+    region.mode = DevelopSubjectImportanceModeFromStableString(
+        value.value("mode", std::string("Important")));
+    region.enabled = value.value("enabled", region.enabled);
+    region.centerX = std::clamp(value.value("centerX", region.centerX), 0.0f, 1.0f);
+    region.centerY = std::clamp(value.value("centerY", region.centerY), 0.0f, 1.0f);
+    region.radiusX = std::clamp(value.value("radiusX", region.radiusX), 0.01f, 1.0f);
+    region.radiusY = std::clamp(value.value("radiusY", region.radiusY), 0.01f, 1.0f);
+    region.feather = std::clamp(value.value("feather", region.feather), 0.0f, 1.0f);
+    region.strength = std::clamp(value.value("strength", region.strength), 0.0f, 1.0f);
+    return region;
+}
+
+nlohmann::json SerializeDevelopSubjectImportanceStrokePoint(const DevelopSubjectImportanceStrokePoint& point) {
+    return {
+        { "x", point.x },
+        { "y", point.y }
+    };
+}
+
+DevelopSubjectImportanceStrokePoint DeserializeDevelopSubjectImportanceStrokePoint(const nlohmann::json& value) {
+    DevelopSubjectImportanceStrokePoint point;
+    if (!value.is_object()) {
+        return point;
+    }
+    point.x = std::clamp(value.value("x", point.x), 0.0f, 1.0f);
+    point.y = std::clamp(value.value("y", point.y), 0.0f, 1.0f);
+    return point;
+}
+
+nlohmann::json SerializeDevelopSubjectImportanceStroke(const DevelopSubjectImportanceStroke& stroke) {
+    nlohmann::json points = nlohmann::json::array();
+    for (const DevelopSubjectImportanceStrokePoint& point : stroke.points) {
+        points.push_back(SerializeDevelopSubjectImportanceStrokePoint(point));
+    }
+    return {
+        { "id", stroke.id },
+        { "mode", DevelopSubjectImportanceModeStableString(stroke.mode) },
+        { "enabled", stroke.enabled },
+        { "subtract", stroke.subtract },
+        { "radius", stroke.radius },
+        { "feather", stroke.feather },
+        { "strength", stroke.strength },
+        { "points", std::move(points) }
+    };
+}
+
+DevelopSubjectImportanceStroke DeserializeDevelopSubjectImportanceStroke(const nlohmann::json& value) {
+    DevelopSubjectImportanceStroke stroke;
+    if (!value.is_object()) {
+        return stroke;
+    }
+    stroke.id = value.value("id", stroke.id);
+    stroke.mode = DevelopSubjectImportanceModeFromStableString(
+        value.value("mode", std::string("Important")));
+    stroke.enabled = value.value("enabled", stroke.enabled);
+    stroke.subtract = value.value("subtract", stroke.subtract);
+    stroke.radius = std::clamp(value.value("radius", stroke.radius), 0.005f, 0.25f);
+    stroke.feather = std::clamp(value.value("feather", stroke.feather), 0.0f, 1.0f);
+    stroke.strength = std::clamp(value.value("strength", stroke.strength), 0.0f, 1.0f);
+    const nlohmann::json points = value.value("points", nlohmann::json::array());
+    if (points.is_array()) {
+        for (const nlohmann::json& pointJson : points) {
+            stroke.points.push_back(DeserializeDevelopSubjectImportanceStrokePoint(pointJson));
+            if (stroke.points.size() >= 192) {
+                break;
+            }
+        }
+    }
+    return stroke;
+}
+
+nlohmann::json SerializeDevelopSubjectImportanceMap(const DevelopSubjectImportanceMap& map) {
+    nlohmann::json regions = nlohmann::json::array();
+    for (const DevelopSubjectImportanceRegion& region : map.regions) {
+        regions.push_back(SerializeDevelopSubjectImportanceRegion(region));
+    }
+    nlohmann::json strokes = nlohmann::json::array();
+    for (const DevelopSubjectImportanceStroke& stroke : map.strokes) {
+        strokes.push_back(SerializeDevelopSubjectImportanceStroke(stroke));
+    }
+    return {
+        { "schemaVersion", map.schemaVersion },
+        { "enabled", map.enabled },
+        { "showOverlay", map.showOverlay },
+        { "overlayOpacity", map.overlayOpacity },
+        { "showInterpretedMapOverlay", map.showInterpretedMapOverlay },
+        { "interpretedMapOpacity", map.interpretedMapOpacity },
+        { "showRefinedMapOverlay", map.showRefinedMapOverlay },
+        { "refinedMapOpacity", map.refinedMapOpacity },
+        { "brushEnabled", map.brushEnabled },
+        { "brushSubtract", map.brushSubtract },
+        { "brushMode", DevelopSubjectImportanceModeStableString(map.brushMode) },
+        { "brushRadius", map.brushRadius },
+        { "brushFeather", map.brushFeather },
+        { "brushStrength", map.brushStrength },
+        { "activeRegionId", map.activeRegionId },
+        { "activeStrokeId", map.activeStrokeId },
+        { "nextRegionId", map.nextRegionId },
+        { "nextStrokeId", map.nextStrokeId },
+        { "regions", std::move(regions) },
+        { "strokes", std::move(strokes) }
+    };
+}
+
+DevelopSubjectImportanceMap DeserializeDevelopSubjectImportanceMap(const nlohmann::json& value) {
+    DevelopSubjectImportanceMap map;
+    if (!value.is_object()) {
+        return map;
+    }
+    map.schemaVersion = std::max(1, value.value("schemaVersion", map.schemaVersion));
+    map.enabled = value.value("enabled", map.enabled);
+    map.showOverlay = value.value("showOverlay", map.showOverlay);
+    map.overlayOpacity = std::clamp(value.value("overlayOpacity", map.overlayOpacity), 0.05f, 1.0f);
+    map.showInterpretedMapOverlay =
+        value.value("showInterpretedMapOverlay", map.showInterpretedMapOverlay);
+    map.interpretedMapOpacity =
+        std::clamp(value.value("interpretedMapOpacity", map.interpretedMapOpacity), 0.05f, 1.0f);
+    map.showRefinedMapOverlay =
+        value.value("showRefinedMapOverlay", map.showRefinedMapOverlay);
+    map.refinedMapOpacity =
+        std::clamp(value.value("refinedMapOpacity", map.refinedMapOpacity), 0.05f, 1.0f);
+    map.brushEnabled = value.value("brushEnabled", map.brushEnabled);
+    map.brushSubtract = value.value("brushSubtract", map.brushSubtract);
+    map.brushMode = DevelopSubjectImportanceModeFromStableString(
+        value.value("brushMode", std::string("Important")));
+    map.brushRadius = std::clamp(value.value("brushRadius", map.brushRadius), 0.005f, 0.25f);
+    map.brushFeather = std::clamp(value.value("brushFeather", map.brushFeather), 0.0f, 1.0f);
+    map.brushStrength = std::clamp(value.value("brushStrength", map.brushStrength), 0.0f, 1.0f);
+    map.activeRegionId = std::max(0, value.value("activeRegionId", map.activeRegionId));
+    map.activeStrokeId = std::max(0, value.value("activeStrokeId", map.activeStrokeId));
+    map.nextRegionId = std::max(1, value.value("nextRegionId", map.nextRegionId));
+    map.nextStrokeId = std::max(1, value.value("nextStrokeId", map.nextStrokeId));
+    const nlohmann::json regions = value.value("regions", nlohmann::json::array());
+    if (regions.is_array()) {
+        for (const nlohmann::json& regionJson : regions) {
+            map.regions.push_back(DeserializeDevelopSubjectImportanceRegion(regionJson));
+            if (map.regions.size() >= 32) {
+                break;
+            }
+        }
+    }
+    for (const DevelopSubjectImportanceRegion& region : map.regions) {
+        map.nextRegionId = std::max(map.nextRegionId, region.id + 1);
+    }
+    const nlohmann::json strokes = value.value("strokes", nlohmann::json::array());
+    if (strokes.is_array()) {
+        for (const nlohmann::json& strokeJson : strokes) {
+            map.strokes.push_back(DeserializeDevelopSubjectImportanceStroke(strokeJson));
+            if (map.strokes.size() >= 128) {
+                break;
+            }
+        }
+    }
+    for (const DevelopSubjectImportanceStroke& stroke : map.strokes) {
+        map.nextStrokeId = std::max(map.nextStrokeId, stroke.id + 1);
+    }
+    if (map.regions.empty()) {
+        map.activeRegionId = 0;
+    } else {
+        const auto activeIt = std::find_if(
+            map.regions.begin(),
+            map.regions.end(),
+            [&](const DevelopSubjectImportanceRegion& region) {
+                return region.id == map.activeRegionId;
+            });
+        if (activeIt == map.regions.end()) {
+            map.activeRegionId = map.regions.front().id;
+        }
+    }
+    if (map.strokes.empty()) {
+        map.activeStrokeId = 0;
+    } else {
+        const auto activeIt = std::find_if(
+            map.strokes.begin(),
+            map.strokes.end(),
+            [&](const DevelopSubjectImportanceStroke& stroke) {
+                return stroke.id == map.activeStrokeId;
+            });
+        if (activeIt == map.strokes.end()) {
+            map.activeStrokeId = map.strokes.back().id;
+        }
+    }
+    return map;
 }
 
 } // namespace
@@ -920,6 +1674,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["scopeKind"] = ScopeKindToString(node.scopeKind);
         item["maskKind"] = MaskGeneratorKindToString(node.maskKind);
         item["maskSettings"] = SerializeMaskSettings(node.maskSettings);
+        item["maskCombineMode"] = MaskCombineModeToString(node.maskCombineMode);
         item["maskUtilityKind"] = MaskUtilityKindToString(node.maskUtilityKind);
         item["maskUtilitySettings"] = SerializeMaskUtilitySettings(node.maskUtilitySettings);
         item["imageToMaskKind"] = ImageToMaskKindToString(node.imageToMaskKind);
@@ -928,6 +1683,8 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["imageGeneratorSettings"] = SerializeImageGeneratorSettings(node.imageGeneratorSettings);
         item["mixBlendMode"] = MixBlendModeToString(node.mixBlendMode);
         item["mixFactor"] = node.mixFactor;
+        item["dataMathMode"] = DataMathModeToString(node.dataMathMode);
+        item["dataMathSettings"] = SerializeDataMathSettings(node.dataMathSettings);
         item["outputEnabled"] = node.outputEnabled;
 
         if (node.kind == NodeKind::Image) {
@@ -946,10 +1703,34 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["neuralDenoiseSettings"] = NeuralDenoise::SerializeSettings(node.rawNeuralDenoise.settings);
         } else if (node.kind == NodeKind::RawDevelop) {
             item["rawSettings"] = SerializeRawSettings(node.rawDevelop.settings);
+            item["scenePrepEnabled"] = node.rawDevelop.scenePrepEnabled;
+            item["scenePrepSettings"] = SerializeRawDetailFusionSettings(node.rawDevelop.scenePrepSettings);
+            item["integratedToneEnabled"] = node.rawDevelop.integratedToneEnabled;
+            item["integratedToneLayer"] = node.rawDevelop.integratedToneLayerJson;
+            item["developSubjectImportance"] =
+                SerializeDevelopSubjectImportanceMap(node.rawDevelop.subjectImportance);
+            item["developAutoGuidance"] = {
+                { "autoIntent", EditorNodeGraph::DevelopAutoIntentStableString(node.rawDevelop.autoGuidance.intent) },
+                { "autoStrength", node.rawDevelop.autoGuidance.autoStrength },
+                { "exposureBias", node.rawDevelop.autoGuidance.exposureBias },
+                { "dynamicRange", node.rawDevelop.autoGuidance.dynamicRange },
+                { "shadowLift", node.rawDevelop.autoGuidance.shadowLift },
+                { "highlightGuard", node.rawDevelop.autoGuidance.highlightGuard },
+                { "highlightCharacter", node.rawDevelop.autoGuidance.highlightCharacter },
+                { "contrastBias", node.rawDevelop.autoGuidance.contrastBias },
+                { "subjectSceneBias", node.rawDevelop.autoGuidance.subjectSceneBias },
+                { "moodReadabilityBias", node.rawDevelop.autoGuidance.moodReadabilityBias }
+            };
+            item["uiMode"] =
+                node.rawDevelop.uiMode == EditorNodeGraph::RawDevelopUiMode::Manual ? "Manual" : "Auto";
         } else if (node.kind == NodeKind::RawDetailAutoMask) {
             item["rawDetailAutoMaskSettings"] = SerializeRawDetailFusionSettings(node.rawDetailAutoMask.settings);
         } else if (node.kind == NodeKind::RawDetailFusion) {
             item["rawDetailFusionSettings"] = SerializeRawDetailFusionSettings(node.rawDetailFusion.settings);
+        } else if (node.kind == NodeKind::HdrMerge) {
+            item["hdrMergeSettings"] = SerializeHdrMergeSettings(node.hdrMerge.settings);
+        } else if (node.kind == NodeKind::CustomMask) {
+            item["customMask"] = SerializeCustomMaskPayload(node.customMask);
         }
 
         nodesJson.push_back(std::move(item));
@@ -1062,7 +1843,31 @@ void DeserializeGraphPayload(
         } else if (kind == "RawDevelop") {
             node.kind = NodeKind::RawDevelop;
             node.rawDevelop.settings = DeserializeRawSettings(item.value("rawSettings", nlohmann::json::object()));
-            if (node.title.empty()) node.title = "RAW Develop";
+            node.rawDevelop.scenePrepEnabled = item.value("scenePrepEnabled", node.rawDevelop.scenePrepEnabled);
+            node.rawDevelop.scenePrepSettings = DeserializeRawDetailFusionSettings(item.value("scenePrepSettings", nlohmann::json::object()));
+            node.rawDevelop.integratedToneEnabled = item.value("integratedToneEnabled", true);
+            node.rawDevelop.integratedToneLayerJson = item.value("integratedToneLayer", nlohmann::json::object());
+            node.rawDevelop.subjectImportance =
+                DeserializeDevelopSubjectImportanceMap(
+                    item.value("developSubjectImportance", nlohmann::json::object()));
+            const nlohmann::json autoGuidance = item.value("developAutoGuidance", nlohmann::json::object());
+            node.rawDevelop.autoGuidance.intent = EditorNodeGraph::DevelopAutoIntentFromStableString(
+                autoGuidance.value("autoIntent", std::string("NaturalFinished")));
+            node.rawDevelop.autoGuidance.autoStrength = autoGuidance.value("autoStrength", node.rawDevelop.autoGuidance.autoStrength);
+            node.rawDevelop.autoGuidance.exposureBias = autoGuidance.value("exposureBias", node.rawDevelop.autoGuidance.exposureBias);
+            node.rawDevelop.autoGuidance.dynamicRange = autoGuidance.value("dynamicRange", node.rawDevelop.autoGuidance.dynamicRange);
+            node.rawDevelop.autoGuidance.shadowLift = autoGuidance.value("shadowLift", node.rawDevelop.autoGuidance.shadowLift);
+            node.rawDevelop.autoGuidance.highlightGuard = autoGuidance.value("highlightGuard", node.rawDevelop.autoGuidance.highlightGuard);
+            node.rawDevelop.autoGuidance.highlightCharacter = autoGuidance.value("highlightCharacter", node.rawDevelop.autoGuidance.highlightCharacter);
+            node.rawDevelop.autoGuidance.contrastBias = autoGuidance.value("contrastBias", node.rawDevelop.autoGuidance.contrastBias);
+            node.rawDevelop.autoGuidance.subjectSceneBias = autoGuidance.value("subjectSceneBias", node.rawDevelop.autoGuidance.subjectSceneBias);
+            node.rawDevelop.autoGuidance.moodReadabilityBias = autoGuidance.value("moodReadabilityBias", node.rawDevelop.autoGuidance.moodReadabilityBias);
+            const std::string uiMode = item.value("uiMode", std::string("Auto"));
+            node.rawDevelop.uiMode =
+                (uiMode == "Manual" || uiMode == "Advanced")
+                    ? EditorNodeGraph::RawDevelopUiMode::Manual
+                    : EditorNodeGraph::RawDevelopUiMode::Auto;
+            if (node.title.empty() || node.title == "RAW Develop") node.title = "Develop";
         } else if (kind == "RawDetailAutoMask") {
             node.kind = NodeKind::RawDetailAutoMask;
             node.rawDetailAutoMask.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailAutoMaskSettings", nlohmann::json::object()));
@@ -1070,7 +1875,11 @@ void DeserializeGraphPayload(
         } else if (kind == "RawDetailFusion") {
             node.kind = NodeKind::RawDetailFusion;
             node.rawDetailFusion.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailFusionSettings", nlohmann::json::object()));
-            if (node.title.empty() || node.title == "RAW Detail Fusion") node.title = "Auto Gain";
+            if (node.title.empty() || node.title == "RAW Detail Fusion" || node.title == "Auto Gain") node.title = "Pre-Local Exposure";
+        } else if (kind == "HdrMerge") {
+            node.kind = NodeKind::HdrMerge;
+            node.hdrMerge.settings = DeserializeHdrMergeSettings(item.value("hdrMergeSettings", nlohmann::json::object()));
+            if (node.title.empty()) node.title = "HDR Merge";
         } else if (kind == "Output") {
             node.kind = NodeKind::Output;
             if (node.title.empty()) node.title = "Output";
@@ -1092,12 +1901,33 @@ void DeserializeGraphPayload(
                     (node.maskKind == MaskGeneratorKind::LinearGradient ? "Linear Gradient Mask" :
                     (node.maskKind == MaskGeneratorKind::RadialGradient ? "Radial Gradient Mask" : "Noise Mask"));
             }
+        } else if (kind == "MaskCombine") {
+            node.kind = NodeKind::MaskCombine;
+            node.maskCombineMode = MaskCombineModeFromString(item.value("maskCombineMode", std::string("Intersect")));
+            if (node.title.empty() ||
+                node.title == "Add Mask" ||
+                node.title == "Subtract Mask" ||
+                node.title == "Intersect Mask" ||
+                node.title == "Exclude Mask") {
+                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+            }
+        } else if (kind == "CustomMask") {
+            node.kind = NodeKind::CustomMask;
+            node.customMask = DeserializeCustomMaskPayload(item.value("customMask", nlohmann::json::object()));
+            if (node.title.empty()) node.title = "Custom Mask";
         } else if (kind == "Mix") {
             node.kind = NodeKind::Mix;
             node.mixBlendMode = MixBlendModeFromString(item.value("mixBlendMode", std::string("Normal")));
             node.mixFactor = item.value("mixFactor", 0.5f);
             if (node.title.empty()) {
-                node.title = "Mix";
+                node.title = "Blend Images";
+            }
+        } else if (kind == "DataMath") {
+            node.kind = NodeKind::DataMath;
+            node.dataMathMode = DataMathModeFromString(item.value("dataMathMode", std::string("Clamp")));
+            node.dataMathSettings = DeserializeDataMathSettings(item.value("dataMathSettings", nlohmann::json::object()));
+            if (node.title.empty()) {
+                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
             }
         } else if (kind == "Preview") {
             node.kind = NodeKind::Preview;
@@ -1108,16 +1938,20 @@ void DeserializeGraphPayload(
             node.kind = NodeKind::MaskUtility;
             node.maskUtilityKind = MaskUtilityKindFromString(item.value("maskUtilityKind", std::string("Invert")));
             node.maskUtilitySettings = DeserializeMaskUtilitySettings(item.value("maskUtilitySettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                node.title = node.maskUtilityKind == MaskUtilityKind::Invert ? "Invert Mask" :
-                    (node.maskUtilityKind == MaskUtilityKind::Levels ? "Levels Mask" : "Threshold Mask");
+            if (node.title.empty() ||
+                node.title == "Invert Mask" ||
+                node.title == "Levels Mask" ||
+                node.title == "Threshold Mask") {
+                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
             }
         } else if (kind == "ImageToMask") {
             node.kind = NodeKind::ImageToMask;
             node.imageToMaskKind = ImageToMaskKindFromString(item.value("imageToMaskKind", std::string("Luminance")));
             node.imageToMaskSettings = DeserializeImageToMaskSettings(item.value("imageToMaskSettings", nlohmann::json::object()));
-            if (node.title.empty()) {
-                node.title = "Luminance Mask";
+            if (node.title.empty() ||
+                node.title == "Luminance Mask" ||
+                node.title == "Sampled Range Mask") {
+                EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
             }
         } else if (kind == "ImageGenerator") {
             node.kind = NodeKind::ImageGenerator;

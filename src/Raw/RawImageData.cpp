@@ -44,10 +44,9 @@ const char* WhiteBalanceModeName(WhiteBalanceMode mode) {
 
 const char* DemosaicMethodName(DemosaicMethod method) {
     switch (method) {
-        case DemosaicMethod::Bilinear: return "Fast / Bilinear";
-        case DemosaicMethod::QualityPlaceholder: return "Quality / Edge-Aware";
+        case DemosaicMethod::Bilinear: return "Fast / Bilinear (preview-safe)";
     }
-    return "Fast / Bilinear";
+    return "Fast / Bilinear (preview-safe)";
 }
 
 const char* RawPixelLayoutName(RawPixelLayout layout) {

@@ -44,6 +44,7 @@ struct AssetEntry {
 
     unsigned int thumbnailTex = 0;
     unsigned int fullPreviewTex = 0;
+    bool thumbnailLoadAttempted = false;
 
     Async::TaskState previewTaskState = Async::TaskState::Idle;
     std::uint64_t previewRequestGeneration = 0;

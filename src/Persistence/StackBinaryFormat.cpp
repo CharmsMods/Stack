@@ -1,17 +1,29 @@
 #include "StackBinaryFormat.h"
 
+#include "ThirdParty/stb_image.h"
+#include "ThirdParty/stb_image_write.h"
+
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <unordered_map>
+#include <limits>
 #include <stdexcept>
+#include <unordered_map>
+
+extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
 
 namespace StackBinaryFormat {
 namespace {
 
 constexpr std::array<char, 4> kMagic = { 'M', 'S', 'T', 'K' };
-constexpr std::uint16_t kFormatVersion = 1;
+constexpr std::uint16_t kLegacyFormatVersion = 1;
+constexpr std::uint16_t kFormatVersion = 2;
+constexpr int kDeflateCompressionLevel = 1;
+constexpr std::size_t kCompressionAttemptThreshold = 4 * 1024;
+constexpr double kCompressionKeepRatio = 0.92;
 
 constexpr std::array<char, 4> kMetaSection = { 'M', 'E', 'T', 'A' };
 constexpr std::array<char, 4> kThumbnailSection = { 'T', 'H', 'M', 'B' };
@@ -19,6 +31,11 @@ constexpr std::array<char, 4> kSourceSection = { 'S', 'R', 'C', 'I' };
 constexpr std::array<char, 4> kPipelineSection = { 'P', 'I', 'P', 'E' };
 constexpr std::array<char, 4> kProjectsSection = { 'P', 'R', 'O', 'J' };
 constexpr std::array<char, 4> kAssetsSection = { 'A', 'S', 'S', 'T' };
+
+enum class CompressionCodec : std::uint8_t {
+    None = 0,
+    Deflate = 1
+};
 
 enum class ValueType : std::uint8_t {
     Null = 0,
@@ -47,11 +64,15 @@ std::uint32_t ComputeCRC32(const unsigned char* data, std::size_t length, std::u
 struct SectionData {
     std::array<char, 4> id;
     std::vector<unsigned char> bytes;
+    std::uint64_t uncompressedSize = 0;
+    CompressionCodec compression = CompressionCodec::None;
 };
 
 struct SectionInfo {
     std::uint64_t offset = 0;
-    std::uint64_t size = 0;
+    std::uint64_t storedSize = 0;
+    std::uint64_t uncompressedSize = 0;
+    CompressionCodec compression = CompressionCodec::None;
 };
 
 class ByteWriter {
@@ -128,6 +149,98 @@ private:
 
 std::string SectionKey(const std::array<char, 4>& id) {
     return std::string(id.data(), id.size());
+}
+
+bool IsCompressionCandidate(FileKind kind, const std::array<char, 4>& id, std::size_t byteCount) {
+    if (kind != FileKind::Project || byteCount < kCompressionAttemptThreshold) {
+        return false;
+    }
+
+    return id == kPipelineSection || id == kThumbnailSection || id == kSourceSection;
+}
+
+bool CompressDeflateBytes(const std::vector<unsigned char>& input, std::vector<unsigned char>& output) {
+    output.clear();
+    if (input.empty()) {
+        return true;
+    }
+    if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+
+    int compressedSize = 0;
+    unsigned char* compressedBytes = stbi_zlib_compress(
+        const_cast<unsigned char*>(input.data()),
+        static_cast<int>(input.size()),
+        &compressedSize,
+        kDeflateCompressionLevel);
+
+    if (!compressedBytes || compressedSize <= 0) {
+        if (compressedBytes) {
+            std::free(compressedBytes);
+        }
+        return false;
+    }
+
+    output.assign(compressedBytes, compressedBytes + compressedSize);
+    std::free(compressedBytes);
+    return true;
+}
+
+bool DecompressDeflateBytes(const std::vector<unsigned char>& input, std::size_t expectedSize, std::vector<unsigned char>& output) {
+    output.clear();
+    if (expectedSize == 0) {
+        return input.empty();
+    }
+    if (input.empty()) {
+        return false;
+    }
+    if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        expectedSize > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+
+    int outputSize = 0;
+    char* decompressedBytes = stbi_zlib_decode_malloc(
+        reinterpret_cast<const char*>(input.data()),
+        static_cast<int>(input.size()),
+        &outputSize);
+    if (!decompressedBytes) {
+        return false;
+    }
+
+    const bool validSize = outputSize >= 0 && static_cast<std::size_t>(outputSize) == expectedSize;
+    if (validSize) {
+        output.assign(
+            reinterpret_cast<const unsigned char*>(decompressedBytes),
+            reinterpret_cast<const unsigned char*>(decompressedBytes) + outputSize);
+    }
+    stbi_image_free(decompressedBytes);
+    return validSize;
+}
+
+SectionData MakeSectionData(FileKind kind, const std::array<char, 4>& id, const std::vector<unsigned char>& rawBytes) {
+    SectionData section;
+    section.id = id;
+    section.bytes = rawBytes;
+    section.uncompressedSize = static_cast<std::uint64_t>(rawBytes.size());
+    section.compression = CompressionCodec::None;
+
+    if (!IsCompressionCandidate(kind, id, rawBytes.size())) {
+        return section;
+    }
+
+    std::vector<unsigned char> compressedBytes;
+    if (!CompressDeflateBytes(rawBytes, compressedBytes)) {
+        return section;
+    }
+
+    if (compressedBytes.size() <= static_cast<std::size_t>(static_cast<double>(rawBytes.size()) * kCompressionKeepRatio)) {
+        section.bytes = std::move(compressedBytes);
+        section.compression = CompressionCodec::Deflate;
+    }
+
+    return section;
 }
 
 json MakeBinaryJson(const std::vector<unsigned char>& bytes) {
@@ -311,7 +424,7 @@ bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const 
         sizeof(kFormatVersion) +
         sizeof(kind) +
         sizeof(sectionCount) +
-        sectionCount * (4 + sizeof(std::uint64_t) + sizeof(std::uint64_t));
+        sectionCount * (4 + sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint8_t));
 
     std::uint64_t dataOffset = headerSize;
 
@@ -329,10 +442,14 @@ bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const 
     for (const auto& section : sections) {
         writeAndCrc(section.id.data(), section.id.size());
         const std::uint64_t sectionOffset = dataOffset;
-        const std::uint64_t sectionSize = static_cast<std::uint64_t>(section.bytes.size());
+        const std::uint64_t storedSize = static_cast<std::uint64_t>(section.bytes.size());
+        const std::uint64_t uncompressedSize = section.uncompressedSize;
+        const std::uint8_t compression = static_cast<std::uint8_t>(section.compression);
         writeAndCrc(&sectionOffset, sizeof(sectionOffset));
-        writeAndCrc(&sectionSize, sizeof(sectionSize));
-        dataOffset += sectionSize;
+        writeAndCrc(&storedSize, sizeof(storedSize));
+        writeAndCrc(&uncompressedSize, sizeof(uncompressedSize));
+        writeAndCrc(&compression, sizeof(compression));
+        dataOffset += storedSize;
     }
 
     for (const auto& section : sections) {
@@ -369,7 +486,8 @@ bool ReadSectionTable(
     const std::filesystem::path& path,
     FileKind expectedKind,
     std::ifstream& file,
-    std::unordered_map<std::string, SectionInfo>& sections) {
+    std::unordered_map<std::string, SectionInfo>& sections,
+    bool verifyChecksum = true) {
 
     file.open(path, std::ios::binary);
     if (!file.is_open()) return false;
@@ -388,15 +506,16 @@ bool ReadSectionTable(
     file.read(reinterpret_cast<char*>(&rawKind), sizeof(rawKind));
     file.read(reinterpret_cast<char*>(&sectionCount), sizeof(sectionCount));
 
-    if (!file.good() || version != kFormatVersion || rawKind != static_cast<std::uint16_t>(expectedKind)) {
+    if (!file.good() ||
+        (version != kLegacyFormatVersion && version != kFormatVersion) ||
+        rawKind != static_cast<std::uint16_t>(expectedKind)) {
         return false;
     }
 
     file.seekg(0, std::ios::end);
     const std::uint64_t fileSize = static_cast<std::uint64_t>(file.tellg());
     
-    // Check for CRC32 footer
-    if (fileSize >= 8) {
+    if (verifyChecksum && fileSize >= 8) {
         file.seekg(static_cast<std::streamoff>(fileSize - 8), std::ios::beg);
         std::array<char, 4> footerTag = {};
         file.read(footerTag.data(), footerTag.size());
@@ -433,9 +552,21 @@ bool ReadSectionTable(
         SectionInfo info;
         file.read(id.data(), static_cast<std::streamsize>(id.size()));
         file.read(reinterpret_cast<char*>(&info.offset), sizeof(info.offset));
-        file.read(reinterpret_cast<char*>(&info.size), sizeof(info.size));
+        file.read(reinterpret_cast<char*>(&info.storedSize), sizeof(info.storedSize));
         if (!file.good()) return false;
-        if ((info.offset + info.size) > fileSize) return false;
+
+        if (version >= kFormatVersion) {
+            file.read(reinterpret_cast<char*>(&info.uncompressedSize), sizeof(info.uncompressedSize));
+            std::uint8_t rawCompression = 0;
+            file.read(reinterpret_cast<char*>(&rawCompression), sizeof(rawCompression));
+            if (!file.good()) return false;
+            info.compression = static_cast<CompressionCodec>(rawCompression);
+        } else {
+            info.uncompressedSize = info.storedSize;
+            info.compression = CompressionCodec::None;
+        }
+
+        if ((info.offset + info.storedSize) > fileSize) return false;
         sections[SectionKey(id)] = info;
     }
 
@@ -454,14 +585,25 @@ bool ReadSectionBytes(
         return false;
     }
 
-    bytes.assign(static_cast<std::size_t>(it->second.size), 0);
-    if (!bytes.empty()) {
+    const SectionInfo& info = it->second;
+    std::vector<unsigned char> storedBytes(static_cast<std::size_t>(info.storedSize), 0);
+    if (!storedBytes.empty()) {
         file.seekg(static_cast<std::streamoff>(it->second.offset), std::ios::beg);
-        file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        file.read(reinterpret_cast<char*>(storedBytes.data()), static_cast<std::streamsize>(storedBytes.size()));
         if (!file.good()) return false;
     }
 
-    return true;
+    if (info.compression == CompressionCodec::None) {
+        bytes = std::move(storedBytes);
+        return true;
+    }
+
+    if (info.compression == CompressionCodec::Deflate) {
+        return DecompressDeflateBytes(storedBytes, static_cast<std::size_t>(info.uncompressedSize), bytes);
+    }
+
+    bytes.clear();
+    return false;
 }
 
 json ProjectMetadataToJson(const ProjectMetadata& metadata) {
@@ -556,17 +698,17 @@ bool AssetFromJson(const json& value, AssetDocument& asset) {
 
 bool WriteProjectFile(const std::filesystem::path& path, const ProjectDocument& document) {
     std::vector<SectionData> sections;
-    sections.push_back({ kMetaSection, SerializeJson(ProjectMetadataToJson(document.metadata)) });
-    sections.push_back({ kThumbnailSection, document.thumbnailBytes });
-    sections.push_back({ kSourceSection, document.sourceImageBytes });
-    sections.push_back({ kPipelineSection, SerializeJson(document.pipelineData.is_null() ? json::array() : document.pipelineData) });
+    sections.push_back(MakeSectionData(FileKind::Project, kMetaSection, SerializeJson(ProjectMetadataToJson(document.metadata))));
+    sections.push_back(MakeSectionData(FileKind::Project, kThumbnailSection, document.thumbnailBytes));
+    sections.push_back(MakeSectionData(FileKind::Project, kSourceSection, document.sourceImageBytes));
+    sections.push_back(MakeSectionData(FileKind::Project, kPipelineSection, SerializeJson(document.pipelineData.is_null() ? json::array() : document.pipelineData)));
     return WriteSectionedFile(path, FileKind::Project, sections);
 }
 
 bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& document, const ProjectLoadOptions& options) {
     std::ifstream file;
     std::unordered_map<std::string, SectionInfo> sections;
-    if (!ReadSectionTable(path, FileKind::Project, file, sections)) {
+    if (!ReadSectionTable(path, FileKind::Project, file, sections, options.verifyChecksum)) {
         return false;
     }
 
@@ -622,9 +764,9 @@ bool WriteLibraryBundle(const std::filesystem::path& path, const LibraryBundleDo
     }
 
     std::vector<SectionData> sections;
-    sections.push_back({ kMetaSection, SerializeJson(meta) });
-    sections.push_back({ kProjectsSection, SerializeJson(projects) });
-    sections.push_back({ kAssetsSection, SerializeJson(assets) });
+    sections.push_back(MakeSectionData(FileKind::LibraryBundle, kMetaSection, SerializeJson(meta)));
+    sections.push_back(MakeSectionData(FileKind::LibraryBundle, kProjectsSection, SerializeJson(projects)));
+    sections.push_back(MakeSectionData(FileKind::LibraryBundle, kAssetsSection, SerializeJson(assets)));
     return WriteSectionedFile(path, FileKind::LibraryBundle, sections);
 }
 

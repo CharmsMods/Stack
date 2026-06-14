@@ -4,13 +4,382 @@
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
 #include "Utils/FileDialogs.h"
+#include "Utils/ImGuiExtras.h"
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 #include <string>
 
 using namespace EditorViewportHelpers;
+
+namespace {
+
+float SmoothStep01(float value) {
+    const float t = std::clamp(value, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+ImVec2 LerpImVec2(const ImVec2& a, const ImVec2& b, float t) {
+    return ImVec2(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t);
+}
+
+ImU32 ApplyAlpha(ImU32 color, float alpha) {
+    ImVec4 rgba = ImGui::ColorConvertU32ToFloat4(color);
+    rgba.w *= std::clamp(alpha, 0.0f, 1.0f);
+    return ImGui::ColorConvertFloat4ToU32(rgba);
+}
+
+ImU32 DevelopSubjectModeColor(EditorNodeGraph::DevelopSubjectImportanceMode mode, float alpha) {
+    const int a = static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f));
+    switch (mode) {
+        case EditorNodeGraph::DevelopSubjectImportanceMode::Reveal:
+            return IM_COL32(62, 186, 232, a);
+        case EditorNodeGraph::DevelopSubjectImportanceMode::Protect:
+            return IM_COL32(87, 210, 128, a);
+        case EditorNodeGraph::DevelopSubjectImportanceMode::PreserveMood:
+            return IM_COL32(178, 126, 232, a);
+        case EditorNodeGraph::DevelopSubjectImportanceMode::Ignore:
+            return IM_COL32(158, 164, 172, a);
+        case EditorNodeGraph::DevelopSubjectImportanceMode::Important:
+        default:
+            return IM_COL32(245, 204, 75, a);
+    }
+}
+
+ImU32 DevelopSubjectStrokeColor(
+    EditorNodeGraph::DevelopSubjectImportanceMode mode,
+    bool subtract,
+    float alpha) {
+    if (subtract) {
+        const int a = static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f));
+        return IM_COL32(48, 54, 64, a);
+    }
+    return DevelopSubjectModeColor(mode, alpha);
+}
+
+void BuildEllipsePoints(ImVec2 center, float radiusX, float radiusY, ImVec2* points, int pointCount) {
+    constexpr float kTwoPi = 6.28318530718f;
+    for (int i = 0; i < pointCount; ++i) {
+        const float angle = (static_cast<float>(i) / static_cast<float>(pointCount)) * kTwoPi;
+        points[i] = ImVec2(
+            center.x + std::cos(angle) * radiusX,
+            center.y + std::sin(angle) * radiusY);
+    }
+}
+
+void DrawDevelopSubjectRegionOverlay(
+    ImDrawList* drawList,
+    const EditorModule::DevelopSubjectViewportRegion& region,
+    int activeRegionId,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax,
+    float overlayOpacity) {
+    const float imageW = std::max(1.0f, imageMax.x - imageMin.x);
+    const float imageH = std::max(1.0f, imageMax.y - imageMin.y);
+    const ImVec2 center(
+        imageMin.x + region.centerX * imageW,
+        imageMin.y + region.centerY * imageH);
+    const float radiusX = std::max(2.0f, region.radiusX * imageW);
+    const float radiusY = std::max(2.0f, region.radiusY * imageH);
+    const bool active = region.id == activeRegionId;
+    const float enabledAlpha = region.enabled ? 1.0f : 0.38f;
+    const float strengthAlpha = std::clamp(0.35f + region.strength * 0.65f, 0.2f, 1.0f);
+    const float fillAlpha = overlayOpacity * enabledAlpha * strengthAlpha * (active ? 0.34f : 0.22f);
+    const float outlineAlpha = overlayOpacity * enabledAlpha * (active ? 1.0f : 0.72f);
+
+    constexpr int kPointCount = 72;
+    ImVec2 points[kPointCount];
+    BuildEllipsePoints(center, radiusX, radiusY, points, kPointCount);
+    drawList->AddConvexPolyFilled(points, kPointCount, DevelopSubjectModeColor(region.mode, fillAlpha));
+    drawList->AddPolyline(
+        points,
+        kPointCount,
+        DevelopSubjectModeColor(region.mode, outlineAlpha),
+        ImDrawFlags_Closed,
+        active ? 2.4f : 1.5f);
+
+    const float featherAlpha = overlayOpacity * enabledAlpha * 0.34f;
+    if (region.feather > 0.02f) {
+        const float featherScale = 1.0f + region.feather * 0.35f;
+        ImVec2 featherPoints[kPointCount];
+        BuildEllipsePoints(center, radiusX * featherScale, radiusY * featherScale, featherPoints, kPointCount);
+        drawList->AddPolyline(
+            featherPoints,
+            kPointCount,
+            DevelopSubjectModeColor(region.mode, featherAlpha),
+            ImDrawFlags_Closed,
+            1.0f);
+    }
+
+    if (active) {
+        drawList->AddCircleFilled(center, 4.0f, IM_COL32(8, 12, 16, 210), 16);
+        drawList->AddCircleFilled(center, 2.5f, DevelopSubjectModeColor(region.mode, overlayOpacity), 16);
+        drawList->AddCircleFilled(
+            ImVec2(center.x + radiusX, center.y),
+            3.5f,
+            IM_COL32(250, 252, 255, static_cast<int>(210.0f * overlayOpacity)),
+            12);
+    }
+}
+
+ImVec2 DevelopSubjectPointToScreen(
+    const EditorModule::DevelopSubjectViewportStrokePoint& point,
+    const ImVec2& imageMin,
+    float imageW,
+    float imageH) {
+    return ImVec2(
+        imageMin.x + point.x * imageW,
+        imageMin.y + point.y * imageH);
+}
+
+void DrawDevelopSubjectStrokeOverlay(
+    ImDrawList* drawList,
+    const EditorModule::DevelopSubjectViewportStroke& stroke,
+    int activeStrokeId,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax,
+    float overlayOpacity) {
+    if (stroke.points.empty()) {
+        return;
+    }
+
+    const float imageW = std::max(1.0f, imageMax.x - imageMin.x);
+    const float imageH = std::max(1.0f, imageMax.y - imageMin.y);
+    const float radiusPx = std::max(2.5f, stroke.radius * std::min(imageW, imageH));
+    const float enabledAlpha = stroke.enabled ? 1.0f : 0.38f;
+    const float strengthAlpha = std::clamp(0.28f + stroke.strength * 0.72f, 0.15f, 1.0f);
+    const float fillAlpha = overlayOpacity * enabledAlpha * strengthAlpha * (stroke.subtract ? 0.34f : 0.30f);
+    const float outlineAlpha = overlayOpacity * enabledAlpha * (stroke.id == activeStrokeId ? 0.90f : 0.50f);
+    const ImU32 fillColor = DevelopSubjectStrokeColor(stroke.mode, stroke.subtract, fillAlpha);
+    const ImU32 outlineColor =
+        stroke.subtract
+            ? IM_COL32(236, 242, 248, static_cast<int>(160.0f * outlineAlpha))
+            : DevelopSubjectModeColor(stroke.mode, outlineAlpha);
+    const ImU32 shadowColor = IM_COL32(5, 8, 12, static_cast<int>(120.0f * overlayOpacity * enabledAlpha));
+
+    if (stroke.points.size() == 1) {
+        const ImVec2 p = DevelopSubjectPointToScreen(stroke.points.front(), imageMin, imageW, imageH);
+        drawList->AddCircleFilled(p, radiusPx + 1.5f, shadowColor, 32);
+        drawList->AddCircleFilled(p, radiusPx, fillColor, 32);
+        drawList->AddCircle(p, radiusPx, outlineColor, 32, stroke.id == activeStrokeId ? 2.0f : 1.0f);
+        return;
+    }
+
+    const float strokeThickness = std::max(2.0f, radiusPx * 2.0f);
+    for (std::size_t i = 1; i < stroke.points.size(); ++i) {
+        const ImVec2 a = DevelopSubjectPointToScreen(stroke.points[i - 1], imageMin, imageW, imageH);
+        const ImVec2 b = DevelopSubjectPointToScreen(stroke.points[i], imageMin, imageW, imageH);
+        drawList->AddLine(a, b, shadowColor, strokeThickness + 3.0f);
+        drawList->AddLine(a, b, fillColor, strokeThickness);
+    }
+
+    const ImVec2 first = DevelopSubjectPointToScreen(stroke.points.front(), imageMin, imageW, imageH);
+    const ImVec2 last = DevelopSubjectPointToScreen(stroke.points.back(), imageMin, imageW, imageH);
+    drawList->AddCircleFilled(first, radiusPx, fillColor, 32);
+    drawList->AddCircleFilled(last, radiusPx, fillColor, 32);
+
+    if (stroke.feather > 0.02f || stroke.id == activeStrokeId) {
+        const float featherRadius = radiusPx * (1.0f + stroke.feather * 0.55f);
+        for (std::size_t i = 1; i < stroke.points.size(); ++i) {
+            const ImVec2 a = DevelopSubjectPointToScreen(stroke.points[i - 1], imageMin, imageW, imageH);
+            const ImVec2 b = DevelopSubjectPointToScreen(stroke.points[i], imageMin, imageW, imageH);
+            drawList->AddLine(a, b, outlineColor, std::max(1.0f, featherRadius * 2.0f));
+        }
+    }
+}
+
+ImU32 DevelopSubjectMapCellColor(
+    const EditorModule::DevelopSubjectViewportMapCell& cell,
+    float opacity) {
+    const float positive = std::max({
+        cell.importance,
+        cell.reveal,
+        cell.protect,
+        cell.preserveMood });
+    const float lowPriority = std::clamp(cell.lowPriority, 0.0f, 1.0f);
+    const float strength = std::clamp(std::max(positive, lowPriority), 0.0f, 1.0f);
+    if (strength <= 0.001f) {
+        return IM_COL32(0, 0, 0, 0);
+    }
+
+    EditorNodeGraph::DevelopSubjectImportanceMode mode =
+        EditorNodeGraph::DevelopSubjectImportanceMode::Important;
+    if (lowPriority > positive * 0.92f) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::Ignore;
+    } else if (cell.protect >= cell.reveal &&
+               cell.protect >= cell.preserveMood &&
+               cell.protect >= cell.importance) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::Protect;
+    } else if (cell.reveal >= cell.preserveMood && cell.reveal >= cell.importance) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::Reveal;
+    } else if (cell.preserveMood >= cell.importance) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::PreserveMood;
+    }
+    return DevelopSubjectModeColor(mode, opacity * (0.08f + strength * 0.52f));
+}
+
+ImU32 DevelopSubjectRefinedMapCellColor(
+    const EditorModule::DevelopSubjectViewportMapCell& cell,
+    float opacity) {
+    const float priority = std::clamp(cell.importance, 0.0f, 1.0f);
+    const float confidence = std::clamp(cell.confidence, 0.0f, 1.0f);
+    const float lowPriority = std::clamp(cell.lowPriority, 0.0f, 1.0f);
+    const float strength = std::max({ priority, confidence, lowPriority });
+    if (strength <= 0.001f) {
+        return IM_COL32(0, 0, 0, 0);
+    }
+
+    EditorNodeGraph::DevelopSubjectImportanceMode mode =
+        EditorNodeGraph::DevelopSubjectImportanceMode::Important;
+    if (lowPriority > priority * 0.88f && lowPriority > confidence * 0.55f) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::Ignore;
+    } else if (cell.protect >= cell.reveal &&
+               cell.protect >= cell.preserveMood &&
+               cell.protect >= priority) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::Protect;
+    } else if (cell.reveal >= cell.preserveMood && cell.reveal >= priority) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::Reveal;
+    } else if (cell.preserveMood >= priority) {
+        mode = EditorNodeGraph::DevelopSubjectImportanceMode::PreserveMood;
+    }
+    return DevelopSubjectModeColor(mode, opacity * (0.10f + strength * 0.58f));
+}
+
+void DrawDevelopSubjectInterpretedMapOverlay(
+    ImDrawList* drawList,
+    const EditorModule::DevelopSubjectViewportState& state,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax) {
+    if (!state.interpretedMapActive ||
+        state.interpretedMapGridWidth <= 0 ||
+        state.interpretedMapGridHeight <= 0 ||
+        state.interpretedMapCells.empty()) {
+        return;
+    }
+
+    const float imageW = std::max(1.0f, imageMax.x - imageMin.x);
+    const float imageH = std::max(1.0f, imageMax.y - imageMin.y);
+    const float cellW = imageW / static_cast<float>(state.interpretedMapGridWidth);
+    const float cellH = imageH / static_cast<float>(state.interpretedMapGridHeight);
+    const float opacity = std::clamp(state.interpretedMapOpacity, 0.0f, 1.0f);
+    const ImU32 gridColor = IM_COL32(236, 244, 250, static_cast<int>(42.0f * opacity));
+
+    for (int y = 0; y < state.interpretedMapGridHeight; ++y) {
+        for (int x = 0; x < state.interpretedMapGridWidth; ++x) {
+            const std::size_t index =
+                static_cast<std::size_t>(y * state.interpretedMapGridWidth + x);
+            if (index >= state.interpretedMapCells.size()) {
+                continue;
+            }
+
+            const EditorModule::DevelopSubjectViewportMapCell& cell =
+                state.interpretedMapCells[index];
+            const ImVec2 cellMin(
+                imageMin.x + static_cast<float>(x) * cellW + 1.0f,
+                imageMin.y + static_cast<float>(y) * cellH + 1.0f);
+            const ImVec2 cellMax(
+                imageMin.x + static_cast<float>(x + 1) * cellW - 1.0f,
+                imageMin.y + static_cast<float>(y + 1) * cellH - 1.0f);
+            const ImU32 fill = DevelopSubjectMapCellColor(cell, opacity);
+            if ((fill & IM_COL32_A_MASK) != 0) {
+                drawList->AddRectFilled(cellMin, cellMax, fill, 3.0f);
+                drawList->AddRect(cellMin, cellMax, gridColor, 3.0f, 0, 1.0f);
+            }
+        }
+    }
+}
+
+void DrawDevelopSubjectRefinedMapOverlay(
+    ImDrawList* drawList,
+    const EditorModule::DevelopSubjectViewportState& state,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax) {
+    if (!state.refinedMapActive ||
+        state.refinedMapGridWidth <= 0 ||
+        state.refinedMapGridHeight <= 0 ||
+        state.refinedMapCells.empty()) {
+        return;
+    }
+
+    const float imageW = std::max(1.0f, imageMax.x - imageMin.x);
+    const float imageH = std::max(1.0f, imageMax.y - imageMin.y);
+    const float cellW = imageW / static_cast<float>(state.refinedMapGridWidth);
+    const float cellH = imageH / static_cast<float>(state.refinedMapGridHeight);
+    const float opacity = std::clamp(state.refinedMapOpacity, 0.0f, 1.0f);
+    const ImU32 gridColor = IM_COL32(252, 246, 230, static_cast<int>(36.0f * opacity));
+
+    for (int y = 0; y < state.refinedMapGridHeight; ++y) {
+        for (int x = 0; x < state.refinedMapGridWidth; ++x) {
+            const std::size_t index =
+                static_cast<std::size_t>(y * state.refinedMapGridWidth + x);
+            if (index >= state.refinedMapCells.size()) {
+                continue;
+            }
+
+            const EditorModule::DevelopSubjectViewportMapCell& cell =
+                state.refinedMapCells[index];
+            const ImVec2 cellMin(
+                imageMin.x + static_cast<float>(x) * cellW + 1.5f,
+                imageMin.y + static_cast<float>(y) * cellH + 1.5f);
+            const ImVec2 cellMax(
+                imageMin.x + static_cast<float>(x + 1) * cellW - 1.5f,
+                imageMin.y + static_cast<float>(y + 1) * cellH - 1.5f);
+            const ImU32 fill = DevelopSubjectRefinedMapCellColor(cell, opacity);
+            if ((fill & IM_COL32_A_MASK) == 0) {
+                continue;
+            }
+            drawList->AddRectFilled(cellMin, cellMax, fill, 2.0f);
+            const float boundaryAlpha =
+                std::clamp(cell.boundaryHint, 0.0f, 1.0f) * 92.0f * opacity;
+            if (boundaryAlpha > 2.0f) {
+                drawList->AddRect(
+                    cellMin,
+                    cellMax,
+                    IM_COL32(255, 248, 220, static_cast<int>(boundaryAlpha)),
+                    2.0f,
+                    0,
+                    1.4f);
+            } else {
+                drawList->AddRect(cellMin, cellMax, gridColor, 2.0f, 0, 0.8f);
+            }
+        }
+    }
+}
+
+void DrawDevelopSubjectBrushCursor(
+    ImDrawList* drawList,
+    const EditorModule::DevelopSubjectViewportState& state,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax,
+    float u,
+    float v) {
+    const float imageW = std::max(1.0f, imageMax.x - imageMin.x);
+    const float imageH = std::max(1.0f, imageMax.y - imageMin.y);
+    const ImVec2 center(
+        imageMin.x + std::clamp(u, 0.0f, 1.0f) * imageW,
+        imageMin.y + std::clamp(v, 0.0f, 1.0f) * imageH);
+    const float radiusPx = std::max(2.5f, state.brushRadius * std::min(imageW, imageH));
+    const ImU32 color = DevelopSubjectStrokeColor(
+        state.brushMode,
+        state.brushSubtract,
+        std::clamp(state.overlayOpacity * 0.92f, 0.10f, 1.0f));
+    drawList->AddCircle(center, radiusPx, IM_COL32(8, 12, 16, 210), 48, 2.7f);
+    drawList->AddCircle(center, radiusPx, color, 48, 1.7f);
+    if (state.brushFeather > 0.02f) {
+        drawList->AddCircle(
+            center,
+            radiusPx * (1.0f + state.brushFeather * 0.55f),
+            DevelopSubjectStrokeColor(state.brushMode, state.brushSubtract, state.overlayOpacity * 0.38f),
+            48,
+            1.0f);
+    }
+}
+
+} // namespace
 
 EditorViewport::EditorViewport() 
     : m_ZoomLevel(1.0f), m_PanX(0.0f), m_PanY(0.0f), m_IsLocked(false) 
@@ -25,6 +394,14 @@ void EditorViewport::ResetSinglePreviewState() {
     m_PanX = 0.0f;
     m_PanY = 0.0f;
     m_IsLocked = false;
+    m_ShowStaticSingleCompare = false;
+    m_StaticSingleCompareBlend = 0.0f;
+    m_StaticCompareRectsInitialized = false;
+    m_ActiveDevelopSubjectHandle = DevelopSubjectRegionHandle::None;
+    m_ActiveDevelopSubjectNodeId = -1;
+    m_ActiveDevelopSubjectRegionId = -1;
+    m_ActiveDevelopSubjectStrokeId = -1;
+    m_DevelopSubjectBrushStrokeActive = false;
 }
 
 void EditorViewport::Initialize() {
@@ -42,12 +419,14 @@ void EditorViewport::Initialize() {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void EditorViewport::Render(EditorModule* editor) {
+void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
+    const float viewportRevealAlpha = std::clamp(revealAlpha, 0.0f, 1.0f);
     auto& pipeline = editor->GetPipeline();
     const bool compositeMode = editor->IsCompositeViewportMode();
     const bool inputBlocked = false;
 
     if (compositeMode) {
+        editor->ClearToneCurveViewportProbe();
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const ImVec2 screenPos = ImGui::GetCursorScreenPos();
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -60,7 +439,7 @@ void EditorViewport::Render(EditorModule* editor) {
         const ImVec2 canvasMin(screenPos.x + margin, screenPos.y + margin);
         const ImVec2 canvasMax(screenPos.x + avail.x - margin, screenPos.y + avail.y - margin);
         const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
-        drawList->AddRectFilled(canvasMin, canvasMax, workspaceFill, kCanvasRounding);
+        drawList->AddRectFilled(canvasMin, canvasMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kCanvasRounding);
 
         const float checkerScale = 24.0f;
         const float canvasW = std::max(1.0f, avail.x - margin * 2.0f);
@@ -73,7 +452,7 @@ void EditorViewport::Render(EditorModule* editor) {
             canvasMax,
             ImVec2(0.0f, 0.0f),
             ImVec2(tilesX, tilesY),
-            IM_COL32(255, 255, 255, 105),
+            IM_COL32(255, 255, 255, static_cast<int>(105.0f * viewportRevealAlpha)),
             kCanvasRounding);
 
         ImGui::InvisibleButton("CompositeCanvasSurface", avail);
@@ -137,7 +516,7 @@ void EditorViewport::Render(EditorModule* editor) {
             if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
                 editor->SetCompositeResizeMode(EditorModule::CompositeResizeMode::Stretch);
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+            if (!ImGuiExtras::IsSliderWheelModifierActive() && ImGui::IsKeyPressed(ImGuiKey_W, false)) {
                 if (editor->GetCompositeResizeMode() == EditorModule::CompositeResizeMode::Scale) {
                     editor->ToggleCompositeScaleOriginMode();
                 } else {
@@ -1020,6 +1399,7 @@ void EditorViewport::Render(EditorModule* editor) {
     const bool outputConnected = editor->GetNodeGraph().IsOutputConnected();
     const bool hasOutputTexture = pipeline.GetOutputTexture() != 0;
     if (!outputConnected || !hasOutputTexture) {
+        editor->ClearToneCurveViewportProbe();
         const char* emptyMessage = nullptr;
         if (editor->IsEditorRenderBusy()) {
             emptyMessage = "Rendering editor output...";
@@ -1064,13 +1444,35 @@ void EditorViewport::Render(EditorModule* editor) {
     // ── Rendering Logic ──────────────────────────────────────────────────────
     
     unsigned int outputTex = pipeline.GetOutputTexture();
+    unsigned int sourceTex = pipeline.GetCompareSourceTexture();
     int imgW = pipeline.GetCanvasWidth();
     int imgH = pipeline.GetCanvasHeight();
+    const bool singleOutputMode = editor->GetViewportMode() == EditorModule::ViewportMode::SingleOutputPreview;
+    EditorModule::DevelopSubjectViewportState developSubjectState;
+    const bool hasDevelopSubjectOverlay =
+        singleOutputMode && editor->GetDevelopSubjectImportanceViewportState(developSubjectState);
+    const bool canStaticCompare = singleOutputMode && sourceTex != 0 && sourceTex != outputTex;
+    const bool viewportFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (!canStaticCompare || !singleOutputMode) {
+        m_ShowStaticSingleCompare = false;
+    }
+    if (!canStaticCompare) {
+        m_StaticSingleCompareBlend = 0.0f;
+        m_StaticCompareRectsInitialized = false;
+    }
+    if (!inputBlocked &&
+        canStaticCompare &&
+        editor->CanConsumeEditorCommandKeys() &&
+        (isHovered || viewportFocused) &&
+        ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
+        m_ShowStaticSingleCompare = !m_ShowStaticSingleCompare;
+        editor->SetHoverFade(0.0f);
+    }
 
     // Base scale to fit screen
     float scaleX = avail.x / (float)imgW;
     float scaleY = avail.y / (float)imgH;
-    float baseScale = std::min(scaleX, scaleY) * 0.84f; // Leave generous room so the image feels staged, not boxed in
+    float baseScale = std::min(scaleX, scaleY) * 0.94f; // Use more of the pane so detail holds up better before zooming
 
     float finalScale = baseScale * m_ZoomLevel;
     float dispW = (float)imgW * finalScale;
@@ -1093,49 +1495,193 @@ void EditorViewport::Render(EditorModule* editor) {
 
     const ImVec2 contentCursor = ImGui::GetCursorPos();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    float offsetX = (avail.x - dispW) * 0.5f + m_PanX;
+    float offsetY = (avail.y - dispH) * 0.5f + m_PanY;
+    const ImVec2 singleImageMin(contentScreen.x + offsetX, contentScreen.y + offsetY);
+    const ImVec2 singleImageMax(singleImageMin.x + dispW, singleImageMin.y + dispH);
+
+    if (canStaticCompare) {
+        const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+        const float blendTarget = m_ShowStaticSingleCompare ? 1.0f : 0.0f;
+        const float blendT = 1.0f - std::exp(-dt / 0.11f);
+        m_StaticSingleCompareBlend += (blendTarget - m_StaticSingleCompareBlend) * blendT;
+        if (!m_ShowStaticSingleCompare && m_StaticSingleCompareBlend < 0.001f) {
+            m_StaticSingleCompareBlend = 0.0f;
+            m_StaticCompareRectsInitialized = false;
+        }
+    }
+
+    if (canStaticCompare && (m_ShowStaticSingleCompare || m_StaticSingleCompareBlend > 0.001f)) {
+        editor->SetHoverFade(0.0f);
+        ImGui::InvisibleButton("StaticSingleCompareSurface", avail);
+
+        constexpr float kImageRounding = 18.0f;
+        const float outerMargin = 8.0f;
+        const float gap = 14.0f;
+        const float drawAvailW = std::max(1.0f, avail.x - outerMargin * 2.0f);
+        const float drawAvailH = std::max(1.0f, avail.y - outerMargin * 2.0f);
+        auto fitArea = [&](float slotW, float slotH) {
+            const float scale = std::min(slotW / static_cast<float>(imgW), slotH / static_cast<float>(imgH));
+            const float w = static_cast<float>(imgW) * scale;
+            const float h = static_cast<float>(imgH) * scale;
+            return w * h;
+        };
+        const float stackedSlotH = std::max(1.0f, (drawAvailH - gap) * 0.5f);
+        const float sideSlotW = std::max(1.0f, (drawAvailW - gap) * 0.5f);
+        const float stackedArea = fitArea(drawAvailW, stackedSlotH);
+        const float sideArea = fitArea(sideSlotW, drawAvailH);
+        const bool stacked = std::abs(stackedArea - sideArea) < 1.0f
+            ? imgW >= imgH
+            : stackedArea > sideArea;
+
+        const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
+        const float uInset = imgW > 1 ? (0.5f / static_cast<float>(imgW)) : 0.0f;
+        const float vInset = imgH > 1 ? (0.5f / static_cast<float>(imgH)) : 0.0f;
+        auto fitImageRect = [&](ImVec2 slotMin, ImVec2 slotMax, ImVec2& outMin, ImVec2& outMax) {
+            const float slotW = std::max(1.0f, slotMax.x - slotMin.x);
+            const float slotH = std::max(1.0f, slotMax.y - slotMin.y);
+            const float scale = std::min(slotW / static_cast<float>(imgW), slotH / static_cast<float>(imgH)) * 0.98f;
+            const float imageW = static_cast<float>(imgW) * scale;
+            const float imageH = static_cast<float>(imgH) * scale;
+            outMin = ImVec2(slotMin.x + (slotW - imageW) * 0.5f, slotMin.y + (slotH - imageH) * 0.5f);
+            outMax = ImVec2(outMin.x + imageW, outMin.y + imageH);
+        };
+        auto drawAnimatedImage = [&](unsigned int texture, ImVec2 min, ImVec2 max, float alpha) {
+            alpha *= viewportRevealAlpha;
+            if (alpha <= 0.001f) {
+                return;
+            }
+            const float imageW = std::max(1.0f, max.x - min.x);
+            const float imageH = std::max(1.0f, max.y - min.y);
+            const float tilesX = std::max(1.0f, imageW / 16.0f);
+            const float tilesY = std::max(1.0f, imageH / 16.0f);
+            drawList->AddRectFilled(min, max, ApplyAlpha(workspaceFill, alpha), kImageRounding);
+            drawList->AddImageRounded(
+                (ImTextureID)(intptr_t)m_CheckerTex,
+                min,
+                max,
+                ImVec2(0.0f, 0.0f),
+                ImVec2(tilesX, tilesY),
+                IM_COL32(255, 255, 255, static_cast<int>(170.0f * std::clamp(alpha, 0.0f, 1.0f))),
+                kImageRounding);
+            drawList->AddImageRounded(
+                (ImTextureID)(intptr_t)texture,
+                min,
+                max,
+                ImVec2(uInset, 1.0f - vInset),
+                ImVec2(1.0f - uInset, vInset),
+                IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f))),
+                kImageRounding);
+        };
+
+        const ImVec2 min(contentScreen.x + outerMargin, contentScreen.y + outerMargin);
+        const ImVec2 max(contentScreen.x + avail.x - outerMargin, contentScreen.y + avail.y - outerMargin);
+        ImVec2 outputTargetMin = singleImageMin;
+        ImVec2 outputTargetMax = singleImageMax;
+        ImVec2 sourceTargetMin = singleImageMin;
+        ImVec2 sourceTargetMax = singleImageMax;
+
+        if (stacked) {
+            const float midY = min.y + (max.y - min.y - gap) * 0.5f;
+            fitImageRect(min, ImVec2(max.x, midY), outputTargetMin, outputTargetMax);
+            fitImageRect(ImVec2(min.x, midY + gap), max, sourceTargetMin, sourceTargetMax);
+        } else {
+            const float midX = min.x + (max.x - min.x - gap) * 0.5f;
+            fitImageRect(min, ImVec2(midX, max.y), outputTargetMin, outputTargetMax);
+            fitImageRect(ImVec2(midX + gap, min.y), max, sourceTargetMin, sourceTargetMax);
+        }
+        if (!m_ShowStaticSingleCompare) {
+            outputTargetMin = singleImageMin;
+            outputTargetMax = singleImageMax;
+            sourceTargetMin = singleImageMin;
+            sourceTargetMax = singleImageMax;
+        }
+
+        if (!m_StaticCompareRectsInitialized) {
+            m_StaticCompareOutputMin = singleImageMin;
+            m_StaticCompareOutputMax = singleImageMax;
+            m_StaticCompareSourceMin = singleImageMin;
+            m_StaticCompareSourceMax = singleImageMax;
+            m_StaticCompareRectsInitialized = true;
+        }
+
+        const float rectT = 1.0f - std::exp(-std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f) / 0.16f);
+        m_StaticCompareOutputMin = LerpImVec2(m_StaticCompareOutputMin, outputTargetMin, rectT);
+        m_StaticCompareOutputMax = LerpImVec2(m_StaticCompareOutputMax, outputTargetMax, rectT);
+        m_StaticCompareSourceMin = LerpImVec2(m_StaticCompareSourceMin, sourceTargetMin, rectT);
+        m_StaticCompareSourceMax = LerpImVec2(m_StaticCompareSourceMax, sourceTargetMax, rectT);
+
+        const float sourceAlpha = SmoothStep01(m_StaticSingleCompareBlend);
+        drawAnimatedImage(sourceTex, m_StaticCompareSourceMin, m_StaticCompareSourceMax, sourceAlpha);
+        drawAnimatedImage(outputTex, m_StaticCompareOutputMin, m_StaticCompareOutputMax, 1.0f);
+        return;
+    }
+
     const bool showHud = m_IsLocked || editor->IsEditorRenderBusy() || editor->IsAutoGainMaskPreviewActive();
     if (showHud) {
         const ImVec2 hudPos = ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f);
         if (m_IsLocked) {
-            drawList->AddText(hudPos, IM_COL32(255, 150, 40, 255), "[ ZOOM LOCKED ] - Press 'L' to unlock");
+            drawList->AddText(hudPos, ApplyAlpha(IM_COL32(255, 150, 40, 255), viewportRevealAlpha), "[ ZOOM LOCKED ] - Press 'L' to unlock");
         }
         if (editor->IsEditorRenderBusy()) {
             const float busyOffsetY = m_IsLocked ? 22.0f : 0.0f;
             drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f + busyOffsetY),
-                              IM_COL32(190, 195, 205, 230),
+                              ApplyAlpha(IM_COL32(190, 195, 205, 230), viewportRevealAlpha),
                               "Rendering...");
         }
         if (editor->IsAutoGainMaskPreviewActive()) {
             const float maskOffsetY = (m_IsLocked ? 22.0f : 0.0f) + (editor->IsEditorRenderBusy() ? 22.0f : 0.0f);
             drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f + maskOffsetY),
-                              IM_COL32(180, 215, 255, 235),
-                              "Auto Gain mask preview - click image to return");
+                              ApplyAlpha(IM_COL32(180, 215, 255, 235), viewportRevealAlpha),
+                              "Pre-Local Exposure preview - click image to return");
         }
     }
-
-    // Centering calculations
-    float offsetX = (avail.x - dispW) * 0.5f + m_PanX;
-    float offsetY = (avail.y - dispH) * 0.5f + m_PanY;
 
     ImVec2 startCursorPos = ImVec2(contentCursor.x + offsetX, contentCursor.y + offsetY);
     ImGui::SetCursorPos(startCursorPos);
     
     ImVec2 drawScreenPos = ImGui::GetCursorScreenPos();
+    float imgMouseX = mousePos.x - drawScreenPos.x;
+    float imgMouseY = mousePos.y - drawScreenPos.y;
+    const bool overImage = (imgMouseX >= 0 && imgMouseX <= dispW && imgMouseY >= 0 && imgMouseY <= dispH);
+    const float clampedImageU = dispW > 0.0f ? std::clamp(imgMouseX / dispW, 0.0f, 1.0f) : 0.0f;
+    const float clampedImageV = dispH > 0.0f ? std::clamp(imgMouseY / dispH, 0.0f, 1.0f) : 0.0f;
+    const float imageU = overImage ? clampedImageU : 0.0f;
+    const float imageV = overImage ? clampedImageV : 0.0f;
+    const bool toneCurveProbeActive = editor->HasFocusedToneCurveViewportInteraction() || editor->IsToneCurveTargeting();
+
+    if (toneCurveProbeActive && overImage && isHovered && !m_IsLocked && !editor->IsPickingColor()) {
+        editor->UpdateToneCurveViewportProbe(imageU, imageV);
+    } else if (!editor->IsToneCurveTargeting()) {
+        editor->ClearToneCurveViewportProbe();
+    }
+
+    if (editor->IsToneCurveTargeting()) {
+        if (overImage && isHovered && !m_IsLocked) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                editor->BeginToneCurveViewportTargetDrag(imageU, imageV);
+            }
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const float deltaCurveY = dispH > 0.0f ? (-ImGui::GetIO().MouseDelta.y / dispH) : 0.0f;
+                if (deltaCurveY != 0.0f) {
+                    editor->UpdateToneCurveViewportTargetDrag(deltaCurveY);
+                }
+            } else {
+                editor->EndToneCurveViewportTargetDrag();
+            }
+        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            editor->EndToneCurveViewportTargetDrag();
+        }
+    }
 
     // ── Handle Color Picking ─────────────────────────────────────────────────
     if (editor->IsPickingColor() && isHovered && !m_IsLocked) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
-        // Calculate pixel under cursor using screen-space image origin
-        float imgMouseX = mousePos.x - drawScreenPos.x;
-        float imgMouseY = mousePos.y - drawScreenPos.y;
-        bool overImage = (imgMouseX >= 0 && imgMouseX <= dispW && imgMouseY >= 0 && imgMouseY <= dispH);
-
         if (overImage) {
-            float u = imgMouseX / dispW;
-            float v = imgMouseY / dispH;
-            int px = std::clamp((int)(u * imgW), 0, imgW - 1);
-            int py = std::clamp((int)(v * imgH), 0, imgH - 1);
+            int px = std::clamp((int)(imageU * imgW), 0, imgW - 1);
+            int py = std::clamp((int)(imageV * imgH), 0, imgH - 1);
 
             const auto& sourcePixels = pipeline.GetSourcePixelsRaw();
             int ch = pipeline.GetSourceChannels();
@@ -1220,19 +1766,186 @@ void EditorViewport::Render(EditorModule* editor) {
     const bool imageHovered = ImGui::IsItemHovered();
     const ImVec2 imageMin = ImGui::GetItemRectMin();
     const ImVec2 imageMax = ImGui::GetItemRectMax();
-    if (imageHovered && !editor->IsPickingColor() && editor->CanToggleActiveAutoGainMaskPreview()) {
+    bool developSubjectRegionHandled = false;
+    const bool developSubjectCanInteract =
+        hasDevelopSubjectOverlay &&
+        imageHovered &&
+        !m_IsLocked &&
+        !editor->IsPickingColor() &&
+        !editor->IsToneCurveTargeting() &&
+        !toneCurveProbeActive &&
+        !editor->CanToggleActiveAutoGainMaskPreview();
+
+    auto hitTestDevelopSubjectRegion =
+        [&](float u, float v, DevelopSubjectRegionHandle& outHandle) -> const EditorModule::DevelopSubjectViewportRegion* {
+            const EditorModule::DevelopSubjectViewportRegion* bestRegion = nullptr;
+            DevelopSubjectRegionHandle bestHandle = DevelopSubjectRegionHandle::None;
+            float bestScore = std::numeric_limits<float>::max();
+            for (const EditorModule::DevelopSubjectViewportRegion& region : developSubjectState.regions) {
+                const float rx = std::max(0.01f, region.radiusX);
+                const float ry = std::max(0.01f, region.radiusY);
+                const float dx = (u - region.centerX) / rx;
+                const float dy = (v - region.centerY) / ry;
+                const float normalizedDistance = std::sqrt(dx * dx + dy * dy);
+                const float edgeDistance = std::abs(normalizedDistance - 1.0f);
+                const bool nearEdge = edgeDistance <= 0.16f;
+                const bool inside = normalizedDistance <= 1.0f;
+                if (!nearEdge && !inside) {
+                    continue;
+                }
+                const float activeBonus = region.id == developSubjectState.activeRegionId ? -0.18f : 0.0f;
+                const float enabledPenalty = region.enabled ? 0.0f : 0.22f;
+                const float score = activeBonus + enabledPenalty + (nearEdge ? edgeDistance : (0.18f + normalizedDistance * 0.04f));
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestRegion = &region;
+                    bestHandle = nearEdge ? DevelopSubjectRegionHandle::Resize : DevelopSubjectRegionHandle::Move;
+                }
+            }
+            outHandle = bestHandle;
+            return bestRegion;
+        };
+
+    if ((!hasDevelopSubjectOverlay || m_ActiveDevelopSubjectNodeId != developSubjectState.nodeId) &&
+        m_DevelopSubjectBrushStrokeActive) {
+        if (m_ActiveDevelopSubjectNodeId > 0 && m_ActiveDevelopSubjectStrokeId > 0) {
+            (void)editor->EndDevelopSubjectImportanceBrushStroke(
+                m_ActiveDevelopSubjectNodeId,
+                m_ActiveDevelopSubjectStrokeId);
+        }
+        m_DevelopSubjectBrushStrokeActive = false;
+        m_ActiveDevelopSubjectNodeId = -1;
+        m_ActiveDevelopSubjectStrokeId = -1;
+    }
+
+    if (!hasDevelopSubjectOverlay && m_ActiveDevelopSubjectHandle != DevelopSubjectRegionHandle::None) {
+        m_ActiveDevelopSubjectHandle = DevelopSubjectRegionHandle::None;
+        m_ActiveDevelopSubjectNodeId = -1;
+        m_ActiveDevelopSubjectRegionId = -1;
+    }
+
+    if (m_DevelopSubjectBrushStrokeActive) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            hasDevelopSubjectOverlay &&
+            m_ActiveDevelopSubjectNodeId == developSubjectState.nodeId &&
+            m_ActiveDevelopSubjectStrokeId > 0) {
+            developSubjectRegionHandled = true;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            (void)editor->AppendDevelopSubjectImportanceBrushStroke(
+                m_ActiveDevelopSubjectNodeId,
+                m_ActiveDevelopSubjectStrokeId,
+                clampedImageU,
+                clampedImageV);
+        } else {
+            if (m_ActiveDevelopSubjectNodeId > 0 && m_ActiveDevelopSubjectStrokeId > 0) {
+                (void)editor->EndDevelopSubjectImportanceBrushStroke(
+                    m_ActiveDevelopSubjectNodeId,
+                    m_ActiveDevelopSubjectStrokeId);
+            }
+            m_DevelopSubjectBrushStrokeActive = false;
+            m_ActiveDevelopSubjectNodeId = -1;
+            m_ActiveDevelopSubjectStrokeId = -1;
+        }
+    }
+
+    if (developSubjectCanInteract &&
+        developSubjectState.brushEnabled &&
+        !m_DevelopSubjectBrushStrokeActive &&
+        m_ActiveDevelopSubjectHandle == DevelopSubjectRegionHandle::None) {
+        developSubjectRegionHandled = true;
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            const int strokeId = editor->BeginDevelopSubjectImportanceBrushStroke(
+                developSubjectState.nodeId,
+                clampedImageU,
+                clampedImageV);
+            if (strokeId > 0) {
+                m_DevelopSubjectBrushStrokeActive = true;
+                m_ActiveDevelopSubjectNodeId = developSubjectState.nodeId;
+                m_ActiveDevelopSubjectStrokeId = strokeId;
+            }
+        }
+    }
+
+    if (m_ActiveDevelopSubjectHandle != DevelopSubjectRegionHandle::None) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            hasDevelopSubjectOverlay &&
+            m_ActiveDevelopSubjectNodeId == developSubjectState.nodeId) {
+            developSubjectRegionHandled = true;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            float nextCenterX = m_DevelopSubjectStartCenterX;
+            float nextCenterY = m_DevelopSubjectStartCenterY;
+            float nextRadiusX = m_DevelopSubjectStartRadiusX;
+            float nextRadiusY = m_DevelopSubjectStartRadiusY;
+            if (m_ActiveDevelopSubjectHandle == DevelopSubjectRegionHandle::Move) {
+                nextCenterX = std::clamp(
+                    m_DevelopSubjectStartCenterX + (clampedImageU - m_DevelopSubjectDragStartU),
+                    0.0f,
+                    1.0f);
+                nextCenterY = std::clamp(
+                    m_DevelopSubjectStartCenterY + (clampedImageV - m_DevelopSubjectDragStartV),
+                    0.0f,
+                    1.0f);
+            } else if (m_ActiveDevelopSubjectHandle == DevelopSubjectRegionHandle::Resize) {
+                nextRadiusX = std::clamp(std::abs(clampedImageU - m_DevelopSubjectStartCenterX), 0.01f, 1.0f);
+                nextRadiusY = std::clamp(std::abs(clampedImageV - m_DevelopSubjectStartCenterY), 0.01f, 1.0f);
+                if (ImGui::GetIO().KeyShift) {
+                    const float sharedRadius = std::max(nextRadiusX, nextRadiusY);
+                    nextRadiusX = sharedRadius;
+                    nextRadiusY = sharedRadius;
+                }
+            }
+            (void)editor->UpdateDevelopSubjectImportanceRegionFromViewport(
+                m_ActiveDevelopSubjectNodeId,
+                m_ActiveDevelopSubjectRegionId,
+                nextCenterX,
+                nextCenterY,
+                nextRadiusX,
+                nextRadiusY);
+        } else {
+            m_ActiveDevelopSubjectHandle = DevelopSubjectRegionHandle::None;
+            m_ActiveDevelopSubjectNodeId = -1;
+            m_ActiveDevelopSubjectRegionId = -1;
+        }
+    }
+
+    if (developSubjectCanInteract &&
+        !developSubjectState.brushEnabled &&
+        m_ActiveDevelopSubjectHandle == DevelopSubjectRegionHandle::None) {
+        DevelopSubjectRegionHandle hoveredHandle = DevelopSubjectRegionHandle::None;
+        const EditorModule::DevelopSubjectViewportRegion* hoveredRegion =
+            hitTestDevelopSubjectRegion(imageU, imageV, hoveredHandle);
+        if (hoveredRegion && hoveredHandle != DevelopSubjectRegionHandle::None) {
+            developSubjectRegionHandled = true;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                (void)editor->SetDevelopSubjectImportanceActiveRegion(developSubjectState.nodeId, hoveredRegion->id);
+                m_ActiveDevelopSubjectHandle = hoveredHandle;
+                m_ActiveDevelopSubjectNodeId = developSubjectState.nodeId;
+                m_ActiveDevelopSubjectRegionId = hoveredRegion->id;
+                m_DevelopSubjectDragStartU = clampedImageU;
+                m_DevelopSubjectDragStartV = clampedImageV;
+                m_DevelopSubjectStartCenterX = hoveredRegion->centerX;
+                m_DevelopSubjectStartCenterY = hoveredRegion->centerY;
+                m_DevelopSubjectStartRadiusX = hoveredRegion->radiusX;
+                m_DevelopSubjectStartRadiusY = hoveredRegion->radiusY;
+            }
+        }
+    }
+
+    if (imageHovered && !developSubjectRegionHandled && !editor->IsPickingColor() && !editor->IsToneCurveTargeting() && editor->CanToggleActiveAutoGainMaskPreview()) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             editor->ToggleActiveAutoGainMaskPreview();
         }
     }
     const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
-    drawList->AddRectFilled(imageMin, imageMax, workspaceFill, kImageRounding);
+    drawList->AddRectFilled(imageMin, imageMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kImageRounding);
     drawList->AddImageRounded((ImTextureID)(intptr_t)m_CheckerTex, imageMin, imageMax,
-                              ImVec2(0, 0), ImVec2(tilesX, tilesY), IM_COL32(255, 255, 255, 170), kImageRounding);
+                              ImVec2(0, 0), ImVec2(tilesX, tilesY), IM_COL32(255, 255, 255, static_cast<int>(170.0f * viewportRevealAlpha)), kImageRounding);
 
     // Handle Fade Factor (hover to compare with original)
-    float hoverTarget = (imageHovered && !m_IsLocked) ? 1.0f : 0.0f;
+    float hoverTarget = (imageHovered && !m_IsLocked && !toneCurveProbeActive && !editor->IsToneCurveTargeting()) ? 1.0f : 0.0f;
     float currentFactor = editor->GetHoverFade();
     const float fadeStep = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.2f);
     currentFactor += (hoverTarget - currentFactor) * fadeStep;
@@ -1243,14 +1956,55 @@ void EditorViewport::Render(EditorModule* editor) {
     const float uInset = imgW > 1 ? (0.5f / static_cast<float>(imgW)) : 0.0f;
     const float vInset = imgH > 1 ? (0.5f / static_cast<float>(imgH)) : 0.0f;
     drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
-                              ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32_WHITE, kImageRounding);
+                              ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding);
 
-    unsigned int sourceTex = pipeline.GetCompareSourceTexture();
     if (currentFactor > 0.001f) {
         if (sourceTex != 0 && sourceTex != outputTex) {
             drawList->AddImageRounded((ImTextureID)(intptr_t)sourceTex, imageMin, imageMax,
                                       ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
-                                      IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f)), kImageRounding);
+                                      IM_COL32(255, 255, 255, static_cast<int>(currentFactor * 255.0f * viewportRevealAlpha)), kImageRounding);
         }
+    }
+
+    if (hasDevelopSubjectOverlay) {
+        drawList->PushClipRect(imageMin, imageMax, true);
+        DrawDevelopSubjectInterpretedMapOverlay(
+            drawList,
+            developSubjectState,
+            imageMin,
+            imageMax);
+        DrawDevelopSubjectRefinedMapOverlay(
+            drawList,
+            developSubjectState,
+            imageMin,
+            imageMax);
+        for (const EditorModule::DevelopSubjectViewportStroke& stroke : developSubjectState.strokes) {
+            DrawDevelopSubjectStrokeOverlay(
+                drawList,
+                stroke,
+                developSubjectState.activeStrokeId,
+                imageMin,
+                imageMax,
+                developSubjectState.overlayOpacity * viewportRevealAlpha);
+        }
+        for (const EditorModule::DevelopSubjectViewportRegion& region : developSubjectState.regions) {
+            DrawDevelopSubjectRegionOverlay(
+                drawList,
+                region,
+                developSubjectState.activeRegionId,
+                imageMin,
+                imageMax,
+                developSubjectState.overlayOpacity * viewportRevealAlpha);
+        }
+        if (developSubjectCanInteract && developSubjectState.brushEnabled && imageHovered) {
+            DrawDevelopSubjectBrushCursor(
+                drawList,
+                developSubjectState,
+                imageMin,
+                imageMax,
+                clampedImageU,
+                clampedImageV);
+        }
+        drawList->PopClipRect();
     }
 }

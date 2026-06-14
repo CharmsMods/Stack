@@ -151,11 +151,25 @@ nlohmann::json EditorModule::SerializePipeline() {
 
 void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
     ResetRenderSubmissionState();
+    ClearAutoGainMaskPreview();
+    m_CompositeSelectedOutputNodeId = -1;
     m_Pipeline.Clear();
+    m_Pipeline.ClearOutput();
     m_CompositePreviewPipeline.Clear();
+    m_CompositePreviewPipeline.ClearOutput();
     m_Layers.clear();
     ClearCompositeRuntimeState();
     m_NodeDirtyGenerations.clear();
+    m_DevelopAutoSolveTriggerHashes.clear();
+    m_DevelopAutoRawSolveTriggerHashes.clear();
+    m_DevelopAutoRawCalibrationHashes.clear();
+    m_DevelopAutoGuidanceDrafts.clear();
+    m_RawDevelopExposureDrafts.clear();
+    m_LastRawDevelopInteractionTime = -1.0;
+    m_RawDevelopInteractionSerialCounter = 1;
+    m_RawDevelopInteractionTimes.clear();
+    m_RawDevelopInteractionSerials.clear();
+    m_DeferredDevelopCandidateFeedbackTimes.clear();
     m_PreviewDisplayedRevisions.clear();
     m_PreviewPixelCache.clear();
     m_PreviewRequestedGenerations.clear();
@@ -228,12 +242,16 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
     }
 
     ResetRenderSubmissionState();
+    ClearAutoGainMaskPreview();
+    m_Pipeline.ClearOutput();
+    m_CompositePreviewPipeline.ClearOutput();
     LoadSourceFromPixels(projectData.sourcePixels.data(), projectData.width, projectData.height, projectData.channels);
     DeserializePipeline(projectData.pipelineData);
     SetCurrentProjectName(projectData.projectName);
     SetCurrentProjectFileName(projectData.projectFileName);
     ClearDirty();
     m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
+    m_LastAutoSaveTime = -1.0;
     return true;
 }
 
@@ -246,9 +264,11 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
         if (AddGraphRawChainFromFile(path, EditorNodeGraph::Vec2{ 20.0f, 120.0f })) {
             m_SourceLoadTaskState = Async::TaskState::Idle;
             m_SourceLoadStatusText = "RAW source node loaded.";
+            QueueUiNotification(UiNotificationSeverity::Success, "RAW source node loaded.", "editor-source-load");
         } else {
             m_SourceLoadTaskState = Async::TaskState::Failed;
             m_SourceLoadStatusText = "Failed to load RAW source node.";
+            QueueUiNotification(UiNotificationSeverity::Error, "Failed to load RAW source node.", "editor-source-load");
         }
         return;
     }
@@ -270,6 +290,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             if (!success || decoded.pixels.empty()) {
                 m_SourceLoadTaskState = Async::TaskState::Failed;
                 m_SourceLoadStatusText = "Failed to load the selected source image.";
+                QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected source image.", "editor-source-load");
                 return;
             }
 
@@ -304,6 +325,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
 
             m_SourceLoadTaskState = Async::TaskState::Idle;
             m_SourceLoadStatusText = "Source image loaded.";
+            QueueUiNotification(UiNotificationSeverity::Success, "Source image loaded.", "editor-source-load");
         });
     });
 }
@@ -333,12 +355,14 @@ bool EditorModule::RequestExportImage(const std::string& path) {
         if (!BuildCompositeExportRaster(pixels, width, height)) {
             m_ExportTaskState = Async::TaskState::Failed;
             m_ExportStatusText = "Failed to capture the composite export.";
+            QueueUiNotification(UiNotificationSeverity::Error, "Failed to capture the composite export.", "editor-export-image");
             return false;
         }
     } else {
         if (!BuildSingleOutputExportRaster(pixels, width, height)) {
             m_ExportTaskState = Async::TaskState::Failed;
             m_ExportStatusText = "Failed to capture the rendered export.";
+            QueueUiNotification(UiNotificationSeverity::Error, "Failed to capture the rendered export.", "editor-export-image");
             return false;
         }
     }
@@ -348,6 +372,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
                   << width << ", Height=" << height << std::endl;
         m_ExportTaskState = Async::TaskState::Failed;
         m_ExportStatusText = "Failed to capture the rendered image.";
+        QueueUiNotification(UiNotificationSeverity::Error, "Failed to capture the rendered image.", "editor-export-image");
         return false;
     }
 
@@ -421,9 +446,11 @@ bool EditorModule::RequestExportImage(const std::string& path) {
             if (success) {
                 m_ExportTaskState = Async::TaskState::Idle;
                 m_ExportStatusText = "Rendered image exported.";
+                QueueUiNotification(UiNotificationSeverity::Success, "Rendered image exported.", "editor-export-image");
             } else {
                 m_ExportTaskState = Async::TaskState::Failed;
                 m_ExportStatusText = "Failed to write the exported PNG.";
+                QueueUiNotification(UiNotificationSeverity::Error, "Failed to write the exported PNG.", "editor-export-image");
             }
         });
     });
@@ -456,13 +483,26 @@ bool EditorModule::BuildProjectDocumentForSave(
     int sourceW = 0;
     int sourceH = 0;
     std::vector<unsigned char> sourcePixels;
+    std::vector<unsigned char> sourcePngBytes;
     if (compositeProject) {
         sourceW = renderedW;
         sourceH = renderedH;
         sourcePixels = BuildTransparentPixels(sourceW, sourceH);
     } else {
-        sourcePixels = m_Pipeline.GetSourcePixels(sourceW, sourceH);
-        if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+        if (const EditorNodeGraph::Node* activeImageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+            activeImageNode &&
+            activeImageNode->kind == EditorNodeGraph::NodeKind::Image &&
+            !activeImageNode->image.pngBytes.empty() &&
+            activeImageNode->image.width > 0 &&
+            activeImageNode->image.height > 0) {
+            sourceW = activeImageNode->image.width;
+            sourceH = activeImageNode->image.height;
+            sourcePngBytes = activeImageNode->image.pngBytes;
+        }
+        if (sourcePngBytes.empty()) {
+            sourcePixels = m_Pipeline.GetSourcePixels(sourceW, sourceH);
+        }
+        if (sourcePixels.empty() && sourcePngBytes.empty()) {
             sourceW = renderedW;
             sourceH = renderedH;
             sourcePixels = BuildTransparentPixels(sourceW, sourceH);
@@ -476,7 +516,9 @@ bool EditorModule::BuildProjectDocumentForSave(
     outDocument.metadata.sourceWidth = sourceW;
     outDocument.metadata.sourceHeight = sourceH;
     outDocument.thumbnailBytes = BuildThumbnailBytes(renderedPixels, renderedW, renderedH);
-    outDocument.sourceImageBytes = EncodePngBytes(sourcePixels, sourceW, sourceH, 4);
+    outDocument.sourceImageBytes = !sourcePngBytes.empty()
+        ? std::move(sourcePngBytes)
+        : EncodePngBytes(sourcePixels, sourceW, sourceH, 4);
     outDocument.pipelineData = pipeline;
     return !outDocument.sourceImageBytes.empty();
 }
@@ -494,6 +536,7 @@ bool EditorModule::RequestExportProject(const std::string& path) {
     if (!BuildProjectDocumentForSave(exportName, document)) {
         m_ExportTaskState = Async::TaskState::Failed;
         m_ExportStatusText = "Failed to package the current project.";
+        QueueUiNotification(UiNotificationSeverity::Error, "Failed to package the current project.", "editor-export-project");
         return false;
     }
 
@@ -522,6 +565,7 @@ bool EditorModule::RequestExportProject(const std::string& path) {
             if (success) {
                 m_ExportTaskState = Async::TaskState::Idle;
                 m_ExportStatusText = "Project exported.";
+                QueueUiNotification(UiNotificationSeverity::Success, "Project exported.", "editor-export-project");
                 if (m_CurrentProjectName.empty()) {
                     const std::string stem = std::filesystem::path(path).stem().string();
                     m_CurrentProjectName = stem.empty() ? std::string("Untitled Project") : stem;
@@ -529,6 +573,7 @@ bool EditorModule::RequestExportProject(const std::string& path) {
             } else {
                 m_ExportTaskState = Async::TaskState::Failed;
                 m_ExportStatusText = "Failed to write the project file.";
+                QueueUiNotification(UiNotificationSeverity::Error, "Failed to write the project file.", "editor-export-project");
             }
         });
     });

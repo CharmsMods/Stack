@@ -1,11 +1,13 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
+#include "App/settings/AppearanceTheme.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <map>
 #include <imgui.h>
 
 namespace {
@@ -40,6 +42,25 @@ ImU32 ScaleAlpha(ImU32 color, float alpha) {
     return ImGui::ColorConvertFloat4ToU32(rgba);
 }
 
+ImVec4 BlendColor(const ImVec4& a, const ImVec4& b, float t) {
+    const float clampedT = std::clamp(t, 0.0f, 1.0f);
+    return ImVec4(
+        a.x + (b.x - a.x) * clampedT,
+        a.y + (b.y - a.y) * clampedT,
+        a.z + (b.z - a.z) * clampedT,
+        a.w + (b.w - a.w) * clampedT);
+}
+
+ImU32 ColorWithAlpha(ImVec4 color, float alpha) {
+    color.w = std::clamp(alpha, 0.0f, 1.0f);
+    return ImGui::ColorConvertFloat4ToU32(color);
+}
+
+StackAppearance::GraphVisualMode CurrentGraphVisualMode(EditorModule* editor) {
+    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+    return appearance ? appearance->GetGraphVisualMode() : StackAppearance::GraphVisualMode::BlackNodes;
+}
+
 bool RenderBrowserRow(const NodeBrowserEntry& entry, float alpha, bool interactive) {
     if (alpha <= 0.01f) {
         return false;
@@ -71,91 +92,57 @@ bool RenderBrowserRow(const NodeBrowserEntry& entry, float alpha, bool interacti
 
 
 bool PrototypeHasCompatibleInput(
-    const EditorNodeGraph::Graph& graph,
+    EditorNodeGraph::Graph& compatibilityGraph,
+    int& nextPrototypeNodeId,
     int fromNodeId,
     const std::string& fromSocketId,
     const NodeBrowserEntry& entry) {
-    EditorNodeGraph::SocketDefinition fromSocket;
-    if (!graph.FindSocket(fromNodeId, fromSocketId, &fromSocket)) {
-        return false;
-    }
     const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(prototype, true)) {
+    EditorNodeGraph::Node testNode = prototype;
+    testNode.id = nextPrototypeNodeId++;
+    compatibilityGraph.GetNodes().push_back(testNode);
+
+    bool compatible = false;
+    for (const EditorNodeGraph::SocketDefinition& socket : compatibilityGraph.GetSockets(testNode, true)) {
         if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
             continue;
         }
-        if (fromSocket.type == EditorNodeGraph::SocketType::Image) {
-            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
-                (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Output && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
-        } else if (fromSocket.type == EditorNodeGraph::SocketType::Mask) {
-            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Mix && socket.id == EditorNodeGraph::kMixFactorSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::MaskUtility && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ChannelCombine &&
-                (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a")) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Output &&
-                (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a")) return true;
-
-            // Also allow mask outputs to connect to main image inputs (treating mask as grayscale image)
-            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
-                (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Output && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ChannelSplit && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-        } else if (fromSocket.type == EditorNodeGraph::SocketType::Raw) {
-            if ((prototype.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-                 prototype.kind == EditorNodeGraph::NodeKind::RawDevelop) &&
-                socket.id == EditorNodeGraph::kRawInputSocketId) return true;
+        if (compatibilityGraph.CanConnectSockets(fromNodeId, fromSocketId, testNode.id, socket.id)) {
+            compatible = true;
+            break;
         }
     }
-    return false;
+    compatibilityGraph.GetNodes().pop_back();
+    return compatible;
 }
 
 bool PrototypeHasCompatibleOutput(
-    const EditorNodeGraph::Graph& graph,
+    EditorNodeGraph::Graph& compatibilityGraph,
+    int& nextPrototypeNodeId,
     const NodeBrowserEntry& entry,
     int toNodeId,
     const std::string& toSocketId) {
-    const EditorNodeGraph::Node* to = graph.FindNode(toNodeId);
+    const EditorNodeGraph::Node* to = compatibilityGraph.FindNode(toNodeId);
     if (!to) {
         return false;
     }
-    EditorNodeGraph::SocketDefinition toSocket;
-    if (!graph.FindSocket(toNodeId, toSocketId, &toSocket)) {
-        return false;
-    }
     const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(prototype, true)) {
+    EditorNodeGraph::Node testNode = prototype;
+    testNode.id = nextPrototypeNodeId++;
+    compatibilityGraph.GetNodes().push_back(testNode);
+
+    bool compatible = false;
+    for (const EditorNodeGraph::SocketDefinition& socket : compatibilityGraph.GetSockets(testNode, true)) {
         if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
             continue;
         }
-        if (toSocket.type == EditorNodeGraph::SocketType::Image && socket.type == EditorNodeGraph::SocketType::Image) {
-            return true;
-        }
-        if (toSocket.type == EditorNodeGraph::SocketType::Mask && socket.type == EditorNodeGraph::SocketType::Mask) {
-            return true;
-        }
-        if (toSocket.type == EditorNodeGraph::SocketType::Raw &&
-            socket.type == EditorNodeGraph::SocketType::Raw &&
-            (prototype.kind == EditorNodeGraph::NodeKind::RawSource ||
-             prototype.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise)) {
-            return true;
+        if (compatibilityGraph.CanConnectSockets(testNode.id, socket.id, toNodeId, toSocketId)) {
+            compatible = true;
+            break;
         }
     }
-    return false;
+    compatibilityGraph.GetNodes().pop_back();
+    return compatible;
 }
 
 int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry, const EditorNodeGraph::Vec2& graphPos) {
@@ -178,6 +165,12 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::MaskGenerator:
             editor->AddMaskNodeAt(static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value), graphPos);
             break;
+        case EditorNodeGraph::NodeKind::CustomMask:
+            editor->AddCustomMaskNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            editor->AddMaskCombineNodeAt(static_cast<EditorNodeGraph::MaskCombineMode>(entry.value), graphPos);
+            break;
         case EditorNodeGraph::NodeKind::MaskUtility:
             editor->AddMaskUtilityNodeAt(static_cast<EditorNodeGraph::MaskUtilityKind>(entry.value), graphPos);
             break;
@@ -189,6 +182,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Mix:
             editor->AddMixNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::DataMath:
+            editor->AddDataMathNodeAt(static_cast<EditorNodeGraph::DataMathMode>(entry.value), graphPos);
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             editor->AddChannelSplitNodeAt(graphPos);
@@ -204,6 +200,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::RawDetailFusion:
             editor->AddRawDetailFusionNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::HdrMerge:
+            editor->AddHdrMergeNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             editor->AddRawNeuralDenoiseNodeAt(graphPos);
@@ -287,6 +286,8 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     const float alpha = std::clamp(currentAlpha, 0.0f, 1.0f);
 
     const EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    EditorNodeGraph::Graph compatibilityGraph = graph;
+    int nextPrototypeNodeId = std::max(1, graph.GetNextNodeId() + 1000);
     std::vector<NodeBrowserEntry> entries = EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
     const std::string search = m_NodeBrowserSearchBuffer;
     std::vector<const NodeBrowserEntry*> filtered;
@@ -299,10 +300,10 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             ContainsCaseInsensitive(entry.category, search);
         const bool compatibleOutput =
             m_NodeBrowserMode != NodeBrowserMode::ConnectFromOutput ||
-            PrototypeHasCompatibleInput(graph, m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId, entry);
+            PrototypeHasCompatibleInput(compatibilityGraph, nextPrototypeNodeId, m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId, entry);
         const bool compatibleInput =
             m_NodeBrowserMode != NodeBrowserMode::ConnectFromInput ||
-            PrototypeHasCompatibleOutput(graph, entry, m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId);
+            PrototypeHasCompatibleOutput(compatibilityGraph, nextPrototypeNodeId, entry, m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId);
         const bool visible = isOpen && matchesSearch && compatibleOutput && compatibleInput;
         const std::string key = EntryKey(entry);
         float& entryAlpha = m_NodeBrowserEntryAlpha[key];
@@ -333,21 +334,58 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     ImVec4 workspaceColor = editor->GetWorkspaceBaseColor();
     const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
     const bool isLightBg = luminance >= 0.5f;
+    const StackAppearance::GraphVisualMode graphMode = CurrentGraphVisualMode(editor);
+    const bool spotlightGraph = graphMode == StackAppearance::GraphVisualMode::SpotlightPrototype;
+    const bool blackNodeGraph = graphMode == StackAppearance::GraphVisualMode::BlackNodes;
+    const bool customGraph = graphMode != StackAppearance::GraphVisualMode::Classic;
+    const StackAppearance::AppearanceManager* appearance = editor->GetAppearance();
+    const ImVec4 themeText = appearance ? appearance->GetWorkingTheme().colors[ImGuiCol_Text] : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    const ImVec4 themeMuted = appearance ? appearance->GetWorkingTheme().colors[ImGuiCol_TextDisabled] : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+    const ImVec4 themeAccent = appearance ? appearance->GetWorkingTheme().colors[ImGuiCol_CheckMark] : ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+    const ImVec4 spotlightTint = isLightBg
+        ? ImVec4(0.86f, 0.96f, 1.0f, 1.0f)
+        : ImVec4(0.00f, 0.11f, 0.14f, 1.0f);
+    const ImVec4 blackTint(0.01f, 0.02f, 0.03f, 1.0f);
 
-    ImVec4 colBgOpaqueVec = workspaceColor;
-    colBgOpaqueVec.w = (isLightBg ? 0.94f : 0.92f) * alpha;
+    ImVec4 colBgOpaqueVec = spotlightGraph
+        ? BlendColor(workspaceColor, spotlightTint, isLightBg ? 0.18f : 0.34f)
+        : (blackNodeGraph
+            ? BlendColor(workspaceColor, blackTint, isLightBg ? 0.90f : 0.58f)
+            : workspaceColor);
+    colBgOpaqueVec.w = (spotlightGraph
+        ? (isLightBg ? 0.88f : 0.84f)
+        : (blackNodeGraph ? 0.96f : (isLightBg ? 0.94f : 0.92f))) * alpha;
     const ImU32 colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
 
     ImVec4 colBgTransVec = workspaceColor;
     colBgTransVec.w = 0.0f;
     const ImU32 colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
 
-    const ImU32 colTitleText = ScaleAlpha(isLightBg ? IM_COL32(18, 24, 30, 255) : IM_COL32(255, 255, 255, 255), alpha);
-    const ImU32 colPassiveText = ScaleAlpha(isLightBg ? IM_COL32(80, 95, 105, 220) : IM_COL32(140, 160, 170, 200), alpha);
-    const ImU32 colActiveText = ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 255) : IM_COL32(92, 178, 255, 255), alpha);
-    const ImU32 colNormalText = ScaleAlpha(isLightBg ? IM_COL32(40, 50, 60, 220) : IM_COL32(200, 210, 220, 200), alpha);
-    const ImU32 colHoveredHeader = ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 28) : IM_COL32(92, 178, 255, 30), alpha);
-    const ImU32 colActiveHeader = ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 48) : IM_COL32(92, 178, 255, 50), alpha);
+    const ImU32 colTitleText = blackNodeGraph
+        ? ColorWithAlpha(ImVec4(0.94f, 0.96f, 0.98f, 1.0f), alpha)
+        : spotlightGraph
+        ? ColorWithAlpha(themeText, alpha)
+        : ScaleAlpha(isLightBg ? IM_COL32(18, 24, 30, 255) : IM_COL32(255, 255, 255, 255), alpha);
+    const ImU32 colPassiveText = blackNodeGraph
+        ? ColorWithAlpha(BlendColor(ImVec4(0.68f, 0.72f, 0.76f, 1.0f), themeAccent, 0.08f), 0.90f * alpha)
+        : spotlightGraph
+        ? ColorWithAlpha(BlendColor(themeMuted, themeAccent, 0.10f), 0.86f * alpha)
+        : ScaleAlpha(isLightBg ? IM_COL32(80, 95, 105, 220) : IM_COL32(140, 160, 170, 200), alpha);
+    const ImU32 colNormalText = blackNodeGraph
+        ? ColorWithAlpha(ImVec4(0.88f, 0.91f, 0.94f, 1.0f), 0.96f * alpha)
+        : spotlightGraph
+        ? ColorWithAlpha(BlendColor(themeText, themeMuted, 0.14f), 0.92f * alpha)
+        : ScaleAlpha(isLightBg ? IM_COL32(40, 50, 60, 220) : IM_COL32(200, 210, 220, 200), alpha);
+    const ImU32 colHoveredHeader = blackNodeGraph
+        ? ColorWithAlpha(BlendColor(themeAccent, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.18f), 0.18f * alpha)
+        : spotlightGraph
+        ? ColorWithAlpha(BlendColor(themeAccent, spotlightTint, 0.16f), 0.18f * alpha)
+        : ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 28) : IM_COL32(92, 178, 255, 30), alpha);
+    const ImU32 colActiveHeader = blackNodeGraph
+        ? ColorWithAlpha(BlendColor(themeAccent, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.24f), 0.28f * alpha)
+        : spotlightGraph
+        ? ColorWithAlpha(BlendColor(themeAccent, themeText, 0.12f), 0.26f * alpha)
+        : ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 48) : IM_COL32(92, 178, 255, 50), alpha);
 
     // Solid part
     if (solidWidth > 0.0f) {
@@ -359,9 +397,20 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImVec2(workspacePos.x + panelWidth, workspacePos.y + paneHeight),
         colBgOpaque, colBgTrans, colBgTrans, colBgOpaque
     );
+    if (customGraph && alpha > 0.01f) {
+        drawList->AddLine(
+            ImVec2(workspacePos.x + 1.0f, workspacePos.y),
+            ImVec2(workspacePos.x + 1.0f, workspacePos.y + paneHeight),
+            ColorWithAlpha(BlendColor(themeAccent, themeText, 0.18f), 0.22f * alpha),
+            1.0f);
+    }
 
     bool closeBrowser = false;
-    if (isOpen) {
+    const bool closeAllowed =
+        isOpen &&
+        (now - m_NodeBrowserOpenedAt) > 0.12 &&
+        !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.0f);
+    if (closeAllowed) {
         ImVec2 mousePos = ImGui::GetIO().MousePos;
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             if (mousePos.x < workspacePos.x || mousePos.x > workspacePos.x + panelWidth ||
@@ -393,14 +442,27 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             : "Search compatible nodes";
 
         // Compact custom input box theme
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(34, 43, 48, 235));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(44, 57, 63, 235));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(44, 57, 63, 235));
+        const ImU32 searchBg = blackNodeGraph
+            ? ColorWithAlpha(BlendColor(colBgOpaqueVec, themeAccent, 0.05f), 0.94f * alpha)
+            : spotlightGraph
+            ? ColorWithAlpha(BlendColor(colBgOpaqueVec, themeAccent, 0.08f), 0.82f * alpha)
+            : IM_COL32(34, 43, 48, 235);
+        const ImU32 searchBgHovered = blackNodeGraph
+            ? ColorWithAlpha(BlendColor(colBgOpaqueVec, themeAccent, 0.10f), 0.98f * alpha)
+            : spotlightGraph
+            ? ColorWithAlpha(BlendColor(colBgOpaqueVec, themeAccent, 0.14f), 0.90f * alpha)
+            : IM_COL32(44, 57, 63, 235);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, searchBg);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, searchBgHovered);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, searchBgHovered);
         ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
         ImGui::PushStyleColor(ImGuiCol_TextDisabled, colPassiveText);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, customGraph ? 1.0f : 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
+        if (customGraph) {
+            ImGui::PushStyleColor(ImGuiCol_Border, ColorWithAlpha(BlendColor(themeAccent, themeText, 0.18f), 0.28f * alpha));
+        }
         
         ImGui::PushItemWidth(-1.0f);
         ImGuiInputTextFlags searchFlags = isOpen ? ImGuiInputTextFlags_None : ImGuiInputTextFlags_ReadOnly;
@@ -408,53 +470,14 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::PopItemWidth();
         
         ImGui::PopStyleVar(3);
+        if (customGraph) {
+            ImGui::PopStyleColor();
+        }
         ImGui::PopStyleColor(5);
         
         ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
-        // Added ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav to prevent default snappy scrolling and blue nav outlines
-        ImGui::BeginChild("NodesPanelScrollingResults", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
-
-        // Premium smooth scrolling implementation
-        static float targetScrollY = 0.0f;
-        static bool isScrollInit = false;
-        static float lastAppliedScrollY = -1.0f;
-        
-        float currentScrollY = ImGui::GetScrollY();
-        float maxScrollY = ImGui::GetScrollMaxY();
-        
-        if (!isScrollInit || !isOpen) {
-            targetScrollY = currentScrollY;
-            lastAppliedScrollY = currentScrollY;
-            isScrollInit = true;
-        }
-        
-        targetScrollY = std::clamp(targetScrollY, 0.0f, maxScrollY);
-        
-        // Detect if the scroll position changed externally (e.g. scrollbar drag or click)
-        bool externalScroll = false;
-        if (lastAppliedScrollY >= 0.0f && std::abs(currentScrollY - lastAppliedScrollY) > 0.01f) {
-            externalScroll = true;
-            targetScrollY = currentScrollY;
-            lastAppliedScrollY = currentScrollY;
-        }
-        
-        if (isOpen && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::GetIO().MouseWheel != 0.0f) {
-            targetScrollY -= ImGui::GetIO().MouseWheel * 280.0f; // 280px scroll speed per wheel notch is responsive and matching standard OS speeds
-            targetScrollY = std::clamp(targetScrollY, 0.0f, maxScrollY);
-            externalScroll = false;
-        }
-        
-        if (!externalScroll) {
-            if (std::abs(currentScrollY - targetScrollY) > 0.5f) {
-                float newScrollY = currentScrollY + (targetScrollY - currentScrollY) * dt * 20.0f;
-                ImGui::SetScrollY(newScrollY);
-                lastAppliedScrollY = newScrollY;
-            } else {
-                ImGui::SetScrollY(targetScrollY);
-                lastAppliedScrollY = targetScrollY;
-            }
-        }
+        ImGui::BeginChild("NodesPanelScrollingResults", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoNav);
 
         std::string currentCategory;
         const NodeBrowserEntry* activatedEntry = nullptr;
@@ -476,7 +499,13 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                 currentCategory = entry->category;
                 ImGui::Dummy(ImVec2(0.0f, 8.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::min(alpha, categoryAlpha[currentCategory]));
+                if (customGraph) {
+                    ImGui::PushStyleColor(ImGuiCol_TextDisabled, colPassiveText);
+                }
                 ImGui::TextDisabled("%s", currentCategory.c_str());
+                if (customGraph) {
+                    ImGui::PopStyleColor();
+                }
                 ImGui::PopStyleVar();
                 ImGui::Dummy(ImVec2(0.0f, 4.0f));
             }

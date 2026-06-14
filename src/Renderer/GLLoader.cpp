@@ -12,6 +12,8 @@ void(APIENTRY* glGetShaderInfoLog_)(GLuint, GLsizei, GLsizei*, GLchar*) = nullpt
 GLuint(APIENTRY* glCreateProgram_)(void) = nullptr;
 void(APIENTRY* glDeleteProgram_)(GLuint) = nullptr;
 void(APIENTRY* glAttachShader_)(GLuint, GLuint) = nullptr;
+void(APIENTRY* glBindAttribLocation_)(GLuint, GLuint, const GLchar*) = nullptr;
+void(APIENTRY* glBindFragDataLocation_)(GLuint, GLuint, const GLchar*) = nullptr;
 void(APIENTRY* glLinkProgram_)(GLuint) = nullptr;
 void(APIENTRY* glUseProgram_)(GLuint) = nullptr;
 void(APIENTRY* glGetProgramiv_)(GLuint, GLenum, GLint*) = nullptr;
@@ -20,6 +22,7 @@ void(APIENTRY* glGetProgramInfoLog_)(GLuint, GLsizei, GLsizei*, GLchar*) = nullp
 GLint(APIENTRY* glGetUniformLocation_)(GLuint, const GLchar*) = nullptr;
 void(APIENTRY* glUniform1i_)(GLint, GLint) = nullptr;
 void(APIENTRY* glUniform1f_)(GLint, GLfloat) = nullptr;
+void(APIENTRY* glUniform1fv_)(GLint, GLsizei, const GLfloat*) = nullptr;
 void(APIENTRY* glUniform2f_)(GLint, GLfloat, GLfloat) = nullptr;
 void(APIENTRY* glUniform2i_)(GLint, GLint, GLint) = nullptr;
 void(APIENTRY* glUniform3f_)(GLint, GLfloat, GLfloat, GLfloat) = nullptr;
@@ -84,6 +87,8 @@ bool LoadGLFunctions() {
     LOAD(glCreateProgram_, "glCreateProgram");
     LOAD(glDeleteProgram_, "glDeleteProgram");
     LOAD(glAttachShader_, "glAttachShader");
+    LOAD(glBindAttribLocation_, "glBindAttribLocation");
+    LOAD(glBindFragDataLocation_, "glBindFragDataLocation");
     LOAD(glLinkProgram_, "glLinkProgram");
     LOAD(glUseProgram_, "glUseProgram");
     LOAD(glGetProgramiv_, "glGetProgramiv");
@@ -92,6 +97,7 @@ bool LoadGLFunctions() {
     LOAD(glGetUniformLocation_, "glGetUniformLocation");
     LOAD(glUniform1i_, "glUniform1i");
     LOAD(glUniform1f_, "glUniform1f");
+    LOAD(glUniform1fv_, "glUniform1fv");
     LOAD(glUniform2f_, "glUniform2f");
     LOAD(glUniform2i_, "glUniform2i");
     LOAD(glUniform3f_, "glUniform3f");

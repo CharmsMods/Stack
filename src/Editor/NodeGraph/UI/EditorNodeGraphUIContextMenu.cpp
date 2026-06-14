@@ -65,6 +65,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                  node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
                  node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
                  node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
+                 node->kind == EditorNodeGraph::NodeKind::HdrMerge ||
                  node->kind == EditorNodeGraph::NodeKind::Layer) &&
                 editor->GetNodeSurfaceSpec(node->id).presentation == NodeSurfacePresentation::RichExpandedSurface;
             if (hasAdvancedEditor) {
@@ -199,13 +200,11 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("RAW")) {
-                if (ImGui::MenuItem("Auto Gain")) {
-                    editor->AddRawDetailFusionNodeAt(m_ContextGraphPos);
-                }
-                ImGui::EndMenu();
-            }
             if (ImGui::BeginMenu("Mask")) {
+                if (ImGui::MenuItem("Custom Mask")) {
+                    editor->AddCustomMaskNodeAt(m_ContextGraphPos);
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Solid Mask")) {
                     editor->AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind::Solid, m_ContextGraphPos);
                 }
@@ -220,21 +219,68 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Mask Utility")) {
-                if (ImGui::MenuItem("Invert Mask")) {
+            if (ImGui::BeginMenu("Scalar / Data")) {
+                if (ImGui::MenuItem("Add Scalars")) {
+                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Add, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Subtract Scalars")) {
+                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Subtract, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Intersect Scalars")) {
+                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Intersect, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Difference Scalars")) {
+                    editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Exclude, m_ContextGraphPos);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Invert Scalar")) {
                     editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Invert, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Levels Mask")) {
+                if (ImGui::MenuItem("Remap Scalar")) {
                     editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Levels, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Threshold Mask")) {
+                if (ImGui::MenuItem("Threshold Scalar")) {
                     editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Threshold, m_ContextGraphPos);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Clamp Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Clamp, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Add Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Add, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Subtract Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Subtract, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Multiply Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Multiply, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Divide Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Divide, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Average Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Average, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Minimum Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Min, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Maximum Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Max, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Difference Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Difference, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Remap Data")) {
+                    editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Remap, m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Generator")) {
-                if (ImGui::MenuItem("Luminance Mask")) {
+                if (ImGui::MenuItem("Image To Scalar")) {
                     editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::Luminance, m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Sampled Range Scalar")) {
+                    editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::SampledRange, m_ContextGraphPos);
                 }
                 if (ImGui::MenuItem("Solid Color Image")) {
                     editor->AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind::SolidColor, m_ContextGraphPos);
@@ -254,8 +300,11 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Merge")) {
-                if (ImGui::MenuItem("Mix")) {
+                if (ImGui::MenuItem("Blend Images")) {
                     editor->AddMixNodeAt(m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("HDR Merge")) {
+                    editor->AddHdrMergeNodeAt(m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }
@@ -274,6 +323,32 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         if (ImGui::BeginMenu("Settings")) {
             if (ImGui::MenuItem("Auto Layout")) {
                 editor->AutoLayoutGraph();
+            }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Graph")) {
+            if (ImGui::BeginMenu("Copy Graph Info")) {
+                const bool hasSelection = !editor->GetNodeGraph().GetSelectedNodeIds().empty();
+                ImGui::BeginDisabled(!hasSelection);
+                if (ImGui::MenuItem("Current Selection / Tree Only")) {
+                    CopyGraphInfo(editor, false, false);
+                }
+                if (ImGui::MenuItem("Current Selection / Tree + State")) {
+                    CopyGraphInfo(editor, false, true);
+                }
+                ImGui::EndDisabled();
+                if (ImGui::MenuItem("Whole Graph / Tree Only")) {
+                    CopyGraphInfo(editor, true, false);
+                }
+                if (ImGui::MenuItem("Whole Graph / Tree + State")) {
+                    CopyGraphInfo(editor, true, true);
+                }
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::MenuItem("Paste Graph")) {
+                PasteGraphInfo(editor);
             }
             ImGui::EndMenu();
         }

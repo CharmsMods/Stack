@@ -50,6 +50,7 @@ enum class LayerType {
     ImageBreaks,
     AnalogVideo,
     BilateralFilter,
+    ClassicalRgbDenoise,
     SceneDenoise,
     LinearRgbNeuralDenoise,
     NonLocalMeansDenoise,

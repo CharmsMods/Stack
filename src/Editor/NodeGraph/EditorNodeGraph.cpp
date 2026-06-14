@@ -194,6 +194,18 @@ Node* Graph::AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 positio
     return &m_Nodes.back();
 }
 
+Node* Graph::AddHdrMergeNode(HdrMergePayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::HdrMerge;
+    node.position = position;
+    node.hdrMerge = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddLayerNode(LayerType type, int layerIndex, Vec2 position) {
     const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(type);
 
@@ -234,11 +246,43 @@ Node* Graph::AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position) {
     return &m_Nodes.back();
 }
 
+Node* Graph::AddMaskCombineNode(MaskCombineMode combineMode, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::MaskCombine;
+    node.maskCombineMode = combineMode;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddMaskUtilityNode(MaskUtilityKind utilityKind, Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
     node.kind = NodeKind::MaskUtility;
     node.maskUtilityKind = utilityKind;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddCustomMaskNode(CustomMaskPayload payload, Vec2 position) {
+    if (payload.width <= 0) payload.width = 1024;
+    if (payload.height <= 0) payload.height = 1024;
+    const std::size_t expected =
+        static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height);
+    if (payload.rasterLayer.size() != expected) {
+        payload.rasterLayer.assign(expected, 0.0f);
+    }
+
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::CustomMask;
+    node.customMask = std::move(payload);
     node.position = position;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
@@ -277,6 +321,18 @@ Node* Graph::AddMixNode(Vec2 position) {
     node.position = position;
     node.mixBlendMode = MixBlendMode::Normal;
     node.mixFactor = 0.5f;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddDataMathNode(DataMathMode mode, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::DataMath;
+    node.position = position;
+    node.dataMathMode = mode;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
     TouchStructure();
@@ -542,12 +598,18 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
         } else if (node->kind == NodeKind::RawDetailFusion &&
                    (currentSocketId == kImageOutputSocketId || currentSocketId == kMaskOutputSocketId)) {
             upstreamSocketId = kImageInputSocketId;
+        } else if (node->kind == NodeKind::HdrMerge && currentSocketId == kImageOutputSocketId) {
+            upstreamSocketId = kHdrMergeInput1SocketId;
         } else if (node->kind == NodeKind::RawDetailAutoMask && currentSocketId == kMaskOutputSocketId) {
             upstreamSocketId = kImageInputSocketId;
         } else if (node->kind == NodeKind::MaskUtility && currentSocketId == kMaskOutputSocketId) {
             upstreamSocketId = kMaskUtilityInputSocketId;
+        } else if (node->kind == NodeKind::MaskCombine && currentSocketId == kMaskOutputSocketId) {
+            upstreamSocketId = kMaskCombineInputASocketId;
         } else if (node->kind == NodeKind::ImageToMask && currentSocketId == kMaskOutputSocketId) {
             upstreamSocketId = kImageToMaskInputSocketId;
+        } else if (node->kind == NodeKind::DataMath && currentSocketId == kImageOutputSocketId) {
+            upstreamSocketId = kMixInputASocketId;
         }
 
         if (!upstreamSocketId) {
@@ -555,6 +617,82 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
         }
         const Link* upstream = FindAnyInputLink(currentNodeId, upstreamSocketId);
         return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : std::string();
+    };
+    return resolve(nodeId, socketId);
+}
+
+bool Graph::IsScalarSocketStream(int nodeId, const std::string& socketId) const {
+    std::unordered_set<std::string> visiting;
+    std::function<bool(int, const std::string&)> resolve = [&](int currentNodeId, const std::string& currentSocketId) -> bool {
+        const std::string key = std::to_string(currentNodeId) + ":" + currentSocketId;
+        if (!visiting.insert(key).second) {
+            return false;
+        }
+
+        auto finish = [&](bool result) {
+            visiting.erase(key);
+            return result;
+        };
+
+        const Node* node = FindNode(currentNodeId);
+        if (!node) {
+            return finish(false);
+        }
+        if (IsChannelSocketId(currentSocketId) || currentSocketId == kMaskOutputSocketId) {
+            return finish(true);
+        }
+
+        auto inputIsScalar = [&](const char* inputSocketId) {
+            const Link* upstream = FindAnyInputLink(currentNodeId, inputSocketId);
+            return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : false;
+        };
+
+        switch (node->kind) {
+            case NodeKind::Layer:
+                if (currentSocketId == kImageOutputSocketId) {
+                    return finish(inputIsScalar(kImageInputSocketId));
+                }
+                break;
+            case NodeKind::RawDetailFusion:
+                if (currentSocketId == kImageOutputSocketId) {
+                    return finish(inputIsScalar(kImageInputSocketId));
+                }
+                if (currentSocketId == kMaskOutputSocketId) {
+                    return finish(true);
+                }
+                break;
+            case NodeKind::RawDetailAutoMask:
+            case NodeKind::MaskGenerator:
+            case NodeKind::MaskCombine:
+            case NodeKind::MaskUtility:
+            case NodeKind::CustomMask:
+            case NodeKind::ImageToMask:
+                if (currentSocketId == kMaskOutputSocketId) {
+                    return finish(true);
+                }
+                break;
+            case NodeKind::Mix:
+            case NodeKind::DataMath:
+                if (currentSocketId == kImageOutputSocketId) {
+                    const Link* inputA = FindAnyInputLink(currentNodeId, kMixInputASocketId);
+                    const Link* inputB = FindAnyInputLink(currentNodeId, kMixInputBSocketId);
+                    const bool scalarA = inputA && resolve(inputA->fromNodeId, inputA->fromSocketId);
+                    const bool scalarB = inputB && resolve(inputB->fromNodeId, inputB->fromSocketId);
+                    const bool hasA = inputA != nullptr;
+                    const bool hasB = inputB != nullptr;
+                    return finish((hasA || hasB) && (!hasA || scalarA) && (!hasB || scalarB));
+                }
+                break;
+            case NodeKind::ChannelSplit:
+                if (IsChannelSocketId(currentSocketId)) {
+                    return finish(true);
+                }
+                break;
+            default:
+                break;
+        }
+
+        return finish(false);
     };
     return resolve(nodeId, socketId);
 }
@@ -576,6 +714,7 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
             case NodeKind::RawSource:
             case NodeKind::ImageGenerator:
             case NodeKind::MaskGenerator:
+            case NodeKind::CustomMask:
                 return currentNodeId;
             case NodeKind::RawDevelop:
                 return currentNodeId;
@@ -591,11 +730,30 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
+            case NodeKind::HdrMerge: {
+                const char* preferredSocketId = kHdrMergeInput1SocketId;
+                if (currentSocketId == kHdrMergeInput2SocketId) {
+                    preferredSocketId = kHdrMergeInput2SocketId;
+                } else if (currentSocketId == kHdrMergeInput3SocketId) {
+                    preferredSocketId = kHdrMergeInput3SocketId;
+                }
+                const Link* upstream = FindInputLink(currentNodeId, preferredSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
             case NodeKind::RawDetailAutoMask: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
             case NodeKind::Mix: {
+                const Link* inputA = FindInputLink(currentNodeId, kMixInputASocketId);
+                if (inputA) {
+                    const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
+                    if (sourceId > 0) return sourceId;
+                }
+                const Link* inputB = FindInputLink(currentNodeId, kMixInputBSocketId);
+                return inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
+            }
+            case NodeKind::DataMath: {
                 const Link* inputA = FindInputLink(currentNodeId, kMixInputASocketId);
                 if (inputA) {
                     const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
@@ -627,6 +785,14 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
                 const Link* upstream = FindInputLink(currentNodeId, kMaskUtilityInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
+            case NodeKind::MaskCombine: {
+                if (const Link* inputA = FindInputLink(currentNodeId, kMaskCombineInputASocketId)) {
+                    const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
+                    if (sourceId > 0) return sourceId;
+                }
+                const Link* inputB = FindInputLink(currentNodeId, kMaskCombineInputBSocketId);
+                return inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
+            }
             case NodeKind::ImageToMask: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageToMaskInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
@@ -651,7 +817,7 @@ int Graph::ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const {
 
 void Graph::ConnectImageToOutput(int nodeId) {
     const Node* node = FindNode(nodeId);
-    if (!node || (node->kind != NodeKind::Image && node->kind != NodeKind::RawDevelop && node->kind != NodeKind::RawDetailFusion)) {
+    if (!node || (node->kind != NodeKind::Image && node->kind != NodeKind::RawDevelop && node->kind != NodeKind::RawDetailFusion && node->kind != NodeKind::HdrMerge)) {
         return;
     }
 

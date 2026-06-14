@@ -134,6 +134,10 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
     "src/*.h"
 )
 
+if (WIN32)
+    list(APPEND SRC_FILES "src/resources.rc")
+endif()
+
 # Legacy aggregate layer implementations were replaced by split, registry-backed
 # nodes. Keep the files in the tree for migration reference, but do not compile them.
 list(FILTER SRC_FILES EXCLUDE REGEX "/src/Editor/Layers/(AdjustmentsLayer|BlurLayer|CompressionLayer|CorruptionLayer|CropTransformLayer|DenoisingLayer|DitherLayer|EdgeEffectsLayer|HeatwaveLayer)\\.(cpp|h)$")
@@ -176,9 +180,26 @@ endif()
 
 # Link OpenGL based on platform
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 dwmapi)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE "-framework OpenGL")
 elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
+endif()
+
+option(STACK_BUILD_GRAPH_TESTS "Build focused node graph behavior tests" ON)
+if (STACK_BUILD_GRAPH_TESTS)
+    add_executable(StackGraphBehaviorTests
+        tools/graph_behavior_tests.cpp
+        src/Editor/NodeGraph/EditorNodeGraph.cpp
+        src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp
+        src/Editor/NodeGraph/Model/EditorNodeGraphLayoutValidation.cpp
+        src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp
+        src/Editor/NodeGraph/Model/EditorNodeGraphSelection.cpp
+        src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp
+    )
+    target_include_directories(StackGraphBehaviorTests PRIVATE
+        src
+        src/ThirdParty
+    )
 endif()

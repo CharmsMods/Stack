@@ -11,7 +11,7 @@ public:
     ~EditorViewport();
 
     void Initialize();
-    void Render(EditorModule* editor);
+    void Render(EditorModule* editor, float revealAlpha = 1.0f);
     void ResetSinglePreviewState();
 
 private:
@@ -42,6 +42,12 @@ private:
         ResizeLeft
     };
 
+    enum class DevelopSubjectRegionHandle {
+        None,
+        Move,
+        Resize
+    };
+
     struct SnapGuideLine {
         ImVec2 a;
         ImVec2 b;
@@ -52,6 +58,13 @@ private:
     float m_PanX = 0.0f;
     float m_PanY = 0.0f;
     bool  m_IsLocked = false;
+    bool  m_ShowStaticSingleCompare = false;
+    float m_StaticSingleCompareBlend = 0.0f;
+    bool  m_StaticCompareRectsInitialized = false;
+    ImVec2 m_StaticCompareOutputMin = ImVec2(0.0f, 0.0f);
+    ImVec2 m_StaticCompareOutputMax = ImVec2(0.0f, 0.0f);
+    ImVec2 m_StaticCompareSourceMin = ImVec2(0.0f, 0.0f);
+    ImVec2 m_StaticCompareSourceMax = ImVec2(0.0f, 0.0f);
     unsigned int m_CheckerTex = 0;
     bool m_ShowCompositeAssetPicker = false;
     ExportHandleType m_ActiveExportHandle = ExportHandleType::None;
@@ -76,4 +89,15 @@ private:
     float m_SceneResizeAnchorY = 0.0f;
     float m_SceneStartMouseAngle = 0.0f;
     std::vector<SnapGuideLine> m_CompositeSnapGuides;
+    DevelopSubjectRegionHandle m_ActiveDevelopSubjectHandle = DevelopSubjectRegionHandle::None;
+    int m_ActiveDevelopSubjectNodeId = -1;
+    int m_ActiveDevelopSubjectRegionId = -1;
+    int m_ActiveDevelopSubjectStrokeId = -1;
+    bool m_DevelopSubjectBrushStrokeActive = false;
+    float m_DevelopSubjectDragStartU = 0.0f;
+    float m_DevelopSubjectDragStartV = 0.0f;
+    float m_DevelopSubjectStartCenterX = 0.5f;
+    float m_DevelopSubjectStartCenterY = 0.5f;
+    float m_DevelopSubjectStartRadiusX = 0.18f;
+    float m_DevelopSubjectStartRadiusY = 0.18f;
 };

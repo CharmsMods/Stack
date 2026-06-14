@@ -377,6 +377,14 @@ void ApplyDngSupplement(const std::string& path, RawMetadata& metadata) {
     for (const DngTiffReader::Entry& entry : entries) {
         const std::vector<double> values = reader.NumberValues(entry);
         switch (entry.tag) {
+            case 274:
+                if (!values.empty()) {
+                    const int orientation = static_cast<int>(std::lround(values[0]));
+                    if (orientation >= 1 && orientation <= 8) {
+                        metadata.orientation = orientation;
+                    }
+                }
+                break;
             case 259: if (!values.empty()) metadata.dngCompression = static_cast<int>(values[0]); break;
             case 262: if (!values.empty()) metadata.dngPhotometricInterpretation = static_cast<int>(values[0]); break;
             case 50706: {
@@ -625,6 +633,7 @@ void ExtractDngColorMetadata(const libraw_data_t& image, RawMetadata& metadata) 
 
 void ExtractMetadata(LibRaw& processor, const std::string& path, RawMetadata& metadata) {
     const libraw_data_t& image = processor.imgdata;
+    const libraw_imgother_t& capture = image.other;
     metadata.cameraMake = image.idata.make ? image.idata.make : "";
     metadata.cameraModel = image.idata.model ? image.idata.model : "";
     metadata.rawWidth = image.sizes.raw_width;
@@ -638,6 +647,16 @@ void ExtractMetadata(LibRaw& processor, const std::string& path, RawMetadata& me
     metadata.whiteLevel = SafePositive(static_cast<float>(image.color.maximum), 65535.0f);
     metadata.blackLevel = std::max(0.0f, static_cast<float>(image.color.black));
     metadata.bitDepth = EstimateBitDepth(metadata.whiteLevel);
+    metadata.exposureTimeSeconds = std::max(0.0f, capture.shutter);
+    metadata.isoSpeed = std::max(0.0f, capture.iso_speed);
+    metadata.apertureFNumber = std::max(0.0f, capture.aperture);
+    metadata.captureTimestamp = capture.timestamp > 0
+        ? static_cast<std::int64_t>(capture.timestamp)
+        : 0;
+    metadata.hasExposureTime = metadata.exposureTimeSeconds > 0.0f;
+    metadata.hasIsoSpeed = metadata.isoSpeed > 0.0f;
+    metadata.hasApertureFNumber = metadata.apertureFNumber > 0.0f;
+    metadata.hasCaptureTimestamp = metadata.captureTimestamp > 0;
     metadata.mosaiced = image.idata.filters != 0 && image.idata.colors >= 3;
     metadata.pixelLayout = metadata.mosaiced ? RawPixelLayout::MosaicBayer : RawPixelLayout::Unknown;
     metadata.cfaPattern = metadata.mosaiced ? ExtractCfaPattern(processor, image) : CfaPattern::Unknown;

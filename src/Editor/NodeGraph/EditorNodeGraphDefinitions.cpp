@@ -24,20 +24,31 @@ const char* MaskTitle(EditorNodeGraph::MaskGeneratorKind kind) {
     return "Mask";
 }
 
+const char* MaskCombineTitle(EditorNodeGraph::MaskCombineMode mode) {
+    switch (mode) {
+        case EditorNodeGraph::MaskCombineMode::Add: return "Add Scalars";
+        case EditorNodeGraph::MaskCombineMode::Subtract: return "Subtract Scalars";
+        case EditorNodeGraph::MaskCombineMode::Intersect: return "Intersect Scalars";
+        case EditorNodeGraph::MaskCombineMode::Exclude: return "Difference Scalars";
+    }
+    return "Scalar Combine";
+}
+
 const char* MaskUtilityTitle(EditorNodeGraph::MaskUtilityKind kind) {
     switch (kind) {
-        case EditorNodeGraph::MaskUtilityKind::Invert: return "Invert Mask";
-        case EditorNodeGraph::MaskUtilityKind::Levels: return "Levels Mask";
-        case EditorNodeGraph::MaskUtilityKind::Threshold: return "Threshold Mask";
+        case EditorNodeGraph::MaskUtilityKind::Invert: return "Invert Scalar";
+        case EditorNodeGraph::MaskUtilityKind::Levels: return "Remap Scalar";
+        case EditorNodeGraph::MaskUtilityKind::Threshold: return "Threshold Scalar";
     }
-    return "Mask Utility";
+    return "Scalar Utility";
 }
 
 const char* ImageToMaskTitle(EditorNodeGraph::ImageToMaskKind kind) {
     switch (kind) {
-        case EditorNodeGraph::ImageToMaskKind::Luminance: return "Luminance Mask";
+        case EditorNodeGraph::ImageToMaskKind::Luminance: return "Image To Scalar";
+        case EditorNodeGraph::ImageToMaskKind::SampledRange: return "Sampled Range Scalar";
     }
-    return "Image To Mask";
+    return "Image To Scalar";
 }
 
 const char* ImageGeneratorTitle(EditorNodeGraph::ImageGeneratorKind kind) {
@@ -49,6 +60,22 @@ const char* ImageGeneratorTitle(EditorNodeGraph::ImageGeneratorKind kind) {
         case EditorNodeGraph::ImageGeneratorKind::Text: return "Text";
     }
     return "Generated Image";
+}
+
+const char* DataMathTitle(EditorNodeGraph::DataMathMode mode) {
+    switch (mode) {
+        case EditorNodeGraph::DataMathMode::Clamp: return "Clamp Data";
+        case EditorNodeGraph::DataMathMode::Add: return "Add Data";
+        case EditorNodeGraph::DataMathMode::Subtract: return "Subtract Data";
+        case EditorNodeGraph::DataMathMode::Multiply: return "Multiply Data";
+        case EditorNodeGraph::DataMathMode::Divide: return "Divide Data";
+        case EditorNodeGraph::DataMathMode::Average: return "Average Data";
+        case EditorNodeGraph::DataMathMode::Min: return "Minimum Data";
+        case EditorNodeGraph::DataMathMode::Max: return "Maximum Data";
+        case EditorNodeGraph::DataMathMode::Difference: return "Difference Data";
+        case EditorNodeGraph::DataMathMode::Remap: return "Remap Data";
+    }
+    return "Data Math";
 }
 
 } // namespace
@@ -65,13 +92,16 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             node.title = "RAW/CFA Neural Denoise";
             break;
         case EditorNodeGraph::NodeKind::RawDevelop:
-            node.title = "RAW Develop";
+            node.title = "Develop";
             break;
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             node.title = "RAW Detail Auto Mask";
             break;
         case EditorNodeGraph::NodeKind::RawDetailFusion:
-            node.title = "Auto Gain";
+            node.title = "Pre-Local Exposure";
+            break;
+        case EditorNodeGraph::NodeKind::HdrMerge:
+            node.title = "HDR Merge";
             break;
         case EditorNodeGraph::NodeKind::Layer: {
             const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
@@ -96,6 +126,13 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::MaskGenerator:
             node.title = MaskTitle(node.maskKind);
             break;
+        case EditorNodeGraph::NodeKind::CustomMask:
+            node.title = "Custom Mask";
+            node.expanded = true;
+            break;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            node.title = MaskCombineTitle(node.maskCombineMode);
+            break;
         case EditorNodeGraph::NodeKind::MaskUtility:
             node.title = MaskUtilityTitle(node.maskUtilityKind);
             break;
@@ -106,13 +143,16 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             node.title = ImageGeneratorTitle(node.imageGeneratorKind);
             break;
         case EditorNodeGraph::NodeKind::Mix:
-            node.title = "Mix";
+            node.title = "Blend Images";
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             node.title = "Channel Split";
             break;
         case EditorNodeGraph::NodeKind::ChannelCombine:
             node.title = "Channel Combine";
+            break;
+        case EditorNodeGraph::NodeKind::DataMath:
+            node.title = DataMathTitle(node.dataMathMode);
             break;
     }
 }
@@ -144,7 +184,9 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             break;
         case EditorNodeGraph::NodeKind::RawDevelop:
             add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
+            add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Finish Mask", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add(EditorNodeGraph::kPreFinishImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Pre-Finish", false, false);
             break;
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
@@ -155,6 +197,12 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Hybrid Mask", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Gain Mask", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::HdrMerge:
+            add(EditorNodeGraph::kHdrMergeInput1SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 1", false, true);
+            add(EditorNodeGraph::kHdrMergeInput2SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 2", true, true);
+            add(EditorNodeGraph::kHdrMergeInput3SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 3", true, true);
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Scene HDR", false, true);
             break;
         case EditorNodeGraph::NodeKind::Layer:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
@@ -173,15 +221,23 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kPreviewInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Analysis, "Image / Mask", false, true);
             break;
         case EditorNodeGraph::NodeKind::MaskGenerator:
-            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Mask", false, true);
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Scalar", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::CustomMask:
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Scalar", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            add(EditorNodeGraph::kMaskCombineInputASocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Scalar A", false, true);
+            add(EditorNodeGraph::kMaskCombineInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Scalar B", false, true);
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Scalar Out", false, true);
             break;
         case EditorNodeGraph::NodeKind::MaskUtility:
-            add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Mask", false, true);
-            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Mask", false, true);
+            add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Scalar", false, true);
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Scalar Out", false, true);
             break;
         case EditorNodeGraph::NodeKind::ImageToMask:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
-            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Mask", false, true);
+            add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Scalar Out", false, true);
             break;
         case EditorNodeGraph::NodeKind::ImageGenerator:
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
@@ -191,6 +247,11 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kMixInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "B", false, true);
             add(EditorNodeGraph::kMixFactorSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Factor", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::DataMath:
+            add(EditorNodeGraph::kMixInputASocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Data A", false, true);
+            add(EditorNodeGraph::kMixInputBSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Data B", true, true);
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Data Out", false, true);
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
@@ -219,6 +280,8 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::ChannelSplit:
             return EditorNodeGraph::kImageInputSocketId;
+        case EditorNodeGraph::NodeKind::HdrMerge:
+            return EditorNodeGraph::kHdrMergeInput1SocketId;
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             return EditorNodeGraph::kRawInputSocketId;
@@ -227,6 +290,7 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Composite:
             break;
         case EditorNodeGraph::NodeKind::Mix:
+        case EditorNodeGraph::NodeKind::DataMath:
             return EditorNodeGraph::kMixInputASocketId;
         case EditorNodeGraph::NodeKind::Scope:
             return EditorNodeGraph::kScopeInputSocketId;
@@ -234,9 +298,12 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
             return EditorNodeGraph::kPreviewInputSocketId;
         case EditorNodeGraph::NodeKind::MaskUtility:
             return EditorNodeGraph::kMaskInputSocketId;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            return EditorNodeGraph::kMaskCombineInputASocketId;
         case EditorNodeGraph::NodeKind::ImageToMask:
             return EditorNodeGraph::kImageInputSocketId;
         case EditorNodeGraph::NodeKind::MaskGenerator:
+        case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::Image:
@@ -250,10 +317,12 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailFusion:
+        case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::ChannelCombine:
+        case EditorNodeGraph::NodeKind::DataMath:
             return EditorNodeGraph::kImageOutputSocketId;
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
@@ -261,6 +330,8 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ChannelSplit:
             return "r";
         case EditorNodeGraph::NodeKind::MaskGenerator:
+        case EditorNodeGraph::NodeKind::CustomMask:
+        case EditorNodeGraph::NodeKind::MaskCombine:
         case EditorNodeGraph::NodeKind::MaskUtility:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -299,22 +370,38 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back({ EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::RGBParade), "RGB Parade", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::Preview, 0, "Preview", "Input / Output" });
     entries.push_back({ EditorNodeGraph::NodeKind::RawNeuralDenoise, 0, "RAW/CFA Neural Denoise", "Input / Output" });
-    entries.push_back({ EditorNodeGraph::NodeKind::RawDevelop, 0, "RAW Develop", "Input / Output" });
-    entries.push_back({ EditorNodeGraph::NodeKind::RawDetailFusion, 0, "Auto Gain", "Input / Output" });
+    entries.push_back({ EditorNodeGraph::NodeKind::RawDevelop, 0, "Develop", "Input / Output" });
+    entries.push_back({ EditorNodeGraph::NodeKind::HdrMerge, 0, "HDR Merge", "Input / Output" });
+    entries.push_back({ EditorNodeGraph::NodeKind::CustomMask, 0, "Custom Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Solid), "Solid Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::LinearGradient), "Linear Gradient Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RadialGradient), "Radial Gradient Mask", "Masks" });
     entries.push_back({ EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Noise), "Noise Mask", "Masks" });
-    entries.push_back({ EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Invert), "Invert Mask", "Masks" });
-    entries.push_back({ EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Levels), "Levels Mask", "Masks" });
-    entries.push_back({ EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Threshold), "Threshold Mask", "Masks" });
-    entries.push_back({ EditorNodeGraph::NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::Luminance), "Luminance Mask", "Masks" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Add), "Add Scalars", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Subtract), "Subtract Scalars", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Intersect), "Intersect Scalars", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Exclude), "Difference Scalars", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Invert), "Invert Scalar", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Levels), "Remap Scalar", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::MaskUtility, static_cast<int>(EditorNodeGraph::MaskUtilityKind::Threshold), "Threshold Scalar", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::Luminance), "Image To Scalar", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::SampledRange), "Sampled Range Scalar", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Clamp), "Clamp Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Add), "Add Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Subtract), "Subtract Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Multiply), "Multiply Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Divide), "Divide Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Average), "Average Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Min), "Minimum Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Max), "Maximum Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Difference), "Difference Data", "Scalar / Data" });
+    entries.push_back({ EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Remap), "Remap Data", "Scalar / Data" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::SolidColor), "Solid Color Image", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::ColorGradient), "Color Gradient Image", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Square), "Square", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Circle), "Circle", "Texture / Generate" });
     entries.push_back({ EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Text), "Text", "Texture / Generate" });
-    entries.push_back({ EditorNodeGraph::NodeKind::Mix, 0, "Blend", "Composite" });
+    entries.push_back({ EditorNodeGraph::NodeKind::Mix, 0, "Blend Images", "Image Operations" });
     entries.push_back({ EditorNodeGraph::NodeKind::ChannelSplit, 0, "Channel Split", "Channels" });
     entries.push_back({ EditorNodeGraph::NodeKind::ChannelCombine, 0, "Channel Combine", "Channels" });
     return entries;
@@ -333,6 +420,9 @@ EditorNodeGraph::Node BuildPrototypeNode(const NodeCatalogEntry& entry) {
         case EditorNodeGraph::NodeKind::MaskGenerator:
             node.maskKind = static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value);
             break;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            node.maskCombineMode = static_cast<EditorNodeGraph::MaskCombineMode>(entry.value);
+            break;
         case EditorNodeGraph::NodeKind::MaskUtility:
             node.maskUtilityKind = static_cast<EditorNodeGraph::MaskUtilityKind>(entry.value);
             break;
@@ -341,6 +431,9 @@ EditorNodeGraph::Node BuildPrototypeNode(const NodeCatalogEntry& entry) {
             break;
         case EditorNodeGraph::NodeKind::ImageGenerator:
             node.imageGeneratorKind = static_cast<EditorNodeGraph::ImageGeneratorKind>(entry.value);
+            break;
+        case EditorNodeGraph::NodeKind::DataMath:
+            node.dataMathMode = static_cast<EditorNodeGraph::DataMathMode>(entry.value);
             break;
         default:
             break;

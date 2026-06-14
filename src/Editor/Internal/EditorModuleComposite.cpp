@@ -286,20 +286,17 @@ bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeG
 
     AddRawDevelopNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + 250.0f, sourcePosition.y });
     const int developNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ToneCurve, EditorNodeGraph::Vec2{ sourcePosition.x + 500.0f, sourcePosition.y });
-    const int toneNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + 750.0f, sourcePosition.y });
+    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + 500.0f, sourcePosition.y });
     const int viewNodeId = m_NodeGraph.GetSelectedNodeId();
-    EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 1000.0f, sourcePosition.y });
-    if (developNodeId <= 0 || toneNodeId <= 0 || viewNodeId <= 0 || !outputNode) {
+    EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 750.0f, sourcePosition.y });
+    if (developNodeId <= 0 || viewNodeId <= 0 || !outputNode) {
         return false;
     }
     const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
     if (!ConnectGraphSockets(sourceNodeId, EditorNodeGraph::kRawOutputSocketId, developNodeId, EditorNodeGraph::kRawInputSocketId, &errorMessage) ||
-        !ConnectGraphSockets(developNodeId, EditorNodeGraph::kImageOutputSocketId, toneNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) ||
-        !ConnectGraphSockets(toneNodeId, EditorNodeGraph::kImageOutputSocketId, viewNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) ||
+        !ConnectGraphSockets(developNodeId, EditorNodeGraph::kImageOutputSocketId, viewNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) ||
         !ConnectGraphSockets(viewNodeId, EditorNodeGraph::kImageOutputSocketId, outputNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage)) {
         return false;
     }

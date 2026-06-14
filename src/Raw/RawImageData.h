@@ -23,8 +23,7 @@ enum class WhiteBalanceMode {
 };
 
 enum class DemosaicMethod {
-    Bilinear,
-    QualityPlaceholder
+    Bilinear
 };
 
 enum class RawPixelLayout {
@@ -149,29 +148,89 @@ struct RawDetailFusionSettings {
     float highlightProtectionBias = 0.0f;
     float shadowLiftLimitBias = 0.0f;
     float wellExposedTargetBias = 0.0f;
-    float minEv = -4.0f;
-    float maxEv = 4.0f;
+    float minEv = -1.50f;
+    float maxEv = 1.50f;
     float baseEv = 0.0f;
-    float strength = 1.0f;
+    float strength = 0.85f;
     int sampleCount = 17;
-    float highlightProtection = 0.85f;
-    float shadowLiftLimit = 0.75f;
-    float noiseProtection = 0.45f;
+    float baseRadiusPercent = 0.012f;
+    float highlightProtection = 0.90f;
+    float shadowLiftLimit = 0.65f;
+    float noiseProtection = 0.60f;
     float detailWeight = 0.55f;
-    float wellExposedTarget = 0.42f;
-    float smoothGradientProtection = 0.75f;
-    float textureSensitivity = 0.55f;
+    float wellExposedTarget = 0.30f;
+    float smoothGradientProtection = 0.85f;
+    float textureSensitivity = 0.50f;
     float skyBias = 0.55f;
     bool invertMask = false;
     float maskBlackPoint = 0.0f;
     float maskWhitePoint = 1.0f;
     float maskGamma = 1.0f;
-    int smoothnessRadius = 4;
-    int smoothAreaRadius = 10;
-    float edgeAwareness = 0.75f;
-    float haloGuard = 0.85f;
+    int smoothnessRadius = 5;
+    int smoothAreaRadius = 12;
+    float edgeAwareness = 0.65f;
+    float haloGuard = 0.90f;
     float maskDebandDither = 0.0f;
     float manualBlend = 0.5f;
+};
+
+enum class HdrMergeDebugView {
+    FinalImage,
+    Contribution,
+    Clipping,
+    NoiseLimited,
+    AlignmentConfidence,
+    MotionMask,
+    RejectedSamples
+};
+
+enum class HdrMergeAlignmentMode {
+    Off,
+    Translation,
+    WideTranslation
+};
+
+enum class HdrMergeExposureMode {
+    Metadata,
+    Manual
+};
+
+enum class HdrMergeReferenceMode {
+    Auto,
+    Frame1,
+    Frame2,
+    Frame3
+};
+
+enum class HdrMergeDeghostMode {
+    Off,
+    Low,
+    Medium,
+    High
+};
+
+enum class HdrMergeMotionPriority {
+    PreserveReference,
+    AverageCleanAreas
+};
+
+struct HdrMergeSettings {
+    HdrMergeDebugView debugView = HdrMergeDebugView::FinalImage;
+    int frameCount = 2;
+    HdrMergeAlignmentMode alignmentMode = HdrMergeAlignmentMode::Off;
+    HdrMergeExposureMode exposureMode = HdrMergeExposureMode::Metadata;
+    HdrMergeReferenceMode referenceMode = HdrMergeReferenceMode::Auto;
+    HdrMergeDeghostMode deghostMode = HdrMergeDeghostMode::Low;
+    HdrMergeMotionPriority motionPriority = HdrMergeMotionPriority::PreserveReference;
+    float manualExposureEv[3] = { 0.0f, -2.0f, 2.0f };
+    float exposureOffsetEv[3] = { 0.0f, 0.0f, 0.0f };
+    bool autoReliability = true;
+    float clipThreshold = 0.98f;
+    float clipFeather = 0.08f;
+    float blackThreshold = 0.002f;
+    float blackFeather = 0.018f;
+    float readNoise = 0.002f;
+    bool noiseAware = true;
 };
 
 struct RawMetadata {
@@ -203,6 +262,14 @@ struct RawMetadata {
     float defaultWhiteClipPercent = 0.0f;
     std::array<float, 4> cameraWhiteBalance { 1.0f, 1.0f, 1.0f, 1.0f };
     std::array<float, 4> daylightWhiteBalance { 1.0f, 1.0f, 1.0f, 1.0f };
+    float exposureTimeSeconds = 0.0f;
+    float isoSpeed = 0.0f;
+    float apertureFNumber = 0.0f;
+    std::int64_t captureTimestamp = 0;
+    bool hasExposureTime = false;
+    bool hasIsoSpeed = false;
+    bool hasApertureFNumber = false;
+    bool hasCaptureTimestamp = false;
     std::array<float, 9> cameraToSrgb {
         1.0f, 0.0f, 0.0f,
         0.0f, 1.0f, 0.0f,

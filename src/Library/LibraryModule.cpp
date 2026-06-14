@@ -12,10 +12,13 @@
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GLLoader.h"
+#include "ThirdParty/stb_image.h"
 #include "Persistence/StackBinaryFormat.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
+#include <iostream>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -23,6 +26,44 @@
 #include <sstream>
 
 namespace {
+
+unsigned int LoadIconTexture(const std::string& filename) {
+    std::vector<std::filesystem::path> searchPaths = {
+        std::filesystem::current_path() / "Icons" / filename,
+        std::filesystem::current_path() / "../Icons" / filename,
+        std::filesystem::current_path() / "../../Icons" / filename,
+        std::filesystem::path("Icons") / filename,
+        std::filesystem::path("../Icons") / filename,
+        std::filesystem::path("../../Icons") / filename
+    };
+
+    std::filesystem::path resolvedPath;
+    for (const auto& path : searchPaths) {
+        if (std::filesystem::exists(path)) {
+            resolvedPath = path;
+            break;
+        }
+    }
+
+    if (resolvedPath.empty()) {
+        std::cerr << "[LibraryModule] Could not find icon: " << filename << std::endl;
+        return 0;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load_thread(1);
+    unsigned char* pixels = stbi_load(resolvedPath.string().c_str(), &width, &height, &channels, 4);
+    if (!pixels) {
+        std::cerr << "[LibraryModule] Failed to load icon: " << resolvedPath << std::endl;
+        return 0;
+    }
+
+    unsigned int tex = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    return tex;
+}
 
 std::string FormatKeyLabel(const std::string& key) {
     std::string result;
@@ -118,6 +159,39 @@ constexpr float kCardMotionSpeed = 16.0f;
 constexpr float kPreviewMotionSpeed = 18.0f;
 constexpr float kStatusMotionSpeed = 12.0f;
 constexpr float kDialogAppearDuration = 0.12f;
+
+void ComputeCoverUv(
+    float sourceWidth,
+    float sourceHeight,
+    const ImRect& targetRect,
+    ImVec2& outUv0,
+    ImVec2& outUv1) {
+    outUv0 = ImVec2(0.0f, 1.0f);
+    outUv1 = ImVec2(1.0f, 0.0f);
+
+    if (sourceWidth <= 0.0f || sourceHeight <= 0.0f) {
+        return;
+    }
+
+    const float sourceAspect = sourceWidth / std::max(1.0f, sourceHeight);
+    const float targetAspect = targetRect.GetWidth() / std::max(1.0f, targetRect.GetHeight());
+
+    if (std::abs(sourceAspect - targetAspect) < 0.001f) {
+        return;
+    }
+
+    if (sourceAspect > targetAspect) {
+        const float visibleWidth = targetAspect / sourceAspect;
+        const float inset = std::clamp((1.0f - visibleWidth) * 0.5f, 0.0f, 0.49f);
+        outUv0.x = inset;
+        outUv1.x = 1.0f - inset;
+    } else {
+        const float visibleHeight = sourceAspect / targetAspect;
+        const float inset = std::clamp((1.0f - visibleHeight) * 0.5f, 0.0f, 0.49f);
+        outUv0.y = 1.0f - inset;
+        outUv1.y = inset;
+    }
+}
 
 template <typename TMap>
 LibraryCardMotionState& GetCardMotionState(TMap& states, const std::string& key) {
@@ -248,7 +322,7 @@ void DrawCardOverlayText(
     drawList->PopClipRect();
 }
 
-void DrawSplitHandle(ImDrawList* drawList, const ImRect& rect, float split, ImGuiID handleId, bool hovered, bool active) {
+void DrawSplitHandle(ImDrawList* drawList, const ImRect& rect, float split, ImGuiID handleId, bool hovered, bool active, float alpha = 1.0f) {
     static std::unordered_map<ImGuiID, SplitHandleMotionState> s_SplitHandleMotion;
     SplitHandleMotionState& motion = GetSplitHandleMotionState(s_SplitHandleMotion, handleId);
     motion.lastSeenFrame = ImGui::GetFrameCount();
@@ -260,20 +334,24 @@ void DrawSplitHandle(ImDrawList* drawList, const ImRect& rect, float split, ImGu
     const float lineThickness = 1.0f + (0.8f * motion.hover);
     const float handleRadius = 5.0f + (1.1f * motion.hover);
     const float haloRadius = handleRadius + (4.5f * motion.hover);
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    auto scaledAlpha = [alpha](float value) {
+        return static_cast<int>(std::clamp(value * alpha, 0.0f, 255.0f));
+    };
 
     drawList->AddLine(
         ImVec2(splitX, rect.Min.y),
         ImVec2(splitX, rect.Max.y),
-        IM_COL32(255, 255, 255, static_cast<int>(210 + (25 * motion.hover))),
+        IM_COL32(255, 255, 255, scaledAlpha(210.0f + (25.0f * motion.hover))),
         lineThickness);
     drawList->AddCircleFilled(
         center,
         haloRadius,
-        IM_COL32(255, 255, 255, static_cast<int>(30 + (35 * motion.hover))));
+        IM_COL32(255, 255, 255, scaledAlpha(30.0f + (35.0f * motion.hover))));
     drawList->AddCircleFilled(
         center,
         handleRadius,
-        IM_COL32(255, 255, 255, static_cast<int>(220 + (25 * motion.hover))));
+        IM_COL32(255, 255, 255, scaledAlpha(220.0f + (25.0f * motion.hover))));
 }
 
 bool ProjectMatchesFilter(const ProjectEntry& project, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly) {
@@ -330,6 +408,119 @@ bool AssetMatchesFilter(const AssetEntry& asset, const char* filter, const std::
     return haystack.find(needle) != std::string::npos;
 }
 
+ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight) {
+    const float standardWidth = 220.0f;
+    const float aspect = (sourceHeight > 0.0f) ? (sourceWidth / sourceHeight) : 1.0f;
+    ImVec2 thumbSize(standardWidth, standardWidth / std::max(aspect, 0.1f));
+
+    if (thumbSize.y > 300.0f) {
+        thumbSize.y = 300.0f;
+        thumbSize.x = 300.0f * aspect;
+    }
+
+    return thumbSize;
+}
+
+struct LibraryPackedCard {
+    size_t index = 0;
+    ImVec2 pos = ImVec2(0.0f, 0.0f);
+    ImVec2 size = ImVec2(0.0f, 0.0f);
+};
+
+bool LibraryPackedRectsOverlap(const LibraryPackedCard& placed, const ImVec2& pos, const ImVec2& size, float gap) {
+    return pos.x < placed.pos.x + placed.size.x + gap &&
+           pos.x + size.x + gap > placed.pos.x &&
+           pos.y < placed.pos.y + placed.size.y + gap &&
+           pos.y + size.y + gap > placed.pos.y;
+}
+
+float LibraryPackedContactScore(const std::vector<LibraryPackedCard>& placed, const ImVec2& pos, const ImVec2& size, float gap) {
+    float score = 0.0f;
+    if (std::abs(pos.x) < 0.5f) score += size.y * 0.25f;
+    if (std::abs(pos.y) < 0.5f) score += size.x * 0.25f;
+
+    for (const LibraryPackedCard& card : placed) {
+        const float verticalOverlap =
+            std::max(0.0f, std::min(pos.y + size.y, card.pos.y + card.size.y) - std::max(pos.y, card.pos.y));
+        const float horizontalOverlap =
+            std::max(0.0f, std::min(pos.x + size.x, card.pos.x + card.size.x) - std::max(pos.x, card.pos.x));
+
+        if (std::abs(pos.x - (card.pos.x + card.size.x + gap)) < 0.5f ||
+            std::abs(card.pos.x - (pos.x + size.x + gap)) < 0.5f) {
+            score += verticalOverlap;
+        }
+        if (std::abs(pos.y - (card.pos.y + card.size.y + gap)) < 0.5f ||
+            std::abs(card.pos.y - (pos.y + size.y + gap)) < 0.5f) {
+            score += horizontalOverlap;
+        }
+    }
+
+    return score;
+}
+
+std::vector<LibraryPackedCard> PackLibraryCards(const std::vector<LibraryPackedCard>& inputCards, float contentWidth, float gap) {
+    std::vector<LibraryPackedCard> placed;
+    placed.reserve(inputCards.size());
+    contentWidth = std::max(contentWidth, 1.0f);
+
+    float packedHeight = 0.0f;
+    for (const LibraryPackedCard& input : inputCards) {
+        LibraryPackedCard best = input;
+        bool found = false;
+        float bestScore = 0.0f;
+
+        std::vector<float> candidateXs;
+        std::vector<float> candidateYs;
+        candidateXs.reserve(placed.size() * 2 + 1);
+        candidateYs.reserve(placed.size() * 2 + 1);
+        candidateXs.push_back(0.0f);
+        candidateYs.push_back(0.0f);
+
+        for (const LibraryPackedCard& card : placed) {
+            candidateXs.push_back(card.pos.x);
+            candidateXs.push_back(card.pos.x + card.size.x + gap);
+            candidateYs.push_back(card.pos.y);
+            candidateYs.push_back(card.pos.y + card.size.y + gap);
+        }
+
+        for (float y : candidateYs) {
+            if (y < 0.0f) continue;
+            for (float x : candidateXs) {
+                if (x < 0.0f || x + input.size.x > contentWidth + 0.5f) continue;
+
+                bool overlaps = false;
+                for (const LibraryPackedCard& card : placed) {
+                    if (LibraryPackedRectsOverlap(card, ImVec2(x, y), input.size, gap)) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) continue;
+
+                const float heightAfter = std::max(packedHeight, y + input.size.y);
+                const float contact = LibraryPackedContactScore(placed, ImVec2(x, y), input.size, gap);
+                const float score = (heightAfter * 100000.0f) + (y * 100.0f) + x - (contact * 2.0f);
+                if (!found || score < bestScore) {
+                    best = input;
+                    best.pos = ImVec2(x, y);
+                    bestScore = score;
+                    found = true;
+                }
+            }
+        }
+
+        if (!found) {
+            best = input;
+            best.pos = ImVec2(0.0f, packedHeight > 0.0f ? packedHeight + gap : 0.0f);
+        }
+
+        placed.push_back(best);
+        packedHeight = std::max(packedHeight, best.pos.y + best.size.y);
+    }
+
+    return placed;
+}
+
 bool IsRenderProject(const ProjectEntry& project) {
     return project.projectKind == StackBinaryFormat::kRenderProjectKind;
 }
@@ -356,7 +547,7 @@ ImVec2 FitImageToBounds(float imageWidth, float imageHeight, const ImVec2& bound
 
 
 
-void DrawComparePreview(const ProjectEntry& project, const ImVec2& requestedSize, float& split, float rounding = 14.0f, bool showLabels = false) {
+void DrawComparePreview(const ProjectEntry& project, const ImVec2& requestedSize, float& split, float rounding = 14.0f, bool showLabels = false, float alpha = 1.0f) {
     ImGui::InvisibleButton("##LibraryComparePreview", requestedSize);
     const ImRect rect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
     const bool hovered = ImGui::IsItemHovered();
@@ -371,7 +562,9 @@ void DrawComparePreview(const ProjectEntry& project, const ImVec2& requestedSize
     }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddRectFilled(rect.Min, rect.Max, IM_COL32(14, 16, 20, 255), rounding);
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    const int alphaByte = static_cast<int>(255.0f * alpha);
+    drawList->AddRectFilled(rect.Min, rect.Max, IM_COL32(14, 16, 20, alphaByte), rounding);
 
     const ImTextureID beforeTex = (ImTextureID)(intptr_t)project.sourcePreviewTex;
     const ImTextureID afterTex = (ImTextureID)(intptr_t)project.fullPreviewTex;
@@ -381,19 +574,19 @@ void DrawComparePreview(const ProjectEntry& project, const ImVec2& requestedSize
     const ImVec2 afterUv1(1, 0);
 
     if (beforeTex) {
-        drawList->AddImageRounded(beforeTex, rect.Min, rect.Max, beforeUv0, beforeUv1, IM_COL32_WHITE, rounding);
+        drawList->AddImageRounded(beforeTex, rect.Min, rect.Max, beforeUv0, beforeUv1, IM_COL32(255, 255, 255, alphaByte), rounding);
     }
 
     if (afterTex) {
         const float splitX = rect.Min.x + rect.GetWidth() * split;
         drawList->PushClipRect(rect.Min, ImVec2(splitX, rect.Max.y), true);
-        drawList->AddImageRounded(afterTex, rect.Min, rect.Max, afterUv0, afterUv1, IM_COL32_WHITE, rounding);
+        drawList->AddImageRounded(afterTex, rect.Min, rect.Max, afterUv0, afterUv1, IM_COL32(255, 255, 255, alphaByte), rounding);
         drawList->PopClipRect();
-        DrawSplitHandle(drawList, rect, split, handleId, hovered, active);
+        DrawSplitHandle(drawList, rect, split, handleId, hovered, active, alpha);
 
         if (showLabels) {
-            drawList->AddText(ImVec2(rect.Min.x + 10.0f, rect.Min.y + 10.0f), IM_COL32(255, 255, 255, 220), "After");
-            drawList->AddText(ImVec2(rect.Max.x - 55.0f, rect.Min.y + 10.0f), IM_COL32(255, 255, 255, 220), "Before");
+            drawList->AddText(ImVec2(rect.Min.x + 10.0f, rect.Min.y + 10.0f), IM_COL32(255, 255, 255, static_cast<int>(220.0f * alpha)), "After");
+            drawList->AddText(ImVec2(rect.Max.x - 55.0f, rect.Min.y + 10.0f), IM_COL32(255, 255, 255, static_cast<int>(220.0f * alpha)), "Before");
         }
     }
 }
@@ -401,7 +594,20 @@ void DrawComparePreview(const ProjectEntry& project, const ImVec2& requestedSize
 } // namespace
 
 LibraryModule::LibraryModule() {}
-LibraryModule::~LibraryModule() {}
+LibraryModule::~LibraryModule() {
+    if (m_OptionsIconTex) {
+        glDeleteTextures(1, &m_OptionsIconTex);
+        m_OptionsIconTex = 0;
+    }
+    if (m_AllProjectsIconTex) {
+        glDeleteTextures(1, &m_AllProjectsIconTex);
+        m_AllProjectsIconTex = 0;
+    }
+    if (m_AssetsIconTex) {
+        glDeleteTextures(1, &m_AssetsIconTex);
+        m_AssetsIconTex = 0;
+    }
+}
 
 void LibraryModule::Initialize() {
     LibraryManager::Get().RefreshLibrary();
@@ -484,10 +690,26 @@ void LibraryModule::OpenAssetPreviewByFileName(const std::string& fileName) {
     }
 }
 
-void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, StackAppearance::AppearanceManager* appearance, int* activeTab) {
+void LibraryModule::RenderUI(
+    EditorModule* editor,
+    CompositeModule* composite,
+    StackAppearance::AppearanceManager* appearance,
+    int* activeTab,
+    std::function<void(const std::string&)> onLoadEditorProject) {
+    if (m_OptionsIconTex == 0) {
+        m_OptionsIconTex = LoadIconTexture("options.png");
+    }
+    if (m_AllProjectsIconTex == 0) {
+        m_AllProjectsIconTex = LoadIconTexture("all projects.png");
+    }
+    if (m_AssetsIconTex == 0) {
+        m_AssetsIconTex = LoadIconTexture("assets.png");
+    }
+
     m_CachedEditor = editor;
     m_CachedComposite = composite;
     m_CachedActiveTab = activeTab;
+    m_OnLoadEditorProject = std::move(onLoadEditorProject);
     m_BlockLibraryGridContextMenuThisFrame = false;
     const float dt = ImGui::GetIO().DeltaTime;
 
@@ -543,9 +765,10 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 255, 255, 26));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(255, 255, 255, 34));
     ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(220, 236, 244, 34));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(56.0f, 24.0f));
-    ImGui::BeginChild("LibraryTabContainer", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(80.0f, 32.0f));
+    ImGui::BeginChild("LibraryTabContainer", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
     ImGui::PopStyleVar();
 
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput) {
@@ -566,148 +789,115 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
         }
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::BeginChild("LibraryHeader", ImVec2(0, 58.0f), false, ImGuiWindowFlags_NoScrollbar);
-    {
-        const float pillHeight = 28.0f;
-        const float pillWidth = 110.0f;
+    float headerHeight = 0.0f;
+    if (m_ImportStatusAlpha > 0.01f || m_ExportStatusAlpha > 0.01f || m_SaveStatusAlpha > 0.01f || m_LoadStatusAlpha > 0.01f) {
+        headerHeight = 24.0f;
+    }
 
-        if (ImGui::Button("Options", ImVec2(84.0f, pillHeight))) {
-            ImGui::OpenPopup("LibraryOptionsPopup");
-        }
-
-        if (ImGui::BeginPopup("LibraryOptionsPopup")) {
-            RenderLibraryMenuOptions(importBusy, exportBusy);
-            ImGui::EndPopup();
-        }
-
-        ImGui::SameLine(0.0f, 12.0f);
-        ImGui::BeginGroup();
-        {
-            auto renderModePill = [&](const char* label, bool active, bool showAssetsValue) {
-                ImGui::PushStyleColor(ImGuiCol_Button, active ? IM_COL32(110, 186, 255, 52) : IM_COL32(255, 255, 255, 10));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? IM_COL32(110, 186, 255, 68) : IM_COL32(255, 255, 255, 22));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? IM_COL32(110, 186, 255, 82) : IM_COL32(255, 255, 255, 30));
-                if (ImGui::Button(label, ImVec2(pillWidth, pillHeight))) {
-                    m_ShowAssets = showAssetsValue;
-                    if (m_ShowAssets) {
-                        m_SelectedProjects.clear();
-                    } else {
-                        m_SelectedAssets.clear();
-                    }
+    if (headerHeight > 0.0f) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        if (ImGui::BeginChild("LibraryHeader", ImVec2(0, headerHeight), false, ImGuiWindowFlags_NoScrollbar)) {
+            bool hasPreviousStatus = false;
+            auto renderInlineStatus = [&](const char* text, float& alphaState) {
+                if (text == nullptr || text[0] == '\0' || alphaState <= 0.01f) {
+                    return;
                 }
-                ImGui::PopStyleColor(3);
+                if (hasPreviousStatus) {
+                    ImGui::SameLine(0.0f, 18.0f);
+                }
+                renderStatusLine(text, alphaState);
+                hasPreviousStatus = true;
             };
 
-            renderModePill("All Projects", !m_ShowAssets, false);
-            ImGui::SameLine(0.0f, 6.0f);
-            renderModePill("Assets", m_ShowAssets, true);
-        }
-        ImGui::EndGroup();
-
-        bool hasPreviousStatus = false;
-        auto renderInlineStatus = [&](const char* text, float& alphaState) {
-            if (text == nullptr || text[0] == '\0' || alphaState <= 0.01f) {
-                return;
-            }
-            if (hasPreviousStatus) {
-                ImGui::SameLine(0.0f, 18.0f);
-            }
-            renderStatusLine(text, alphaState);
-            hasPreviousStatus = true;
-        };
-
-        if (m_ImportStatusAlpha > 0.01f || m_ExportStatusAlpha > 0.01f || m_SaveStatusAlpha > 0.01f || m_LoadStatusAlpha > 0.01f) {
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 2.0f);
             renderInlineStatus(LibraryManager::Get().GetImportStatusText().c_str(), m_ImportStatusAlpha);
             renderInlineStatus(LibraryManager::Get().GetExportStatusText().c_str(), m_ExportStatusAlpha);
             renderInlineStatus(LibraryManager::Get().GetSaveStatusText().c_str(), m_SaveStatusAlpha);
             renderInlineStatus(LibraryManager::Get().GetProjectLoadStatusText().c_str(), m_LoadStatusAlpha);
         }
+        ImGui::EndChild();
+        ImGui::PopStyleVar(); // Pop LibraryHeader's WindowPadding
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
-    ImGui::EndChild();
-    ImGui::PopStyleVar(); // Pop LibraryHeader's WindowPadding
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGuiStyle& style = ImGui::GetStyle();
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x + 12.0f, style.ItemSpacing.y + 16.0f));
-    ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), false);
 
-    auto getCardWidth = [](float aspect) {
-        const float standardWidth = 220.0f;
-        float cardWidth = standardWidth;
-        float cardHeight = standardWidth / std::max(aspect, 0.1f);
-        if (cardHeight > 300.0f) {
-            cardWidth = 300.0f * aspect;
-        }
-        return cardWidth;
-    };
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 18.0f));
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x + 16.0f, style.ItemSpacing.y + 20.0f));
+    ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding);
 
     int renderedCount = 0;
-    if (m_ShowAssets) {
-        float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    const ImVec2 layoutStartScreen = ImGui::GetCursorScreenPos();
+    const ImVec2 layoutStartLocal = ImGui::GetCursorPos();
+    const float layoutWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const float packedCardGap = 22.0f;
+    float packedHeight = 0.0f;
 
+    if (m_ShowAssets) {
         const auto& assets = LibraryManager::Get().GetAssets();
+        std::vector<LibraryPackedCard> cards;
+        cards.reserve(assets.size());
+
         for (size_t idx = 0; idx < assets.size(); ++idx) {
             const auto& asset = assets[idx];
             if (!asset) continue;
 
+            const auto motionIt = m_AssetCardMotion.find(asset->fileName);
+            const bool revealing = motionIt != m_AssetCardMotion.end() && motionIt->second.reveal > 0.01f;
+            const bool matchesFilter = AssetMatchesFilter(*asset, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag);
+            if (!matchesFilter && !revealing) continue;
+
+            LibraryPackedCard card;
+            card.index = idx;
+            card.size = ComputeLibraryCardSize(static_cast<float>(asset->width), static_cast<float>(asset->height));
+            cards.push_back(card);
+        }
+
+        const std::vector<LibraryPackedCard> packedCards = PackLibraryCards(cards, layoutWidth, packedCardGap);
+        for (const LibraryPackedCard& card : packedCards) {
+            const auto& asset = assets[card.index];
+            if (!asset) continue;
+
+            ImGui::SetCursorScreenPos(ImVec2(layoutStartScreen.x + card.pos.x, layoutStartScreen.y + card.pos.y));
             ImGui::PushID(asset->fileName.c_str());
-            const bool rendered = RenderAssetCard(*asset, editor);
-            if (rendered) {
-                ++renderedCount;
-                const float lastButtonX2 = ImGui::GetItemRectMax().x;
-
-                // Lookahead to find next matched asset
-                float nextCardWidth = 220.0f;
-                for (size_t nextIdx = idx + 1; nextIdx < assets.size(); ++nextIdx) {
-                    const auto& nextAsset = assets[nextIdx];
-                    if (nextAsset && AssetMatchesFilter(*nextAsset, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag)) {
-                        const float nextAspect = (nextAsset->height > 0) ? (static_cast<float>(nextAsset->width) / static_cast<float>(nextAsset->height)) : 1.0f;
-                        nextCardWidth = getCardWidth(nextAspect);
-                        break;
-                    }
-                }
-
-                const float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + nextCardWidth;
-                if (nextButtonX2 < windowVisibleX2) {
-                    ImGui::SameLine();
-                }
-            }
+            if (RenderAssetCard(*asset, editor)) ++renderedCount;
             ImGui::PopID();
+            packedHeight = std::max(packedHeight, card.pos.y + card.size.y);
         }
     } else {
-        float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-
         const auto& projects = LibraryManager::Get().GetProjects();
+        std::vector<LibraryPackedCard> cards;
+        cards.reserve(projects.size());
+
         for (size_t idx = 0; idx < projects.size(); ++idx) {
             const auto& project = projects[idx];
             if (!project) continue;
 
-            ImGui::PushID(project->fileName.c_str());
-            const bool rendered = RenderProjectCard(*project, editor);
-            if (rendered) {
-                ++renderedCount;
-                const float lastButtonX2 = ImGui::GetItemRectMax().x;
+            const auto motionIt = m_ProjectCardMotion.find(project->fileName);
+            const bool revealing = motionIt != m_ProjectCardMotion.end() && motionIt->second.reveal > 0.01f;
+            const bool matchesFilter = ProjectMatchesFilter(*project, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag);
+            if (!matchesFilter && !revealing) continue;
 
-                // Lookahead to find next matched project
-                float nextCardWidth = 220.0f;
-                for (size_t nextIdx = idx + 1; nextIdx < projects.size(); ++nextIdx) {
-                    const auto& nextProject = projects[nextIdx];
-                    if (nextProject && ProjectMatchesFilter(*nextProject, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag)) {
-                        const float nextAspect = (nextProject->sourceHeight > 0) ? (static_cast<float>(nextProject->sourceWidth) / static_cast<float>(nextProject->sourceHeight)) : 1.0f;
-                        nextCardWidth = getCardWidth(nextAspect);
-                        break;
-                    }
-                }
-
-                const float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + nextCardWidth;
-                if (nextButtonX2 < windowVisibleX2) {
-                    ImGui::SameLine();
-                }
-            }
-            ImGui::PopID();
+            LibraryPackedCard card;
+            card.index = idx;
+            card.size = ComputeLibraryCardSize(static_cast<float>(project->sourceWidth), static_cast<float>(project->sourceHeight));
+            cards.push_back(card);
         }
+
+        const std::vector<LibraryPackedCard> packedCards = PackLibraryCards(cards, layoutWidth, packedCardGap);
+        for (const LibraryPackedCard& card : packedCards) {
+            const auto& project = projects[card.index];
+            if (!project) continue;
+
+            ImGui::SetCursorScreenPos(ImVec2(layoutStartScreen.x + card.pos.x, layoutStartScreen.y + card.pos.y));
+            ImGui::PushID(project->fileName.c_str());
+            if (RenderProjectCard(*project, editor)) ++renderedCount;
+            ImGui::PopID();
+            packedHeight = std::max(packedHeight, card.pos.y + card.size.y);
+        }
+    }
+
+    ImGui::SetCursorPos(ImVec2(layoutStartLocal.x, layoutStartLocal.y + packedHeight));
+    if (packedHeight > 0.0f) {
+        ImGui::Dummy(ImVec2(1.0f, 1.0f));
     }
 
     m_EmptyStateAlpha = ImGuiExtras::AnimateTowards(m_EmptyStateAlpha, renderedCount == 0 ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
@@ -726,11 +916,18 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
         ImGui::PopStyleVar();
     }
 
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(118, 162, 196, 210));
     if (!m_BlockLibraryGridContextMenuThisFrame &&
         ImGui::BeginPopupContextWindow("LibraryGridContextMenu", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
         RenderLibraryMenuOptions(importBusy, exportBusy);
         ImGui::EndPopup();
     }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(4);
 
     // Sliding tags panel overlay inside LibraryGrid
     {
@@ -909,27 +1106,38 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
         }
     }
 
-    // Centered floating search bar at bottom
+    // Centered floating search bar and options/mode pills at bottom
     {
         ImVec2 libraryPos = ImGui::GetWindowPos();
         ImVec2 librarySize = ImGui::GetWindowSize();
         
         const float searchW = 340.0f;
-        const float searchH = 34.0f;
-        const float gapFromBottom = 16.0f;
+        const float gapFromBottom = 10.0f;
+        
+        // Position bottom-center of the window 10px above the bottom of the grid
         ImVec2 searchPos = ImVec2(
-            libraryPos.x + (librarySize.x - searchW) * 0.5f,
-            libraryPos.y + librarySize.y - searchH - gapFromBottom
+            libraryPos.x + librarySize.x * 0.5f,
+            libraryPos.y + librarySize.y - gapFromBottom
         );
 
-        ImGui::SetNextWindowPos(searchPos);
-        ImGui::SetNextWindowSize(ImVec2(searchW, searchH));
+        ImGui::SetNextWindowPos(searchPos, ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowSize(ImVec2(searchW, 0.0f), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(10.0f, 10.0f));
-        ImGui::Begin("##LibraryFloatingSearch", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::Begin("##LibraryFloatingSearch", nullptr, 
+            ImGuiWindowFlags_NoDecoration | 
+            ImGuiWindowFlags_NoMove | 
+            ImGuiWindowFlags_NoSavedSettings | 
+            ImGuiWindowFlags_NoScrollbar | 
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_AlwaysAutoResize);
 
+        // Push tight item spacing for search/icons vertical layout
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f));
+
+        // 1. Render Search Bar
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(24, 28, 34, 235));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(32, 38, 46, 245));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(38, 44, 52, 255));
@@ -943,6 +1151,76 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
 
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(4);
+
+
+        // 2. Render Centered Icons (Options + Mode Pills)
+        const float defaultBtnWidth = 110.0f;
+        float optionsWidth = (m_OptionsIconTex != 0) ? (18.0f + ImGui::GetStyle().FramePadding.x * 2.0f) : 84.0f;
+        float allProjWidth = (m_AllProjectsIconTex != 0) ? (18.0f + ImGui::GetStyle().FramePadding.x * 2.0f) : defaultBtnWidth;
+        float assetsWidth = (m_AssetsIconTex != 0) ? (18.0f + ImGui::GetStyle().FramePadding.x * 2.0f) : defaultBtnWidth;
+        float iconsRowWidth = optionsWidth + 12.0f + allProjWidth + 6.0f + assetsWidth;
+
+        ImGui::SetCursorPosX((searchW - iconsRowWidth) * 0.5f);
+
+        bool openOptions = false;
+        if (m_OptionsIconTex != 0) {
+            if (ImGui::ImageButton("##OptionsIconBtn", (ImTextureID)(intptr_t)m_OptionsIconTex, ImVec2(18.0f, 18.0f))) {
+                openOptions = true;
+            }
+        } else {
+            if (ImGui::Button("Options", ImVec2(84.0f, 28.0f))) {
+                openOptions = true;
+            }
+        }
+        if (openOptions) {
+            ImGui::OpenPopup("LibraryOptionsPopup");
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Options");
+        }
+
+        if (ImGui::BeginPopup("LibraryOptionsPopup")) {
+            RenderLibraryMenuOptions(importBusy, exportBusy);
+            ImGui::EndPopup();
+        }
+
+        ImGui::SameLine(0.0f, 12.0f);
+        ImGui::BeginGroup();
+        {
+            auto renderModePill = [&](const char* label, bool active, bool showAssetsValue, unsigned int iconTex) {
+                ImGui::PushStyleColor(ImGuiCol_Button, active ? IM_COL32(110, 186, 255, 52) : IM_COL32(255, 255, 255, 10));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? IM_COL32(110, 186, 255, 68) : IM_COL32(255, 255, 255, 22));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? IM_COL32(110, 186, 255, 82) : IM_COL32(255, 255, 255, 30));
+                
+                bool clicked = false;
+                if (iconTex != 0) {
+                    std::string strId = std::string("##ModePill_") + label;
+                    clicked = ImGui::ImageButton(strId.c_str(), (ImTextureID)(intptr_t)iconTex, ImVec2(18.0f, 18.0f));
+                } else {
+                    clicked = ImGui::Button(label, ImVec2(defaultBtnWidth, 28.0f));
+                }
+
+                if (clicked) {
+                    m_ShowAssets = showAssetsValue;
+                    if (m_ShowAssets) {
+                        m_SelectedProjects.clear();
+                    } else {
+                        m_SelectedAssets.clear();
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", label);
+                }
+                ImGui::PopStyleColor(3);
+            };
+
+            renderModePill("All Projects", !m_ShowAssets, false, m_AllProjectsIconTex);
+            ImGui::SameLine(0.0f, 6.0f);
+            renderModePill("Assets", m_ShowAssets, true, m_AssetsIconTex);
+        }
+        ImGui::EndGroup();
+
+        ImGui::PopStyleVar(); // Pop ItemSpacing
         ImGui::End();
         ImGui::PopStyleVar(3);
     }
@@ -951,16 +1229,16 @@ void LibraryModule::RenderUI(EditorModule* editor, CompositeModule* composite, S
     ImGui::PopStyleVar(2); // Pop LibraryGrid's WindowPadding and ItemSpacing
     ImGui::EndChild(); // End LibraryTabContainer
 
-    ImGui::PopStyleColor(7);
+    ImGui::PopStyleColor(8);
     ImGui::PopStyleVar(3);
 
     PruneCardMotionStates(m_ProjectCardMotion, ImGui::GetFrameCount());
     PruneCardMotionStates(m_AssetCardMotion, ImGui::GetFrameCount());
 
     if (m_PreviewProject || m_ProjectPreviewTransition > 0.0f) {
-        RenderPreviewPopup(editor, composite, activeTab);
+        RenderPreviewPopup(editor, composite, activeTab, onLoadEditorProject);
     } else if (m_PreviewAsset || m_AssetPreviewTransition > 0.0f) {
-        RenderAssetPreviewPopup(editor, composite, activeTab);
+        RenderAssetPreviewPopup(editor, composite, activeTab, onLoadEditorProject);
     }
 
     if (importBusy) {
@@ -991,14 +1269,7 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
         return false;
     }
 
-    const float standardWidth = 220.0f;
-    const float aspect = (project.sourceHeight > 0) ? (static_cast<float>(project.sourceWidth) / static_cast<float>(project.sourceHeight)) : 1.0f;
-    ImVec2 thumbSize(standardWidth, standardWidth / std::max(aspect, 0.1f));
-
-    if (thumbSize.y > 300.0f) {
-        thumbSize.y = 300.0f;
-        thumbSize.x = 300.0f * aspect;
-    }
+    ImVec2 thumbSize = ComputeLibraryCardSize(static_cast<float>(project.sourceWidth), static_cast<float>(project.sourceHeight));
 
     const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
@@ -1018,12 +1289,15 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
         ImVec2(cardRect.Min.x + xOffset + thumbSize.x, cardRect.Min.y + thumbSize.y));
 
     if (project.thumbnailTex) {
+        ImVec2 uv0;
+        ImVec2 uv1;
+        ComputeCoverUv(static_cast<float>(project.sourceWidth), static_cast<float>(project.sourceHeight), imageRect, uv0, uv1);
         drawList->AddImageRounded(
             (ImTextureID)(intptr_t)project.thumbnailTex,
             imageRect.Min,
             imageRect.Max,
-            ImVec2(0, 1),
-            ImVec2(1, 0),
+            uv0,
+            uv1,
             IM_COL32(255, 255, 255, static_cast<int>(255.0f * cardAlpha)),
             rounding);
     } else {
@@ -1108,13 +1382,22 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
     }
 
     const std::string popupId = std::string("ProjectCardContextMenu##") + project.fileName;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(118, 162, 196, 210));
     if (ImGui::BeginPopup(popupId.c_str())) {
         const bool multiple = m_SelectedProjects.size() > 1;
         if (!multiple) {
             if (project.projectKind == "editor" || project.projectKind.empty()) {
                 if (ImGui::MenuItem("Open in Editor")) {
-                    LibraryManager::Get().RequestLoadProject(project.fileName, m_CachedEditor);
-                    if (m_CachedActiveTab) *m_CachedActiveTab = 0;
+                    if (m_OnLoadEditorProject) {
+                        m_OnLoadEditorProject(project.fileName);
+                    } else {
+                        LibraryManager::Get().RequestLoadProject(project.fileName, m_CachedEditor);
+                        if (m_CachedActiveTab) *m_CachedActiveTab = 1;
+                    }
                 }
             }
             if (project.projectKind == "composite") {
@@ -1140,6 +1423,8 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
 
         ImGui::EndPopup();
     }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(4);
 
     ImGui::EndGroup();
     return true;
@@ -1160,14 +1445,7 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
         return false;
     }
 
-    const float standardWidth = 220.0f;
-    const float aspect = (asset.height > 0) ? (static_cast<float>(asset.width) / static_cast<float>(asset.height)) : 1.0f;
-    ImVec2 thumbSize(standardWidth, standardWidth / std::max(aspect, 0.1f));
-
-    if (thumbSize.y > 300.0f) {
-        thumbSize.y = 300.0f;
-        thumbSize.x = 300.0f * aspect;
-    }
+    ImVec2 thumbSize = ComputeLibraryCardSize(static_cast<float>(asset.width), static_cast<float>(asset.height));
 
     const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
@@ -1187,12 +1465,15 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
         ImVec2(cardRect.Min.x + xOffset + thumbSize.x, cardRect.Min.y + thumbSize.y));
 
     if (asset.thumbnailTex) {
+        ImVec2 uv0;
+        ImVec2 uv1;
+        ComputeCoverUv(static_cast<float>(asset.width), static_cast<float>(asset.height), imageRect, uv0, uv1);
         drawList->AddImageRounded(
             (ImTextureID)(intptr_t)asset.thumbnailTex,
             imageRect.Min,
             imageRect.Max,
-            ImVec2(0, 1),
-            ImVec2(1, 0),
+            uv0,
+            uv1,
             IM_COL32(255, 255, 255, static_cast<int>(255.0f * cardAlpha)),
             rounding);
     } else {
@@ -1278,6 +1559,11 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     }
 
     const std::string popupId = std::string("AssetCardContextMenu##") + asset.fileName;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(118, 162, 196, 210));
     if (ImGui::BeginPopup(popupId.c_str())) {
         if (ImGui::MenuItem("Add Selected To Editor Composite", nullptr, false, !m_SelectedAssets.empty() && editor != nullptr)) {
             for (const auto& fn : m_SelectedAssets) {
@@ -1297,12 +1583,18 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
         }
         ImGui::EndPopup();
     }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(4);
 
     ImGui::EndGroup();
     return true;
 }
 
-void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* composite, int* activeTab) {
+void LibraryModule::RenderPreviewPopup(
+    EditorModule* editor,
+    CompositeModule* composite,
+    int* activeTab,
+    const std::function<void(const std::string&)>& onLoadEditorProject) {
     if (!m_PreviewProject && m_ProjectPreviewTransition <= 0.0f) {
         return;
     }
@@ -1441,10 +1733,10 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* co
                 imageRect.Max,
                 ImVec2(0, 1),
                 ImVec2(1, 0),
-                IM_COL32_WHITE,
+                IM_COL32(255, 255, 255, static_cast<int>(255.0f * contentVisibility)),
                 18.0f);
         } else {
-            DrawComparePreview(*m_PreviewProject, fittedImageSize, m_CompareSplit, 18.0f, false);
+            DrawComparePreview(*m_PreviewProject, fittedImageSize, m_CompareSplit, 18.0f, false, contentVisibility);
         }
     } else {
         const ImVec2 spinnerPos(
@@ -1562,15 +1854,19 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* co
             } else {
                 m_ProjectPreviewClosing = true;
                 m_ProjectPreviewRefreshAfterClose = false;
-                LibraryManager::Get().RequestLoadProject(projectFileName, editor, [this, activeTab](bool success) {
-                    if (!success) {
-                        return;
-                    }
+                if (onLoadEditorProject) {
+                    onLoadEditorProject(projectFileName);
+                } else {
+                    LibraryManager::Get().RequestLoadProject(projectFileName, editor, [this, activeTab](bool success) {
+                        if (!success) {
+                            return;
+                        }
 
-                    if (activeTab) {
-                        *activeTab = 1;
-                    }
-                });
+                        if (activeTab) {
+                            *activeTab = 1;
+                        }
+                    });
+                }
             }
         }
     }
@@ -1578,6 +1874,14 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* co
     ImGui::SameLine(0.0f, 10.0f);
     if (ImGui::Button("Delete Project...", actionSize)) {
         ImGui::OpenPopup("Confirm Delete Project");
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Export Project...", ImVec2(contentWidth, 34.0f))) {
+        std::string exportPath = FileDialogs::SaveProjectFileDialog("Export Project File", m_PreviewProject->fileName.c_str());
+        if (!exportPath.empty()) {
+            LibraryManager::Get().ExportProject(m_PreviewProject->fileName, exportPath);
+        }
     }
 
     if (compositeProject) {
@@ -1645,7 +1949,11 @@ void LibraryModule::RenderPreviewPopup(EditorModule* editor, CompositeModule* co
     }
 }
 
-void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, CompositeModule* composite, int* activeTab) {
+void LibraryModule::RenderAssetPreviewPopup(
+    EditorModule* editor,
+    CompositeModule* composite,
+    int* activeTab,
+    const std::function<void(const std::string&)>& onLoadEditorProject) {
     if (!m_PreviewAsset && m_AssetPreviewTransition <= 0.0f) {
         return;
     }
@@ -1778,7 +2086,7 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, CompositeModul
             imageRect.Max,
             ImVec2(0, 1),
             ImVec2(1, 0),
-            IM_COL32_WHITE,
+            IM_COL32(255, 255, 255, static_cast<int>(255.0f * contentVisibility)),
             18.0f);
     } else {
         const ImVec2 spinnerPos(
@@ -1895,15 +2203,19 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, CompositeModul
                 m_ConfirmLoadOpen = true;
             } else {
                 m_AssetPreviewClosing = true;
-                LibraryManager::Get().RequestLoadProject(projectFileName, editor, [this, activeTab](bool success) {
-                    if (!success) {
-                        return;
-                    }
+                if (onLoadEditorProject) {
+                    onLoadEditorProject(projectFileName);
+                } else {
+                    LibraryManager::Get().RequestLoadProject(projectFileName, editor, [this, activeTab](bool success) {
+                        if (!success) {
+                            return;
+                        }
 
-                    if (activeTab) {
-                        *activeTab = 1;
-                    }
-                });
+                        if (activeTab) {
+                            *activeTab = 1;
+                        }
+                    });
+                }
             }
         }
     }
@@ -1940,11 +2252,28 @@ void LibraryModule::RenderAssetPreviewPopup(EditorModule* editor, CompositeModul
 
 
 void LibraryModule::RenderGlobalPopups() {
-    RenderConfirmLoadPopup();
+    RenderConfirmLoadPopup(m_OnLoadEditorProject);
     RenderFolderImportPopup();
     RenderImportConflictPopup();
     RenderAssetConflictPopup();
     RenderDeleteConfirmPopup();
+}
+
+void LibraryModule::DismissPreviewsForProjectLoad() {
+    LibraryManager::Get().CancelProjectPreviewRequests();
+    LibraryManager::Get().CancelAssetPreviewRequests();
+    m_PreviewProject = nullptr;
+    m_PreviewAsset = nullptr;
+    m_ProjectPreviewTransition = 0.0f;
+    m_ProjectPreviewClosing = false;
+    m_ProjectPreviewRefreshAfterClose = false;
+    m_AssetPreviewTransition = 0.0f;
+    m_AssetPreviewClosing = false;
+    m_ProjectPreviewMenuHover = 0.0f;
+    m_AssetPreviewMenuHover = 0.0f;
+    m_ProjectPreviewLaunchRect.valid = false;
+    m_AssetPreviewLaunchRect.valid = false;
+    m_RenameTargetFileName.clear();
 }
 
 void LibraryModule::RenderFolderImportPopup() {
@@ -2033,7 +2362,7 @@ void LibraryModule::RenderFolderImportPopup() {
     }
 }
 
-void LibraryModule::RenderConfirmLoadPopup() {
+void LibraryModule::RenderConfirmLoadPopup(const std::function<void(const std::string&)>& onLoadEditorProject) {
     if (m_ConfirmLoadOpen) {
         ImGui::OpenPopup("Project Already Open##Library");
         m_ConfirmLoadOpen = false;
@@ -2070,7 +2399,26 @@ void LibraryModule::RenderConfirmLoadPopup() {
                     LibraryManager::Get().RequestSaveProject(
                         m_CachedEditor->GetCurrentProjectName(),
                         m_CachedEditor,
-                        m_CachedEditor->GetCurrentProjectFileName());
+                        m_CachedEditor->GetCurrentProjectFileName(),
+                        [this](bool success) {
+                            if (!success || !m_CachedEditor) {
+                                return;
+                            }
+                            if (m_PreviewProject) {
+                                m_ProjectPreviewClosing = true;
+                                m_ProjectPreviewRefreshAfterClose = false;
+                            }
+                            if (m_PreviewAsset) {
+                                m_AssetPreviewClosing = true;
+                            }
+                            if (m_OnLoadEditorProject) {
+                                m_OnLoadEditorProject(m_PendingLoadProjectFileName);
+                            } else {
+                                LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool loadSuccess) {
+                                    if (loadSuccess && m_CachedActiveTab) *m_CachedActiveTab = 1;
+                                });
+                            }
+                        });
                 }
             } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
                 if (m_CachedComposite->GetCurrentProjectFileName().empty()) {
@@ -2079,36 +2427,27 @@ void LibraryModule::RenderConfirmLoadPopup() {
                     LibraryManager::Get().RequestSaveCompositeProject(
                         m_CachedComposite->GetCurrentProjectName(),
                         m_CachedComposite,
-                        m_CachedComposite->GetCurrentProjectFileName());
+                        m_CachedComposite->GetCurrentProjectFileName(),
+                        [this](bool success) {
+                            if (!success || !m_CachedComposite) {
+                                return;
+                            }
+                            if (m_PreviewProject) {
+                                m_ProjectPreviewClosing = true;
+                                m_ProjectPreviewRefreshAfterClose = false;
+                            }
+                            if (m_PreviewAsset) {
+                                m_AssetPreviewClosing = true;
+                            }
+                            LibraryManager::Get().RequestLoadCompositeProject(m_PendingLoadProjectFileName, m_CachedComposite, [this](bool loadSuccess) {
+                                if (loadSuccess && m_CachedActiveTab) *m_CachedActiveTab = 2;
+                            });
+                        });
                 }
             }
 
             if (needsName) {
                 m_SaveNamePromptOpen = true;
-            } else {
-                if (m_PendingLoadTarget == PendingLoadTarget::Editor && m_CachedEditor) {
-                    if (m_PreviewProject) {
-                        m_ProjectPreviewClosing = true;
-                        m_ProjectPreviewRefreshAfterClose = false;
-                    }
-                    if (m_PreviewAsset) {
-                        m_AssetPreviewClosing = true;
-                    }
-                    LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool success) {
-                        if (success && m_CachedActiveTab) *m_CachedActiveTab = 1;
-                    });
-                } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
-                    if (m_PreviewProject) {
-                        m_ProjectPreviewClosing = true;
-                        m_ProjectPreviewRefreshAfterClose = false;
-                    }
-                    if (m_PreviewAsset) {
-                        m_AssetPreviewClosing = true;
-                    }
-                    LibraryManager::Get().RequestLoadCompositeProject(m_PendingLoadProjectFileName, m_CachedComposite, [this](bool success) {
-                        if (success && m_CachedActiveTab) *m_CachedActiveTab = 2;
-                    });
-                }
             }
             ImGui::CloseCurrentPopup();
         }
@@ -2123,9 +2462,13 @@ void LibraryModule::RenderConfirmLoadPopup() {
                 if (m_PreviewAsset) {
                     m_AssetPreviewClosing = true;
                 }
-                LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool success) {
-                    if (success && m_CachedActiveTab) *m_CachedActiveTab = 1;
-                });
+                if (onLoadEditorProject) {
+                    onLoadEditorProject(m_PendingLoadProjectFileName);
+                } else {
+                    LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool success) {
+                        if (success && m_CachedActiveTab) *m_CachedActiveTab = 1;
+                    });
+                }
             } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
                 if (m_PreviewProject) {
                     m_ProjectPreviewClosing = true;
@@ -2172,28 +2515,40 @@ void LibraryModule::RenderConfirmLoadPopup() {
             }
 
             if (m_PendingLoadTarget == PendingLoadTarget::Editor && m_CachedEditor) {
-                if (m_PreviewProject) {
-                    m_ProjectPreviewClosing = true;
-                    m_ProjectPreviewRefreshAfterClose = false;
-                }
-                if (m_PreviewAsset) {
-                    m_AssetPreviewClosing = true;
-                }
-                LibraryManager::Get().RequestSaveProject(newName, m_CachedEditor, "");
-                LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool success) {
-                    if (success && m_CachedActiveTab) *m_CachedActiveTab = 1;
+                LibraryManager::Get().RequestSaveProject(newName, m_CachedEditor, "", [this](bool success) {
+                    if (!success || !m_CachedEditor) {
+                        return;
+                    }
+                    if (m_PreviewProject) {
+                        m_ProjectPreviewClosing = true;
+                        m_ProjectPreviewRefreshAfterClose = false;
+                    }
+                    if (m_PreviewAsset) {
+                        m_AssetPreviewClosing = true;
+                    }
+                    if (m_OnLoadEditorProject) {
+                        m_OnLoadEditorProject(m_PendingLoadProjectFileName);
+                    } else {
+                        LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool loadSuccess) {
+                            if (loadSuccess && m_CachedActiveTab) *m_CachedActiveTab = 1;
+                        });
+                    }
                 });
             } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
-                if (m_PreviewProject) {
-                    m_ProjectPreviewClosing = true;
-                    m_ProjectPreviewRefreshAfterClose = false;
-                }
-                if (m_PreviewAsset) {
-                    m_AssetPreviewClosing = true;
-                }
-                LibraryManager::Get().RequestSaveCompositeProject(newName, m_CachedComposite, "");
-                LibraryManager::Get().RequestLoadCompositeProject(m_PendingLoadProjectFileName, m_CachedComposite, [this](bool success) {
-                    if (success && m_CachedActiveTab) *m_CachedActiveTab = 2;
+                LibraryManager::Get().RequestSaveCompositeProject(newName, m_CachedComposite, "", [this](bool success) {
+                    if (!success || !m_CachedComposite) {
+                        return;
+                    }
+                    if (m_PreviewProject) {
+                        m_ProjectPreviewClosing = true;
+                        m_ProjectPreviewRefreshAfterClose = false;
+                    }
+                    if (m_PreviewAsset) {
+                        m_AssetPreviewClosing = true;
+                    }
+                    LibraryManager::Get().RequestLoadCompositeProject(m_PendingLoadProjectFileName, m_CachedComposite, [this](bool loadSuccess) {
+                        if (loadSuccess && m_CachedActiveTab) *m_CachedActiveTab = 2;
+                    });
                 });
             }
             

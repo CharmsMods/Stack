@@ -84,6 +84,11 @@ private:
     EditorNodeGraph::Vec2 GraphToScreen(const EditorNodeGraph::Vec2& graph) const;
     EditorNodeGraph::Vec2 NodeSize(const EditorNodeGraph::Node& node) const;
     EditorNodeGraph::Vec2 NodeScreenSize(const EditorNodeGraph::Node& node) const;
+    EditorNodeGraph::Vec2 NodeViewportSizePx(const EditorNodeGraph::Node& node) const;
+    EditorNodeGraph::Vec2 NodeGraphFootprintSize(const EditorNodeGraph::Node& node) const;
+    bool UsesFixedNodeViewport() const;
+    float NodeContentScale() const;
+    float NodePinRadius() const;
     void ZoomAtMouse(float wheel);
     void ClampPanToContent(const EditorNodeGraph::Graph& graph);
 
@@ -95,7 +100,10 @@ private:
     void RenderNodeBrowser(EditorModule* editor);
     void RenderValidationStatus(const EditorNodeGraph::Graph& graph);
     void RenderInteractionDebugOverlay(const EditorNodeGraph::Graph& graph, int hoveredNodeId, GraphMouseOwner owner) const;
+    void RenderChannelSplitConfirmPrompt(EditorModule* editor);
     bool IsGraphCanvasHovered() const;
+    bool CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph& graph, int nodeId) const;
+    void CancelChannelSplitConfirm();
     GraphMouseOwner ResolveMouseOwner(
         const EditorNodeGraph::Graph& graph,
         bool graphHovered,
@@ -131,6 +139,10 @@ private:
     EditorNodeGraph::Vec2 m_CanvasOrigin;
     EditorNodeGraph::Vec2 m_Pan = { 40.0f, 40.0f };
     float m_Zoom = 1.0f;
+    float m_ZoomTarget = 1.0f;
+    bool m_SmoothZoomActive = false;
+    EditorNodeGraph::Vec2 m_SmoothZoomFocusScreen {};
+    EditorNodeGraph::Vec2 m_SmoothZoomFocusGraph {};
     EditorNodeGraph::Vec2 m_ContextGraphPos;
     ContextTarget m_ContextTarget = ContextTarget::Canvas;
     int m_ContextNodeId = -1;
@@ -181,6 +193,8 @@ private:
     mutable std::map<int, float> m_NodeMeasuredBaseHeights;
     mutable std::map<int, bool> m_NodeContentOverflow;
     std::uint64_t m_NodeFrontOrderCounter = 1;
+    EditorNodeGraph::Vec2 m_LastGraphMousePos {};
+    bool m_HasLastGraphMousePos = false;
     EditorModule* m_ActiveEditor = nullptr;
     int m_PushedSourceNodeId = -1;
     float m_PushDistance = 0.0f;
@@ -190,9 +204,15 @@ private:
     int m_DragGroupId = -1;
     int m_ResizingGroupId = -1;
     int m_HoveredGroupId = -1;
+    int m_ChannelSplitConfirmNodeId = -1;
+    double m_ChannelSplitConfirmStartTime = 0.0;
+    CachedRect m_ChannelSplitConfirmRect {};
 
     void CopySelectedNodes(EditorModule* editor);
     void PasteNodes(EditorModule* editor);
+    void CopyGraphInfo(EditorModule* editor, bool wholeGraph, bool includeState);
+    void PasteGraphInfo(EditorModule* editor);
+    bool PasteClipboardPayload(EditorModule* editor, const nlohmann::json& clipboardPayload, std::string* outSummary);
     void DuplicateSelectedNodes(EditorModule* editor);
     nlohmann::json m_Clipboard;
     int m_ClipboardPasteCount = 0;

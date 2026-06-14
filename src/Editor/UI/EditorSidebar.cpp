@@ -86,6 +86,69 @@ namespace {
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
+
+    void RenderGraphSettingsPanel(EditorModule* editor, float controlWidth) {
+        ImGuiExtras::RichSectionLabel("GRAPH", 4.0f);
+        ImGui::TextWrapped("Graph appearance and link rendering options are listed below.");
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+
+        auto* appearance = editor ? editor->GetAppearance() : nullptr;
+        if (appearance == nullptr) {
+            ImGui::TextDisabled("Graph appearance settings are unavailable.");
+            return;
+        }
+
+        StackAppearance::GraphVisualMode graphMode = appearance->GetGraphVisualMode();
+        const StackAppearance::GraphVisualMode graphModes[] = {
+            StackAppearance::GraphVisualMode::BlackNodes,
+            StackAppearance::GraphVisualMode::Classic,
+            StackAppearance::GraphVisualMode::SpotlightPrototype
+        };
+
+        ImGui::Text("Graph Visual Mode");
+        ImGui::SetNextItemWidth(controlWidth);
+        if (ImGui::BeginCombo("##SettingsGraphVisualMode", StackAppearance::GraphVisualModeLabel(graphMode))) {
+            for (const StackAppearance::GraphVisualMode candidate : graphModes) {
+                const bool selected = graphMode == candidate;
+                if (ImGui::Selectable(StackAppearance::GraphVisualModeLabel(candidate), selected)) {
+                    if (appearance->SetGraphVisualMode(candidate)) {
+                        graphMode = candidate;
+                    }
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(120.0f, controlWidth));
+        ImGui::TextDisabled("%s", StackAppearance::GraphVisualModeDescription(graphMode));
+        ImGui::PopTextWrapPos();
+
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+        bool dottedMaskLinks = appearance->GetGraphDottedMaskLinks();
+        if (ImGui::Checkbox("Dotted mask-endpoint links", &dottedMaskLinks)) {
+            appearance->SetGraphDottedMaskLinks(dottedMaskLinks);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Render links as dotted when either endpoint is a mask-typed graph socket.");
+        }
+
+        if (graphMode == StackAppearance::GraphVisualMode::SpotlightPrototype) {
+            bool haloOutlines = appearance->GetGraphSpotlightHaloOutlines();
+            if (ImGui::Checkbox("Halo edge outlines", &haloOutlines)) {
+                appearance->SetGraphSpotlightHaloOutlines(haloOutlines);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Draw a faint edge halo around spotlight nodes.");
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Text("Grid Spacing: 32 px");
+    }
 }
 
 EditorSidebar::EditorSidebar() {}
@@ -143,7 +206,12 @@ static const char* CompositeSnapPresetLabel(EditorModule::CompositeSnapModePrese
 
 void EditorSidebar::RenderSettings(EditorModule* editor) {
     const float contentWidth = ImGui::GetContentRegionAvail().x;
-    static int activeCategory = 0; // 0: General, 1: Canvas Composition
+    enum SettingsCategory : int {
+        SettingsCategoryGeneral = 0,
+        SettingsCategoryGraph = 1,
+        SettingsCategoryCanvasComposition = 2
+    };
+    static int activeCategory = SettingsCategoryGeneral;
     
     ImGui::Columns(2, "##SettingsColumns", false);
     ImGui::SetColumnWidth(0, 95.0f * ImGui::GetIO().FontGlobalScale);
@@ -154,19 +222,24 @@ void EditorSidebar::RenderSettings(EditorModule* editor) {
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(70, 70, 85, 230));
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(90, 90, 110, 255));
     
-    if (ImGui::Selectable("General", activeCategory == 0, 0, ImVec2(0, 26.0f))) {
-        activeCategory = 0;
+    if (ImGui::Selectable("General", activeCategory == SettingsCategoryGeneral, 0, ImVec2(0, 26.0f))) {
+        activeCategory = SettingsCategoryGeneral;
     }
-    
+
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    if (ImGui::Selectable("Graph", activeCategory == SettingsCategoryGraph, 0, ImVec2(0, 26.0f))) {
+        activeCategory = SettingsCategoryGraph;
+    }
+
     const bool hasComposite = editor->GetCompletedChainCount() >= 2;
     if (hasComposite) {
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        if (ImGui::Selectable("Canvas\nComposition", activeCategory == 1, 0, ImVec2(0, 36.0f))) {
-            activeCategory = 1;
+        if (ImGui::Selectable("Canvas\nComposition", activeCategory == SettingsCategoryCanvasComposition, 0, ImVec2(0, 36.0f))) {
+            activeCategory = SettingsCategoryCanvasComposition;
         }
     } else {
-        if (activeCategory == 1) {
-            activeCategory = 0;
+        if (activeCategory == SettingsCategoryCanvasComposition) {
+            activeCategory = SettingsCategoryGeneral;
         }
     }
     
@@ -178,9 +251,9 @@ void EditorSidebar::RenderSettings(EditorModule* editor) {
     // Right column: Content for category
     const float rightColWidth = ImGui::GetContentRegionAvail().x;
     
-    if (activeCategory == 0) {
+    if (activeCategory == SettingsCategoryGeneral) {
         ImGuiExtras::RichSectionLabel("THEME & GENERAL", 4.0f);
-        ImGui::TextWrapped("Grid & Theme options are listed below.");
+        ImGui::TextWrapped("Theme options are listed below.");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         
         auto* appearance = editor->GetAppearance();
@@ -205,13 +278,14 @@ void EditorSidebar::RenderSettings(EditorModule* editor) {
         }
         
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGui::Text("Grid Spacing: 32 px");
         ImGui::Text("Renderer: OpenGL 4.3 Core");
         
         ImGui::Dummy(ImVec2(0.0f, 12.0f));
         ImGui::TextDisabled("Stack Image Editor");
         ImGui::TextDisabled("Version 1.0.0");
-    } else if (activeCategory == 1 && hasComposite) {
+    } else if (activeCategory == SettingsCategoryGraph) {
+        RenderGraphSettingsPanel(editor, rightColWidth);
+    } else if (activeCategory == SettingsCategoryCanvasComposition && hasComposite) {
         ImGuiExtras::RichSectionLabel("CANVAS COMPOSITION", 4.0f);
         
         // Snap Mode
@@ -437,11 +511,7 @@ void EditorSidebar::RenderExportSettings(EditorModule* editor) {
 
 void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
     const float fullWidth = ImGui::GetContentRegionAvail().x;
-    
-    if (ImGuiExtras::RichFullWidthButton("< Back to Graph", fullWidth, 30.0f)) {
-        editor->SwitchToSubWindow(EditorModule::EditorSubWindow::NodeGraph);
-    }
-    
+
     int nodeId = editor->GetActiveComplexNodeId();
     EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(nodeId);
     if (!node) {
@@ -484,6 +554,16 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
     }
     if (node->kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
         editor->RenderRawDetailFusionControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
+        editor->RenderHdrMergeControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::CustomMask) {
+        editor->RenderCustomMaskControls(*node, controlWidth, true);
         ImGui::EndChild();
         return;
     }

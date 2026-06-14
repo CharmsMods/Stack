@@ -23,6 +23,7 @@ struct ProjectLoadOptions {
     bool includeThumbnail = true;
     bool includeSourceImage = true;
     bool includePipelineData = true;
+    bool verifyChecksum = true;
 };
 
 struct ProjectMetadata {

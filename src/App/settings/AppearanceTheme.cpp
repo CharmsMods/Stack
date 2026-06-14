@@ -27,6 +27,9 @@ constexpr const char* kIdKey = "id";
 constexpr const char* kNameKey = "name";
 constexpr const char* kThemeKey = "theme";
 constexpr const char* kLegacyThemeKey = "themePreset";
+constexpr const char* kGraphVisualModeKey = "graphVisualMode";
+constexpr const char* kGraphSpotlightHaloOutlinesKey = "graphSpotlightHaloOutlines";
+constexpr const char* kGraphDottedMaskLinksKey = "graphDottedMaskLinks";
 constexpr const char* kFactoryThemeToken = "premium-dark-studio";
 constexpr float kMinTextScale = 0.75f;
 constexpr float kMaxTextScale = 1.60f;
@@ -49,6 +52,31 @@ ImVec2 Blend(const ImVec2& from, const ImVec2& to, float t) {
     return ImVec2(
         from.x + (to.x - from.x) * clampedT,
         from.y + (to.y - from.y) * clampedT);
+}
+
+const char* GraphVisualModeToString(GraphVisualMode mode) {
+    switch (mode) {
+        case GraphVisualMode::Classic: return "Classic";
+        case GraphVisualMode::BlackNodes: return "BlackNodes";
+        case GraphVisualMode::SpotlightPrototype: return "SpotlightPrototype";
+    }
+    return "BlackNodes";
+}
+
+GraphVisualMode GraphVisualModeFromString(const std::string& value) {
+    if (value == "BlackNodes" || value == "Black Nodes") {
+        return GraphVisualMode::BlackNodes;
+    }
+    if (value == "SpotlightPrototype" ||
+        value == "Soft Spotlight Prototype" ||
+        value == "FuturistGlassPrototype" ||
+        value == "Futurist Glass Prototype") {
+        return GraphVisualMode::SpotlightPrototype;
+    }
+    if (value == "Classic") {
+        return GraphVisualMode::Classic;
+    }
+    return GraphVisualMode::BlackNodes;
 }
 
 json WriteVec2(const ImVec2& value) {
@@ -930,6 +958,9 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
     root[kVersionKey] = kAppearanceSettingsVersion;
     root[kAppearanceKey] = json::object();
     root[kAppearanceKey][kActivePresetIdKey] = library.activePresetId.empty() ? std::string(kFactoryThemeToken) : library.activePresetId;
+    root[kAppearanceKey][kGraphVisualModeKey] = GraphVisualModeToString(library.graphVisualMode);
+    root[kAppearanceKey][kGraphSpotlightHaloOutlinesKey] = library.graphSpotlightHaloOutlines;
+    root[kAppearanceKey][kGraphDottedMaskLinksKey] = library.graphDottedMaskLinks;
     root[kAppearanceKey][kPresetsKey] = json::array();
     for (const ThemeDefinition& preset : library.customPresets) {
         root[kAppearanceKey][kPresetsKey].push_back(ThemePresetRecordToJson(preset));
@@ -940,6 +971,9 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
 bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibrary, bool* outNeedsMigration = nullptr) {
     outLibrary = {};
     outLibrary.activePresetId = kFactoryThemeToken;
+    outLibrary.graphVisualMode = GraphVisualMode::BlackNodes;
+    outLibrary.graphSpotlightHaloOutlines = false;
+    outLibrary.graphDottedMaskLinks = true;
     outLibrary.customPresets.clear();
 
     if (!root.is_object()) {
@@ -957,6 +991,9 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         const std::string legacyToken = appearance.value(kLegacyThemeKey, std::string(kFactoryThemeToken));
         (void)legacyToken;
         outLibrary.activePresetId = kFactoryThemeToken;
+        outLibrary.graphVisualMode = GraphVisualMode::BlackNodes;
+        outLibrary.graphSpotlightHaloOutlines = false;
+        outLibrary.graphDottedMaskLinks = true;
         return true;
     }
 
@@ -966,6 +1003,10 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
 
     const json appearance = root.value(kAppearanceKey, json::object());
     outLibrary.activePresetId = appearance.value(kActivePresetIdKey, std::string(kFactoryThemeToken));
+    outLibrary.graphVisualMode = GraphVisualModeFromString(
+        appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::BlackNodes))));
+    outLibrary.graphSpotlightHaloOutlines = appearance.value(kGraphSpotlightHaloOutlinesKey, false);
+    outLibrary.graphDottedMaskLinks = appearance.value(kGraphDottedMaskLinksKey, true);
 
     const json presets = appearance.value(kPresetsKey, json::array());
     if (!presets.is_array()) {
@@ -1031,6 +1072,27 @@ std::string GetSettingsFileToken() {
 
 ThemeDefinition MakeFactoryPremiumDarkStudioTheme() {
     return BuildFactoryTheme();
+}
+
+const char* GraphVisualModeLabel(GraphVisualMode mode) {
+    switch (mode) {
+        case GraphVisualMode::Classic: return "Classic";
+        case GraphVisualMode::BlackNodes: return "Black Nodes";
+        case GraphVisualMode::SpotlightPrototype: return "Soft Spotlight Prototype";
+    }
+    return "Black Nodes";
+}
+
+const char* GraphVisualModeDescription(GraphVisualMode mode) {
+    switch (mode) {
+        case GraphVisualMode::Classic:
+            return "Use the current stable node graph rendering.";
+        case GraphVisualMode::BlackNodes:
+            return "Use the new default graph rendering with near-black nodes and theme-derived accents.";
+        case GraphVisualMode::SpotlightPrototype:
+            return "Use the experimental graph where nodes read as soft lighter spots in the canvas.";
+    }
+    return "";
 }
 
 std::vector<ThemeDefinition> MakeFactoryThemes() {
@@ -1271,6 +1333,18 @@ std::string AppearanceManager::GetActivePresetDisplayName() const {
     return m_WorkingTheme.displayName;
 }
 
+GraphVisualMode AppearanceManager::GetGraphVisualMode() const {
+    return m_Library.graphVisualMode;
+}
+
+bool AppearanceManager::GetGraphSpotlightHaloOutlines() const {
+    return m_Library.graphSpotlightHaloOutlines;
+}
+
+bool AppearanceManager::GetGraphDottedMaskLinks() const {
+    return m_Library.graphDottedMaskLinks;
+}
+
 bool AppearanceManager::ActivePresetIsFactory() const {
     return std::any_of(
         m_FactoryThemes.begin(),
@@ -1299,6 +1373,30 @@ bool AppearanceManager::SelectPresetById(const std::string& presetId) {
     m_Library.activePresetId = preset->id;
     m_WorkingTheme = *preset;
     m_WorkingTheme.readOnly = preset->readOnly;
+    return Save();
+}
+
+bool AppearanceManager::SetGraphVisualMode(GraphVisualMode mode) {
+    if (m_Library.graphVisualMode == mode) {
+        return true;
+    }
+    m_Library.graphVisualMode = mode;
+    return Save();
+}
+
+bool AppearanceManager::SetGraphSpotlightHaloOutlines(bool enabled) {
+    if (m_Library.graphSpotlightHaloOutlines == enabled) {
+        return true;
+    }
+    m_Library.graphSpotlightHaloOutlines = enabled;
+    return Save();
+}
+
+bool AppearanceManager::SetGraphDottedMaskLinks(bool enabled) {
+    if (m_Library.graphDottedMaskLinks == enabled) {
+        return true;
+    }
+    m_Library.graphDottedMaskLinks = enabled;
     return Save();
 }
 

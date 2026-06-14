@@ -2,7 +2,10 @@
 
 #include "Editor/EditorModule.h"
 #include "Editor/LayerRegistry.h"
+#include "App/settings/AppearanceTheme.h"
 #include "EditorNodeGraphDefinitions.h"
+#include "EditorNodeGraphSerializer.h"
+#include "EditorNodeGraphUIMetrics.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
 #include "Utils/FileDialogs.h"
@@ -11,12 +14,27 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include "Renderer/GLLoader.h"
+#include <sstream>
 #include <string>
+#include <unordered_set>
 
 namespace {
+
+using EditorNodeGraphUIMetrics::CubicBezierPoint;
+using EditorNodeGraphUIMetrics::LinkBezierHandle;
+using EditorNodeGraphUIMetrics::LinkThicknessScaleFromZoom;
+using EditorNodeGraphUIMetrics::NodeUiScaleFromZoom;
+using EditorNodeGraphUIMetrics::PinRadiusForZoom;
+
+bool InsertNewNodeOnExistingLink(
+    EditorNodeGraphUI* ui,
+    EditorModule* editor,
+    const EditorNodeGraph::Link& link,
+    int newNodeId);
 
 ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
     return ImVec2(value.x, value.y);
@@ -37,10 +55,6 @@ bool ContainsCaseInsensitive(const std::string& haystack, const std::string& nee
     };
 
     return lower(haystack).find(lower(needle)) != std::string::npos;
-}
-
-float NodeUiScaleFromZoom(float zoom) {
-    return zoom;
 }
 
 constexpr float kGraphPositionLimit = 20000.0f;
@@ -73,6 +87,39 @@ struct NodeFamilyStyle {
     ImVec4 mutedText;
 };
 
+const NodeFamilyStyle& StyleForFamily(NodeFamily family);
+bool ShouldShowKindLabel(const EditorNodeGraph::Node& node);
+
+struct GraphStyleTokens {
+    StackAppearance::GraphVisualMode mode = StackAppearance::GraphVisualMode::BlackNodes;
+    bool enabled = false;
+    bool light = false;
+    bool haloOutlines = false;
+    bool spotlightSurface = false;
+    ImVec4 canvas;
+    ImVec4 nodeSurface;
+    ImVec4 nodeSurfaceCollapsed;
+    ImVec4 spotlightCenter;
+    ImVec4 spotlightEdge;
+    ImVec4 spotlightHalo;
+    ImVec4 selectionGlow;
+    ImVec4 text;
+    ImVec4 mutedText;
+    ImVec4 selected;
+    ImVec4 linkImage;
+    ImVec4 linkMask;
+    ImVec4 linkAnalysis;
+    ImVec4 linkUnderlay;
+    ImVec4 socketImage;
+    ImVec4 socketMask;
+    ImVec4 socketAnalysis;
+    ImVec4 socketValue;
+    ImVec4 socketRaw;
+    ImVec4 groupFill;
+    ImVec4 groupHeader;
+    ImVec4 groupBorder;
+};
+
 struct NodeLayoutMetrics {
     float width = 260.0f;
     float collapsedHeight = 52.0f;
@@ -94,6 +141,25 @@ struct NodeLayoutMetrics {
     float minExpandedHeight = 96.0f;
 };
 
+enum class NodePresentationKind {
+    Standard,
+    FramelessMedia,
+    CompactControls,
+    SummaryOnly,
+    RouteSquare,
+    PreviewPanel,
+    ScopePanel
+};
+
+struct NodePresentationProfile {
+    NodePresentationKind kind = NodePresentationKind::Standard;
+    bool showFrame = true;
+    bool showTitle = true;
+    bool showKindLabel = true;
+    bool inlineControls = true;
+    bool hoverDetails = false;
+};
+
 using NodeBrowserEntry = EditorNodeGraphDefinitions::NodeCatalogEntry;
 
 NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
@@ -110,8 +176,11 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Preview:
             return NodeFamily::Preview;
         case EditorNodeGraph::NodeKind::MaskGenerator:
+        case EditorNodeGraph::NodeKind::MaskCombine:
         case EditorNodeGraph::NodeKind::MaskUtility:
+        case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageToMask:
+        case EditorNodeGraph::NodeKind::DataMath:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             return NodeFamily::Mask;
         case EditorNodeGraph::NodeKind::Scope:
@@ -119,6 +188,7 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ImageGenerator:
             return NodeFamily::Generator;
         case EditorNodeGraph::NodeKind::Mix:
+        case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::ChannelSplit:
         case EditorNodeGraph::NodeKind::ChannelCombine:
             return NodeFamily::Merge;
@@ -135,6 +205,230 @@ ImVec4 BlendColor(const ImVec4& a, const ImVec4& b, float t) {
         a.w + (b.w - a.w) * clampedT);
 }
 
+float ColorLuminance(const ImVec4& color) {
+    return (0.2126f * color.x) + (0.7152f * color.y) + (0.0722f * color.z);
+}
+
+ImVec4 WithAlpha(ImVec4 color, float alpha) {
+    color.w = std::clamp(alpha, 0.0f, 1.0f);
+    return color;
+}
+
+ImVec4 WithScaledAlpha(ImVec4 color, float scale) {
+    color.w = std::clamp(color.w * scale, 0.0f, 1.0f);
+    return color;
+}
+
+ImVec4 BrightenedSelectionFill(ImVec4 fill, const ImVec4& accent, const GraphStyleTokens& tokens) {
+    const ImVec4 lift = tokens.enabled
+        ? BlendColor(tokens.text, accent, 0.28f)
+        : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+    const float alpha = fill.w;
+    fill = BlendColor(fill, lift, tokens.enabled ? 0.075f : 0.10f);
+    fill.w = alpha;
+    return fill;
+}
+
+ImVec4 FamilyAccent(NodeFamily family, const GraphStyleTokens& tokens) {
+    const ImVec4 slate = tokens.light ? ImVec4(0.30f, 0.42f, 0.54f, 1.0f) : ImVec4(0.64f, 0.78f, 0.92f, 1.0f);
+    const ImVec4 green = tokens.light ? ImVec4(0.16f, 0.58f, 0.42f, 1.0f) : ImVec4(0.44f, 0.90f, 0.62f, 1.0f);
+    const ImVec4 violet = tokens.light ? ImVec4(0.54f, 0.32f, 0.76f, 1.0f) : ImVec4(0.82f, 0.62f, 1.0f, 1.0f);
+    const ImVec4 amber = tokens.light ? ImVec4(0.72f, 0.46f, 0.10f, 1.0f) : ImVec4(1.0f, 0.74f, 0.34f, 1.0f);
+    const ImVec4 blue = tokens.light ? ImVec4(0.16f, 0.46f, 0.84f, 1.0f) : ImVec4(0.36f, 0.72f, 1.0f, 1.0f);
+    const ImVec4 cyan = tokens.light ? ImVec4(0.02f, 0.58f, 0.66f, 1.0f) : ImVec4(0.30f, 0.92f, 1.0f, 1.0f);
+
+    switch (family) {
+        case NodeFamily::Gray: return slate;
+        case NodeFamily::Layer: return green;
+        case NodeFamily::Preview: return amber;
+        case NodeFamily::Mask: return violet;
+        case NodeFamily::Scope: return amber;
+        case NodeFamily::Generator: return blue;
+        case NodeFamily::Merge: return cyan;
+    }
+    return slate;
+}
+
+GraphStyleTokens BuildGraphStyleTokens(EditorModule* editor) {
+    GraphStyleTokens tokens;
+    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+    tokens.mode = appearance ? appearance->GetGraphVisualMode() : StackAppearance::GraphVisualMode::BlackNodes;
+    tokens.enabled = tokens.mode != StackAppearance::GraphVisualMode::Classic;
+    tokens.spotlightSurface = tokens.mode == StackAppearance::GraphVisualMode::SpotlightPrototype;
+    tokens.haloOutlines = appearance ? (tokens.spotlightSurface && appearance->GetGraphSpotlightHaloOutlines()) : false;
+
+    const ImGuiStyle& imguiStyle = ImGui::GetStyle();
+    const StackAppearance::ThemeDefinition* theme = appearance ? &appearance->GetWorkingTheme() : nullptr;
+    const ImVec4 window = theme ? theme->colors[ImGuiCol_WindowBg] : imguiStyle.Colors[ImGuiCol_WindowBg];
+    const ImVec4 accent = theme ? theme->colors[ImGuiCol_CheckMark] : imguiStyle.Colors[ImGuiCol_CheckMark];
+    tokens.text = theme ? theme->colors[ImGuiCol_Text] : imguiStyle.Colors[ImGuiCol_Text];
+    tokens.mutedText = theme ? theme->colors[ImGuiCol_TextDisabled] : imguiStyle.Colors[ImGuiCol_TextDisabled];
+    tokens.light = ColorLuminance(window) >= 0.52f;
+
+    if (!tokens.enabled) {
+        tokens.canvas = window;
+        tokens.nodeSurface = window;
+        tokens.nodeSurfaceCollapsed = window;
+        tokens.spotlightHalo = imguiStyle.Colors[ImGuiCol_Border];
+        tokens.selectionGlow = accent;
+        tokens.selected = accent;
+        return tokens;
+    }
+
+    if (tokens.mode == StackAppearance::GraphVisualMode::BlackNodes) {
+        tokens.canvas = window;
+        tokens.light = false;
+        tokens.text = ImVec4(0.94f, 0.96f, 0.98f, 1.0f);
+        tokens.mutedText = ImVec4(0.67f, 0.72f, 0.77f, 1.0f);
+        tokens.nodeSurface = WithAlpha(BlendColor(ImVec4(0.02f, 0.025f, 0.03f, 1.0f), accent, 0.03f), 0.97f);
+        tokens.nodeSurfaceCollapsed = WithAlpha(BlendColor(ImVec4(0.035f, 0.04f, 0.045f, 1.0f), accent, 0.02f), 0.99f);
+        tokens.spotlightCenter = tokens.nodeSurface;
+        tokens.spotlightEdge = WithAlpha(tokens.canvas, 0.0f);
+        tokens.spotlightHalo = WithAlpha(BlendColor(accent, tokens.text, 0.22f), 0.22f);
+        tokens.selectionGlow = WithAlpha(BlendColor(accent, tokens.text, 0.30f), 0.54f);
+        tokens.selected = WithAlpha(BlendColor(accent, tokens.text, 0.40f), 0.96f);
+
+        tokens.socketImage = ImVec4(0.44f, 0.80f, 1.0f, 1.0f);
+        tokens.socketMask = ImVec4(0.82f, 0.58f, 1.0f, 1.0f);
+        tokens.socketAnalysis = ImVec4(1.0f, 0.72f, 0.34f, 1.0f);
+        tokens.socketValue = ImVec4(0.46f, 0.94f, 0.94f, 1.0f);
+        tokens.socketRaw = ImVec4(0.48f, 0.94f, 0.62f, 1.0f);
+
+        tokens.linkImage = WithAlpha(tokens.socketImage, 0.92f);
+        tokens.linkMask = WithAlpha(BlendColor(tokens.socketMask, tokens.socketRaw, 0.14f), 0.90f);
+        tokens.linkAnalysis = WithAlpha(tokens.socketAnalysis, 0.88f);
+        tokens.linkUnderlay = ImVec4(0.0f, 0.0f, 0.0f, 0.62f);
+        tokens.groupFill = ImVec4(0.02f, 0.03f, 0.04f, 0.46f);
+        tokens.groupHeader = WithAlpha(BlendColor(tokens.groupFill, accent, 0.10f), 0.72f);
+        tokens.groupBorder = WithAlpha(BlendColor(accent, tokens.text, 0.18f), 0.48f);
+        return tokens;
+    }
+
+    const ImVec4 coolDark(0.00f, 0.10f, 0.13f, 1.0f);
+    const ImVec4 coolLight(0.86f, 0.96f, 1.0f, 1.0f);
+    tokens.canvas = tokens.light
+        ? BlendColor(window, coolLight, 0.20f)
+        : BlendColor(window, coolDark, 0.36f);
+    const float canvasLuminance = ColorLuminance(tokens.canvas);
+    const ImVec4 canvasGray(canvasLuminance, canvasLuminance, canvasLuminance, 1.0f);
+    const ImVec4 desaturatedCanvas = BlendColor(tokens.canvas, canvasGray, tokens.light ? 0.24f : 0.34f);
+    const ImVec4 shiftedCanvas = tokens.light
+        ? BlendColor(desaturatedCanvas, ImVec4(0.0f, 0.0f, 0.0f, 1.0f), 0.18f)
+        : BlendColor(desaturatedCanvas, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.32f);
+    tokens.spotlightCenter = WithAlpha(shiftedCanvas, tokens.light ? 0.68f : 0.84f);
+    tokens.spotlightEdge = WithAlpha(tokens.canvas, 0.0f);
+    tokens.spotlightHalo = WithAlpha(BlendColor(accent, tokens.text, tokens.light ? 0.10f : 0.18f), tokens.light ? 0.34f : 0.40f);
+    tokens.selectionGlow = WithAlpha(BlendColor(accent, tokens.text, 0.22f), tokens.light ? 0.56f : 0.68f);
+    tokens.nodeSurface = tokens.spotlightCenter;
+    tokens.nodeSurfaceCollapsed = WithAlpha(tokens.spotlightCenter, tokens.light ? 0.56f : 0.72f);
+    tokens.selected = WithAlpha(BlendColor(accent, tokens.text, 0.18f), 0.95f);
+
+    tokens.socketImage = tokens.light ? ImVec4(0.08f, 0.42f, 0.80f, 1.0f) : ImVec4(0.42f, 0.78f, 1.0f, 1.0f);
+    tokens.socketMask = tokens.light ? ImVec4(0.56f, 0.28f, 0.76f, 1.0f) : ImVec4(0.82f, 0.56f, 1.0f, 1.0f);
+    tokens.socketAnalysis = tokens.light ? ImVec4(0.76f, 0.44f, 0.08f, 1.0f) : ImVec4(1.0f, 0.72f, 0.34f, 1.0f);
+    tokens.socketValue = tokens.light ? ImVec4(0.02f, 0.54f, 0.60f, 1.0f) : ImVec4(0.44f, 0.90f, 0.92f, 1.0f);
+    tokens.socketRaw = tokens.light ? ImVec4(0.12f, 0.56f, 0.32f, 1.0f) : ImVec4(0.48f, 0.94f, 0.62f, 1.0f);
+
+    tokens.linkImage = WithAlpha(tokens.socketImage, 0.86f);
+    tokens.linkMask = WithAlpha(BlendColor(tokens.socketMask, tokens.socketRaw, 0.18f), 0.88f);
+    tokens.linkAnalysis = WithAlpha(tokens.socketAnalysis, 0.82f);
+    tokens.linkUnderlay = tokens.light ? ImVec4(0.0f, 0.08f, 0.12f, 0.16f) : ImVec4(0.0f, 0.0f, 0.0f, 0.44f);
+    tokens.groupFill = tokens.light ? ImVec4(0.82f, 0.94f, 0.98f, 0.28f) : ImVec4(0.02f, 0.12f, 0.16f, 0.34f);
+    tokens.groupHeader = WithAlpha(BlendColor(tokens.groupFill, accent, 0.18f), tokens.light ? 0.42f : 0.48f);
+    tokens.groupBorder = WithAlpha(BlendColor(accent, tokens.text, 0.16f), tokens.light ? 0.42f : 0.52f);
+    return tokens;
+}
+
+bool GraphDottedMaskLinksEnabled(EditorModule* editor) {
+    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+    return appearance ? appearance->GetGraphDottedMaskLinks() : true;
+}
+
+bool IsSummaryOnlyNode(const EditorNodeGraph::Node& node) {
+    switch (node.kind) {
+        case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+        case EditorNodeGraph::NodeKind::RawDevelop:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+        case EditorNodeGraph::NodeKind::HdrMerge:
+        case EditorNodeGraph::NodeKind::CustomMask:
+            return true;
+        default:
+            return false;
+    }
+}
+
+NodePresentationProfile BuildNodePresentationProfile(const EditorNodeGraph::Node& node, const GraphStyleTokens& tokens) {
+    NodePresentationProfile profile;
+    (void)tokens;
+
+    profile.showKindLabel = false;
+    switch (node.kind) {
+        case EditorNodeGraph::NodeKind::Image:
+            profile.kind = NodePresentationKind::FramelessMedia;
+            profile.showFrame = false;
+            profile.showTitle = false;
+            profile.inlineControls = false;
+            profile.hoverDetails = true;
+            break;
+        case EditorNodeGraph::NodeKind::RawSource:
+            profile.kind = NodePresentationKind::SummaryOnly;
+            profile.inlineControls = false;
+            profile.hoverDetails = true;
+            break;
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+        case EditorNodeGraph::NodeKind::RawDevelop:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+        case EditorNodeGraph::NodeKind::HdrMerge:
+        case EditorNodeGraph::NodeKind::CustomMask:
+            profile.kind = NodePresentationKind::SummaryOnly;
+            profile.inlineControls = false;
+            break;
+        case EditorNodeGraph::NodeKind::Output:
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            profile.kind = NodePresentationKind::RouteSquare;
+            break;
+        case EditorNodeGraph::NodeKind::Preview:
+            profile.kind = NodePresentationKind::PreviewPanel;
+            break;
+        case EditorNodeGraph::NodeKind::Scope:
+            profile.kind = NodePresentationKind::ScopePanel;
+            break;
+        default:
+            profile.kind = NodePresentationKind::CompactControls;
+            profile.showTitle = node.kind != EditorNodeGraph::NodeKind::Layer;
+            break;
+    }
+    return profile;
+}
+
+NodeFamilyStyle StyleForFamily(NodeFamily family, const GraphStyleTokens& tokens) {
+    NodeFamilyStyle style = StyleForFamily(family);
+    if (!tokens.enabled) {
+        return style;
+    }
+
+    const ImVec4 accent = FamilyAccent(family, tokens);
+    if (!tokens.spotlightSurface) {
+        style.fill = WithAlpha(BlendColor(tokens.nodeSurface, accent, 0.028f), tokens.nodeSurface.w);
+        style.border = WithAlpha(BlendColor(tokens.spotlightHalo, accent, 0.10f), 0.72f);
+        style.accent = accent;
+        style.text = tokens.text;
+        style.mutedText = BlendColor(tokens.mutedText, accent, 0.05f);
+        return style;
+    }
+
+    style.fill = WithAlpha(BlendColor(tokens.nodeSurface, accent, tokens.light ? 0.04f : 0.06f), tokens.nodeSurface.w);
+    style.border = WithAlpha(BlendColor(tokens.spotlightHalo, accent, 0.28f), tokens.light ? 0.30f : 0.36f);
+    style.accent = accent;
+    style.text = tokens.text;
+    style.mutedText = BlendColor(tokens.mutedText, accent, tokens.light ? 0.08f : 0.12f);
+    return style;
+}
+
 std::vector<NodeBrowserEntry> BuildNodeBrowserEntries() {
     return EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
 }
@@ -146,50 +440,18 @@ bool PrototypeHasCompatibleInput(
     int fromNodeId,
     const std::string& fromSocketId,
     const NodeBrowserEntry& entry) {
-    EditorNodeGraph::SocketDefinition fromSocket;
-    if (!graph.FindSocket(fromNodeId, fromSocketId, &fromSocket)) {
-        return false;
-    }
+    EditorNodeGraph::Graph testGraph = graph;
     const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(prototype, true)) {
+    EditorNodeGraph::Node testNode = prototype;
+    testNode.id = std::max(1, graph.GetNextNodeId() + 1000);
+    testGraph.GetNodes().push_back(testNode);
+
+    for (const EditorNodeGraph::SocketDefinition& socket : testGraph.GetSockets(testNode, true)) {
         if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
             continue;
         }
-        if (fromSocket.type == EditorNodeGraph::SocketType::Image) {
-            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
-                (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Output && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
-        } else if (fromSocket.type == EditorNodeGraph::SocketType::Mask) {
-            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Mix && socket.id == EditorNodeGraph::kMixFactorSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::MaskUtility && socket.id == EditorNodeGraph::kMaskInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Preview && socket.id == EditorNodeGraph::kPreviewInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Scope && socket.id == EditorNodeGraph::kScopeInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ChannelCombine &&
-                (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a")) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Output &&
-                (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a")) return true;
-
-            // Also allow mask outputs to connect to main image inputs (treating mask as grayscale image)
-            if (prototype.kind == EditorNodeGraph::NodeKind::Layer && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::RawDetailFusion && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Mix &&
-                (socket.id == EditorNodeGraph::kMixInputASocketId || socket.id == EditorNodeGraph::kMixInputBSocketId)) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ImageToMask && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::Output && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-            if (prototype.kind == EditorNodeGraph::NodeKind::ChannelSplit && socket.id == EditorNodeGraph::kImageInputSocketId) return true;
-        } else if (fromSocket.type == EditorNodeGraph::SocketType::Raw) {
-            if ((prototype.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-                 prototype.kind == EditorNodeGraph::NodeKind::RawDevelop) &&
-                socket.id == EditorNodeGraph::kRawInputSocketId) return true;
+        if (testGraph.CanConnectSockets(fromNodeId, fromSocketId, testNode.id, socket.id)) {
+            return true;
         }
     }
     return false;
@@ -204,25 +466,17 @@ bool PrototypeHasCompatibleOutput(
     if (!to) {
         return false;
     }
-    EditorNodeGraph::SocketDefinition toSocket;
-    if (!graph.FindSocket(toNodeId, toSocketId, &toSocket)) {
-        return false;
-    }
+    EditorNodeGraph::Graph testGraph = graph;
     const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(prototype, true)) {
+    EditorNodeGraph::Node testNode = prototype;
+    testNode.id = std::max(1, graph.GetNextNodeId() + 1000);
+    testGraph.GetNodes().push_back(testNode);
+
+    for (const EditorNodeGraph::SocketDefinition& socket : testGraph.GetSockets(testNode, true)) {
         if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
             continue;
         }
-        if (toSocket.type == EditorNodeGraph::SocketType::Image && socket.type == EditorNodeGraph::SocketType::Image) {
-            return true;
-        }
-        if (toSocket.type == EditorNodeGraph::SocketType::Mask && socket.type == EditorNodeGraph::SocketType::Mask) {
-            return true;
-        }
-        if (toSocket.type == EditorNodeGraph::SocketType::Raw &&
-            socket.type == EditorNodeGraph::SocketType::Raw &&
-            (prototype.kind == EditorNodeGraph::NodeKind::RawSource ||
-             prototype.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise)) {
+        if (testGraph.CanConnectSockets(testNode.id, socket.id, toNodeId, toSocketId)) {
             return true;
         }
     }
@@ -249,6 +503,12 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::MaskGenerator:
             editor->AddMaskNodeAt(static_cast<EditorNodeGraph::MaskGeneratorKind>(entry.value), graphPos);
             break;
+        case EditorNodeGraph::NodeKind::CustomMask:
+            editor->AddCustomMaskNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            editor->AddMaskCombineNodeAt(static_cast<EditorNodeGraph::MaskCombineMode>(entry.value), graphPos);
+            break;
         case EditorNodeGraph::NodeKind::MaskUtility:
             editor->AddMaskUtilityNodeAt(static_cast<EditorNodeGraph::MaskUtilityKind>(entry.value), graphPos);
             break;
@@ -260,6 +520,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Mix:
             editor->AddMixNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::DataMath:
+            editor->AddDataMathNodeAt(static_cast<EditorNodeGraph::DataMathMode>(entry.value), graphPos);
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             editor->AddChannelSplitNodeAt(graphPos);
@@ -275,6 +538,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::RawDetailFusion:
             editor->AddRawDetailFusionNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::HdrMerge:
+            editor->AddHdrMergeNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             editor->AddRawNeuralDenoiseNodeAt(graphPos);
@@ -428,6 +694,74 @@ NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
     return metrics;
 }
 
+void ApplyModernCompactMetrics(const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics) {
+    metrics.headerInsetX = 12.0f;
+    metrics.headerInsetY = 10.0f;
+    metrics.bodyInsetBottom = 10.0f;
+    metrics.itemGap = 6.0f;
+    metrics.sectionGap = 7.0f;
+    metrics.titleHeight = 16.0f;
+    metrics.kindLabelHeight = 0.0f;
+    metrics.rowHeight = 22.0f;
+    metrics.sliderHeight = 20.0f;
+
+    switch (node.kind) {
+        case EditorNodeGraph::NodeKind::Image:
+            metrics.width = 176.0f;
+            metrics.collapsedHeight = 108.0f;
+            metrics.minExpandedHeight = 108.0f;
+            metrics.contentLaneWidth = 156.0f;
+            metrics.previewWidth = 156.0f;
+            metrics.previewHeight = 96.0f;
+            break;
+        case EditorNodeGraph::NodeKind::RawSource:
+            metrics.width = 128.0f;
+            metrics.collapsedHeight = 72.0f;
+            metrics.minExpandedHeight = 72.0f;
+            metrics.contentLaneWidth = 100.0f;
+            break;
+        case EditorNodeGraph::NodeKind::Layer:
+            metrics.width = 250.0f;
+            metrics.contentLaneWidth = 204.0f;
+            metrics.minExpandedHeight = 70.0f;
+            metrics.collapsedHeight = 48.0f;
+            metrics.previewWidth = 176.0f;
+            metrics.previewHeight = 86.0f;
+            break;
+        case EditorNodeGraph::NodeKind::MaskGenerator:
+        case EditorNodeGraph::NodeKind::MaskUtility:
+        case EditorNodeGraph::NodeKind::ImageToMask:
+        case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::DataMath:
+        case EditorNodeGraph::NodeKind::Mix:
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            metrics.width = std::min(metrics.width, 238.0f);
+            metrics.contentLaneWidth = std::min(metrics.contentLaneWidth, 192.0f);
+            metrics.minExpandedHeight = std::max(74.0f, metrics.minExpandedHeight - 24.0f);
+            metrics.collapsedHeight = 48.0f;
+            break;
+        case EditorNodeGraph::NodeKind::Preview:
+            metrics.width = 232.0f;
+            metrics.contentLaneWidth = 196.0f;
+            metrics.previewWidth = 196.0f;
+            metrics.previewHeight = 118.0f;
+            metrics.minExpandedHeight = 168.0f;
+            break;
+        case EditorNodeGraph::NodeKind::Scope:
+            metrics.width = 268.0f;
+            metrics.contentLaneWidth = 220.0f;
+            metrics.scopeHeight = 168.0f;
+            metrics.minExpandedHeight = 226.0f;
+            break;
+        case EditorNodeGraph::NodeKind::Composite:
+            metrics.width = 270.0f;
+            metrics.contentLaneWidth = 220.0f;
+            break;
+        default:
+            break;
+    }
+}
+
 void ApplyLayerSurfaceMetrics(const EditorModule* editor, const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics) {
     if (!editor || node.kind != EditorNodeGraph::NodeKind::Layer) {
         return;
@@ -450,10 +784,6 @@ void ApplyLayerSurfaceMetrics(const EditorModule* editor, const EditorNodeGraph:
     metrics.checkboxHeight = spec.density == NodeSurfaceDensity::UltraDense ? 16.0f : 18.0f;
 }
 
-float PinRadiusForZoom(float zoom) {
-    return std::max(1.8f, 5.3f * NodeUiScaleFromZoom(zoom));
-}
-
 ImU32 ColorWithAlpha(const ImVec4& color, float alpha) {
     return ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, std::clamp(alpha, 0.0f, 1.0f)));
 }
@@ -472,6 +802,17 @@ bool HasAdvancedLayerSurface(const EditorModule* editor, const EditorNodeGraph::
         return false;
     }
     return editor->GetNodeSurfaceSpec(node.id).presentation == NodeSurfacePresentation::RichExpandedSurface;
+}
+
+bool HasDedicatedComplexEditor(const EditorModule* editor, const EditorNodeGraph::Node& node) {
+    if (!editor) {
+        return false;
+    }
+    if (node.kind == EditorNodeGraph::NodeKind::HdrMerge ||
+        node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+        return true;
+    }
+    return HasAdvancedLayerSurface(editor, node);
 }
 
 std::string CompactAdvancedLayerLabel(const EditorNodeGraph::Node& node) {
@@ -526,8 +867,9 @@ void RenderLayerMetadataNotes(
 
     const std::string channel = graph.ResolveSocketChannel(node.id, EditorNodeGraph::kImageOutputSocketId);
     const bool hasChannel = !channel.empty();
+    const bool isScalarStream = !hasChannel && graph.IsScalarSocketStream(node.id, EditorNodeGraph::kImageOutputSocketId);
     const bool lifecycleNeedsNote = descriptor->lifecycleStatus != LayerLifecycleStatus::Stable;
-    if (!hasChannel && !lifecycleNeedsNote) {
+    if (!hasChannel && !isScalarStream && !lifecycleNeedsNote) {
         return;
     }
 
@@ -537,6 +879,16 @@ void RenderLayerMetadataNotes(
             ChannelPolicyColor(descriptor->channelPolicy),
             "Channel stream: %s (%s)",
             ChannelDisplayName(channel),
+            LayerRegistry::ChannelPolicyLabel(descriptor->channelPolicy));
+        if (descriptor->channelPolicy != LayerChannelPolicy::ChannelSafe &&
+            descriptor->channelNote &&
+            descriptor->channelNote[0] != '\0') {
+            ImGui::TextDisabled("%s", descriptor->channelNote);
+        }
+    } else if (isScalarStream) {
+        ImGui::TextColored(
+            ChannelPolicyColor(descriptor->channelPolicy),
+            "Scalar stream (%s)",
             LayerRegistry::ChannelPolicyLabel(descriptor->channelPolicy));
         if (descriptor->channelPolicy != LayerChannelPolicy::ChannelSafe &&
             descriptor->channelNote &&
@@ -559,11 +911,11 @@ void RenderLayerMetadataNotes(
 }
 
 float NodeControlWidthForScale(float logicalWidth, float uiScale) {
-    return std::max(18.0f, logicalWidth * uiScale);
+    return std::max(1.0f, logicalWidth * uiScale);
 }
 
 ImVec2 NodePreviewSizeForScale(const NodeLayoutMetrics& metrics, float uiScale) {
-    return ImVec2(std::max(22.0f, metrics.previewWidth * uiScale), std::max(18.0f, metrics.previewHeight * uiScale));
+    return ImVec2(std::max(1.0f, metrics.previewWidth * uiScale), std::max(1.0f, metrics.previewHeight * uiScale));
 }
 
 ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& familyStyle) {
@@ -581,6 +933,454 @@ ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& 
         case EditorNodeGraph::SocketType::Raw: base = rawBase; break;
     }
     return ImGui::ColorConvertFloat4ToU32(BlendColor(base, familyStyle.accent, 0.38f));
+}
+
+bool IsChannelSocketId(const std::string& id) {
+    return id == "r" || id == "g" || id == "b" || id == "a";
+}
+
+enum class LinkVisualKind {
+    Image,
+    MaskEndpoint,
+    Analysis,
+    Raw
+};
+
+struct LinkVisualStyle {
+    LinkVisualKind kind = LinkVisualKind::Image;
+    std::string channel;
+    bool dotted = false;
+    bool scalarStream = false;
+};
+
+LinkVisualStyle ResolveLinkVisualStyle(
+    const EditorNodeGraph::Graph& graph,
+    int fromNodeId,
+    const std::string& fromSocketId,
+    int toNodeId,
+    const std::string& toSocketId) {
+    LinkVisualStyle style;
+    EditorNodeGraph::SocketDefinition fromSocket;
+    EditorNodeGraph::SocketDefinition toSocket;
+    if (!graph.FindSocket(fromNodeId, fromSocketId, &fromSocket) ||
+        !graph.FindSocket(toNodeId, toSocketId, &toSocket)) {
+        if (IsChannelSocketId(fromSocketId)) {
+            style.channel = fromSocketId;
+        } else if (IsChannelSocketId(toSocketId)) {
+            style.channel = toSocketId;
+        }
+        return style;
+    }
+
+    style.channel = graph.ResolveSocketChannel(fromNodeId, fromSocketId);
+    if (style.channel.empty() && IsChannelSocketId(toSocketId)) {
+        style.channel = toSocketId;
+    }
+    style.scalarStream = fromSocket.type == EditorNodeGraph::SocketType::Mask ||
+        graph.IsScalarSocketStream(fromNodeId, fromSocketId);
+
+    const EditorNodeGraph::Link probeLink { fromNodeId, fromSocketId, toNodeId, toSocketId };
+    if (graph.GetLinkRole(probeLink) == EditorNodeGraph::LinkRole::Scope) {
+        style.kind = LinkVisualKind::Analysis;
+        return style;
+    }
+    if (fromSocket.type == EditorNodeGraph::SocketType::Raw ||
+        toSocket.type == EditorNodeGraph::SocketType::Raw) {
+        style.kind = LinkVisualKind::Raw;
+        return style;
+    }
+    if (fromSocket.type == EditorNodeGraph::SocketType::Mask ||
+        toSocket.type == EditorNodeGraph::SocketType::Mask) {
+        style.kind = LinkVisualKind::MaskEndpoint;
+        style.dotted = true;
+        return style;
+    }
+    return style;
+}
+
+LinkVisualStyle ResolveLinkVisualStyle(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Link& link) {
+    return ResolveLinkVisualStyle(graph, link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId);
+}
+
+LinkVisualStyle ResolvePendingLinkVisualStyle(
+    const EditorNodeGraph::Graph& graph,
+    int outputNodeId,
+    const std::string& outputSocketId,
+    int inputNodeId,
+    const std::string& inputSocketId) {
+    return ResolveLinkVisualStyle(graph, outputNodeId, outputSocketId, inputNodeId, inputSocketId);
+}
+
+LinkVisualStyle ResolvePendingLinkVisualStyle(
+    const EditorNodeGraph::Graph& graph,
+    int nodeId,
+    const std::string& socketId,
+    EditorNodeGraph::SocketDirection direction) {
+    LinkVisualStyle style;
+    EditorNodeGraph::SocketDefinition socket;
+    if (!graph.FindSocket(nodeId, socketId, &socket)) {
+        if (IsChannelSocketId(socketId)) {
+            style.channel = socketId;
+        }
+        return style;
+    }
+
+    style.channel = IsChannelSocketId(socketId) ? socketId : graph.ResolveSocketChannel(nodeId, socketId);
+    style.scalarStream = direction == EditorNodeGraph::SocketDirection::Output &&
+        (socket.type == EditorNodeGraph::SocketType::Mask || graph.IsScalarSocketStream(nodeId, socketId));
+
+    if (socket.type == EditorNodeGraph::SocketType::Analysis) {
+        style.kind = LinkVisualKind::Analysis;
+        return style;
+    }
+    if (socket.type == EditorNodeGraph::SocketType::Raw) {
+        style.kind = LinkVisualKind::Raw;
+        return style;
+    }
+    if (socket.type == EditorNodeGraph::SocketType::Mask) {
+        style.kind = LinkVisualKind::MaskEndpoint;
+        style.dotted = true;
+        return style;
+    }
+    return style;
+}
+
+ImVec4 ChannelColorVec(const std::string& channel, const GraphStyleTokens& tokens) {
+    const bool light = tokens.enabled && tokens.light;
+    if (channel == "r") return light ? ImVec4(0.82f, 0.12f, 0.12f, 1.0f) : ImVec4(1.0f, 0.24f, 0.24f, 1.0f);
+    if (channel == "g") return light ? ImVec4(0.05f, 0.62f, 0.24f, 1.0f) : ImVec4(0.32f, 1.0f, 0.42f, 1.0f);
+    if (channel == "b") return light ? ImVec4(0.10f, 0.34f, 0.92f, 1.0f) : ImVec4(0.34f, 0.56f, 1.0f, 1.0f);
+    if (channel == "a") return light ? ImVec4(0.50f, 0.54f, 0.58f, 1.0f) : ImVec4(0.90f, 0.92f, 0.94f, 1.0f);
+    return tokens.enabled ? tokens.socketImage : ImVec4(0.60f, 0.69f, 0.79f, 1.0f);
+}
+
+ImVec4 SocketColorVec(
+    const EditorNodeGraph::SocketDefinition& socket,
+    const NodeFamilyStyle& familyStyle,
+    const GraphStyleTokens& tokens) {
+    if (IsChannelSocketId(socket.id)) {
+        return ChannelColorVec(socket.id, tokens);
+    }
+    if (!tokens.enabled) {
+        return ImGui::ColorConvertU32ToFloat4(TypedSocketColor(socket.type, familyStyle));
+    }
+    switch (socket.type) {
+        case EditorNodeGraph::SocketType::Image: return BlendColor(tokens.socketImage, familyStyle.accent, 0.16f);
+        case EditorNodeGraph::SocketType::Mask: return BlendColor(tokens.socketMask, familyStyle.accent, 0.12f);
+        case EditorNodeGraph::SocketType::Analysis: return BlendColor(tokens.socketAnalysis, familyStyle.accent, 0.10f);
+        case EditorNodeGraph::SocketType::Value: return BlendColor(tokens.socketValue, familyStyle.accent, 0.10f);
+        case EditorNodeGraph::SocketType::Raw: return BlendColor(tokens.socketRaw, familyStyle.accent, 0.12f);
+    }
+    return tokens.socketImage;
+}
+
+ImU32 SocketColor(
+    const EditorNodeGraph::SocketDefinition& socket,
+    const NodeFamilyStyle& familyStyle,
+    const GraphStyleTokens& tokens) {
+    return ImGui::ColorConvertFloat4ToU32(SocketColorVec(socket, familyStyle, tokens));
+}
+
+ImVec4 LinkColorVec(const LinkVisualStyle& style, const GraphStyleTokens& tokens) {
+    if (!style.channel.empty()) {
+        return WithAlpha(ChannelColorVec(style.channel, tokens), 0.88f);
+    }
+
+    switch (style.kind) {
+        case LinkVisualKind::Analysis:
+            return tokens.enabled ? tokens.linkAnalysis : ImVec4(0.51f, 0.90f, 0.67f, 0.90f);
+        case LinkVisualKind::MaskEndpoint:
+            return tokens.enabled ? tokens.linkMask : ImVec4(0.51f, 0.90f, 0.67f, 0.90f);
+        case LinkVisualKind::Raw:
+        case LinkVisualKind::Image:
+            return tokens.enabled ? tokens.linkImage : ImVec4(0.47f, 0.67f, 1.0f, 0.90f);
+    }
+    return tokens.enabled ? tokens.linkImage : ImVec4(0.47f, 0.67f, 1.0f, 0.90f);
+}
+
+ImU32 LinkColorClassic(const LinkVisualStyle& style, bool selected) {
+    if (selected) {
+        return IM_COL32(255, 255, 255, 255);
+    }
+    if (!style.channel.empty()) {
+        if (style.channel == "r") return IM_COL32(255, 64, 64, 210);
+        if (style.channel == "g") return IM_COL32(64, 255, 64, 210);
+        if (style.channel == "b") return IM_COL32(64, 128, 255, 210);
+        if (style.channel == "a") return IM_COL32(220, 220, 220, 210);
+    }
+
+    switch (style.kind) {
+        case LinkVisualKind::Analysis:
+        case LinkVisualKind::MaskEndpoint:
+            return IM_COL32(130, 230, 170, 230);
+        case LinkVisualKind::Raw:
+        case LinkVisualKind::Image:
+            return IM_COL32(120, 170, 255, 230);
+    }
+    return IM_COL32(120, 170, 255, 230);
+}
+
+void DrawDottedBezierStroke(
+    ImDrawList* drawList,
+    const ImVec2& p0,
+    const ImVec2& p1,
+    const ImVec2& p2,
+    const ImVec2& p3,
+    ImU32 color,
+    float thickness) {
+    auto pointDistance = [](const ImVec2& a, const ImVec2& b) {
+        const float dx = b.x - a.x;
+        const float dy = b.y - a.y;
+        return std::sqrt((dx * dx) + (dy * dy));
+    };
+    const float radius = std::max(0.25f, thickness * 0.5f);
+    const float spacing = std::max(1.4f, radius * 2.6f);
+    const float estimate =
+        pointDistance(p0, p1) +
+        pointDistance(p1, p2) +
+        pointDistance(p2, p3);
+    const int sampleCount = std::clamp(static_cast<int>(estimate / 6.0f), 24, 128);
+
+    ImVec2 previous = p0;
+    float distanceToNextDot = 0.0f;
+    for (int index = 1; index <= sampleCount; ++index) {
+        const float t = static_cast<float>(index) / static_cast<float>(sampleCount);
+        const ImVec2 current = CubicBezierPoint(p0, p1, p2, p3, t);
+        const ImVec2 delta(current.x - previous.x, current.y - previous.y);
+        const float segmentLength = std::sqrt((delta.x * delta.x) + (delta.y * delta.y));
+        if (segmentLength <= 1e-4f) {
+            previous = current;
+            continue;
+        }
+
+        while (distanceToNextDot <= segmentLength) {
+            const float dotT = distanceToNextDot / segmentLength;
+            const ImVec2 dotPos(
+                previous.x + (delta.x * dotT),
+                previous.y + (delta.y * dotT));
+            drawList->AddCircleFilled(dotPos, radius, color);
+            distanceToNextDot += spacing;
+        }
+
+        distanceToNextDot -= segmentLength;
+        previous = current;
+    }
+}
+
+void DrawBezierLinkStroke(
+    ImDrawList* drawList,
+    const ImVec2& p0,
+    const ImVec2& p1,
+    const ImVec2& p2,
+    const ImVec2& p3,
+    ImU32 color,
+    float thickness,
+    bool dotted) {
+    if (dotted) {
+        DrawDottedBezierStroke(drawList, p0, p1, p2, p3, color, thickness);
+        return;
+    }
+    drawList->AddBezierCubic(p0, p1, p2, p3, color, thickness);
+}
+
+ImVec2 SuperellipsePoint(const ImVec2& center, float radiusX, float radiusY, float angle, float exponent) {
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    const float power = 2.0f / std::max(0.1f, exponent);
+    const float x = std::copysign(std::pow(std::abs(c), power), c) * radiusX;
+    const float y = std::copysign(std::pow(std::abs(s), power), s) * radiusY;
+    return ImVec2(center.x + x, center.y + y);
+}
+
+void DrawSoftSpotlightBlob(
+    ImDrawList* drawList,
+    const ImVec2& min,
+    const ImVec2& max,
+    ImVec4 centerColor,
+    ImVec4 edgeColor,
+    float feather,
+    float exponent = 3.2f,
+    float coreRatio = 0.72f,
+    float edgePower = 1.35f) {
+    if (centerColor.w <= 0.001f || max.x <= min.x || max.y <= min.y) {
+        return;
+    }
+
+    constexpr int kSegments = 64;
+    constexpr int kRings = 12;
+    constexpr float kTau = 6.28318530718f;
+
+    const ImVec2 center((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
+    const float radiusX = (max.x - min.x) * 0.5f + feather;
+    const float radiusY = (max.y - min.y) * 0.5f + feather;
+    const int vtxCount = 1 + (kRings * kSegments);
+    const int idxCount = (kSegments * 3) + ((kRings - 1) * kSegments * 6);
+    const ImVec2 uv = drawList->_Data->TexUvWhitePixel;
+
+    drawList->PrimReserve(idxCount, vtxCount);
+    const ImDrawIdx base = static_cast<ImDrawIdx>(drawList->_VtxCurrentIdx);
+
+    for (int segment = 0; segment < kSegments; ++segment) {
+        const int next = (segment + 1) % kSegments;
+        drawList->PrimWriteIdx(base);
+        drawList->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + segment));
+        drawList->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + next));
+    }
+
+    for (int ring = 1; ring < kRings; ++ring) {
+        const int previousStart = 1 + ((ring - 1) * kSegments);
+        const int currentStart = 1 + (ring * kSegments);
+        for (int segment = 0; segment < kSegments; ++segment) {
+            const int next = (segment + 1) % kSegments;
+            const ImDrawIdx previous = static_cast<ImDrawIdx>(base + previousStart + segment);
+            const ImDrawIdx previousNext = static_cast<ImDrawIdx>(base + previousStart + next);
+            const ImDrawIdx current = static_cast<ImDrawIdx>(base + currentStart + segment);
+            const ImDrawIdx currentNext = static_cast<ImDrawIdx>(base + currentStart + next);
+            drawList->PrimWriteIdx(previous);
+            drawList->PrimWriteIdx(current);
+            drawList->PrimWriteIdx(currentNext);
+            drawList->PrimWriteIdx(previous);
+            drawList->PrimWriteIdx(currentNext);
+            drawList->PrimWriteIdx(previousNext);
+        }
+    }
+
+    drawList->PrimWriteVtx(center, uv, ImGui::ColorConvertFloat4ToU32(centerColor));
+    const float clampedCoreRatio = std::clamp(coreRatio, 0.05f, 0.92f);
+    for (int ring = 0; ring < kRings; ++ring) {
+        const float ratio = static_cast<float>(ring + 1) / static_cast<float>(kRings);
+        const float fadeT = std::clamp((ratio - clampedCoreRatio) / std::max(0.001f, 1.0f - clampedCoreRatio), 0.0f, 1.0f);
+        const float smoothT = fadeT * fadeT * (3.0f - 2.0f * fadeT);
+        ImVec4 ringColor = BlendColor(centerColor, edgeColor, smoothT);
+        ringColor.w = (ring == kRings - 1)
+            ? 0.0f
+            : centerColor.w * std::pow(std::max(0.0f, 1.0f - smoothT), edgePower);
+        const float ringRadiusX = radiusX * ratio;
+        const float ringRadiusY = radiusY * ratio;
+        for (int segment = 0; segment < kSegments; ++segment) {
+            const float angle = (static_cast<float>(segment) / static_cast<float>(kSegments)) * kTau;
+            drawList->PrimWriteVtx(
+                SuperellipsePoint(center, ringRadiusX, ringRadiusY, angle, exponent),
+                uv,
+                ImGui::ColorConvertFloat4ToU32(ringColor));
+        }
+    }
+}
+
+void DrawSoftSpotlightHalo(
+    ImDrawList* drawList,
+    const ImVec2& min,
+    const ImVec2& max,
+    ImU32 color,
+    float feather,
+    float thickness,
+    float exponent = 3.2f) {
+    constexpr int kSegments = 72;
+    constexpr float kTau = 6.28318530718f;
+    ImVec2 points[kSegments];
+    const ImVec2 center((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
+    const float radiusX = (max.x - min.x) * 0.5f + feather;
+    const float radiusY = (max.y - min.y) * 0.5f + feather;
+    for (int segment = 0; segment < kSegments; ++segment) {
+        const float angle = (static_cast<float>(segment) / static_cast<float>(kSegments)) * kTau;
+        points[segment] = SuperellipsePoint(center, radiusX, radiusY, angle, exponent);
+    }
+    drawList->AddPolyline(points, kSegments, color, thickness, ImDrawFlags_Closed);
+}
+
+void DrawGraphNodeSpotlightSurface(
+    ImDrawList* drawList,
+    const ImVec2& min,
+    const ImVec2& max,
+    const ImVec4& fillColor,
+    const ImVec4& borderColor,
+    const ImVec4& accentColor,
+    const GraphStyleTokens& tokens,
+    bool selected,
+    bool expanded,
+    float uiScale,
+    float rounding,
+    float borderThickness) {
+    const ImVec4 surfaceFill = selected
+        ? BrightenedSelectionFill(fillColor, accentColor, tokens)
+        : fillColor;
+    if (!tokens.enabled) {
+        drawList->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(surfaceFill), rounding);
+        drawList->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(borderColor), rounding, 0, borderThickness);
+        return;
+    }
+
+    if (!tokens.spotlightSurface) {
+        drawList->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(surfaceFill), rounding);
+        drawList->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(borderColor), rounding, 0, borderThickness);
+        return;
+    }
+
+    const float width = std::max(1.0f, max.x - min.x);
+    const float height = std::max(1.0f, max.y - min.y);
+    const float feather = std::clamp(std::min(width, height) * 0.20f, 12.0f * uiScale, 32.0f * uiScale);
+    const float coreRatioX = (width * 0.5f) / ((width * 0.5f) + feather);
+    const float coreRatioY = (height * 0.5f) / ((height * 0.5f) + feather);
+    const float contentCoreRatio = std::clamp(std::max(coreRatioX, coreRatioY) + 0.025f, 0.64f, 0.86f);
+    const ImVec4 familySpot = selected
+        ? BrightenedSelectionFill(WithAlpha(BlendColor(tokens.spotlightCenter, accentColor, tokens.light ? 0.035f : 0.055f), expanded ? tokens.spotlightCenter.w : tokens.nodeSurfaceCollapsed.w), accentColor, tokens)
+        : WithAlpha(BlendColor(tokens.spotlightCenter, accentColor, tokens.light ? 0.035f : 0.055f), expanded ? tokens.spotlightCenter.w : tokens.nodeSurfaceCollapsed.w);
+    const ImVec4 familyEdge = WithAlpha(BlendColor(tokens.spotlightEdge, accentColor, tokens.light ? 0.025f : 0.04f), tokens.spotlightEdge.w);
+
+    DrawSoftSpotlightBlob(drawList, min, max, familySpot, familyEdge, feather, 3.2f, contentCoreRatio, 1.45f);
+
+    if (tokens.haloOutlines) {
+        DrawSoftSpotlightHalo(
+            drawList,
+            min,
+            max,
+            ColorWithAlpha(tokens.spotlightHalo, 0.28f),
+            feather * 0.42f,
+            std::max(0.65f, 0.85f * uiScale),
+            3.2f);
+    }
+}
+
+void DrawSocketPin(
+    ImDrawList* drawList,
+    const ImVec2& pin,
+    float radius,
+    ImU32 baseColor,
+    const GraphStyleTokens& tokens,
+    bool hovered) {
+    if (!tokens.enabled) {
+        drawList->AddCircleFilled(pin, radius, hovered ? IM_COL32(255, 255, 255, 255) : baseColor);
+        return;
+    }
+
+    const ImVec4 baseVec = ImGui::ColorConvertU32ToFloat4(baseColor);
+    const float hoverBoost = hovered ? 1.0f : 0.0f;
+    drawList->AddCircleFilled(
+        pin,
+        radius * (hovered ? 1.95f : 1.55f),
+        ColorWithAlpha(hovered ? tokens.selected : baseVec, hovered ? 0.32f : 0.18f));
+    drawList->AddCircleFilled(pin, radius * 1.14f, ColorWithAlpha(tokens.canvas, 0.86f));
+    drawList->AddCircleFilled(pin, radius * (hovered ? 0.92f : 0.78f), ImGui::ColorConvertFloat4ToU32(BlendColor(baseVec, tokens.text, hoverBoost * 0.22f)));
+    drawList->AddCircle(pin, radius * 1.14f, ColorWithAlpha(hovered ? tokens.selected : tokens.spotlightHalo, hovered ? 0.90f : 0.52f), 16, std::max(0.8f, radius * 0.18f));
+}
+
+void DrawPreviewFrame(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const GraphStyleTokens& tokens, float uiScale) {
+    if (!tokens.enabled || max.x <= min.x || max.y <= min.y) {
+        return;
+    }
+    const float rounding = std::max(2.0f, 4.0f * uiScale);
+    drawList->AddRect(min, max, ColorWithAlpha(tokens.spotlightHalo, 0.075f), rounding, 0, std::max(0.45f, 0.55f * uiScale));
+}
+
+float ChannelLaneOffset(const std::string& channel, float zoom) {
+    const float lane = std::max(0.05f, zoom) * 2.2f;
+    if (channel == "r") return -lane * 1.5f;
+    if (channel == "g") return -lane * 0.5f;
+    if (channel == "b") return lane * 0.5f;
+    if (channel == "a") return lane * 1.5f;
+    return 0.0f;
 }
 
 float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayoutMetrics& metrics, float measuredLayerHeight = 0.0f) {
@@ -630,10 +1430,32 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
                     return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
             }
             break;
+        case EditorNodeGraph::NodeKind::CustomMask:
+            return headerBlock + sectionGap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            return headerBlock + sectionGap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::DataMath:
+            if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
+                return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
+            }
+            if (node.dataMathMode == EditorNodeGraph::DataMathMode::Remap) {
+                return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
+            }
+            return headerBlock + sectionGap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::ImageToMask:
+            if (node.imageToMaskKind == EditorNodeGraph::ImageToMaskKind::SampledRange) {
+                const int extraSamples = std::max(0, std::clamp(node.imageToMaskSettings.sampleCount, 1, 5) - 1);
+                const float extraSampleRows = static_cast<float>(extraSamples + 3);
+                return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap +
+                    row + gap + sliderRow + gap + extraSampleRows * row + gap * extraSampleRows + checkboxRow + bottomPadding;
+            }
             return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             return headerBlock + sectionGap + row + gap + metrics.previewHeight + sectionGap + metrics.minExpandedHeight + bottomPadding;
+        case EditorNodeGraph::NodeKind::HdrMerge: {
+            const float inputRows = 4.0f;
+            return headerBlock + sectionGap + inputRows * row + gap * (inputRows - 1.0f) + bottomPadding;
+        }
         case EditorNodeGraph::NodeKind::ImageGenerator:
             if (node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::SolidColor ||
                 node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Square ||
@@ -664,9 +1486,13 @@ bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::Preview:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+        case EditorNodeGraph::NodeKind::HdrMerge:
+        case EditorNodeGraph::NodeKind::MaskCombine:
         case EditorNodeGraph::NodeKind::MaskUtility:
+        case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::DataMath:
             return true;
     }
     return false;
@@ -702,19 +1528,23 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::Image: return "Image";
         case EditorNodeGraph::NodeKind::RawSource: return "RAW";
         case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "RAW Denoise";
-        case EditorNodeGraph::NodeKind::RawDevelop: return "RAW Develop";
+        case EditorNodeGraph::NodeKind::RawDevelop: return "Develop";
         case EditorNodeGraph::NodeKind::RawDetailAutoMask: return "RAW Detail Auto Mask";
-        case EditorNodeGraph::NodeKind::RawDetailFusion: return "Auto Gain";
+        case EditorNodeGraph::NodeKind::RawDetailFusion: return "Pre-Local Exposure";
+        case EditorNodeGraph::NodeKind::HdrMerge: return "HDR Merge";
         case EditorNodeGraph::NodeKind::Layer: return "Layer";
         case EditorNodeGraph::NodeKind::Output: return "Output";
         case EditorNodeGraph::NodeKind::Composite: return "Composite";
         case EditorNodeGraph::NodeKind::Scope: return "Scope";
         case EditorNodeGraph::NodeKind::MaskGenerator: return "Mask";
-        case EditorNodeGraph::NodeKind::Mix: return "Merge";
+        case EditorNodeGraph::NodeKind::CustomMask: return "Custom Mask";
+        case EditorNodeGraph::NodeKind::MaskCombine: return "Scalar Combine";
+        case EditorNodeGraph::NodeKind::Mix: return "Image Blend";
         case EditorNodeGraph::NodeKind::Preview: return "Preview";
-        case EditorNodeGraph::NodeKind::MaskUtility: return "Mask Utility";
-        case EditorNodeGraph::NodeKind::ImageToMask: return "Image To Mask";
+        case EditorNodeGraph::NodeKind::MaskUtility: return "Scalar Utility";
+        case EditorNodeGraph::NodeKind::ImageToMask: return "Image To Scalar";
         case EditorNodeGraph::NodeKind::ImageGenerator: return "Generator";
+        case EditorNodeGraph::NodeKind::DataMath: return "Data Math";
         case EditorNodeGraph::NodeKind::ChannelSplit: return "Channel Split";
         case EditorNodeGraph::NodeKind::ChannelCombine: return "Channel Combine";
     }
@@ -769,11 +1599,11 @@ const char* MaskLabel(EditorNodeGraph::MaskGeneratorKind kind) {
 
 const char* MaskUtilityLabel(EditorNodeGraph::MaskUtilityKind kind) {
     switch (kind) {
-        case EditorNodeGraph::MaskUtilityKind::Invert: return "Invert Mask";
-        case EditorNodeGraph::MaskUtilityKind::Levels: return "Levels Mask";
-        case EditorNodeGraph::MaskUtilityKind::Threshold: return "Threshold Mask";
+        case EditorNodeGraph::MaskUtilityKind::Invert: return "Invert Scalar";
+        case EditorNodeGraph::MaskUtilityKind::Levels: return "Remap Scalar";
+        case EditorNodeGraph::MaskUtilityKind::Threshold: return "Threshold Scalar";
     }
-    return "Mask Utility";
+    return "Scalar Utility";
 }
 
 const char* ImageGeneratorLabel(EditorNodeGraph::ImageGeneratorKind kind) {
@@ -790,6 +1620,7 @@ const char* ImageGeneratorLabel(EditorNodeGraph::ImageGeneratorKind kind) {
 const char* MixBlendLabel(EditorNodeGraph::MixBlendMode mode) {
     switch (mode) {
         case EditorNodeGraph::MixBlendMode::Normal: return "Normal / Lerp";
+        case EditorNodeGraph::MixBlendMode::Average: return "Average Images";
         case EditorNodeGraph::MixBlendMode::Add: return "Add";
         case EditorNodeGraph::MixBlendMode::Multiply: return "Multiply";
         case EditorNodeGraph::MixBlendMode::Screen: return "Screen";
@@ -798,18 +1629,20 @@ const char* MixBlendLabel(EditorNodeGraph::MixBlendMode mode) {
     return "Normal / Lerp";
 }
 
-float DistancePointToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
-    const float vx = b.x - a.x;
-    const float vy = b.y - a.y;
-    const float wx = p.x - a.x;
-    const float wy = p.y - a.y;
-    const float lenSq = vx * vx + vy * vy;
-    const float t = lenSq > 0.0f ? std::max(0.0f, std::min(1.0f, (wx * vx + wy * vy) / lenSq)) : 0.0f;
-    const float px = a.x + t * vx;
-    const float py = a.y + t * vy;
-    const float dx = p.x - px;
-    const float dy = p.y - py;
-    return std::sqrt(dx * dx + dy * dy);
+const char* DataMathLabel(EditorNodeGraph::DataMathMode mode) {
+    switch (mode) {
+        case EditorNodeGraph::DataMathMode::Clamp: return "Clamp";
+        case EditorNodeGraph::DataMathMode::Add: return "Add";
+        case EditorNodeGraph::DataMathMode::Subtract: return "Subtract";
+        case EditorNodeGraph::DataMathMode::Multiply: return "Multiply";
+        case EditorNodeGraph::DataMathMode::Divide: return "Divide";
+        case EditorNodeGraph::DataMathMode::Average: return "Average";
+        case EditorNodeGraph::DataMathMode::Min: return "Minimum";
+        case EditorNodeGraph::DataMathMode::Max: return "Maximum";
+        case EditorNodeGraph::DataMathMode::Difference: return "Difference";
+        case EditorNodeGraph::DataMathMode::Remap: return "Remap";
+    }
+    return "Clamp";
 }
 
 } // namespace
@@ -833,20 +1666,30 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
     // Heuristic: If carrying specific color channel, prioritize exact matching channel socket first!
     std::unordered_set<int> visited;
     std::string channel = GetUpstreamChannel(graph, fromNodeId, fromSocketId, visited);
+    const bool fromScalarStream = graph.IsScalarSocketStream(fromNodeId, fromSocketId);
     if (!channel.empty()) {
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Input && socket.id == channel) {
                 std::string error;
-                if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+                if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+                    editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                     return true;
                 }
             }
         }
     }
 
+    if (fromScalarStream && to->kind == EditorNodeGraph::NodeKind::Layer) {
+        std::string error;
+        if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId) &&
+            editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, &error)) {
+            return true;
+        }
+    }
+
     // Determine the preferred target socket type
     EditorNodeGraph::SocketType preferredType = fromSocket.type;
-    if (from->kind == EditorNodeGraph::NodeKind::ChannelSplit) {
+    if (from->kind == EditorNodeGraph::NodeKind::ChannelSplit || fromScalarStream) {
         preferredType = EditorNodeGraph::SocketType::Image;
     }
 
@@ -857,7 +1700,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+                editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
         }
@@ -870,7 +1714,8 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+                editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
         }
@@ -900,7 +1745,8 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Output && socket.id == toSocketId) {
                 std::string error;
-                if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+                if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId) &&
+                    editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                     return true;
                 }
             }
@@ -920,7 +1766,8 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId) &&
+                editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }
         }
@@ -933,7 +1780,8 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
+            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId) &&
+                editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }
         }
@@ -951,6 +1799,28 @@ void EditorNodeGraphUI::Initialize() {}
 
 bool EditorNodeGraphUI::IsGraphCanvasHovered() const {
     return ImGui::IsMouseHoveringRect(ToImVec2(m_CanvasMin), ToImVec2(m_CanvasMax), false);
+}
+
+bool EditorNodeGraphUI::CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph& graph, int nodeId) const {
+    const EditorNodeGraph::Node* node = graph.FindNode(nodeId);
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Layer) {
+        return false;
+    }
+    if (!graph.FindInputLink(nodeId, EditorNodeGraph::kImageInputSocketId)) {
+        return false;
+    }
+    for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
+        if (link.fromNodeId == nodeId && link.fromSocketId == EditorNodeGraph::kImageOutputSocketId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void EditorNodeGraphUI::CancelChannelSplitConfirm() {
+    m_ChannelSplitConfirmNodeId = -1;
+    m_ChannelSplitConfirmStartTime = 0.0;
+    m_ChannelSplitConfirmRect = {};
 }
 
 EditorNodeGraphUI::GraphMouseOwner EditorNodeGraphUI::ResolveMouseOwner(
@@ -1054,7 +1924,15 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
             if (entry) {
                 ImVec2 dropPos = ImGui::GetIO().MousePos;
                 EditorNodeGraph::Vec2 graphPos = ScreenToGraph(ToGraphVec2(dropPos));
-                AddNodeFromBrowserEntry(editor, *entry, graphPos);
+                const EditorNodeGraph::Link hoveredDropLink = FindLinkAt(graph, ToGraphVec2(dropPos));
+                const int newNodeId = AddNodeFromBrowserEntry(editor, *entry, graphPos);
+                if (newNodeId > 0 &&
+                    hoveredDropLink.fromNodeId > 0 &&
+                    hoveredDropLink.toNodeId > 0 &&
+                    hoveredDropLink.fromNodeId != newNodeId &&
+                    hoveredDropLink.toNodeId != newNodeId) {
+                    InsertNewNodeOnExistingLink(this, editor, hoveredDropLink, newNodeId);
+                }
             }
         }
         ImGui::EndDragDropTarget();
@@ -1067,7 +1945,9 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     m_CanvasMax = ToGraphVec2(canvasMax);
     editor->ApplyGraphAutoFocusFrame(canvasSize.x, canvasSize.y, m_Pan.x, m_Pan.y, m_Zoom);
     editor->SetGraphDropTargetRect(canvasMin.x, canvasMin.y, canvasMax.x, canvasMax.y);
-    editor->SetGraphViewTransform(canvasMin.x, canvasMin.y, m_Pan.x, m_Pan.y, m_Zoom);
+    if (!m_SmoothZoomActive) {
+        m_ZoomTarget = m_Zoom;
+    }
     bool graphHovered = IsGraphCanvasHovered();
     if (graphHovered) {
         ImVec2 mousePos = ImGui::GetIO().MousePos;
@@ -1075,6 +1955,10 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
         if (mousePos.x >= canvasMin.x && mousePos.x <= canvasMin.x + drawersWidth) {
             graphHovered = false;
         }
+    }
+    if (graphHovered) {
+        m_LastGraphMousePos = ScreenToGraph(ToGraphVec2(ImGui::GetIO().MousePos));
+        m_HasLastGraphMousePos = true;
     }
 
     // Robust raw Tab key press detection to bypass ImGui's internal text input focus interception/consumption
@@ -1134,24 +2018,38 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
         editor->CancelGraphAutoFocusTracking();
         ZoomAtMouse(ImGui::GetIO().MouseWheel);
     }
+    if (m_SmoothZoomActive) {
+        const float nextZoom = m_Zoom + ((m_ZoomTarget - m_Zoom) * std::clamp(ImGui::GetIO().DeltaTime * 18.0f, 0.0f, 1.0f));
+        m_Zoom = (std::abs(m_ZoomTarget - nextZoom) < 0.0005f) ? m_ZoomTarget : nextZoom;
+        m_Pan.x = m_SmoothZoomFocusScreen.x - m_CanvasOrigin.x - m_SmoothZoomFocusGraph.x * m_Zoom;
+        m_Pan.y = m_SmoothZoomFocusScreen.y - m_CanvasOrigin.y - m_SmoothZoomFocusGraph.y * m_Zoom;
+        if (std::abs(m_ZoomTarget - m_Zoom) < 0.0005f) {
+            m_Zoom = m_ZoomTarget;
+            m_SmoothZoomActive = false;
+        }
+    }
+    editor->SetGraphViewTransform(canvasMin.x, canvasMin.y, m_Pan.x, m_Pan.y, m_Zoom);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     drawList->PushClipRect(canvasMin, canvasMax, true);
+    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
-    drawList->AddRectFilled(canvasMin, canvasMax, ImGui::ColorConvertFloat4ToU32(workspaceBg));
+    const ImVec4 canvasBg = graphStyle.enabled ? graphStyle.canvas : workspaceBg;
+    drawList->AddRectFilled(canvasMin, canvasMax, ImGui::ColorConvertFloat4ToU32(canvasBg));
 
-    const float gridStep = std::max(8.0f, 32.0f * m_Zoom);
-    const float luminance = 0.2126f * workspaceBg.x + 0.7152f * workspaceBg.y + 0.0722f * workspaceBg.z;
-    const ImU32 gridColor = (luminance < 0.5f)
-        ? IM_COL32(255, 255, 255, 20)  // Dark background: soft light grid
-        : IM_COL32(0, 0, 0, 18);        // Light background: soft dark grid
-    for (float x = std::fmod(m_Pan.x, gridStep); x < canvasSize.x; x += gridStep) {
-        drawList->AddLine(ImVec2(canvasMin.x + x, canvasMin.y), ImVec2(canvasMin.x + x, canvasMax.y), gridColor);
+    if (!graphStyle.spotlightSurface) {
+        const float gridStep = std::max(8.0f, 32.0f * m_Zoom);
+        const float luminance = 0.2126f * workspaceBg.x + 0.7152f * workspaceBg.y + 0.0722f * workspaceBg.z;
+        const ImU32 gridColor = (luminance < 0.5f)
+            ? IM_COL32(255, 255, 255, 20)  // Dark background: soft light grid
+            : IM_COL32(0, 0, 0, 18);        // Light background: soft dark grid
+        for (float x = std::fmod(m_Pan.x, gridStep); x < canvasSize.x; x += gridStep) {
+            drawList->AddLine(ImVec2(canvasMin.x + x, canvasMin.y), ImVec2(canvasMin.x + x, canvasMax.y), gridColor);
+        }
+        for (float y = std::fmod(m_Pan.y, gridStep); y < canvasSize.y; y += gridStep) {
+            drawList->AddLine(ImVec2(canvasMin.x, canvasMin.y + y), ImVec2(canvasMax.x, canvasMin.y + y), gridColor);
+        }
     }
-    for (float y = std::fmod(m_Pan.y, gridStep); y < canvasSize.y; y += gridStep) {
-        drawList->AddLine(ImVec2(canvasMin.x, canvasMin.y + y), ImVec2(canvasMax.x, canvasMin.y + y), gridColor);
-    }
-
     ClampPanToContent(graph);
 
     for (EditorNodeGraph::Node& node : graph.GetNodes()) {
@@ -1178,6 +2076,7 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
 
     RenderInteraction(editor, graph);
     RenderValidationStatus(graph);
+    RenderChannelSplitConfirmPrompt(editor);
     const int debugHoveredNodeId = IsGraphCanvasHovered() ? FindNodeAt(graph, ToGraphVec2(ImGui::GetMousePos())) : -1;
     RenderInteractionDebugOverlay(graph, debugHoveredNodeId, m_MouseOwner);
     RenderContextMenu(editor);
@@ -1185,13 +2084,23 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
 
     const float seamFade = std::min(120.0f, canvasSize.x);
     const float edgeFade = std::min(56.0f, std::min(canvasSize.x, canvasSize.y) * 0.10f);
-    const ImU32 fadeSoft = ColorWithAlpha(workspaceBg, 0.62f);
-    const ImU32 fadeStrong = ColorWithAlpha(workspaceBg, 1.0f);
-    const ImU32 fadeClear = ColorWithAlpha(workspaceBg, 0.0f);
+    const float topSeamFade = std::min(26.0f, std::max(12.0f, edgeFade * 0.55f));
+    const ImU32 fadeSoft = ColorWithAlpha(canvasBg, graphStyle.spotlightSurface ? 0.38f : 0.62f);
+    const ImU32 fadeStrong = ColorWithAlpha(canvasBg, graphStyle.spotlightSurface ? 0.82f : 1.0f);
+    const ImU32 fadeClear = ColorWithAlpha(canvasBg, 0.0f);
     if (edgeFade > 1.0f) {
         drawList->AddRectFilledMultiColor(canvasMin, ImVec2(canvasMin.x + edgeFade, canvasMax.y), fadeSoft, fadeClear, fadeClear, fadeSoft);
         drawList->AddRectFilledMultiColor(canvasMin, ImVec2(canvasMax.x, canvasMin.y + edgeFade), fadeSoft, fadeSoft, fadeClear, fadeClear);
         drawList->AddRectFilledMultiColor(ImVec2(canvasMin.x, canvasMax.y - edgeFade), canvasMax, fadeClear, fadeClear, fadeSoft, fadeSoft);
+    }
+    if (topSeamFade > 1.0f) {
+        drawList->AddRectFilledMultiColor(
+            canvasMin,
+            ImVec2(canvasMax.x, canvasMin.y + topSeamFade),
+            fadeStrong,
+            fadeStrong,
+            fadeClear,
+            fadeClear);
     }
     if (seamFade > 1.0f) {
         drawList->AddRectFilledMultiColor(
@@ -1211,9 +2120,12 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     const EditorNodeGraph::Node& node) const {
     const NodeLayoutMetrics metrics = MetricsForNode(node);
     NodeLayoutMetrics adjustedMetrics = metrics;
+    ApplyModernCompactMetrics(node, adjustedMetrics);
     ApplyLayerSurfaceMetrics(m_ActiveEditor, node, adjustedMetrics);
-    const float uiScale = NodeUiScaleFromZoom(m_Zoom);
-    const float pinRadius = PinRadiusForZoom(m_Zoom);
+    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(m_ActiveEditor);
+    const NodePresentationProfile profile = BuildNodePresentationProfile(node, graphStyle);
+    const float uiScale = NodeContentScale();
+    const float pinRadius = NodePinRadius();
     const float headerInsetX = adjustedMetrics.headerInsetX * uiScale;
     const float headerInsetY = adjustedMetrics.headerInsetY * uiScale;
     const float bodyInsetBottom = adjustedMetrics.bodyInsetBottom * uiScale;
@@ -1228,9 +2140,9 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     const ImVec2 frameMin = ToImVec2(nodeScreenPos);
     const ImVec2 frameMax(frameMin.x + nodeSize.x, frameMin.y + nodeSize.y);
 
-    const bool showKindLabel = ShouldShowKindLabel(node);
+    const bool showKindLabel = profile.showKindLabel;
     const float kindLabelBlock = showKindLabel ? (adjustedMetrics.kindLabelHeight * uiScale) + (2.0f * uiScale) : 0.0f;
-    const float titleBlock = adjustedMetrics.titleHeight * uiScale;
+    const float titleBlock = profile.showTitle ? (adjustedMetrics.titleHeight * uiScale) : 0.0f;
     const float headerVisualHeight = headerInsetY + kindLabelBlock + titleBlock;
     const float expandedHeaderHeight = headerVisualHeight + std::max(6.0f, sectionGap * 0.65f);
     const float collapsedHeaderHeight = std::max(headerVisualHeight + (headerInsetY * 0.45f), frameMax.y - frameMin.y);
@@ -1252,6 +2164,13 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
         ImVec2(contentMinX, contentMinY),
         ImVec2(contentMaxX, contentMaxY)
     };
+    if (profile.kind == NodePresentationKind::FramelessMedia) {
+        cache.headerRect = CachedRect{ frameMin, frameMax };
+        cache.contentRect = CachedRect{
+            ImVec2(frameMin.x + 2.0f * uiScale, frameMin.y + 2.0f * uiScale),
+            ImVec2(frameMax.x - 2.0f * uiScale, frameMax.y - 2.0f * uiScale)
+        };
+    }
 
     std::vector<EditorNodeGraph::SocketDefinition> inputSockets;
     std::vector<EditorNodeGraph::SocketDefinition> outputSockets;
@@ -1376,11 +2295,15 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& n
     if (node.kind == EditorNodeGraph::NodeKind::Output ||
         node.kind == EditorNodeGraph::NodeKind::ChannelSplit ||
         node.kind == EditorNodeGraph::NodeKind::ChannelCombine ||
-        HasAdvancedLayerSurface(m_ActiveEditor, node)) {
+        IsSummaryOnlyNode(node)) {
+        if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
+            return EditorNodeGraph::Vec2{ 128.0f, 72.0f };
+        }
         return EditorNodeGraph::Vec2{ 90.0f, 90.0f };
     }
 
     NodeLayoutMetrics metrics = MetricsForNode(node);
+    ApplyModernCompactMetrics(node, metrics);
     ApplyLayerSurfaceMetrics(m_ActiveEditor, node, metrics);
     const float measuredLayerHeight = [&]() -> float {
         const auto it = m_NodeMeasuredBaseHeights.find(node.id);
@@ -1402,8 +2325,11 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& n
 void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& node) {
     EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
     NodeLayoutMetrics metrics = MetricsForNode(node);
+    ApplyModernCompactMetrics(node, metrics);
     ApplyLayerSurfaceMetrics(editor, node, metrics);
-    const NodeFamilyStyle& familyStyle = StyleForFamily(FamilyForNode(node));
+    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
+    const NodePresentationProfile presentation = BuildNodePresentationProfile(node, graphStyle);
+    const NodeFamilyStyle familyStyle = StyleForFamily(FamilyForNode(node), graphStyle);
     if (!FindNodeLayoutCache(node.id)) {
         RefreshNodeLayoutCache(graph, node);
     }
@@ -1415,35 +2341,104 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     const ImVec2 min = layout->frameRect.min;
     const ImVec2 max = layout->frameRect.max;
     const bool selected = graph.IsNodeSelected(node.id);
-    const float uiScale = NodeUiScaleFromZoom(m_Zoom);
-    const float pinRadius = PinRadiusForZoom(m_Zoom);
+    const float uiScale = NodeContentScale();
+    const float pinRadius = NodePinRadius();
+
+    if (presentation.kind == NodePresentationKind::FramelessMedia) {
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const bool hovered = ImGui::IsMouseHoveringRect(min, max, false);
+        const unsigned int texture = GetImagePreviewTexture(node);
+        const ImVec2 frameSize(std::max(1.0f, max.x - min.x), std::max(1.0f, max.y - min.y));
+        const ImVec2 imageSourceSize(
+            static_cast<float>(std::max(1, node.image.width)),
+            static_cast<float>(std::max(1, node.image.height)));
+        const ImVec2 fittedSize = FitPreviewRect(frameSize, imageSourceSize);
+        const ImVec2 imageMin(
+            min.x + (frameSize.x - fittedSize.x) * 0.5f,
+            min.y + (frameSize.y - fittedSize.y) * 0.5f);
+        const ImVec2 imageMax(imageMin.x + fittedSize.x, imageMin.y + fittedSize.y);
+        if (texture != 0) {
+            drawList->AddImage(
+                (ImTextureID)(intptr_t)texture,
+                imageMin,
+                imageMax,
+                ImVec2(0, 1),
+                ImVec2(1, 0),
+                IM_COL32_WHITE);
+        } else {
+            drawList->AddRectFilled(imageMin, imageMax, ColorWithAlpha(graphStyle.nodeSurface, 0.42f), std::max(3.0f, 5.0f * uiScale));
+        }
+        if (selected) {
+            drawList->AddRectFilled(imageMin, imageMax, IM_COL32(255, 255, 255, 22), std::max(3.0f, 5.0f * uiScale));
+        } else if (hovered) {
+            const float rounding = std::max(3.0f, 5.0f * uiScale);
+            drawList->AddRect(
+                imageMin,
+                imageMax,
+                ColorWithAlpha(graphStyle.spotlightHalo, 0.42f),
+                rounding,
+                0,
+                std::max(0.8f, 1.0f * uiScale));
+        }
+
+        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
+            const SocketAnchor* anchor = FindSocketAnchor(*layout, socket.id, socket.direction);
+            if (!anchor) {
+                continue;
+            }
+            const bool hoveredSocket = socket.direction == EditorNodeGraph::SocketDirection::Input
+                ? (m_HoveredInputNodeId == node.id && m_HoveredInputSocketId == socket.id)
+                : (m_HoveredOutputNodeId == node.id && m_HoveredOutputSocketId == socket.id);
+            DrawSocketPin(drawList, anchor->screenPos, pinRadius, SocketColor(socket, familyStyle, graphStyle), graphStyle, hoveredSocket);
+        }
+
+        if ((hovered || selected) && node.image.width > 0 && node.image.height > 0) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(node.title.empty() ? "Image" : node.title.c_str());
+            ImGui::TextDisabled("%d x %d", node.image.width, node.image.height);
+            ImGui::TextDisabled("%s", graph.GetActiveImageNodeId() == node.id ? "Active image" : "Unconnected image");
+            ImGui::EndTooltip();
+        }
+        return;
+    }
 
     const bool isSquareNode = (node.kind == EditorNodeGraph::NodeKind::Output) ||
         (node.kind == EditorNodeGraph::NodeKind::ChannelSplit) ||
         (node.kind == EditorNodeGraph::NodeKind::ChannelCombine) ||
-        (node.kind != EditorNodeGraph::NodeKind::RawSource && HasAdvancedLayerSurface(editor, node));
+        IsSummaryOnlyNode(node);
 
     if (isSquareNode) {
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         const float frameRounding = std::max(4.0f, 8.0f * uiScale);
-        const float borderThickness = selected ? std::max(1.4f, 2.0f * uiScale) : std::max(0.95f, 1.15f * uiScale);
+        const float borderThickness = std::max(0.95f, 1.15f * uiScale);
 
         ImVec4 fillColor = BlendColor(familyStyle.fill, ImVec4(0.10f, 0.12f, 0.13f, familyStyle.fill.w), 0.18f);
-        ImVec4 borderColor = selected
-            ? BlendColor(familyStyle.accent, ImVec4(0.94f, 0.96f, 0.98f, 1.0f), 0.42f)
-            : familyStyle.border;
+        ImVec4 borderColor = familyStyle.border;
         if (node.kind == EditorNodeGraph::NodeKind::Output && !node.outputEnabled) {
             fillColor = ImVec4(0.26f, 0.08f, 0.08f, 1.0f);
-            borderColor = selected ? ImVec4(0.95f, 0.45f, 0.45f, 1.0f) : ImVec4(0.65f, 0.20f, 0.20f, 1.0f);
+            borderColor = ImVec4(0.65f, 0.20f, 0.20f, 1.0f);
         }
             
-        drawList->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(fillColor), frameRounding);
-        drawList->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(borderColor), frameRounding, 0, borderThickness);
+        DrawGraphNodeSpotlightSurface(
+            drawList,
+            min,
+            max,
+            fillColor,
+            borderColor,
+            familyStyle.accent,
+            graphStyle,
+            selected,
+            true,
+            uiScale,
+            frameRounding,
+            borderThickness);
         
         // Custom compact labels for square nodes
         std::string squareLabel = "Output";
         if (node.kind == EditorNodeGraph::NodeKind::Layer) {
             squareLabel = CompactAdvancedLayerLabel(node);
+        } else if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
+            squareLabel = "RAW";
         } else if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
             squareLabel = "RAW Denoise";
         } else if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
@@ -1451,7 +2446,11 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
             squareLabel = "Auto Mask";
         } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
-            squareLabel = "Auto Gain";
+            squareLabel = "Pre-Local";
+        } else if (node.kind == EditorNodeGraph::NodeKind::HdrMerge) {
+            squareLabel = "HDR Merge";
+        } else if (node.kind == EditorNodeGraph::NodeKind::CustomMask) {
+            squareLabel = "Mask Edit";
         } else if (node.kind == EditorNodeGraph::NodeKind::Output && !node.outputEnabled) {
             squareLabel = "Deactivated";
         } else if (node.kind == EditorNodeGraph::NodeKind::ChannelSplit) {
@@ -1461,7 +2460,10 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         }
 
         const float fontSize = ImGui::GetFontSize() * uiScale;
-        ImVec2 textSize = ImGui::CalcTextSize(squareLabel.c_str());
+        const std::string squareDisplayLabel = EllipsizeLabel(
+            squareLabel,
+            std::max(28.0f, (max.x - min.x - (12.0f * uiScale)) / std::max(0.01f, uiScale)));
+        ImVec2 textSize = ImGui::CalcTextSize(squareDisplayLabel.c_str());
         ImVec2 scaledTextSize = ImVec2(textSize.x * uiScale, textSize.y * uiScale);
         
         bool isOutputFourPins = false;
@@ -1474,9 +2476,20 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             }
         }
 
+        const char* outputModeLabel = isOutputFourPins ? "RGBA" : "Full";
+        const float modeFontSize = std::max(9.0f, fontSize * 0.72f);
+        ImVec2 scaledModeTextSize {};
+        if (node.kind == EditorNodeGraph::NodeKind::Output) {
+            const ImVec2 modeTextSize = ImGui::CalcTextSize(outputModeLabel);
+            const float modeScale = modeFontSize / std::max(1.0f, ImGui::GetFontSize());
+            scaledModeTextSize = ImVec2(modeTextSize.x * modeScale, modeTextSize.y * modeScale);
+        }
+        const float labelBlockHeight = (node.kind == EditorNodeGraph::NodeKind::Output)
+            ? (scaledTextSize.y + scaledModeTextSize.y + 3.0f * uiScale)
+            : scaledTextSize.y;
         ImVec2 textPos = ImVec2(
             isOutputFourPins ? min.x + (max.x - min.x) * 0.54f - scaledTextSize.x * 0.5f : min.x + (max.x - min.x - scaledTextSize.x) * 0.5f,
-            min.y + (max.y - min.y - scaledTextSize.y) * 0.5f
+            min.y + (max.y - min.y - labelBlockHeight) * 0.5f
         );
         
         drawList->AddText(
@@ -1484,8 +2497,20 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             fontSize,
             textPos,
             ImGui::ColorConvertFloat4ToU32(familyStyle.text),
-            squareLabel.c_str());
-            
+            squareDisplayLabel.c_str());
+
+        if (node.kind == EditorNodeGraph::NodeKind::Output) {
+            const ImVec2 modePos(
+                min.x + (max.x - min.x - scaledModeTextSize.x) * 0.5f,
+                textPos.y + scaledTextSize.y + 3.0f * uiScale);
+            drawList->AddText(
+                ImGui::GetFont(),
+                modeFontSize,
+                modePos,
+                graphStyle.enabled ? ColorWithAlpha(graphStyle.mutedText, 0.92f) : IM_COL32(180, 195, 205, 220),
+                outputModeLabel);
+        }
+
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
             const SocketAnchor* anchor = FindSocketAnchor(*layout, socket.id, socket.direction);
             if (anchor) {
@@ -1493,14 +2518,9 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 const bool hoveredSocket = (socket.direction == EditorNodeGraph::SocketDirection::Input)
                     ? (m_HoveredInputNodeId == node.id && m_HoveredInputSocketId == socket.id)
                     : (m_HoveredOutputNodeId == node.id && m_HoveredOutputSocketId == socket.id);
-                
-                ImU32 baseColor = TypedSocketColor(socket.type, familyStyle);
-                if (socket.id == "r") baseColor = IM_COL32(255, 64, 64, 255);
-                else if (socket.id == "g") baseColor = IM_COL32(64, 255, 64, 255);
-                else if (socket.id == "b") baseColor = IM_COL32(64, 128, 255, 255);
-                else if (socket.id == "a") baseColor = IM_COL32(230, 230, 230, 255);
 
-                drawList->AddCircleFilled(pin, pinRadius, hoveredSocket ? IM_COL32(255, 255, 255, 255) : baseColor);
+                const ImU32 baseColor = SocketColor(socket, familyStyle, graphStyle);
+                DrawSocketPin(drawList, pin, pinRadius, baseColor, graphStyle, hoveredSocket);
 
                 const bool isChannelSocket = socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a";
                 if (isSquareNode && isChannelSocket) {
@@ -1514,7 +2534,8 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                         drawList->AddText(ImGui::GetFont(), fontSize * 0.72f, pinLabelPos, baseColor, labelText.c_str());
                     } else {
                         ImVec2 labelSize = ImGui::CalcTextSize(labelText.c_str());
-                        float scaledLabelWidth = labelSize.x * 0.72f;
+                        const float labelFontScale = (fontSize * 0.72f) / std::max(1.0f, ImGui::GetFontSize());
+                        float scaledLabelWidth = labelSize.x * labelFontScale;
                         pinLabelPos = ImVec2(pin.x - pinRadius * 2.2f - scaledLabelWidth, pin.y - fontSize * 0.45f);
                         drawList->AddText(ImGui::GetFont(), fontSize * 0.72f, pinLabelPos, baseColor, labelText.c_str());
                     }
@@ -1530,6 +2551,22 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                     ImGui::EndTooltip();
                 }
             }
+        }
+
+        if (IsSummaryOnlyNode(node) && ImGui::IsMouseHoveringRect(min, max, false)) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(node.title.empty() ? squareLabel.c_str() : node.title.c_str());
+            if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
+                if (!node.rawSource.label.empty()) {
+                    ImGui::TextDisabled("%s", node.rawSource.label.c_str());
+                }
+                if (!node.rawSource.sourcePath.empty()) {
+                    ImGui::TextDisabled("%s", node.rawSource.sourcePath.c_str());
+                }
+            } else if (HasDedicatedComplexEditor(editor, node)) {
+                ImGui::TextDisabled("Detailed controls are in the node inspector.");
+            }
+            ImGui::EndTooltip();
         }
         
         return;
@@ -1550,7 +2587,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     const float logicalSafeContentWidth = safeContentWidth / std::max(0.001f, uiScale);
     const ImVec2 previewSize = NodePreviewSizeForScale(metrics, uiScale);
     const float frameRounding = std::max(4.0f, 8.0f * uiScale);
-    const float borderThickness = selected ? std::max(1.4f, 2.0f * uiScale) : std::max(0.95f, 1.15f * uiScale);
+    const float borderThickness = std::max(0.95f, 1.15f * uiScale);
     const float headerY = metrics.headerInsetY * uiScale;
     const float sectionGap = metrics.sectionGap * uiScale;
     const float itemGap = metrics.itemGap * uiScale;
@@ -1559,18 +2596,29 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     const ImVec4 fillColor = expanded
         ? familyStyle.fill
         : BlendColor(familyStyle.fill, ImVec4(0.10f, 0.12f, 0.13f, familyStyle.fill.w), 0.18f);
-    const ImVec4 borderColor = selected
-        ? BlendColor(familyStyle.accent, ImVec4(0.94f, 0.96f, 0.98f, 1.0f), 0.42f)
-        : familyStyle.border;
-    drawList->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(fillColor), frameRounding);
-    drawList->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(borderColor), frameRounding, 0, borderThickness);
-    const float accentHeight = std::max(2.0f, 3.0f * uiScale);
-    drawList->AddRectFilled(
-        ImVec2(min.x, min.y),
-        ImVec2(max.x, min.y + accentHeight),
-        ColorWithAlpha(familyStyle.accent, expanded ? 0.42f : 0.28f),
+    const ImVec4 borderColor = familyStyle.border;
+    DrawGraphNodeSpotlightSurface(
+        drawList,
+        min,
+        max,
+        fillColor,
+        borderColor,
+        familyStyle.accent,
+        graphStyle,
+        selected,
+        expanded,
+        uiScale,
         frameRounding,
-        ImDrawFlags_RoundCornersTop);
+        borderThickness);
+    if (!graphStyle.enabled) {
+        const float accentHeight = std::max(2.0f, 3.0f * uiScale);
+        drawList->AddRectFilled(
+            ImVec2(min.x, min.y),
+            ImVec2(max.x, min.y + accentHeight),
+            ColorWithAlpha(familyStyle.accent, expanded ? 0.42f : 0.28f),
+            frameRounding,
+            ImDrawFlags_RoundCornersTop);
+    }
 
     for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
         const bool isInput = socket.direction == EditorNodeGraph::SocketDirection::Input;
@@ -1582,8 +2630,8 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         const bool hoveredSocket = isInput
             ? (m_HoveredInputNodeId == node.id && m_HoveredInputSocketId == socket.id)
             : (m_HoveredOutputNodeId == node.id && m_HoveredOutputSocketId == socket.id);
-        const ImU32 baseColor = TypedSocketColor(socket.type, familyStyle);
-        drawList->AddCircleFilled(pin, pinRadius, hoveredSocket ? IM_COL32(255, 255, 255, 255) : baseColor);
+        const ImU32 baseColor = SocketColor(socket, familyStyle, graphStyle);
+        DrawSocketPin(drawList, pin, pinRadius, baseColor, graphStyle, hoveredSocket);
         const float pinLabelSize = std::max(3.5f, ImGui::GetFontSize() * uiScale * 0.86f);
         const float pinLabelScale = pinLabelSize / std::max(1.0f, ImGui::GetFontSize());
         const ImVec2 labelMin = isInput
@@ -1616,16 +2664,24 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 return std::to_string(node.layerIndex + 1) + ". " + (node.title.empty() ? "Layer" : node.title);
             case EditorNodeGraph::NodeKind::MaskGenerator:
                 return MaskLabel(node.maskKind);
+            case EditorNodeGraph::NodeKind::CustomMask:
+                return node.title.empty() ? "Custom Mask" : node.title;
+            case EditorNodeGraph::NodeKind::MaskCombine:
+                return node.title.empty() ? "Intersect Scalars" : node.title;
             case EditorNodeGraph::NodeKind::MaskUtility:
                 return MaskUtilityLabel(node.maskUtilityKind);
             case EditorNodeGraph::NodeKind::ImageToMask:
-                return "Luminance Mask";
+                return node.imageToMaskKind == EditorNodeGraph::ImageToMaskKind::SampledRange
+                    ? "Sampled Range Scalar"
+                    : "Image To Scalar";
             case EditorNodeGraph::NodeKind::ImageGenerator:
                 return ImageGeneratorLabel(node.imageGeneratorKind);
             case EditorNodeGraph::NodeKind::Scope:
                 return ScopeLabel(node.scopeKind);
             case EditorNodeGraph::NodeKind::Mix:
-                return node.title.empty() ? "Mix" : node.title;
+                return node.title.empty() ? "Blend Images" : node.title;
+            case EditorNodeGraph::NodeKind::DataMath:
+                return node.title.empty() ? DataMathLabel(node.dataMathMode) : node.title;
             case EditorNodeGraph::NodeKind::Preview:
                 return node.title.empty() ? "Preview" : node.title;
             case EditorNodeGraph::NodeKind::RawDetailAutoMask:
@@ -1644,19 +2700,44 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         return node.title.empty() ? NodeKindLabel(node.kind) : node.title;
     }();
 
-    const ImVec4 frameBg = BlendColor(familyStyle.fill, ImVec4(0.12f, 0.14f, 0.15f, 1.0f), 0.34f);
-    const ImVec4 frameBgHovered = BlendColor(frameBg, familyStyle.accent, 0.12f);
-    const ImVec4 frameBgActive = BlendColor(frameBg, familyStyle.accent, 0.22f);
-    const ImVec4 buttonBg = BlendColor(familyStyle.fill, familyStyle.accent, 0.18f);
-    const ImVec4 buttonBgHovered = BlendColor(buttonBg, familyStyle.accent, 0.20f);
-    const ImVec4 buttonBgActive = BlendColor(buttonBg, familyStyle.accent, 0.32f);
+    const bool blackNodeMode = graphStyle.mode == StackAppearance::GraphVisualMode::BlackNodes;
+    const ImVec4 frameBg = blackNodeMode
+        ? WithAlpha(BlendColor(familyStyle.fill, familyStyle.accent, 0.08f), 0.88f)
+        : graphStyle.enabled
+        ? WithAlpha(BlendColor(graphStyle.canvas, familyStyle.accent, graphStyle.light ? 0.035f : 0.050f), graphStyle.light ? 0.20f : 0.18f)
+        : BlendColor(familyStyle.fill, ImVec4(0.12f, 0.14f, 0.15f, 1.0f), 0.34f);
+    const ImVec4 frameBgHovered = blackNodeMode
+        ? WithAlpha(BlendColor(frameBg, familyStyle.accent, 0.22f), 0.94f)
+        : graphStyle.enabled
+        ? WithAlpha(BlendColor(frameBg, familyStyle.accent, 0.18f), graphStyle.light ? 0.30f : 0.28f)
+        : BlendColor(frameBg, familyStyle.accent, 0.12f);
+    const ImVec4 frameBgActive = blackNodeMode
+        ? WithAlpha(BlendColor(frameBg, familyStyle.accent, 0.34f), 0.98f)
+        : graphStyle.enabled
+        ? WithAlpha(BlendColor(frameBg, familyStyle.accent, 0.28f), graphStyle.light ? 0.40f : 0.36f)
+        : BlendColor(frameBg, familyStyle.accent, 0.22f);
+    const ImVec4 buttonBg = blackNodeMode
+        ? WithAlpha(BlendColor(familyStyle.fill, familyStyle.accent, 0.12f), 0.82f)
+        : graphStyle.enabled
+        ? WithAlpha(BlendColor(graphStyle.canvas, familyStyle.accent, 0.08f), graphStyle.light ? 0.18f : 0.16f)
+        : BlendColor(familyStyle.fill, familyStyle.accent, 0.18f);
+    const ImVec4 buttonBgHovered = blackNodeMode
+        ? WithAlpha(BlendColor(buttonBg, familyStyle.accent, 0.24f), 0.90f)
+        : graphStyle.enabled
+        ? WithAlpha(BlendColor(buttonBg, familyStyle.accent, 0.24f), graphStyle.light ? 0.30f : 0.28f)
+        : BlendColor(buttonBg, familyStyle.accent, 0.20f);
+    const ImVec4 buttonBgActive = blackNodeMode
+        ? WithAlpha(BlendColor(buttonBg, familyStyle.accent, 0.36f), 0.96f)
+        : graphStyle.enabled
+        ? WithAlpha(BlendColor(buttonBg, familyStyle.accent, 0.34f), graphStyle.light ? 0.40f : 0.36f)
+        : BlendColor(buttonBg, familyStyle.accent, 0.32f);
     const ImVec4 textMuted = BlendColor(familyStyle.mutedText, familyStyle.text, 0.18f);
 
     ImGui::PushID(node.id);
     const float titleFontSize = ImGui::GetFontSize() * uiScale;
     const ImVec2 headerTextMin(layout->contentRect.min.x, min.y + headerY);
     ImVec2 headerCursor = headerTextMin;
-    if (ShouldShowKindLabel(node)) {
+    if (presentation.showKindLabel) {
         const float kindFontSize = std::max(8.0f, ImGui::GetFontSize() * uiScale * 0.86f);
         drawList->AddText(
             ImGui::GetFont(),
@@ -1666,21 +2747,23 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
             NodeKindLabel(node.kind));
         headerCursor.y += kindFontSize + (2.0f * uiScale);
     }
-    const std::string displayTitle = EllipsizeLabel(nodePrimaryTitle, std::max(36.0f, controlWidth - (6.0f * uiScale)));
-    drawList->AddText(
-        ImGui::GetFont(),
-        titleFontSize,
-        headerCursor,
-        ImGui::ColorConvertFloat4ToU32(familyStyle.text),
-        displayTitle.c_str());
+    if (presentation.showTitle) {
+        const std::string displayTitle = EllipsizeLabel(nodePrimaryTitle, std::max(36.0f, controlWidth - (6.0f * uiScale)));
+        drawList->AddText(
+            ImGui::GetFont(),
+            titleFontSize,
+            headerCursor,
+            ImGui::ColorConvertFloat4ToU32(familyStyle.text),
+            displayTitle.c_str());
+    }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::max(2.0f, 6.0f * uiScale * densityScale), std::max(1.0f, 2.5f * uiScale * densityScale)));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(std::max(2.0f, metrics.itemGap * uiScale * 0.75f * densityScale), std::max(2.0f, metrics.itemGap * uiScale * 0.58f * densityScale)));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(std::max(2.0f, 4.0f * uiScale * densityScale), std::max(1.0f, 2.0f * uiScale * densityScale)));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(2.0f, 5.0f * uiScale * densityScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::max(0.35f, 6.0f * uiScale * densityScale), std::max(0.25f, 2.5f * uiScale * densityScale)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(std::max(0.35f, metrics.itemGap * uiScale * 0.75f * densityScale), std::max(0.35f, metrics.itemGap * uiScale * 0.58f * densityScale)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(std::max(0.35f, 4.0f * uiScale * densityScale), std::max(0.25f, 2.0f * uiScale * densityScale)));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::max(0.25f, 5.0f * uiScale * densityScale));
     ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 999.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, std::max(2.5f, 6.5f * uiScale * densityScale));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(0.8f, 1.0f * uiScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, std::max(0.75f, 6.5f * uiScale * densityScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(0.20f, 1.0f * uiScale));
     ImGui::PushStyleColor(ImGuiCol_Text, familyStyle.text);
     ImGui::PushStyleColor(ImGuiCol_TextDisabled, textMuted);
     ImGui::PushStyleColor(ImGuiCol_Border, BlendColor(familyStyle.border, familyStyle.accent, 0.10f));
@@ -1705,9 +2788,19 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     }
 
     ImGui::SetCursorScreenPos(layout->contentRect.min);
-    ImGui::SetWindowFontScale(contentScale);
+    bool fontScalePushed = false;
+    if (std::abs(contentScale - 1.0f) > 0.0001f) {
+        ImGui::SetWindowFontScale(contentScale);
+        fontScalePushed = true;
+    }
     ImGui::PushItemWidth(controlWidth);
     ImGuiExtras::ResetNodeControlState();
+    ImGuiExtras::BeginGraphNodeControlScope(ImGuiExtras::GraphNodeControlScopeConfig{
+        68.0f * contentScale,
+        46.0f * contentScale,
+        82.0f * contentScale,
+        contentScale
+    });
     ImGui::BeginGroup();
     const ImVec2 contentUsedMin = ImGui::GetCursorScreenPos();
     auto captureIfActive = [&]() {
@@ -1781,9 +2874,11 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 ImGui::SameLine(0.0f, 0.0f);
             }
             ImGui::Image((ImTextureID)(intptr_t)texture, fittedPreviewSize, ImVec2(0, 1), ImVec2(1, 0));
+            DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
             ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
         } else {
             ImGui::Dummy(previewSize);
+            DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
             ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
         }
         if (node.image.width > 0 && node.image.height > 0) {
@@ -1810,15 +2905,64 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                 ImGui::SameLine(0.0f, 0.0f);
             }
             ImGui::Image((ImTextureID)(intptr_t)texture, fittedPreviewSize, ImVec2(0, 1), ImVec2(1, 0));
+            DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
             ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.55f));
         } else {
             ImGui::Dummy(previewSize);
+            DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
             ImGui::TextDisabled("Auto mask preview unavailable");
         }
         editor->RenderRawDetailAutoMaskControls(node, controlWidth, false);
     } else if (node.kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
         editor->RenderRawDetailFusionControls(node, controlWidth, false);
+    } else if (node.kind == EditorNodeGraph::NodeKind::HdrMerge) {
+        const EditorModule::HdrMergeNodeStatus status = editor->GetHdrMergeNodeStatus(node.id);
+        for (const EditorModule::HdrMergeInputSummary& input : status.inputs) {
+            if (input.label.empty() || (!input.active && input.socketId == EditorNodeGraph::kHdrMergeInput3SocketId)) {
+                continue;
+            }
+            const std::string value = input.active
+                ? input.sourceLabel
+                : std::string("Inactive");
+            ImGui::TextDisabled("%s", input.label.c_str());
+            ImGui::TextWrapped("%s", value.c_str());
+            if (!input.metadataSummary.empty()) {
+                ImGui::TextDisabled("%s", input.metadataSummary.c_str());
+            }
+            if (!input.normalizationSummary.empty()) {
+                ImGui::TextDisabled("%s", input.normalizationSummary.c_str());
+            }
+        }
+        ImGui::Dummy(ImVec2(0.0f, metrics.itemGap * uiScale * 0.45f));
+        ImGui::TextDisabled("Status");
+        if (status.state == EditorModule::HdrMergeRenderState::Failed ||
+            status.state == EditorModule::HdrMergeRenderState::IncompatibleInput) {
+            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f), "%s", status.message.c_str());
+        } else if (status.state == EditorModule::HdrMergeRenderState::BlockedMissingInput) {
+            ImGui::TextColored(ImVec4(0.92f, 0.76f, 0.42f, 1.0f), "%s", status.message.c_str());
+        } else {
+            ImGui::TextWrapped("%s", status.message.c_str());
+        }
+        if (!status.normalizationMessage.empty()) {
+            ImGui::TextDisabled("Normalization");
+            ImGui::TextWrapped("%s", status.normalizationMessage.c_str());
+        }
+        if (!status.reliabilityMessage.empty()) {
+            ImGui::TextDisabled("Reliability");
+            ImGui::TextWrapped("%s", status.reliabilityMessage.c_str());
+        }
+        if (!status.warningMessage.empty()) {
+            ImGui::TextColored(ImVec4(0.92f, 0.76f, 0.42f, 1.0f), "%s", status.warningMessage.c_str());
+        }
     } else if (node.kind == EditorNodeGraph::NodeKind::Output) {
+        bool outputUsesRgbaPins = false;
+        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
+            if (socket.id == "r" || socket.id == "g" || socket.id == "b" || socket.id == "a") {
+                outputUsesRgbaPins = true;
+                break;
+            }
+        }
+        ImGui::TextDisabled("Mode: %s", outputUsesRgbaPins ? "RGBA" : "Full");
         if (!node.outputEnabled) {
             ImGui::TextDisabled("This output is deactivated.");
         } else {
@@ -1981,6 +3125,46 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         if (changed) {
             editor->MarkRenderDirty(node.id);
         }
+    } else if (node.kind == EditorNodeGraph::NodeKind::MaskCombine) {
+        bool changed = false;
+        int mode = static_cast<int>(node.maskCombineMode);
+        const char* modes[] = { "Add", "Subtract", "Intersect", "Difference" };
+        if (ImGuiExtras::NodeCombo("Mode", "##MaskCombineMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
+            node.maskCombineMode = static_cast<EditorNodeGraph::MaskCombineMode>(std::clamp(mode, 0, 3));
+            changed = true;
+        }
+        ImGui::TextDisabled("Scalar A is the base. Scalar B refines it.");
+        if (changed) {
+            editor->MarkRenderDirty(node.id);
+        }
+    } else if (node.kind == EditorNodeGraph::NodeKind::DataMath) {
+        bool changed = false;
+        int mode = static_cast<int>(node.dataMathMode);
+        const char* modes[] = { "Clamp", "Add", "Subtract", "Multiply", "Divide", "Average", "Minimum", "Maximum", "Difference", "Remap" };
+        if (ImGuiExtras::NodeCombo("Mode", "##DataMathMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
+            node.dataMathMode = static_cast<EditorNodeGraph::DataMathMode>(std::clamp(mode, 0, 9));
+            EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+            changed = true;
+        }
+        ImGui::TextDisabled("Works on scalar/channel streams or full RGBA images.");
+        if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
+            changed |= renderSlider("Min", "##DataMathMin", &node.dataMathSettings.minValue, -4.0f, 4.0f);
+            changed |= renderSlider("Max", "##DataMathMax", &node.dataMathSettings.maxValue, -4.0f, 4.0f);
+        } else if (node.dataMathMode == EditorNodeGraph::DataMathMode::Remap) {
+            changed |= renderSlider("In Min", "##DataMathInMin", &node.dataMathSettings.minValue, -4.0f, 4.0f);
+            changed |= renderSlider("In Max", "##DataMathInMax", &node.dataMathSettings.maxValue, -4.0f, 4.0f);
+            changed |= renderSlider("Out Min", "##DataMathOutMin", &node.dataMathSettings.outMin, -4.0f, 4.0f);
+            changed |= renderSlider("Out Max", "##DataMathOutMax", &node.dataMathSettings.outMax, -4.0f, 4.0f);
+        }
+        if (changed) {
+            editor->MarkRenderDirty(node.id);
+        }
+    } else if (node.kind == EditorNodeGraph::NodeKind::CustomMask) {
+        ImGui::TextDisabled("%d x %d grayscale mask", node.customMask.width, node.customMask.height);
+        ImGui::TextDisabled("%zu object%s", node.customMask.objects.size(), node.customMask.objects.size() == 1 ? "" : "s");
+        if (ImGuiExtras::RichFullWidthButton("Open Mask Editor", controlWidth, 26.0f)) {
+            editor->SwitchToComplexNodeSubWindow(node.id);
+        }
     } else if (node.kind == EditorNodeGraph::NodeKind::MaskUtility) {
         bool changed = false;
         if (node.maskUtilityKind == EditorNodeGraph::MaskUtilityKind::Invert) {
@@ -2002,10 +3186,50 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         }
     } else if (node.kind == EditorNodeGraph::NodeKind::ImageToMask) {
         bool changed = false;
-        changed |= renderSlider("Low", "##LumLow", &node.imageToMaskSettings.low, 0.0f, 1.0f);
-        changed |= renderSlider("High", "##LumHigh", &node.imageToMaskSettings.high, 0.0f, 1.0f);
-        changed |= renderSlider("Softness", "##LumSoftness", &node.imageToMaskSettings.softness, 0.0f, 0.5f);
-        changed |= ImGuiExtras::NodeCheckbox("Invert", "##ImageToMaskInvert", &node.imageToMaskSettings.invert, controlWidth);
+        if (node.imageToMaskKind == EditorNodeGraph::ImageToMaskKind::SampledRange) {
+            changed |= renderSlider("Tone Similarity", "##SampledRangeToneSimilarity", &node.imageToMaskSettings.toneSimilarity, 0.02f, 0.35f);
+            changed |= renderSlider("Color Similarity", "##SampledRangeColorSimilarity", &node.imageToMaskSettings.colorSimilarity, 0.02f, 0.50f);
+            changed |= renderSlider("Area Radius", "##SampledRangeRegionRadius", &node.imageToMaskSettings.regionRadius, 0.05f, 1.0f);
+            changed |= renderSlider("Region Feather", "##SampledRangeRegionFeather", &node.imageToMaskSettings.regionFeather, 0.0f, 1.0f);
+            changed |= renderSlider("Edge Sensitivity", "##SampledRangeEdgeSensitivity", &node.imageToMaskSettings.edgeSensitivity, 0.0f, 1.0f);
+            changed |= renderSlider("Local Coherence", "##SampledRangeLocalCoherence", &node.imageToMaskSettings.localCoherence, 0.0f, 1.0f);
+            changed |= renderSlider("Softness", "##SampledRangeSoftness", &node.imageToMaskSettings.softness, 0.0f, 0.5f);
+            ImGui::TextDisabled(
+                "Seed RGB: %.3f %.3f %.3f",
+                node.imageToMaskSettings.sampleRgb[0],
+                node.imageToMaskSettings.sampleRgb[1],
+                node.imageToMaskSettings.sampleRgb[2]);
+            ImGui::TextDisabled(
+                "Seed Luma / UV: %.3f  (%.3f, %.3f)",
+                node.imageToMaskSettings.sampleLuma,
+                node.imageToMaskSettings.sampleU,
+                node.imageToMaskSettings.sampleV);
+            ImGui::TextDisabled("Samples: %d / 5", std::clamp(node.imageToMaskSettings.sampleCount, 1, 5));
+            for (int i = 0; i < std::max(0, std::clamp(node.imageToMaskSettings.sampleCount, 1, 5) - 1); ++i) {
+                ImGui::TextDisabled(
+                    "Extra %d: RGB %.3f %.3f %.3f  Luma %.3f",
+                    i + 2,
+                    node.imageToMaskSettings.extraSampleRgb[i][0],
+                    node.imageToMaskSettings.extraSampleRgb[i][1],
+                    node.imageToMaskSettings.extraSampleRgb[i][2],
+                    node.imageToMaskSettings.extraSampleLuma[i]);
+            }
+            if (node.imageToMaskSettings.sampleCount > 1 && ImGui::Button("Remove Last Sample")) {
+                const int removeIndex = std::clamp(node.imageToMaskSettings.sampleCount - 2, 0, 3);
+                node.imageToMaskSettings.extraSampleRgb[removeIndex][0] = 0.5f;
+                node.imageToMaskSettings.extraSampleRgb[removeIndex][1] = 0.5f;
+                node.imageToMaskSettings.extraSampleRgb[removeIndex][2] = 0.5f;
+                node.imageToMaskSettings.extraSampleLuma[removeIndex] = 0.5f;
+                node.imageToMaskSettings.sampleCount -= 1;
+                changed = true;
+            }
+            changed |= ImGuiExtras::NodeCheckbox("Invert", "##SampledRangeInvert", &node.imageToMaskSettings.invert, controlWidth);
+        } else {
+            changed |= renderSlider("Low", "##LumLow", &node.imageToMaskSettings.low, 0.0f, 1.0f);
+            changed |= renderSlider("High", "##LumHigh", &node.imageToMaskSettings.high, 0.0f, 1.0f);
+            changed |= renderSlider("Softness", "##LumSoftness", &node.imageToMaskSettings.softness, 0.0f, 0.5f);
+            changed |= ImGuiExtras::NodeCheckbox("Invert", "##ImageToMaskInvert", &node.imageToMaskSettings.invert, controlWidth);
+        }
         captureIfActive();
         if (changed) {
             editor->MarkRenderDirty(node.id);
@@ -2034,7 +3258,7 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
     } else if (node.kind == EditorNodeGraph::NodeKind::Mix) {
         bool changed = false;
         int mode = static_cast<int>(node.mixBlendMode);
-        const char* modes[] = { "Normal / Lerp", "Add", "Multiply", "Screen", "Alpha Over" };
+        const char* modes[] = { "Normal / Lerp", "Average", "Add", "Multiply", "Screen", "Alpha Over" };
         if (ImGuiExtras::NodeCombo("Blend", "##MixBlendMode", &mode, modes, IM_ARRAYSIZE(modes), controlWidth)) {
             node.mixBlendMode = static_cast<EditorNodeGraph::MixBlendMode>(mode);
             changed = true;
@@ -2063,13 +3287,16 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
                     ImGui::SameLine(0.0f, 0.0f);
                 }
                 ImGui::Image((ImTextureID)(intptr_t)texture, fittedPreviewSize, ImVec2(0, 1), ImVec2(1, 0));
+                DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
             } else {
                 ImGui::Dummy(previewSize);
+                DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
                 ImGui::TextDisabled("Preview unavailable");
             }
         } else {
             ImGui::TextDisabled("No input");
             ImGui::Dummy(previewSize);
+            DrawPreviewFrame(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), graphStyle, uiScale);
         }
     }
     const ImVec2 contentCursorMax = ImGui::GetCursorScreenPos();
@@ -2109,7 +3336,10 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
         m_LastNodeControlId = nodeControlState.id;
     }
     ImGui::PopItemWidth();
-    ImGui::SetWindowFontScale(1.0f);
+    ImGuiExtras::EndGraphNodeControlScope();
+    if (fontScalePushed) {
+        ImGui::SetWindowFontScale(1.0f);
+    }
     ImGui::PopStyleColor(15);
     ImGui::PopStyleVar(7);
     ImGui::PopID();
@@ -2117,7 +3347,11 @@ void EditorNodeGraphUI::RenderNode(EditorModule* editor, EditorNodeGraph::Node& 
 
 void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const float thicknessScale = std::max(0.7f, NodeUiScaleFromZoom(m_Zoom));
+    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(m_ActiveEditor);
+    const float thicknessScale = LinkThicknessScaleFromZoom(m_Zoom);
+    const EditorNodeGraph::Link hoveredLink = (graphStyle.enabled && IsGraphCanvasHovered())
+        ? FindLinkAt(graph, ToGraphVec2(ImGui::GetMousePos()))
+        : EditorNodeGraph::Link{};
     for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
         const EditorNodeGraph::Node* from = graph.FindNode(link.fromNodeId);
         const EditorNodeGraph::Node* to = graph.FindNode(link.toNodeId);
@@ -2125,39 +3359,91 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             continue;
         }
 
-        const ImVec2 p1 = ToImVec2(OutputPinScreenPos(*from, link.fromSocketId));
-        const ImVec2 p2 = ToImVec2(InputPinScreenPos(*to, link.toSocketId));
-        const float handle = std::max(60.0f, (p2.x - p1.x) * 0.45f);
+        ImVec2 p1 = ToImVec2(OutputPinScreenPos(*from, link.fromSocketId));
+        ImVec2 p2 = ToImVec2(InputPinScreenPos(*to, link.toSocketId));
         const bool selected = graph.GetSelectedLink() &&
             graph.GetSelectedLink()->fromNodeId == link.fromNodeId &&
             graph.GetSelectedLink()->fromSocketId == link.fromSocketId &&
             graph.GetSelectedLink()->toNodeId == link.toNodeId &&
             graph.GetSelectedLink()->toSocketId == link.toSocketId;
-        const bool scopeLink = graph.GetLinkRole(link) == EditorNodeGraph::LinkRole::Scope;
-        const bool maskLink = link.fromSocketId == EditorNodeGraph::kMaskOutputSocketId ||
-            link.toSocketId == EditorNodeGraph::kMaskInputSocketId ||
-            link.toSocketId == EditorNodeGraph::kMixFactorSocketId;
+        const bool hovered =
+            hoveredLink.fromNodeId == link.fromNodeId &&
+            hoveredLink.fromSocketId == link.fromSocketId &&
+            hoveredLink.toNodeId == link.toNodeId &&
+            hoveredLink.toSocketId == link.toSocketId;
+        LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, link);
+        if (!GraphDottedMaskLinksEnabled(m_ActiveEditor)) {
+            visualStyle.dotted = false;
+        }
+        const std::string& channel = visualStyle.channel;
 
-        ImU32 lineColor = selected ? IM_COL32(255, 255, 255, 255) : (maskLink ? IM_COL32(130, 230, 170, 230) : (scopeLink ? IM_COL32(130, 230, 170, 230) : IM_COL32(120, 170, 255, 230)));
-        if (!selected) {
-            std::unordered_set<int> visited;
-            std::string channel = GetUpstreamChannel(graph, link.fromNodeId, link.fromSocketId, visited);
-            if (channel.empty()) {
-                channel = (link.toSocketId == "r" || link.toSocketId == "g" || link.toSocketId == "b" || link.toSocketId == "a") ? link.toSocketId : "";
+        if (graphStyle.enabled) {
+            const float laneOffset = ChannelLaneOffset(channel, m_Zoom);
+            p1.y += laneOffset;
+            p2.y += laneOffset;
+            const float handle = LinkBezierHandle(p1, p2);
+            const ImVec2 c1(p1.x + handle, p1.y);
+            const ImVec2 c2(p2.x - handle, p2.y);
+            ImVec4 linkColor = LinkColorVec(visualStyle, graphStyle);
+            if (selected) {
+                linkColor = WithAlpha(BlendColor(linkColor, graphStyle.text, 0.28f), 0.98f);
+            } else if (hovered) {
+                linkColor = WithAlpha(BlendColor(linkColor, graphStyle.text, 0.16f), 0.94f);
             }
-            if (channel == "r") lineColor = IM_COL32(255, 64, 64, 210);
-            else if (channel == "g") lineColor = IM_COL32(64, 255, 64, 210);
-            else if (channel == "b") lineColor = IM_COL32(64, 128, 255, 210);
-            else if (channel == "a") lineColor = IM_COL32(220, 220, 220, 210);
+
+            DrawBezierLinkStroke(
+                drawList,
+                p1,
+                c1,
+                c2,
+                p2,
+                ColorWithAlpha(graphStyle.linkUnderlay, selected ? 0.78f : (hovered ? 0.64f : 0.48f)),
+                (selected ? 7.0f : (hovered ? 5.8f : 4.6f)) * thicknessScale,
+                visualStyle.dotted);
+            if (selected || hovered) {
+                DrawBezierLinkStroke(
+                    drawList,
+                    p1,
+                    c1,
+                    c2,
+                    p2,
+                    ColorWithAlpha(selected ? graphStyle.selected : graphStyle.spotlightHalo, selected ? 0.72f : 0.42f),
+                    (selected ? 5.0f : 4.0f) * thicknessScale,
+                    visualStyle.dotted);
+            }
+            DrawBezierLinkStroke(
+                drawList,
+                p1,
+                c1,
+                c2,
+                p2,
+                ImGui::ColorConvertFloat4ToU32(linkColor),
+                (selected ? 3.4f : 2.35f) * thicknessScale,
+                visualStyle.dotted);
+            if (selected) {
+                DrawBezierLinkStroke(
+                    drawList,
+                    p1,
+                    c1,
+                    c2,
+                    p2,
+                    ColorWithAlpha(graphStyle.text, 0.44f),
+                    std::max(1.0f, 1.05f * thicknessScale),
+                    visualStyle.dotted);
+            }
+            continue;
         }
 
-        drawList->AddBezierCubic(
+        const float handle = LinkBezierHandle(p1, p2);
+        DrawBezierLinkStroke(
+            drawList,
             p1,
             ImVec2(p1.x + handle, p1.y),
             ImVec2(p2.x - handle, p2.y),
             p2,
-            lineColor,
-            (selected ? 4.5f : 3.0f) * thicknessScale);
+            LinkColorClassic(visualStyle, selected),
+            (selected ? 4.5f : 3.0f) * thicknessScale,
+            visualStyle.dotted);
     }
 }
 
@@ -2167,6 +3453,7 @@ static bool IsPointInRect(const EditorNodeGraph::Vec2& pt, const EditorNodeGraph
 
 void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph) {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     auto& groups = graph.GetGroups();
 
     for (auto& group : groups) {
@@ -2184,7 +3471,12 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
         ImU32 borderColor;
         ImU32 headerColor;
 
-        if (isDragged || isResized) {
+        if (graphStyle.enabled) {
+            const float activeBoost = (isDragged || isResized) ? 0.22f : (isHovered ? 0.12f : 0.0f);
+            bgColor = ColorWithAlpha(graphStyle.groupFill, graphStyle.groupFill.w + activeBoost);
+            borderColor = ColorWithAlpha(isDragged || isResized ? graphStyle.selected : graphStyle.groupBorder, (isDragged || isResized) ? 0.92f : (isHovered ? 0.70f : graphStyle.groupBorder.w));
+            headerColor = ColorWithAlpha(graphStyle.groupHeader, graphStyle.groupHeader.w + activeBoost);
+        } else if (isDragged || isResized) {
             bgColor = IM_COL32(24, 30, 48, 140);
             borderColor = IM_COL32(90, 160, 255, 230);
             headerColor = IM_COL32(42, 54, 80, 240);
@@ -2254,7 +3546,7 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
                 ImGui::GetFont(),
                 titleFontSize,
                 textPos,
-                IM_COL32(255, 255, 255, 220),
+                graphStyle.enabled ? ColorWithAlpha(graphStyle.text, 0.86f) : IM_COL32(255, 255, 255, 220),
                 group.title.c_str());
         }
     }
@@ -2281,13 +3573,60 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
     m_HoveredOutputSocketId = hoveredOutput.socketId;
     const int hoveredNodeId = graphHovered ? FindNodeAt(graph, mouse) : -1;
     const EditorNodeGraph::Link hoveredLink = graphHovered ? FindLinkAt(graph, mouse) : EditorNodeGraph::Link{};
+    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     const bool additiveSelect = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift;
     const bool anyPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+    const bool graphWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt && ImGui::IsKeyPressed(ImGuiKey_G, false)) {
         m_DebugInteractionOverlay = !m_DebugInteractionOverlay;
     }
 
+    const bool plainGPressed =
+        editor->CanConsumeEditorCommandKeys() &&
+        !ImGui::GetIO().KeyCtrl &&
+        !ImGui::GetIO().KeyAlt &&
+        !ImGui::GetIO().KeyShift &&
+        ImGui::IsKeyPressed(ImGuiKey_G, false);
+    const auto& selectedNodeIds = graph.GetSelectedNodeIds();
+    if (m_ChannelSplitConfirmNodeId > 0) {
+        const bool selectionStillValid =
+            selectedNodeIds.size() == 1 &&
+            selectedNodeIds.front() == m_ChannelSplitConfirmNodeId &&
+            CanOpenChannelSplitConfirm(graph, m_ChannelSplitConfirmNodeId);
+        const ImVec2 mousePos = ImGui::GetMousePos();
+        const bool clickedOutsidePrompt =
+            (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) &&
+            (!m_ChannelSplitConfirmRect.IsValid() || !m_ChannelSplitConfirmRect.Contains(mousePos));
+        if (!graphWindowFocused ||
+            anyPopupOpen ||
+            !selectionStillValid ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+            clickedOutsidePrompt) {
+            CancelChannelSplitConfirm();
+        } else if (plainGPressed || ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+            const int confirmNodeId = m_ChannelSplitConfirmNodeId;
+            CancelChannelSplitConfirm();
+            if (editor->SplitLayerNodeIntoChannels(confirmNodeId)) {
+                m_StatusMessage = "Channel split created.";
+            } else {
+                m_StatusMessage = "Channel split failed.";
+            }
+            return;
+        }
+    } else if (plainGPressed &&
+               graphWindowFocused &&
+               !anyPopupOpen &&
+               !m_NodeBrowserOpen &&
+               selectedNodeIds.size() == 1 &&
+               CanOpenChannelSplitConfirm(graph, selectedNodeIds.front())) {
+        m_ChannelSplitConfirmNodeId = selectedNodeIds.front();
+        m_ChannelSplitConfirmStartTime = ImGui::GetTime();
+        m_ChannelSplitConfirmRect = {};
+        return;
+    }
+
     if (m_NodeBrowserOpen) {
+        CancelChannelSplitConfirm();
         m_GraphInteractionBlocked = true;
         m_MouseOwner = GraphMouseOwner::Popup;
         m_BoxSelecting = false;
@@ -2453,23 +3792,32 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         const EditorNodeGraph::Node* from = graph.FindNode(m_DragOutputNodeId);
         if (from) {
             ImDrawList* drawList = ImGui::GetWindowDrawList();
-            const ImVec2 p1 = ToImVec2(OutputPinScreenPos(*from, m_DragOutputSocketId));
-            const ImVec2 p2 = ImGui::GetMousePos();
-            const float handle = std::max(60.0f, (p2.x - p1.x) * 0.45f);
-
-            ImU32 dragColor = IM_COL32(255, 255, 255, 210);
-            if (m_DragOutputSocketId == "r") dragColor = IM_COL32(255, 64, 64, 210);
-            else if (m_DragOutputSocketId == "g") dragColor = IM_COL32(64, 255, 64, 210);
-            else if (m_DragOutputSocketId == "b") dragColor = IM_COL32(64, 128, 255, 210);
-            else if (m_DragOutputSocketId == "a") dragColor = IM_COL32(220, 220, 220, 210);
-            else {
-                EditorNodeGraph::SocketDefinition sock;
-                if (graph.FindSocket(m_DragOutputNodeId, m_DragOutputSocketId, &sock) && sock.type == EditorNodeGraph::SocketType::Mask) {
-                    dragColor = IM_COL32(130, 230, 170, 230);
-                }
+            const bool hoveredInputConnectable = hoveredInput.IsValid() &&
+                graph.CanConnectSockets(m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId);
+            LinkVisualStyle visualStyle = hoveredInputConnectable
+                ? ResolvePendingLinkVisualStyle(graph, m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId)
+                : ResolvePendingLinkVisualStyle(graph, m_DragOutputNodeId, m_DragOutputSocketId, EditorNodeGraph::SocketDirection::Output);
+            if (!GraphDottedMaskLinksEnabled(editor)) {
+                visualStyle.dotted = false;
             }
-
-            drawList->AddBezierCubic(p1, ImVec2(p1.x + handle, p1.y), ImVec2(p2.x - handle, p2.y), p2, dragColor, std::max(1.2f, 2.5f * NodeUiScaleFromZoom(m_Zoom)));
+            ImVec2 p1 = ToImVec2(OutputPinScreenPos(*from, m_DragOutputSocketId));
+            ImVec2 p2 = ImGui::GetMousePos();
+            const float laneOffset = ChannelLaneOffset(visualStyle.channel, m_Zoom);
+            p1.y += laneOffset;
+            p2.y += laneOffset;
+            const float handle = LinkBezierHandle(p1, p2);
+            const ImU32 dragColor = graphStyle.enabled
+                ? ImGui::ColorConvertFloat4ToU32(LinkColorVec(visualStyle, graphStyle))
+                : LinkColorClassic(visualStyle, false);
+            DrawBezierLinkStroke(
+                drawList,
+                p1,
+                ImVec2(p1.x + handle, p1.y),
+                ImVec2(p2.x - handle, p2.y),
+                p2,
+                dragColor,
+                std::max(0.35f, 2.5f * NodeUiScaleFromZoom(m_Zoom)),
+                visualStyle.dotted);
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -2501,23 +3849,32 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         const EditorNodeGraph::Node* to = graph.FindNode(m_DragInputNodeId);
         if (to) {
             ImDrawList* drawList = ImGui::GetWindowDrawList();
-            const ImVec2 p1 = ImGui::GetMousePos();
-            const ImVec2 p2 = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
-            const float handle = std::max(60.0f, (p2.x - p1.x) * 0.45f);
-
-            ImU32 dragColor = IM_COL32(255, 255, 255, 210);
-            if (m_DragInputSocketId == "r") dragColor = IM_COL32(255, 64, 64, 210);
-            else if (m_DragInputSocketId == "g") dragColor = IM_COL32(64, 255, 64, 210);
-            else if (m_DragInputSocketId == "b") dragColor = IM_COL32(64, 128, 255, 210);
-            else if (m_DragInputSocketId == "a") dragColor = IM_COL32(220, 220, 220, 210);
-            else {
-                EditorNodeGraph::SocketDefinition sock;
-                if (graph.FindSocket(m_DragInputNodeId, m_DragInputSocketId, &sock) && sock.type == EditorNodeGraph::SocketType::Mask) {
-                    dragColor = IM_COL32(130, 230, 170, 230);
-                }
+            const bool hoveredOutputConnectable = hoveredOutput.IsValid() &&
+                graph.CanConnectSockets(hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId);
+            LinkVisualStyle visualStyle = hoveredOutputConnectable
+                ? ResolvePendingLinkVisualStyle(graph, hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId)
+                : ResolvePendingLinkVisualStyle(graph, m_DragInputNodeId, m_DragInputSocketId, EditorNodeGraph::SocketDirection::Input);
+            if (!GraphDottedMaskLinksEnabled(editor)) {
+                visualStyle.dotted = false;
             }
-
-            drawList->AddBezierCubic(p1, ImVec2(p1.x + handle, p1.y), ImVec2(p2.x - handle, p2.y), p2, dragColor, std::max(1.2f, 2.5f * NodeUiScaleFromZoom(m_Zoom)));
+            ImVec2 p1 = ImGui::GetMousePos();
+            ImVec2 p2 = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
+            const float laneOffset = ChannelLaneOffset(visualStyle.channel, m_Zoom);
+            p1.y += laneOffset;
+            p2.y += laneOffset;
+            const float handle = LinkBezierHandle(p1, p2);
+            const ImU32 dragColor = graphStyle.enabled
+                ? ImGui::ColorConvertFloat4ToU32(LinkColorVec(visualStyle, graphStyle))
+                : LinkColorClassic(visualStyle, false);
+            DrawBezierLinkStroke(
+                drawList,
+                p1,
+                ImVec2(p1.x + handle, p1.y),
+                ImVec2(p2.x - handle, p2.y),
+                p2,
+                dragColor,
+                std::max(0.35f, 2.5f * NodeUiScaleFromZoom(m_Zoom)),
+                visualStyle.dotted);
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -2564,6 +3921,17 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         return;
     }
 
+    if (m_MouseOwner == GraphMouseOwner::NodeContent &&
+        hoveredNodeId > 0 &&
+        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
+        if (node && node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
+            TouchNodeFront(node->id);
+            editor->SwitchToComplexNodeSubWindow(node->id);
+            return;
+        }
+    }
+
     if (ownerIsContent) {
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             m_BoxSelecting = false;
@@ -2583,14 +3951,20 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         return;
     }
 
-    if (m_MouseOwner == GraphMouseOwner::NodeHeader && hoveredNodeId > 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+    if ((m_MouseOwner == GraphMouseOwner::NodeHeader ||
+         (m_MouseOwner == GraphMouseOwner::NodeFrame &&
+          hoveredNodeId > 0 &&
+          editor->GetNodeGraph().FindNode(hoveredNodeId) &&
+          editor->GetNodeGraph().FindNode(hoveredNodeId)->kind == EditorNodeGraph::NodeKind::HdrMerge)) &&
+        hoveredNodeId > 0 &&
+        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
         if (node) {
             if (node->kind == EditorNodeGraph::NodeKind::Output) {
                 return;
             }
             TouchNodeFront(node->id);
-            if (HasAdvancedLayerSurface(editor, *node)) {
+            if (HasDedicatedComplexEditor(editor, *node)) {
                 editor->SwitchToComplexNodeSubWindow(node->id);
                 return;
             }
@@ -2599,7 +3973,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             node->expanded = !node->expanded;
             editor->SelectGraphNode(node->id);
             if (expanding) {
-                editor->RequestGraphNodeAutoFocus(node->id, node->position, NodeSize(*node), m_Pan.x, m_Pan.y, m_Zoom);
+                editor->RequestGraphNodeAutoFocus(node->id, node->position, NodeGraphFootprintSize(*node), m_Pan.x, m_Pan.y, m_Zoom);
             } else {
                 editor->ClearGraphAutoFocusIfTrackedNode(node->id);
             }
@@ -2632,7 +4006,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 m_BoxSelectStart,
                 m_BoxSelectCurrent,
                 [this](const EditorNodeGraph::Node& node) {
-                    return NodeSize(node);
+                    return NodeGraphFootprintSize(node);
                 },
                 true);
             m_BoxSelecting = false;
@@ -2659,7 +4033,6 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         m_DragNodeId = -1;
     }
 
-    const bool graphWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (editor->CanConsumeEditorCommandKeys() &&
         graphWindowFocused &&
         !anyPopupOpen &&
@@ -2672,7 +4045,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 editor->RequestGraphNodeAutoFocus(
                     selectedNode->id,
                     selectedNode->position,
-                    NodeSize(*selectedNode),
+                    NodeGraphFootprintSize(*selectedNode),
                     m_Pan.x,
                     m_Pan.y,
                     m_Zoom);
@@ -2732,7 +4105,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 bool hasNodes = false;
                 for (int nodeId : selectedIds) {
                     if (const auto* node = editor->GetNodeGraph().FindNode(nodeId)) {
-                        EditorNodeGraph::Vec2 size = NodeSize(*node);
+                        EditorNodeGraph::Vec2 size = NodeGraphFootprintSize(*node);
                         minX = std::min(minX, node->position.x);
                         minY = std::min(minY, node->position.y);
                         maxX = std::max(maxX, node->position.x + size.x);
@@ -2783,6 +4156,43 @@ void EditorNodeGraphUI::RenderValidationStatus(const EditorNodeGraph::Graph& gra
         IM_COL32(18, 20, 24, 170),
         10.0f);
     drawList->AddText(pos, color, text.c_str());
+}
+
+void EditorNodeGraphUI::RenderChannelSplitConfirmPrompt(EditorModule* editor) {
+    if (m_ChannelSplitConfirmNodeId <= 0 || !editor) {
+        m_ChannelSplitConfirmRect = {};
+        return;
+    }
+
+    const double now = ImGui::GetTime();
+    const float elapsed = static_cast<float>(now - m_ChannelSplitConfirmStartTime);
+    const float appearT = std::clamp(elapsed / 0.18f, 0.0f, 1.0f);
+    const float appearEase = 1.0f - std::pow(1.0f - appearT, 3.0f);
+    const char* message = "Channel Split?";
+    const char* helper = "Press G or Enter to confirm";
+    const ImVec2 messageSize = ImGui::CalcTextSize(message);
+    const ImVec2 helperSize = ImGui::CalcTextSize(helper);
+    const float width = std::clamp(std::max(messageSize.x, helperSize.x) + 40.0f, 240.0f, 420.0f);
+    const float height = 58.0f;
+    const float centerX = (m_CanvasMin.x + m_CanvasMax.x) * 0.5f;
+    const float targetY = m_CanvasMin.y + 28.0f;
+    const float y = targetY - ((1.0f - appearEase) * 18.0f);
+    const ImVec2 min(centerX - width * 0.5f, y);
+    const ImVec2 max(centerX + width * 0.5f, y + height);
+    m_ChannelSplitConfirmRect = { min, max };
+
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    const float alpha = appearEase;
+    drawList->AddRectFilled(min, max, IM_COL32(30, 36, 44, static_cast<int>(228.0f * alpha)), 21.0f);
+    drawList->AddRect(min, max, IM_COL32(124, 182, 255, static_cast<int>(220.0f * alpha)), 21.0f, 0, 1.2f);
+    drawList->AddText(
+        ImVec2(centerX - messageSize.x * 0.5f, y + 10.0f),
+        IM_COL32(245, 248, 252, static_cast<int>(255.0f * alpha)),
+        message);
+    drawList->AddText(
+        ImVec2(centerX - helperSize.x * 0.5f, y + 31.0f),
+        IM_COL32(180, 206, 230, static_cast<int>(235.0f * alpha)),
+        helper);
 }
 
 void EditorNodeGraphUI::RenderInteractionDebugOverlay(
@@ -2859,6 +4269,12 @@ void EditorNodeGraphUI::RenderInteractionDebugOverlay(
 #include "Editor/LayerRegistry.h"
 
 namespace {
+
+bool InsertNewNodeOnExistingLink(
+    EditorNodeGraphUI* ui,
+    EditorModule* editor,
+    const EditorNodeGraph::Link& link,
+    int newNodeId);
 
 nlohmann::json SerializeMaskSettings(const EditorNodeGraph::MaskGeneratorSettings& settings) {
     return {
@@ -2982,6 +4398,7 @@ nlohmann::json SerializeRawDetailFusionSettings(const Raw::RawDetailFusionSettin
         { "baseEv", settings.baseEv },
         { "strength", settings.strength },
         { "sampleCount", settings.sampleCount },
+        { "baseRadiusPercent", settings.baseRadiusPercent },
         { "highlightProtection", settings.highlightProtection },
         { "shadowLiftLimit", settings.shadowLiftLimit },
         { "noiseProtection", settings.noiseProtection },
@@ -3028,6 +4445,7 @@ Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::
     settings.baseEv = value.value("baseEv", settings.baseEv);
     settings.strength = value.value("strength", settings.strength);
     settings.sampleCount = value.value("sampleCount", settings.sampleCount);
+    settings.baseRadiusPercent = value.value("baseRadiusPercent", settings.baseRadiusPercent);
     settings.highlightProtection = value.value("highlightProtection", settings.highlightProtection);
     settings.shadowLiftLimit = value.value("shadowLiftLimit", settings.shadowLiftLimit);
     settings.noiseProtection = value.value("noiseProtection", settings.noiseProtection);
@@ -3046,23 +4464,24 @@ Raw::RawDetailFusionSettings DeserializeRawDetailFusionSettings(const nlohmann::
     settings.haloGuard = value.value("haloGuard", settings.haloGuard);
     settings.maskDebandDither = value.value("maskDebandDither", settings.maskDebandDither);
     settings.manualBlend = value.value("manualBlend", settings.manualBlend);
-    settings.minEv = std::clamp(settings.minEv, -8.0f, 8.0f);
-    settings.maxEv = std::clamp(settings.maxEv, settings.minEv + 0.01f, 8.0f);
-    settings.baseEv = std::clamp(settings.baseEv, -8.0f, 8.0f);
-    settings.minEvBias = std::clamp(settings.minEvBias, -3.0f, 3.0f);
-    settings.maxEvBias = std::clamp(settings.maxEvBias, -3.0f, 3.0f);
-    settings.baseEvBias = std::clamp(settings.baseEvBias, -3.0f, 3.0f);
+    settings.minEv = std::clamp(settings.minEv, -2.5f, 0.5f);
+    settings.maxEv = std::clamp(settings.maxEv, std::max(settings.minEv + 0.01f, 0.25f), 2.5f);
+    settings.baseEv = std::clamp(settings.baseEv, -1.0f, 1.0f);
+    settings.minEvBias = std::clamp(settings.minEvBias, -2.0f, 2.0f);
+    settings.maxEvBias = std::clamp(settings.maxEvBias, -2.0f, 2.0f);
+    settings.baseEvBias = std::clamp(settings.baseEvBias, -1.25f, 1.25f);
     settings.noiseProtectionBias = std::clamp(settings.noiseProtectionBias, -1.0f, 1.0f);
     settings.highlightProtectionBias = std::clamp(settings.highlightProtectionBias, -1.0f, 1.0f);
     settings.shadowLiftLimitBias = std::clamp(settings.shadowLiftLimitBias, -1.0f, 1.0f);
-    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -0.5f, 0.5f);
-    settings.strength = std::clamp(settings.strength, 0.0f, 4.0f);
+    settings.wellExposedTargetBias = std::clamp(settings.wellExposedTargetBias, -1.0f, 1.0f);
+    settings.strength = std::clamp(settings.strength, 0.0f, 1.25f);
     settings.sampleCount = std::clamp(settings.sampleCount, 3, 33);
+    settings.baseRadiusPercent = std::clamp(settings.baseRadiusPercent, 0.002f, 0.030f);
     settings.highlightProtection = std::clamp(settings.highlightProtection, 0.0f, 1.0f);
     settings.shadowLiftLimit = std::clamp(settings.shadowLiftLimit, 0.0f, 1.0f);
     settings.noiseProtection = std::clamp(settings.noiseProtection, 0.0f, 1.0f);
     settings.detailWeight = std::clamp(settings.detailWeight, 0.0f, 1.0f);
-    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.01f, 1.0f);
+    settings.wellExposedTarget = std::clamp(settings.wellExposedTarget, 0.10f, 0.55f);
     settings.smoothGradientProtection = std::clamp(settings.smoothGradientProtection, 0.0f, 1.0f);
     settings.textureSensitivity = std::clamp(settings.textureSensitivity, 0.0f, 1.0f);
     settings.skyBias = std::clamp(settings.skyBias, 0.0f, 1.0f);
@@ -3101,221 +4520,474 @@ bool DecodePngBytesClipboard(const std::vector<unsigned char>& pngBytes, EditorN
     return true;
 }
 
-} // namespace
-
-void EditorNodeGraphUI::CopySelectedNodes(EditorModule* editor) {
-    if (!editor) return;
-
-    m_Clipboard = nlohmann::json::object();
-    m_ClipboardPasteCount = 0;
-
-    const auto& selectedNodeIds = editor->GetNodeGraph().GetSelectedNodeIds();
-    if (selectedNodeIds.empty()) {
-        return;
-    }
-
-    nlohmann::json nodesJson = nlohmann::json::array();
-    for (int nodeId : selectedNodeIds) {
-        const auto* node = editor->GetNodeGraph().FindNode(nodeId);
-        if (!node) continue;
-
-        nlohmann::json item = nlohmann::json::object();
-        item["id"] = node->id;
-        item["kind"] = static_cast<int>(node->kind);
-        item["layerIndex"] = node->layerIndex;
-        item["layerType"] = static_cast<int>(node->layerType);
-        item["typeId"] = node->typeId;
-        item["title"] = node->title;
-        item["x"] = node->position.x;
-        item["y"] = node->position.y;
-        item["expanded"] = node->expanded;
-        item["scopeKind"] = static_cast<int>(node->scopeKind);
-        item["maskKind"] = static_cast<int>(node->maskKind);
-        item["maskSettings"] = SerializeMaskSettings(node->maskSettings);
-        item["maskUtilityKind"] = static_cast<int>(node->maskUtilityKind);
-        item["maskUtilitySettings"] = SerializeMaskUtilitySettings(node->maskUtilitySettings);
-        item["imageToMaskKind"] = static_cast<int>(node->imageToMaskKind);
-        item["imageToMaskSettings"] = SerializeImageToMaskSettings(node->imageToMaskSettings);
-        item["imageGeneratorKind"] = static_cast<int>(node->imageGeneratorKind);
-        item["imageGeneratorSettings"] = SerializeImageGeneratorSettings(node->imageGeneratorSettings);
-        item["mixBlendMode"] = static_cast<int>(node->mixBlendMode);
-        item["mixFactor"] = node->mixFactor;
-
-        if (node->kind == EditorNodeGraph::NodeKind::Image) {
-            item["label"] = node->image.label;
-            item["sourcePath"] = node->image.sourcePath;
-            item["width"] = node->image.width;
-            item["height"] = node->image.height;
-            item["channels"] = node->image.channels;
-            item["originalChannels"] = node->image.originalChannels;
-            item["pngBytes"] = nlohmann::json::binary(node->image.pngBytes);
-        } else if (node->kind == EditorNodeGraph::NodeKind::Layer) {
-            const auto& layers = editor->GetLayers();
-            if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(layers.size())) {
-                item["layerData"] = layers[node->layerIndex]->Serialize();
-            }
-        } else if (node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
-            item["rawDetailAutoMaskSettings"] = SerializeRawDetailFusionSettings(node->rawDetailAutoMask.settings);
-        } else if (node->kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
-            item["rawDetailFusionSettings"] = SerializeRawDetailFusionSettings(node->rawDetailFusion.settings);
-        }
-
-        nodesJson.push_back(item);
-    }
-    m_Clipboard["nodes"] = nodesJson;
-
-    nlohmann::json linksJson = nlohmann::json::array();
-    for (const auto& link : editor->GetNodeGraph().GetLinks()) {
-        bool fromSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), link.fromNodeId) != selectedNodeIds.end();
-        bool toSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), link.toNodeId) != selectedNodeIds.end();
-        if (fromSelected && toSelected) {
-            nlohmann::json linkItem = nlohmann::json::object();
-            linkItem["fromNodeId"] = link.fromNodeId;
-            linkItem["fromSocketId"] = link.fromSocketId;
-            linkItem["toNodeId"] = link.toNodeId;
-            linkItem["toSocketId"] = link.toSocketId;
-            linksJson.push_back(linkItem);
-        }
-    }
-    m_Clipboard["links"] = linksJson;
+EditorNodeGraph::Node MakeTreeOnlyNode(EditorNodeGraph::Node node) {
+    node.image = {};
+    node.rawSource = {};
+    node.rawNeuralDenoise = {};
+    node.rawDevelop = {};
+    node.rawDetailAutoMask = {};
+    node.rawDetailFusion = {};
+    node.hdrMerge = {};
+    node.maskSettings = {};
+    node.maskUtilitySettings = {};
+    node.imageToMaskSettings = {};
+    node.imageGeneratorSettings = {};
+    node.mixBlendMode = EditorNodeGraph::MixBlendMode::Normal;
+    node.mixFactor = 0.5f;
+    node.dataMathMode = EditorNodeGraph::DataMathMode::Clamp;
+    node.dataMathSettings = {};
+    node.outputEnabled = true;
+    return node;
 }
 
-void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
-    if (!editor || m_Clipboard.empty() || !m_Clipboard.contains("nodes")) {
-        return;
+bool GroupIntersectsSelection(
+    const EditorNodeGraph::NodeGroup& group,
+    const EditorNodeGraph::Graph& graph,
+    const std::unordered_set<int>& selectedNodeIds) {
+    const float groupMinX = group.position.x;
+    const float groupMinY = group.position.y;
+    const float groupMaxX = group.position.x + group.size.x;
+    const float groupMaxY = group.position.y + group.size.y;
+
+    for (int nodeId : selectedNodeIds) {
+        const EditorNodeGraph::Node* node = graph.FindNode(nodeId);
+        if (!node) {
+            continue;
+        }
+        if (node->position.x >= groupMinX && node->position.x <= groupMaxX &&
+            node->position.y >= groupMinY && node->position.y <= groupMaxY) {
+            return true;
+        }
+    }
+    return false;
+}
+
+nlohmann::json BuildClipboardPayload(EditorModule* editor, const std::vector<int>& nodeIds, bool includeState, bool wholeGraph) {
+    nlohmann::json payload = nlohmann::json::object();
+    payload["format"] = "stack-node-graph";
+    payload["version"] = 1;
+    payload["scope"] = wholeGraph ? "fullGraph" : "selection";
+    payload["mode"] = includeState ? "tree+state" : "tree";
+
+    if (!editor) {
+        return payload;
+    }
+
+    const EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    const auto& layers = editor->GetLayers();
+    std::unordered_set<int> includedNodeIds(nodeIds.begin(), nodeIds.end());
+
+    std::unordered_map<int, int> oldLayerIndexToNew;
+    nlohmann::json layerArray = nlohmann::json::array();
+    EditorNodeGraph::Graph exportGraph;
+    exportGraph.Clear();
+    exportGraph.SetNextNodeId(1);
+    exportGraph.SetNextGroupId(1);
+
+    int maxNodeId = 0;
+    for (int nodeId : nodeIds) {
+        const EditorNodeGraph::Node* sourceNode = graph.FindNode(nodeId);
+        if (!sourceNode) {
+            continue;
+        }
+
+        EditorNodeGraph::Node nodeCopy = includeState ? *sourceNode : MakeTreeOnlyNode(*sourceNode);
+        if (nodeCopy.kind == EditorNodeGraph::NodeKind::Layer) {
+            int remappedLayerIndex = -1;
+            const auto it = oldLayerIndexToNew.find(sourceNode->layerIndex);
+            if (it != oldLayerIndexToNew.end()) {
+                remappedLayerIndex = it->second;
+            } else if (sourceNode->layerIndex >= 0 && sourceNode->layerIndex < static_cast<int>(layers.size())) {
+                remappedLayerIndex = static_cast<int>(layerArray.size());
+                oldLayerIndexToNew[sourceNode->layerIndex] = remappedLayerIndex;
+                std::shared_ptr<LayerBase> layerToSerialize = layers[sourceNode->layerIndex];
+                if (!includeState) {
+                    const std::string typeId = layerToSerialize->Serialize().value("type", std::string());
+                    std::shared_ptr<LayerBase> defaultLayer = LayerRegistry::CreateLayerFromTypeId(typeId);
+                    if (defaultLayer) {
+                        defaultLayer->InitializeGL();
+                        layerToSerialize = defaultLayer;
+                    }
+                }
+                layerArray.push_back(layerToSerialize ? layerToSerialize->Serialize() : nlohmann::json::object());
+            }
+            nodeCopy.layerIndex = remappedLayerIndex;
+        }
+
+        exportGraph.GetNodes().push_back(std::move(nodeCopy));
+        maxNodeId = std::max(maxNodeId, sourceNode->id);
+    }
+
+    for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
+        if (includedNodeIds.count(link.fromNodeId) && includedNodeIds.count(link.toNodeId)) {
+            exportGraph.GetLinks().push_back(link);
+        }
+    }
+
+    for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
+        if (wholeGraph || GroupIntersectsSelection(group, graph, includedNodeIds)) {
+            exportGraph.GetGroups().push_back(group);
+        }
+    }
+
+    exportGraph.SetNextNodeId(std::max(maxNodeId + 1, 1));
+    exportGraph.SetNextGroupId(static_cast<int>(exportGraph.GetGroups().size()) + 1);
+    if (!nodeIds.empty()) {
+        exportGraph.SelectNode(nodeIds.front());
+    }
+
+    payload["payload"] = EditorNodeGraph::SerializeGraphPayload(layerArray, exportGraph);
+    return payload;
+}
+
+std::string BuildGraphText(const nlohmann::json& clipboardPayload) {
+    std::ostringstream stream;
+    stream << "STACK_NODE_GRAPH 1\n";
+    stream << "scope: " << clipboardPayload.value("scope", std::string("selection")) << "\n";
+    stream << "mode: " << clipboardPayload.value("mode", std::string("tree+state")) << "\n\n";
+    stream << clipboardPayload.dump(2);
+    return stream.str();
+}
+
+bool ParseGraphText(const std::string& text, nlohmann::json& outPayload, std::string& outError) {
+    if (text.rfind("STACK_NODE_GRAPH 1", 0) != 0) {
+        outError = "Clipboard does not contain Stack graph text.";
+        return false;
+    }
+
+    const std::size_t jsonStart = text.find('{');
+    if (jsonStart == std::string::npos) {
+        outError = "Graph text is missing its payload block.";
+        return false;
+    }
+
+    outPayload = nlohmann::json::parse(text.substr(jsonStart), nullptr, false);
+    if (outPayload.is_discarded() || !outPayload.is_object()) {
+        outError = "Graph text payload could not be parsed.";
+        return false;
+    }
+
+    if (!outPayload.contains("payload") || !outPayload["payload"].is_object()) {
+        outError = "Graph text payload is missing nodeGraph data.";
+        return false;
+    }
+
+    return true;
+}
+
+bool BuildImportedLayers(
+    const nlohmann::json& layerArray,
+    std::vector<std::shared_ptr<LayerBase>>& outLayers,
+    std::vector<std::string>& warnings) {
+    outLayers.clear();
+    if (!layerArray.is_array()) {
+        return true;
+    }
+
+    for (const auto& layerData : layerArray) {
+        const std::string type = layerData.value("type", "");
+        std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(type);
+        if (!newLayer) {
+            warnings.push_back(type.empty() ? "Skipped a layer with no type." : ("Skipped unsupported layer type: " + type));
+            outLayers.push_back(nullptr);
+            continue;
+        }
+        newLayer->InitializeGL();
+        newLayer->Deserialize(layerData);
+        outLayers.push_back(newLayer);
+    }
+    return true;
+}
+
+} // namespace
+
+bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohmann::json& clipboardPayload, std::string* outSummary) {
+    if (!editor || !clipboardPayload.is_object()) {
+        return false;
+    }
+
+    const nlohmann::json serializerPayload = clipboardPayload.value("payload", nlohmann::json::object());
+    if (!serializerPayload.is_object() || !serializerPayload.contains("nodeGraph")) {
+        if (outSummary) *outSummary = "Graph payload is missing node data.";
+        return false;
+    }
+    const nlohmann::json graphJson = serializerPayload.value("nodeGraph", nlohmann::json::object());
+    const nlohmann::json serializedNodesJson = graphJson.value("nodes", nlohmann::json::array());
+    std::unordered_set<int> serializedNodeIds;
+    if (serializedNodesJson.is_array()) {
+        for (const nlohmann::json& item : serializedNodesJson) {
+            if (!item.is_object()) {
+                continue;
+            }
+            const int nodeId = item.value("id", 0);
+            if (nodeId > 0) {
+                serializedNodeIds.insert(nodeId);
+            }
+        }
+    }
+
+    const nlohmann::json layerArray = EditorNodeGraph::ExtractLayerArray(serializerPayload);
+    std::vector<std::shared_ptr<LayerBase>> importedLayers;
+    std::vector<std::string> warnings;
+    BuildImportedLayers(layerArray, importedLayers, warnings);
+
+    EditorNodeGraph::Graph tempGraph;
+    EditorNodeGraph::DeserializeGraphPayload(serializerPayload, tempGraph, static_cast<int>(importedLayers.size()), {}, 0, 0, 0);
+
+    std::vector<int> syntheticOutputNodeIds;
+    for (const EditorNodeGraph::Node& node : tempGraph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::Output &&
+            serializedNodeIds.find(node.id) == serializedNodeIds.end()) {
+            syntheticOutputNodeIds.push_back(node.id);
+        }
+    }
+    for (int nodeId : syntheticOutputNodeIds) {
+        tempGraph.RemoveNode(nodeId);
+    }
+
+    const auto& nodes = tempGraph.GetNodes();
+    if (nodes.empty()) {
+        if (outSummary) *outSummary = "Graph payload did not contain any nodes.";
+        return false;
     }
 
     m_ClipboardPasteCount++;
-    float offsetX = m_ClipboardPasteCount * 40.0f;
-    float offsetY = m_ClipboardPasteCount * 40.0f;
+    const float offsetX = m_ClipboardPasteCount * 40.0f;
+    const float offsetY = m_ClipboardPasteCount * 40.0f;
 
     const ImVec2 mousePos = ImGui::GetMousePos();
     const bool mouseInsideCanvas =
         mousePos.x >= m_CanvasMin.x && mousePos.x <= m_CanvasMax.x &&
         mousePos.y >= m_CanvasMin.y && mousePos.y <= m_CanvasMax.y;
-    const bool useCursorPos = mouseInsideCanvas;
+    const bool useCursorPos = mouseInsideCanvas || m_HasLastGraphMousePos;
+    EditorNodeGraph::Vec2 cursorGraphPos = m_LastGraphMousePos;
     float minX = std::numeric_limits<float>::max();
     float minY = std::numeric_limits<float>::max();
-    EditorNodeGraph::Vec2 cursorGraphPos {};
-
-    const auto& nodesJson = m_Clipboard["nodes"];
+    for (const EditorNodeGraph::Node& node : nodes) {
+        minX = std::min(minX, node.position.x);
+        minY = std::min(minY, node.position.y);
+    }
     if (useCursorPos) {
-        cursorGraphPos = ScreenToGraph(ToGraphVec2(mousePos));
-        for (const auto& item : nodesJson) {
-            if (!item.is_object()) continue;
-            minX = std::min(minX, item.value("x", 0.0f));
-            minY = std::min(minY, item.value("y", 0.0f));
+        if (mouseInsideCanvas) {
+            cursorGraphPos = ScreenToGraph(ToGraphVec2(mousePos));
+            m_LastGraphMousePos = cursorGraphPos;
+            m_HasLastGraphMousePos = true;
         }
     }
 
-    auto& graph = editor->GetNodeGraph();
-    std::map<int, int> oldIdToNewId;
-    std::vector<int> newlyPastedNodeIds;
+    auto& targetGraph = editor->GetNodeGraph();
+    auto& targetLayers = editor->GetLayers();
+    std::unordered_map<int, int> layerIndexMap;
+    for (int i = 0; i < static_cast<int>(importedLayers.size()); ++i) {
+        if (!importedLayers[i]) {
+            continue;
+        }
+        layerIndexMap[i] = static_cast<int>(targetLayers.size());
+        targetLayers.push_back(importedLayers[i]);
+    }
 
-    for (const auto& item : nodesJson) {
-        if (!item.is_object()) continue;
+    std::unordered_map<int, int> oldNodeIdToNew;
+    std::vector<int> pastedNodeIds;
+    int importedNodeCount = 0;
+    for (const EditorNodeGraph::Node& sourceNode : nodes) {
+        EditorNodeGraph::Node nodeCopy = sourceNode;
+        nodeCopy.id = targetGraph.GetNextNodeId();
+        targetGraph.SetNextNodeId(nodeCopy.id + 1);
 
-        int oldId = item.value("id", 0);
-        EditorNodeGraph::NodeKind kind = static_cast<EditorNodeGraph::NodeKind>(item.value("kind", 0));
-
-        EditorNodeGraph::Node node;
-        node.id = graph.GetNextNodeId();
-        graph.SetNextNodeId(node.id + 1);
-        node.kind = kind;
-        node.layerIndex = -1;
-        node.layerType = static_cast<LayerType>(item.value("layerType", 0));
-        node.typeId = item.value("typeId", "");
-        node.title = item.value("title", "");
-
-        float newX = 0.0f;
-        float newY = 0.0f;
         if (useCursorPos && minX != std::numeric_limits<float>::max()) {
-            newX = cursorGraphPos.x + (item.value("x", 0.0f) - minX);
-            newY = cursorGraphPos.y + (item.value("y", 0.0f) - minY);
+            nodeCopy.position.x = cursorGraphPos.x + (sourceNode.position.x - minX);
+            nodeCopy.position.y = cursorGraphPos.y + (sourceNode.position.y - minY);
         } else {
-            newX = item.value("x", 0.0f) + offsetX;
-            newY = item.value("y", 0.0f) + offsetY;
-        }
-        node.position.x = newX;
-        node.position.y = newY;
-
-        node.expanded = item.value("expanded", false);
-        node.scopeKind = static_cast<EditorNodeGraph::ScopeKind>(item.value("scopeKind", 0));
-        node.maskKind = static_cast<EditorNodeGraph::MaskGeneratorKind>(item.value("maskKind", 0));
-        node.maskSettings = DeserializeMaskSettings(item.value("maskSettings", nlohmann::json::object()));
-        node.maskUtilityKind = static_cast<EditorNodeGraph::MaskUtilityKind>(item.value("maskUtilityKind", 0));
-        node.maskUtilitySettings = DeserializeMaskUtilitySettings(item.value("maskUtilitySettings", nlohmann::json::object()));
-        node.imageToMaskKind = static_cast<EditorNodeGraph::ImageToMaskKind>(item.value("imageToMaskKind", 0));
-        node.imageToMaskSettings = DeserializeImageToMaskSettings(item.value("imageToMaskSettings", nlohmann::json::object()));
-        node.imageGeneratorKind = static_cast<EditorNodeGraph::ImageGeneratorKind>(item.value("imageGeneratorKind", 0));
-        node.imageGeneratorSettings = DeserializeImageGeneratorSettings(item.value("imageGeneratorSettings", nlohmann::json::object()));
-        node.mixBlendMode = static_cast<EditorNodeGraph::MixBlendMode>(item.value("mixBlendMode", 0));
-        node.mixFactor = item.value("mixFactor", 0.5f);
-
-        if (kind == EditorNodeGraph::NodeKind::Image) {
-            node.image.label = item.value("label", "");
-            node.image.sourcePath = item.value("sourcePath", "");
-            node.image.width = item.value("width", 0);
-            node.image.height = item.value("height", 0);
-            node.image.channels = item.value("channels", 4);
-            node.image.originalChannels = item.value("originalChannels", 4);
-            if (item.contains("pngBytes")) {
-                const auto& bin = item["pngBytes"];
-                if (bin.is_binary()) {
-                    const auto& binaryValue = bin.get_binary();
-                    std::vector<unsigned char> pngBytes(binaryValue.begin(), binaryValue.end());
-                    DecodePngBytesClipboard(pngBytes, node.image);
-                }
-            }
-        } else if (kind == EditorNodeGraph::NodeKind::Layer) {
-            std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(node.typeId);
-            if (newLayer) {
-                newLayer->InitializeGL();
-                if (item.contains("layerData")) {
-                    newLayer->Deserialize(item["layerData"]);
-                }
-                auto& layers = editor->GetLayers();
-                node.layerIndex = static_cast<int>(layers.size());
-                layers.push_back(newLayer);
-            }
-        } else if (kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
-            node.rawDetailAutoMask.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailAutoMaskSettings", nlohmann::json::object()));
-        } else if (kind == EditorNodeGraph::NodeKind::RawDetailFusion) {
-            node.rawDetailFusion.settings = DeserializeRawDetailFusionSettings(item.value("rawDetailFusionSettings", nlohmann::json::object()));
+            nodeCopy.position.x = sourceNode.position.x + offsetX;
+            nodeCopy.position.y = sourceNode.position.y + offsetY;
         }
 
-        EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
-        graph.GetNodes().push_back(node);
-        oldIdToNewId[oldId] = node.id;
-        newlyPastedNodeIds.push_back(node.id);
+        if (nodeCopy.kind == EditorNodeGraph::NodeKind::Layer) {
+            const auto layerIt = layerIndexMap.find(sourceNode.layerIndex);
+            if (layerIt == layerIndexMap.end()) {
+                warnings.push_back("Skipped a layer node because its layer state could not be created.");
+                continue;
+            }
+            nodeCopy.layerIndex = layerIt->second;
+        }
+
+        targetGraph.GetNodes().push_back(nodeCopy);
+        oldNodeIdToNew[sourceNode.id] = nodeCopy.id;
+        pastedNodeIds.push_back(nodeCopy.id);
+        importedNodeCount++;
     }
 
-    if (m_Clipboard.contains("links")) {
-        const auto& linksJson = m_Clipboard["links"];
-        for (const auto& linkItem : linksJson) {
-            if (!linkItem.is_object()) continue;
-
-            int fromNodeId = linkItem.value("fromNodeId", 0);
-            std::string fromSocketId = linkItem.value("fromSocketId", "");
-            int toNodeId = linkItem.value("toNodeId", 0);
-            std::string toSocketId = linkItem.value("toSocketId", "");
-
-            if (oldIdToNewId.count(fromNodeId) && oldIdToNewId.count(toNodeId)) {
-                int newFromNodeId = oldIdToNewId[fromNodeId];
-                int newToNodeId = oldIdToNewId[toNodeId];
-                graph.TryConnectSockets(newFromNodeId, fromSocketId, newToNodeId, toSocketId);
+    int importedLinkCount = 0;
+    int skippedLinkCount = 0;
+    for (const EditorNodeGraph::Link& link : tempGraph.GetLinks()) {
+        const auto fromIt = oldNodeIdToNew.find(link.fromNodeId);
+        const auto toIt = oldNodeIdToNew.find(link.toNodeId);
+        if (fromIt == oldNodeIdToNew.end() || toIt == oldNodeIdToNew.end()) {
+            skippedLinkCount++;
+            continue;
+        }
+        std::string errorMessage;
+        if (targetGraph.TryConnectSockets(fromIt->second, link.fromSocketId, toIt->second, link.toSocketId, &errorMessage)) {
+            importedLinkCount++;
+        } else {
+            skippedLinkCount++;
+            if (!errorMessage.empty()) {
+                warnings.push_back(errorMessage);
             }
+        }
+    }
+
+    int importedGroupCount = 0;
+    for (const EditorNodeGraph::NodeGroup& group : tempGraph.GetGroups()) {
+        EditorNodeGraph::Vec2 position = group.position;
+        if (useCursorPos && minX != std::numeric_limits<float>::max()) {
+            position.x = cursorGraphPos.x + (group.position.x - minX);
+            position.y = cursorGraphPos.y + (group.position.y - minY);
+        } else {
+            position.x += offsetX;
+            position.y += offsetY;
+        }
+        if (targetGraph.AddGroup(group.title, position, group.size)) {
+            importedGroupCount++;
         }
     }
 
     editor->RefreshGraphLayerMetadata();
+    targetGraph.ClearSelection();
+    for (int nodeId : pastedNodeIds) {
+        targetGraph.SelectNode(nodeId, true);
+    }
+    editor->MarkRenderDirty();
 
-    graph.ClearSelection();
-    for (int newId : newlyPastedNodeIds) {
-        graph.SelectNode(newId, true);
+    std::ostringstream summary;
+    summary << "Imported " << importedNodeCount << " nodes, " << importedLinkCount << " links, and " << importedGroupCount << " groups";
+    if (skippedLinkCount > 0) {
+        summary << "; skipped " << skippedLinkCount << " invalid links";
+    }
+    if (!warnings.empty()) {
+        summary << ".";
+    }
+    if (outSummary) {
+        *outSummary = summary.str();
+    }
+    return true;
+}
+
+namespace {
+
+bool InsertNewNodeOnExistingLink(
+    EditorNodeGraphUI* ui,
+    EditorModule* editor,
+    const EditorNodeGraph::Link& link,
+    int newNodeId) {
+    if (!ui || !editor || newNodeId <= 0 || link.fromNodeId <= 0 || link.toNodeId <= 0) {
+        return false;
     }
 
-    editor->MarkRenderDirty();
+    if (!editor->RemoveGraphLink(link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId)) {
+        return false;
+    }
+
+    const bool connectedFirst = EditorNodeGraphUI::ConnectOutputToBestInput(
+        editor,
+        link.fromNodeId,
+        link.fromSocketId,
+        newNodeId);
+    const bool connectedSecond = connectedFirst
+        ? EditorNodeGraphUI::ConnectBestOutputToInput(editor, newNodeId, link.toNodeId, link.toSocketId)
+        : false;
+    if (connectedFirst && connectedSecond) {
+        return true;
+    }
+
+    editor->RemoveGraphNode(newNodeId);
+    editor->ConnectGraphSockets(link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId, nullptr);
+    return false;
+}
+
+} // namespace
+
+void EditorNodeGraphUI::CopySelectedNodes(EditorModule* editor) {
+    if (!editor) {
+        return;
+    }
+
+    m_ClipboardPasteCount = 0;
+    const auto& selectedNodeIds = editor->GetNodeGraph().GetSelectedNodeIds();
+    if (selectedNodeIds.empty()) {
+        m_Clipboard = nlohmann::json::object();
+        return;
+    }
+
+    m_Clipboard = BuildClipboardPayload(editor, selectedNodeIds, true, false);
+}
+
+void EditorNodeGraphUI::PasteNodes(EditorModule* editor) {
+    if (!editor || m_Clipboard.empty()) {
+        return;
+    }
+    std::string summary;
+    if (PasteClipboardPayload(editor, m_Clipboard, &summary)) {
+        m_StatusMessage = summary;
+    } else if (!summary.empty()) {
+        m_StatusMessage = summary;
+    }
+}
+
+void EditorNodeGraphUI::CopyGraphInfo(EditorModule* editor, bool wholeGraph, bool includeState) {
+    if (!editor) {
+        return;
+    }
+
+    std::vector<int> nodeIds;
+    if (wholeGraph) {
+        for (const EditorNodeGraph::Node& node : editor->GetNodeGraph().GetNodes()) {
+            nodeIds.push_back(node.id);
+        }
+    } else {
+        nodeIds = editor->GetNodeGraph().GetSelectedNodeIds();
+    }
+
+    if (nodeIds.empty()) {
+        m_StatusMessage = wholeGraph ? "Graph is empty." : "Select at least one node to copy graph info.";
+        return;
+    }
+
+    nlohmann::json payload = BuildClipboardPayload(editor, nodeIds, includeState, wholeGraph);
+    const std::string text = BuildGraphText(payload);
+    ImGui::SetClipboardText(text.c_str());
+    m_Clipboard = payload;
+    m_ClipboardPasteCount = 0;
+    m_StatusMessage = wholeGraph
+        ? (includeState ? "Whole graph copied with state." : "Whole graph copied as tree only.")
+        : (includeState ? "Selected graph copied with state." : "Selected graph copied as tree only.");
+}
+
+void EditorNodeGraphUI::PasteGraphInfo(EditorModule* editor) {
+    if (!editor) {
+        return;
+    }
+
+    const char* clipboardText = ImGui::GetClipboardText();
+    if (!clipboardText || clipboardText[0] == '\0') {
+        m_StatusMessage = "Clipboard is empty.";
+        return;
+    }
+
+    nlohmann::json payload;
+    std::string error;
+    if (!ParseGraphText(clipboardText, payload, error)) {
+        m_StatusMessage = error;
+        return;
+    }
+
+    std::string summary;
+    if (PasteClipboardPayload(editor, payload, &summary)) {
+        m_Clipboard = payload;
+        m_StatusMessage = summary;
+    } else {
+        m_StatusMessage = summary.empty() ? "Graph text could not be imported." : summary;
+    }
 }
 
 void EditorNodeGraphUI::DuplicateSelectedNodes(EditorModule* editor) {

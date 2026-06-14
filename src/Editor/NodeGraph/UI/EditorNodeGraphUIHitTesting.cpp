@@ -1,5 +1,6 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,30 +11,9 @@ ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
     return ImVec2(value.x, value.y);
 }
 
-float NodeUiScaleFromZoom(float zoom) {
-    return zoom;
-}
-
-float PinRadiusForZoom(float zoom) {
-    return std::max(1.8f, 5.3f * NodeUiScaleFromZoom(zoom));
-}
-
-float DistancePointToSegment(const ImVec2& point, const ImVec2& a, const ImVec2& b) {
-    const ImVec2 ab(b.x - a.x, b.y - a.y);
-    const ImVec2 ap(point.x - a.x, point.y - a.y);
-    const float abLenSq = ab.x * ab.x + ab.y * ab.y;
-    if (abLenSq <= 1e-6f) {
-        const float dx = point.x - a.x;
-        const float dy = point.y - a.y;
-        return std::sqrt(dx * dx + dy * dy);
-    }
-
-    const float t = std::clamp((ap.x * ab.x + ap.y * ab.y) / abLenSq, 0.0f, 1.0f);
-    const ImVec2 closest(a.x + ab.x * t, a.y + ab.y * t);
-    const float dx = point.x - closest.x;
-    const float dy = point.y - closest.y;
-    return std::sqrt(dx * dx + dy * dy);
-}
+using EditorNodeGraphUIMetrics::IsPointNearCubicBezier;
+using EditorNodeGraphUIMetrics::LinkBezierHandle;
+using EditorNodeGraphUIMetrics::LinkHitRadiusForZoom;
 
 } // namespace
 
@@ -43,8 +23,7 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::InputPinScreenPos(const EditorNodeGraph
             return EditorNodeGraph::Vec2{ anchor->screenPos.x, anchor->screenPos.y };
         }
     }
-    const EditorNodeGraph::Vec2 size = NodeSize(node);
-    const EditorNodeGraph::Vec2 screenSize{ size.x * m_Zoom, size.y * m_Zoom };
+    const EditorNodeGraph::Vec2 screenSize = NodeScreenSize(node);
     const EditorNodeGraph::Vec2 pos = GraphToScreen(node.position);
     return EditorNodeGraph::Vec2{ pos.x, pos.y + screenSize.y * 0.5f };
 }
@@ -55,14 +34,13 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::OutputPinScreenPos(const EditorNodeGrap
             return EditorNodeGraph::Vec2{ anchor->screenPos.x, anchor->screenPos.y };
         }
     }
-    const EditorNodeGraph::Vec2 size = NodeSize(node);
-    const EditorNodeGraph::Vec2 screenSize{ size.x * m_Zoom, size.y * m_Zoom };
+    const EditorNodeGraph::Vec2 screenSize = NodeScreenSize(node);
     const EditorNodeGraph::Vec2 pos = GraphToScreen(node.position);
     return EditorNodeGraph::Vec2{ pos.x + screenSize.x, pos.y + screenSize.y * 0.5f };
 }
 
 EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
-    const float hitRadius = std::max(12.0f, PinRadiusForZoom(m_Zoom) + 8.0f);
+    const float hitRadius = std::max(1.0f, NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
     std::vector<const EditorNodeGraph::Node*> orderedNodes;
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
@@ -98,7 +76,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
 }
 
 EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
-    const float hitRadius = std::max(12.0f, PinRadiusForZoom(m_Zoom) + 8.0f);
+    const float hitRadius = std::max(1.0f, NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
     std::vector<const EditorNodeGraph::Node*> orderedNodes;
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
@@ -183,7 +161,16 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
 }
 
 bool EditorNodeGraphUI::IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const {
-    return DistancePointToSegment(ToImVec2(point), ToImVec2(a), ToImVec2(b)) <= std::max(6.0f, 8.0f * NodeUiScaleFromZoom(m_Zoom));
+    const ImVec2 p0 = ToImVec2(a);
+    const ImVec2 p3 = ToImVec2(b);
+    const float handle = LinkBezierHandle(p0, p3);
+    return IsPointNearCubicBezier(
+        ToImVec2(point),
+        p0,
+        ImVec2(p0.x + handle, p0.y),
+        ImVec2(p3.x - handle, p3.y),
+        p3,
+        LinkHitRadiusForZoom(m_Zoom));
 }
 
 void EditorNodeGraphUI::DrawClippedText(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const char* text, ImU32 color) const {

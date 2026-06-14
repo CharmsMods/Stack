@@ -20,6 +20,15 @@ inline constexpr const char* kYellowLightPresetId = "yellow-light";
 inline constexpr std::uint32_t kAppearanceSettingsVersion = 2;
 inline constexpr std::uint32_t kThemePresetFileVersion = 2;
 
+enum class GraphVisualMode {
+    Classic,
+    BlackNodes,
+    SpotlightPrototype
+};
+
+const char* GraphVisualModeLabel(GraphVisualMode mode);
+const char* GraphVisualModeDescription(GraphVisualMode mode);
+
 struct ThemeStyleValues {
     float alpha = 1.0f;
     ImVec2 windowPadding = ImVec2(16.0f, 16.0f);
@@ -61,6 +70,9 @@ struct ThemeDefinition {
 
 struct AppearanceLibrary {
     std::string activePresetId = kFactoryPresetId;
+    GraphVisualMode graphVisualMode = GraphVisualMode::BlackNodes;
+    bool graphSpotlightHaloOutlines = false;
+    bool graphDottedMaskLinks = true;
     std::vector<ThemeDefinition> customPresets;
 };
 
@@ -95,10 +107,16 @@ public:
     const ThemeDefinition* GetActivePreset() const;
     const std::string& GetActivePresetId() const;
     std::string GetActivePresetDisplayName() const;
+    GraphVisualMode GetGraphVisualMode() const;
+    bool GetGraphSpotlightHaloOutlines() const;
+    bool GetGraphDottedMaskLinks() const;
     bool ActivePresetIsFactory() const;
     bool HasUnsavedChanges() const;
 
     bool SelectPresetById(const std::string& presetId);
+    bool SetGraphVisualMode(GraphVisualMode mode);
+    bool SetGraphSpotlightHaloOutlines(bool enabled);
+    bool SetGraphDottedMaskLinks(bool enabled);
     bool ResetWorkingTheme();
     bool SaveWorkingTheme();
     bool SaveWorkingThemeAsNew(std::string displayName);

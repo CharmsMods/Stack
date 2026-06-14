@@ -53,8 +53,21 @@ if __name__ == "__main__":
         ("Settings", os.path.join(root_dir, "Icons", "settings.png")),
         ("BackgroundRemover", os.path.join(root_dir, "Icons", "nodes", "background remover.png")),
         ("ColorGrade", os.path.join(root_dir, "Icons", "nodes", "3 color wheels.png")),
+        ("ProgramIcon", os.path.join(root_dir, "website", "program icon.png")),
     ]
     output_file = os.path.join(root_dir, "src", "App", "Resources", "EmbeddedTabIcons.h")
 
     bake_icons(input_specs, output_file)
     print(f"Successfully baked tab icons to {output_file}")
+
+    # Automatically generate the Windows .ico file if the program icon is modified
+    try:
+        from PIL import Image
+        program_icon_path = os.path.join(root_dir, "website", "program icon.png")
+        ico_output_path = os.path.join(root_dir, "src", "Stack.ico")
+        if os.path.exists(program_icon_path):
+            img = Image.open(program_icon_path)
+            img.save(ico_output_path, format='ICO', sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+            print(f"Successfully updated Windows executable icon at {ico_output_path}")
+    except Exception as e:
+        print(f"Warning: Could not automatically generate Windows executable icon: {e}")

@@ -182,6 +182,8 @@ extern void(APIENTRY* glGetShaderInfoLog_)(GLuint shader, GLsizei bufSize, GLsiz
 extern GLuint(APIENTRY* glCreateProgram_)(void);
 extern void(APIENTRY* glDeleteProgram_)(GLuint program);
 extern void(APIENTRY* glAttachShader_)(GLuint program, GLuint shader);
+extern void(APIENTRY* glBindAttribLocation_)(GLuint program, GLuint index, const GLchar* name);
+extern void(APIENTRY* glBindFragDataLocation_)(GLuint program, GLuint colorNumber, const GLchar* name);
 extern void(APIENTRY* glLinkProgram_)(GLuint program);
 extern void(APIENTRY* glUseProgram_)(GLuint program);
 extern void(APIENTRY* glGetProgramiv_)(GLuint program, GLenum pname, GLint* params);
@@ -191,6 +193,7 @@ extern void(APIENTRY* glGetProgramInfoLog_)(GLuint program, GLsizei bufSize, GLs
 extern GLint(APIENTRY* glGetUniformLocation_)(GLuint program, const GLchar* name);
 extern void(APIENTRY* glUniform1i_)(GLint location, GLint v0);
 extern void(APIENTRY* glUniform1f_)(GLint location, GLfloat v0);
+extern void(APIENTRY* glUniform1fv_)(GLint location, GLsizei count, const GLfloat* value);
 extern void(APIENTRY* glUniform2f_)(GLint location, GLfloat v0, GLfloat v1);
 extern void(APIENTRY* glUniform2i_)(GLint location, GLint v0, GLint v1);
 extern void(APIENTRY* glUniform3f_)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
@@ -249,6 +252,8 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glCreateProgram glCreateProgram_
 #define glDeleteProgram glDeleteProgram_
 #define glAttachShader glAttachShader_
+#define glBindAttribLocation glBindAttribLocation_
+#define glBindFragDataLocation glBindFragDataLocation_
 #define glLinkProgram glLinkProgram_
 #define glUseProgram glUseProgram_
 #define glGetProgramiv glGetProgramiv_
@@ -256,6 +261,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glGetUniformLocation glGetUniformLocation_
 #define glUniform1i glUniform1i_
 #define glUniform1f glUniform1f_
+#define glUniform1fv glUniform1fv_
 #define glUniform2f glUniform2f_
 #define glUniform2i glUniform2i_
 #define glUniform3f glUniform3f_

@@ -768,6 +768,32 @@ std::array<float, 9> ApplyDiagonalRight(const std::array<float, 9>& matrix, cons
     return result;
 }
 
+std::array<float, 9> ApplyDiagonalLeft(const std::array<float, 9>& matrix, const std::array<float, 3>& diagonal) {
+    std::array<float, 9> result = matrix;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            result[static_cast<std::size_t>(r * 3 + c)] *= diagonal[static_cast<std::size_t>(r)];
+        }
+    }
+    return result;
+}
+
+std::array<float, 9> DiagonalMatrix3(const std::array<float, 3>& diagonal) {
+    return {
+        diagonal[0], 0.0f, 0.0f,
+        0.0f, diagonal[1], 0.0f,
+        0.0f, 0.0f, diagonal[2]
+    };
+}
+
+std::array<float, 3> MultiplyMatrixVector3(const std::array<float, 9>& matrix, const std::array<float, 3>& vector) {
+    return {
+        matrix[0] * vector[0] + matrix[1] * vector[1] + matrix[2] * vector[2],
+        matrix[3] * vector[0] + matrix[4] * vector[1] + matrix[5] * vector[2],
+        matrix[6] * vector[0] + matrix[7] * vector[1] + matrix[8] * vector[2]
+    };
+}
+
 bool InvertMatrix3(const std::array<float, 9>& m, std::array<float, 9>& out) {
     const float det =
         m[0] * (m[4] * m[8] - m[5] * m[7]) -
@@ -828,6 +854,91 @@ std::array<float, 9> SelectDngForwardMatrix(const RawMetadata& metadata, RawCame
     return metadata.dngForwardMatrix1;
 }
 
+std::array<float, 9> SelectDngCameraCalibration(const RawMetadata& metadata, RawCameraTransformSource source) {
+    const std::array<float, 9> calibration1 =
+        metadata.hasDngCameraCalibration1 ? metadata.dngCameraCalibration1 : IdentityMatrix3();
+    const std::array<float, 9> calibration2 =
+        metadata.hasDngCameraCalibration2 ? metadata.dngCameraCalibration2 : IdentityMatrix3();
+
+    if (source == RawCameraTransformSource::DngForwardMatrix1) {
+        if (metadata.hasDngForwardMatrix1) {
+            return calibration1;
+        }
+        if (metadata.hasDngForwardMatrix2) {
+            return calibration2;
+        }
+    }
+    if (source == RawCameraTransformSource::DngForwardMatrix2) {
+        if (metadata.hasDngForwardMatrix2) {
+            return calibration2;
+        }
+        if (metadata.hasDngForwardMatrix1) {
+            return calibration1;
+        }
+    }
+    if (metadata.hasDngForwardMatrix1 && metadata.hasDngForwardMatrix2) {
+        return LerpMatrix3(calibration1, calibration2, DngWarmthFromAsShotNeutral(metadata));
+    }
+    if (metadata.hasDngForwardMatrix2) {
+        return calibration2;
+    }
+    return calibration1;
+}
+
+std::array<float, 3> CameraNeutralFromWhiteBalance(const RawMetadata& metadata, const RawDevelopSettings& settings) {
+    const std::array<float, 3> wb = ResolveWhiteBalance(metadata, settings);
+    return {
+        1.0f / std::max(0.001f, wb[0]),
+        1.0f / std::max(0.001f, wb[1]),
+        1.0f / std::max(0.001f, wb[2])
+    };
+}
+
+bool IsUsableNeutral(const std::array<float, 3>& neutral) {
+    return std::isfinite(neutral[0]) && std::isfinite(neutral[1]) && std::isfinite(neutral[2]) &&
+        neutral[0] > 0.0001f && neutral[1] > 0.0001f && neutral[2] > 0.0001f;
+}
+
+std::array<float, 9> BuildDngForwardMatrixToWorking(
+    const RawMetadata& metadata,
+    const RawDevelopSettings& settings,
+    bool inputAlreadyWhiteBalanced) {
+    const std::array<float, 9> forwardMatrix =
+        SelectDngForwardMatrix(metadata, settings.cameraTransformSource);
+    const std::array<float, 9> calibration =
+        SelectDngCameraCalibration(metadata, settings.cameraTransformSource);
+    const std::array<float, 3> analogBalance =
+        metadata.hasDngAnalogBalance ? metadata.dngAnalogBalance : std::array<float, 3> { 1.0f, 1.0f, 1.0f };
+    const std::array<float, 9> analogCalibration = ApplyDiagonalLeft(calibration, analogBalance);
+
+    std::array<float, 9> inverseAnalogCalibration {};
+    if (!InvertMatrix3(analogCalibration, inverseAnalogCalibration)) {
+        return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), forwardMatrix);
+    }
+
+    const std::array<float, 3> cameraNeutral = CameraNeutralFromWhiteBalance(metadata, settings);
+    const std::array<float, 3> referenceNeutral = MultiplyMatrixVector3(inverseAnalogCalibration, cameraNeutral);
+    if (!IsUsableNeutral(cameraNeutral) || !IsUsableNeutral(referenceNeutral)) {
+        return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), forwardMatrix);
+    }
+
+    // DNG ForwardMatrix expects raw camera RGB. The Bayer shader has already
+    // applied white balance, so compensate with cameraNeutral when needed.
+    const std::array<float, 9> referenceWhiteBalance = DiagonalMatrix3({
+        1.0f / referenceNeutral[0],
+        1.0f / referenceNeutral[1],
+        1.0f / referenceNeutral[2]
+    });
+    std::array<float, 9> cameraToXyz =
+        MultiplyMatrix3(MultiplyMatrix3(forwardMatrix, referenceWhiteBalance), inverseAnalogCalibration);
+
+    if (inputAlreadyWhiteBalanced) {
+        cameraToXyz = MultiplyMatrix3(cameraToXyz, DiagonalMatrix3(cameraNeutral));
+    }
+
+    return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), cameraToXyz);
+}
+
 std::array<float, 9> SelectDngColorMatrix(const RawMetadata& metadata) {
     std::array<float, 9> color = IdentityMatrix3();
     std::array<float, 9> calibration = IdentityMatrix3();
@@ -850,19 +961,22 @@ std::array<float, 9> SelectDngColorMatrix(const RawMetadata& metadata) {
     return color;
 }
 
-std::array<float, 9> BuildCameraToWorking(const RawMetadata& metadata, const RawDevelopSettings& settings) {
+std::array<float, 9> BuildCameraToWorking(
+    const RawMetadata& metadata,
+    const RawDevelopSettings& settings,
+    bool inputAlreadyWhiteBalanced) {
     if (metadata.isDng) {
         if ((settings.cameraTransformSource == RawCameraTransformSource::DngAuto ||
             settings.cameraTransformSource == RawCameraTransformSource::DngForwardMatrix1 ||
             settings.cameraTransformSource == RawCameraTransformSource::DngForwardMatrix2) &&
             (metadata.hasDngForwardMatrix1 || metadata.hasDngForwardMatrix2)) {
-            return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), SelectDngForwardMatrix(metadata, settings.cameraTransformSource));
+            return BuildDngForwardMatrixToWorking(metadata, settings, inputAlreadyWhiteBalanced);
         }
         if (settings.cameraTransformSource == RawCameraTransformSource::DngForwardMatrix1 && metadata.hasDngForwardMatrix1) {
-            return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), metadata.dngForwardMatrix1);
+            return BuildDngForwardMatrixToWorking(metadata, settings, inputAlreadyWhiteBalanced);
         }
         if (settings.cameraTransformSource == RawCameraTransformSource::DngForwardMatrix2 && metadata.hasDngForwardMatrix2) {
-            return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), metadata.dngForwardMatrix2);
+            return BuildDngForwardMatrixToWorking(metadata, settings, inputAlreadyWhiteBalanced);
         }
         if (settings.cameraTransformSource == RawCameraTransformSource::DngColorMatrixInverse ||
             settings.cameraTransformSource == RawCameraTransformSource::DngAuto) {
@@ -873,7 +987,7 @@ std::array<float, 9> BuildCameraToWorking(const RawMetadata& metadata, const Raw
             }
         }
         if (settings.cameraTransformSource == RawCameraTransformSource::DngForwardMatrix1 && metadata.hasDngForwardMatrix2) {
-            return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), metadata.dngForwardMatrix2);
+            return BuildDngForwardMatrixToWorking(metadata, settings, inputAlreadyWhiteBalanced);
         }
     }
 
@@ -1269,7 +1383,7 @@ bool RawGpuPipeline::EnsureOutput(int width, int height) {
     return true;
 }
 
-unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSettings& settings) {
+unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSettings& settings, int previewMaxDimension) {
     m_LastError.clear();
     const RawMetadata& metadata = raw.metadata;
 
@@ -1313,8 +1427,19 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     const int visibleWidth = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
     const int visibleHeight = metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
     const bool swapsDimensions = OrientationSwapsDimensions(effectiveOrientation);
-    const int outWidth = settings.rotateToFitFrame ? visibleWidth : (swapsDimensions ? visibleHeight : visibleWidth);
-    const int outHeight = settings.rotateToFitFrame ? visibleHeight : (swapsDimensions ? visibleWidth : visibleHeight);
+    const int nativeOutWidth = settings.rotateToFitFrame ? visibleWidth : (swapsDimensions ? visibleHeight : visibleWidth);
+    const int nativeOutHeight = settings.rotateToFitFrame ? visibleHeight : (swapsDimensions ? visibleWidth : visibleHeight);
+    int outWidth = nativeOutWidth;
+    int outHeight = nativeOutHeight;
+    if (previewMaxDimension > 0) {
+        const int longestSide = std::max(outWidth, outHeight);
+        if (longestSide > previewMaxDimension) {
+            outWidth = std::max(1, static_cast<int>(
+                (static_cast<long long>(outWidth) * previewMaxDimension + longestSide / 2) / longestSide));
+            outHeight = std::max(1, static_cast<int>(
+                (static_cast<long long>(outHeight) * previewMaxDimension + longestSide / 2) / longestSide));
+        }
+    }
     if (metadata.pixelLayout == RawPixelLayout::LinearRgb) {
         if (!EnsureLinearProgram() ||
             !UploadLinearTexture(raw, settings) ||
@@ -1332,7 +1457,7 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(m_LinearProgram);
 
-        const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings);
+        const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings, false);
         const float exposure = std::pow(2.0f, settings.exposureStops);
 
         glActiveTexture(GL_TEXTURE0);
@@ -1408,7 +1533,7 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     const float black = settings.overrideBlackLevel ? settings.blackLevelOverride : metadata.blackLevel;
     const float white = std::max(black + 1.0f, settings.overrideWhiteLevel ? settings.whiteLevelOverride : metadata.whiteLevel);
     const std::array<float, 3> wb = ResolveWhiteBalance(metadata, settings);
-    const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings);
+    const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings, true);
     const float exposure = std::pow(2.0f, settings.exposureStops);
     std::array<float, 4> channelBlack = metadata.perChannelBlack;
     if (settings.overrideBlackLevel) {
@@ -1447,7 +1572,7 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glUniform1i(glGetUniformLocation(m_Program, "uHighlightMode"), static_cast<int>(settings.highlightMode));
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightStrength"), settings.highlightStrength);
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightThreshold"), settings.highlightThreshold);
-    glUniform1i(glGetUniformLocation(m_Program, "uDemosaicMethod"), static_cast<int>(settings.demosaicMethod));
+    glUniform1i(glGetUniformLocation(m_Program, "uDemosaicMethod"), static_cast<int>(Raw::DemosaicMethod::Bilinear));
     glUniform1f(glGetUniformLocation(m_Program, "uFalseColorSuppression"), settings.falseColorSuppression);
     glUniform1f(glGetUniformLocation(m_Program, "uDefringeStrength"), settings.defringeStrength);
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightEdgeCleanup"), settings.highlightEdgeCleanup);
