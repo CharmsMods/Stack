@@ -11,6 +11,11 @@ bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
 
+bool SupportsDynamicChannelInputs(const EditorNodeGraph::Node& node) {
+    return node.kind == EditorNodeGraph::NodeKind::Output ||
+        node.kind == EditorNodeGraph::NodeKind::Lut;
+}
+
 const char* ChannelLabel(const std::string& socketId) {
     if (socketId == "r") return "R";
     if (socketId == "g") return "G";
@@ -158,6 +163,18 @@ Node* Graph::AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 posit
     return &m_Nodes.back();
 }
 
+Node* Graph::AddRawDecodeNode(RawDecodePayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawDecode;
+    node.position = position;
+    node.rawDecode = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddRawDevelopNode(RawDevelopPayload payload, Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
@@ -200,6 +217,18 @@ Node* Graph::AddHdrMergeNode(HdrMergePayload payload, Vec2 position) {
     node.kind = NodeKind::HdrMerge;
     node.position = position;
     node.hdrMerge = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddLutNode(LutPayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::Lut;
+    node.position = position;
+    node.lut = std::move(payload);
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
     TouchStructure();
@@ -477,8 +506,8 @@ const Node* Graph::FindNodeByLayerIndex(int layerIndex) const {
 }
 
 std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOnly) const {
-    if (node.kind == NodeKind::Output) {
-        bool useFourPins = m_ForceOutputFourPins;
+    if (SupportsDynamicChannelInputs(node)) {
+        bool useFourPins = node.kind == NodeKind::Output && m_ForceOutputFourPins;
         if (!useFourPins) {
             for (const Link& link : m_Links) {
                 if (link.toNodeId == node.id &&
@@ -510,6 +539,10 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             add("g", SocketDirection::Input, SocketType::Mask, "G", true, false);
             add("b", SocketDirection::Input, SocketType::Mask, "B", true, false);
             add("a", SocketDirection::Input, SocketType::Mask, "A", true, false);
+        }
+        if (node.kind == NodeKind::Lut) {
+            add(kMaskInputSocketId, SocketDirection::Input, SocketType::Mask, "Mask", true, true);
+            add(kImageOutputSocketId, SocketDirection::Output, SocketType::Image, "Image", false, true);
         }
         return sockets;
     }
@@ -544,7 +577,7 @@ bool Graph::FindSocket(int nodeId, const std::string& socketId, SocketDefinition
     if (!node) {
         return false;
     }
-    if (node->kind == NodeKind::Output && IsChannelSocketId(socketId)) {
+    if (SupportsDynamicChannelInputs(*node) && IsChannelSocketId(socketId)) {
         if (outSocket) {
             *outSocket = SocketDefinition{
                 socketId,
@@ -594,6 +627,8 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
 
         const char* upstreamSocketId = nullptr;
         if (node->kind == NodeKind::Layer && currentSocketId == kImageOutputSocketId) {
+            upstreamSocketId = kImageInputSocketId;
+        } else if (node->kind == NodeKind::Lut && currentSocketId == kImageOutputSocketId) {
             upstreamSocketId = kImageInputSocketId;
         } else if (node->kind == NodeKind::RawDetailFusion &&
                    (currentSocketId == kImageOutputSocketId || currentSocketId == kMaskOutputSocketId)) {
@@ -649,6 +684,7 @@ bool Graph::IsScalarSocketStream(int nodeId, const std::string& socketId) const 
 
         switch (node->kind) {
             case NodeKind::Layer:
+            case NodeKind::Lut:
                 if (currentSocketId == kImageOutputSocketId) {
                     return finish(inputIsScalar(kImageInputSocketId));
                 }
@@ -716,6 +752,7 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
             case NodeKind::MaskGenerator:
             case NodeKind::CustomMask:
                 return currentNodeId;
+            case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
                 return currentNodeId;
             case NodeKind::RawNeuralDenoise: {
@@ -725,6 +762,20 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
             case NodeKind::Layer: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
+            case NodeKind::Lut: {
+                if (const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId)) {
+                    return resolve(upstream->fromNodeId, upstream->fromSocketId);
+                }
+                for (const char* channelSocketId : { "r", "g", "b", "a" }) {
+                    if (const Link* channelInput = FindInputLink(currentNodeId, channelSocketId)) {
+                        const int sourceId = resolve(channelInput->fromNodeId, channelInput->fromSocketId);
+                        if (sourceId > 0) {
+                            return sourceId;
+                        }
+                    }
+                }
+                return -1;
             }
             case NodeKind::RawDetailFusion: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
@@ -817,7 +868,12 @@ int Graph::ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const {
 
 void Graph::ConnectImageToOutput(int nodeId) {
     const Node* node = FindNode(nodeId);
-    if (!node || (node->kind != NodeKind::Image && node->kind != NodeKind::RawDevelop && node->kind != NodeKind::RawDetailFusion && node->kind != NodeKind::HdrMerge)) {
+    if (!node || (node->kind != NodeKind::Image &&
+                  node->kind != NodeKind::RawDecode &&
+                  node->kind != NodeKind::RawDevelop &&
+                  node->kind != NodeKind::RawDetailFusion &&
+                  node->kind != NodeKind::HdrMerge &&
+                  node->kind != NodeKind::Lut)) {
         return;
     }
 

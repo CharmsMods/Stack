@@ -31,6 +31,32 @@ std::string RawDisplayName(const EditorNodeGraph::RawSourcePayload& rawSource) {
     }
 }
 
+Raw::RawDevelopSettings BuildRawDecodeDefaultSettingsFromMetadata(const Raw::RawMetadata& metadata) {
+    Raw::RawDevelopSettings settings;
+    if (metadata.hasDngBaselineExposure) {
+        settings.exposureStops = metadata.dngBaselineExposure;
+    }
+    settings.blackLevelOverride = metadata.blackLevel;
+    settings.whiteLevelOverride = metadata.whiteLevel;
+    const bool dngHasColorTags = metadata.hasDngForwardMatrix1 || metadata.hasDngForwardMatrix2 ||
+        metadata.hasDngColorMatrix1 || metadata.hasDngColorMatrix2;
+    const bool dngHasCalibrationTags = metadata.hasDngCameraCalibration1 || metadata.hasDngCameraCalibration2;
+    const bool dngHasDualForwardMatrices = metadata.hasDngForwardMatrix1 && metadata.hasDngForwardMatrix2;
+    const bool preferLibRawForUnderSpecifiedDng =
+        metadata.isDng &&
+        metadata.hasCameraMatrix &&
+        dngHasDualForwardMatrices &&
+        !dngHasCalibrationTags;
+    if (!metadata.isDng || preferLibRawForUnderSpecifiedDng) {
+        settings.cameraTransformSource = Raw::RawCameraTransformSource::LibRawRgbCam;
+    } else if (dngHasColorTags) {
+        settings.cameraTransformSource = Raw::RawCameraTransformSource::DngAuto;
+    } else {
+        settings.cameraTransformSource = Raw::RawCameraTransformSource::LibRawRgbCam;
+    }
+    return settings;
+}
+
 std::array<float, 3> EffectiveWhiteBalance(const Raw::RawMetadata& metadata, const Raw::RawDevelopSettings& settings) {
     if (settings.whiteBalanceMode == Raw::WhiteBalanceMode::Manual) {
         return settings.manualWhiteBalance;
@@ -362,9 +388,16 @@ const char* HdrMergeMotionPriorityLabel(Raw::HdrMergeMotionPriority mode) {
 
 bool g_SuppressNextAutoGainHelpPopup = false;
 
+bool GraphSliderRightClickWasConsumed() {
+    return ImGuiExtras::IsGraphNodeControlScopeActive() &&
+           ImGuiExtras::GetNodeControlState().lastRightClickConsumed;
+}
+
 bool ApplyResettableSliderFloat(float* value, float resetValue, bool changed) {
     const ImGuiExtras::NodeControlState& state = ImGuiExtras::GetNodeControlState();
-    if (!state.lastHovered || !ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (GraphSliderRightClickWasConsumed() ||
+        !state.lastHovered ||
+        !ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         return changed;
     }
     g_SuppressNextAutoGainHelpPopup = true;
@@ -377,7 +410,9 @@ bool ApplyResettableSliderFloat(float* value, float resetValue, bool changed) {
 
 bool ApplyResettableSliderInt(int* value, int resetValue, bool changed) {
     const ImGuiExtras::NodeControlState& state = ImGuiExtras::GetNodeControlState();
-    if (!state.lastHovered || !ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (GraphSliderRightClickWasConsumed() ||
+        !state.lastHovered ||
+        !ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         return changed;
     }
     g_SuppressNextAutoGainHelpPopup = true;
@@ -484,7 +519,9 @@ void RenderAutoGainHelpPopup(const char* key, const char* title) {
     const std::string popupId = std::string("AutoGainHelp_") + (key ? key : "Unknown");
     if (g_SuppressNextAutoGainHelpPopup) {
         g_SuppressNextAutoGainHelpPopup = false;
-    } else if (state.lastHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    } else if (!GraphSliderRightClickWasConsumed() &&
+               state.lastHovered &&
+               ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         ImGui::OpenPopup(popupId.c_str());
     }
     if (ImGui::BeginPopup(popupId.c_str())) {
@@ -1382,11 +1419,11 @@ void EditorModule::RenderRawSourceControls(EditorNodeGraph::Node& node, float co
     } else {
         ImGui::TextDisabled("Status: ready");
     }
-    ImGui::TextDisabled("Denoise starts in Develop; RAW Source is not RGB image data.");
+    ImGui::TextDisabled("RAW Source is not RGB image data; connect RAW Decode for the manual path or Develop for the merged auto workflow.");
 
     if (advanced) {
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGui::TextWrapped("Connect this RAW source to a Develop node to produce unclamped scene-linear RGB.");
+        ImGui::TextWrapped("Connect this RAW source to a RAW Decode node for the manual chain or to Develop for the merged auto workflow.");
         if (ImGui::Button("Add Develop", ImVec2(controlWidth, 0.0f))) {
             const EditorNodeGraph::Vec2 position{ node.position.x + 250.0f, node.position.y };
             const int sourceNodeId = node.id;
@@ -1564,6 +1601,214 @@ void EditorModule::RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, f
     }
 }
 
+void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
+    if (node.kind != EditorNodeGraph::NodeKind::RawDecode) {
+        return;
+    }
+    if (node.title.empty()) {
+        node.title = "RAW Decode";
+    }
+
+    const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSource(m_NodeGraph, node);
+    const Raw::RawMetadata emptyMetadata;
+    const Raw::RawMetadata& metadata =
+        (rawSourceNode && rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource)
+            ? rawSourceNode->rawSource.metadata
+            : emptyMetadata;
+    const bool hasRawSourceInput = rawSourceNode && rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource;
+
+    EditorNodeGraph::RawDecodePayload& payload = node.rawDecode;
+    Raw::RawDevelopSettings& settings = payload.settings;
+    const Raw::RawDevelopSettings settingsBefore = settings;
+    const Raw::RawDevelopSettings defaultSettings = BuildRawDecodeDefaultSettingsFromMetadata(metadata);
+    const std::array<float, 3> effectiveWb = EffectiveWhiteBalance(metadata, settings);
+    const bool demosaicEnabled = metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer;
+
+    auto resettableDecodeSliderFloat = [&](const char* label,
+                                           const char* id,
+                                           float* value,
+                                           float resetValue,
+                                           float minValue,
+                                           float maxValue,
+                                           const char* format) {
+        bool localChanged = ImGuiExtras::NodeSliderFloat(label, id, value, minValue, maxValue, format, controlWidth);
+        const ImGuiExtras::NodeControlState& state = ImGuiExtras::GetNodeControlState();
+        if (!GraphSliderRightClickWasConsumed() &&
+            state.lastHovered &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+            std::abs(*value - resetValue) > 0.0001f) {
+            *value = resetValue;
+            localChanged = true;
+        }
+        return localChanged;
+    };
+
+    ImGuiExtras::RichSectionLabel("RAW DECODE", 4.0f);
+    if (hasRawSourceInput) {
+        ImGui::TextDisabled("%s", RawDisplayName(rawSourceNode->rawSource).c_str());
+        ImGui::TextDisabled("Output: unclamped scene-linear float RGB");
+        if (advanced && metadata.visibleWidth > 0 && metadata.visibleHeight > 0) {
+            ImGui::TextDisabled("Visible: %d x %d", metadata.visibleWidth, metadata.visibleHeight);
+        }
+    } else {
+        ImGui::TextWrapped("Connect a RAW Source or RAW Neural Denoise node to decode sensor data into scene-linear RGB.");
+    }
+    ImGui::TextDisabled("Manual RAW foundation: decode, orient, white-balance, and expose before Tone Curve / View Transform.");
+
+    if (!hasRawSourceInput) {
+        ImGui::BeginDisabled();
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("RAW COLOR", 4.0f);
+    const char* wbLabels[] = { "Camera WB", "Auto WB", "Neutral", "Manual" };
+    int wbMode = static_cast<int>(settings.whiteBalanceMode);
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo("White Balance", &wbMode, wbLabels, 4)) {
+        settings.whiteBalanceMode = static_cast<Raw::WhiteBalanceMode>(std::clamp(wbMode, 0, 3));
+    }
+    ImGui::BeginDisabled(settings.whiteBalanceMode != Raw::WhiteBalanceMode::Manual);
+    resettableDecodeSliderFloat("Red Mult", "##RawDecodeWbR", &settings.manualWhiteBalance[0], defaultSettings.manualWhiteBalance[0], 0.05f, 16.0f, "%.3f");
+    resettableDecodeSliderFloat("Green Mult", "##RawDecodeWbG", &settings.manualWhiteBalance[1], defaultSettings.manualWhiteBalance[1], 0.05f, 16.0f, "%.3f");
+    resettableDecodeSliderFloat("Blue Mult", "##RawDecodeWbB", &settings.manualWhiteBalance[2], defaultSettings.manualWhiteBalance[2], 0.05f, 16.0f, "%.3f");
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Effective WB RGB: %.3f %.3f %.3f", effectiveWb[0], effectiveWb[1], effectiveWb[2]);
+    if (!metadata.whiteBalanceSource.empty()) {
+        ImGui::TextDisabled("WB source: %s", metadata.whiteBalanceSource.c_str());
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("RAW EXPOSURE / EV", 4.0f);
+    auto& exposureDraft = m_RawDevelopExposureDrafts[node.id];
+    if (!exposureDraft.editing) {
+        exposureDraft.exposureStops = settings.exposureStops;
+    }
+    const bool exposureDraftChanged = resettableDecodeSliderFloat(
+        "RAW Exposure / EV",
+        "##RawDecodeExposure",
+        &exposureDraft.exposureStops,
+        defaultSettings.exposureStops,
+        -8.0f,
+        8.0f,
+        "%+.2f EV");
+    const ImGuiExtras::NodeControlState& exposureState = ImGuiExtras::GetNodeControlState();
+    if (exposureState.lastHovered) {
+        ImGui::SetTooltip("+1 EV multiplies scene-linear values by 2 before Tone Curve, View Transform, and later image operations.");
+    }
+    if (exposureState.lastActive) {
+        exposureDraft.editing = true;
+    } else if (exposureDraft.editing) {
+        exposureDraft.editing = false;
+        if (std::abs(exposureDraft.exposureStops - settings.exposureStops) > 0.0001f) {
+            settings.exposureStops = exposureDraft.exposureStops;
+        }
+    } else if (exposureDraftChanged &&
+               std::abs(exposureDraft.exposureStops - settings.exposureStops) > 0.0001f) {
+        settings.exposureStops = exposureDraft.exposureStops;
+    }
+    if (metadata.hasDngBaselineExposure) {
+        ImGui::TextDisabled("DNG baseline exposure metadata: %+.2f EV", metadata.dngBaselineExposure);
+    }
+    ImGui::TextDisabled("Scene-linear scale: x%.2f", std::exp2(settings.exposureStops));
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("RAW HIGHLIGHT RECONSTRUCTION", 4.0f);
+    ImGui::TextDisabled("Decode-stage highlight recovery before Tone Curve or later image processing.");
+    const char* highlightLabels[] = { "Off", "Clip / Neutral", "Luminance", "Color Reconstruction" };
+    int highlightMode = static_cast<int>(settings.highlightMode);
+    ImGui::BeginDisabled(!demosaicEnabled);
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo("Mode", &highlightMode, highlightLabels, 4)) {
+        settings.highlightMode = static_cast<Raw::HighlightReconstructionMode>(std::clamp(highlightMode, 0, 3));
+    }
+    resettableDecodeSliderFloat("Strength", "##RawDecodeHighlightStrength", &settings.highlightStrength, defaultSettings.highlightStrength, 0.0f, 1.0f, "%.2f");
+    resettableDecodeSliderFloat("Clip Threshold", "##RawDecodeHighlightThreshold", &settings.highlightThreshold, defaultSettings.highlightThreshold, 0.8f, 1.0f, "%.3f");
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Current mode: %s", Raw::HighlightReconstructionModeName(settings.highlightMode));
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
+    if (demosaicEnabled) {
+        if (settings.demosaicMethod != Raw::DemosaicMethod::Bilinear) {
+            settings.demosaicMethod = Raw::DemosaicMethod::Bilinear;
+        }
+        ImGui::TextDisabled("Method: %s", Raw::DemosaicMethodName(settings.demosaicMethod));
+        ImGui::TextDisabled("Status: preview-safe bilinear decode in this build.");
+    } else {
+        ImGui::TextDisabled("Method: skipped");
+        ImGui::TextDisabled("Status: source is already linear RGB, so demosaic is not used.");
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("RAW ORIENTATION", 4.0f);
+    const char* rotationLabels[] = { "0 Degrees", "90 Degrees CW", "180 Degrees", "270 Degrees CW" };
+    int rotationIdx = settings.rotationDegrees / 90;
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo("Manual Rotation", &rotationIdx, rotationLabels, 4)) {
+        settings.rotationDegrees = std::clamp(rotationIdx, 0, 3) * 90;
+    }
+    ImGuiExtras::NodeCheckbox("Stretch To Fit Frame", "##RawDecodeRotateToFitFrame", &settings.rotateToFitFrame, controlWidth);
+    ImGuiExtras::NodeCheckbox("Flip Horizontally", "##RawDecodeFlipHorizontally", &settings.flipHorizontally, controlWidth);
+    ImGuiExtras::NodeCheckbox("Flip Vertically", "##RawDecodeFlipVertically", &settings.flipVertically, controlWidth);
+    if (advanced && metadata.orientation > 0) {
+        ImGui::TextDisabled("Metadata orientation: %d", metadata.orientation);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGuiExtras::RichSectionLabel("CAMERA COLOR TRANSFORM", 4.0f);
+    ImGuiExtras::NodeCheckbox("Camera Transform", "##RawDecodeCameraTransform", &settings.cameraTransformEnabled, controlWidth);
+    const char* transformLabels[] = {
+        "LibRaw rgb_cam",
+        "DNG Auto (approx)",
+        "DNG ForwardMatrix 1",
+        "DNG ForwardMatrix 2",
+        "DNG ColorMatrix inverse"
+    };
+    int transformSource = static_cast<int>(settings.cameraTransformSource);
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo("Matrix Source", &transformSource, transformLabels, 5)) {
+        settings.cameraTransformSource = static_cast<Raw::RawCameraTransformSource>(std::clamp(transformSource, 0, 4));
+    }
+    if (!metadata.cameraMatrixSource.empty()) {
+        ImGui::TextDisabled("Metadata preferred: %s", metadata.cameraMatrixSource.c_str());
+    } else if (advanced) {
+        ImGui::TextDisabled("Current source: %s", Raw::RawCameraTransformSourceName(settings.cameraTransformSource));
+    }
+
+    if (advanced) {
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGuiExtras::RichSectionLabel("RAW SOURCE SUMMARY", 4.0f);
+        if (!metadata.cameraMake.empty() || !metadata.cameraModel.empty()) {
+            ImGui::TextDisabled("%s %s", metadata.cameraMake.c_str(), metadata.cameraModel.c_str());
+        }
+        if (metadata.rawWidth > 0 && metadata.rawHeight > 0) {
+            ImGui::TextDisabled("Raw: %d x %d", metadata.rawWidth, metadata.rawHeight);
+        }
+        if (metadata.visibleWidth > 0 && metadata.visibleHeight > 0) {
+            ImGui::TextDisabled("Visible: %d x %d", metadata.visibleWidth, metadata.visibleHeight);
+        }
+        if (metadata.pixelLayout == Raw::RawPixelLayout::LinearRgb) {
+            ImGui::TextDisabled("Layout: linear RGB");
+        } else {
+            ImGui::TextDisabled("CFA: %s", Raw::CfaPatternName(metadata.cfaPattern));
+        }
+    }
+
+    if (!hasRawSourceInput) {
+        ImGui::EndDisabled();
+    }
+
+    if (!metadata.error.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.38f, 0.34f, 1.0f));
+        ImGui::TextWrapped("%s", metadata.error.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (!SameRawDevelopSettings(settingsBefore, settings)) {
+        MarkRenderDirty(node.id);
+    }
+}
+
 void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
     if (node.kind != EditorNodeGraph::NodeKind::RawDevelop) {
         return;
@@ -1617,7 +1862,10 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
                                             const char* format) {
         bool localChanged = ImGuiExtras::NodeSliderFloat(label, id, value, minValue, maxValue, format, controlWidth);
         const ImGuiExtras::NodeControlState& state = ImGuiExtras::GetNodeControlState();
-        if (state.lastHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && std::abs(*value - resetValue) > 0.0001f) {
+        if (!GraphSliderRightClickWasConsumed() &&
+            state.lastHovered &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+            std::abs(*value - resetValue) > 0.0001f) {
             *value = resetValue;
             localChanged = true;
         }
@@ -1632,7 +1880,10 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
                                           const char* format) {
         bool localChanged = ImGuiExtras::NodeSliderInt(label, id, value, minValue, maxValue, format, controlWidth);
         const ImGuiExtras::NodeControlState& state = ImGuiExtras::GetNodeControlState();
-        if (state.lastHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && *value != resetValue) {
+        if (!GraphSliderRightClickWasConsumed() &&
+            state.lastHovered &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+            *value != resetValue) {
             *value = resetValue;
             localChanged = true;
         }

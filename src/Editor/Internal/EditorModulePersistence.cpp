@@ -3,11 +3,13 @@
 #include "Async/TaskSystem.h"
 #include "Library/LibraryManager.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
 #include "ThirdParty/stb_image.h"
 #include "ThirdParty/stb_image_write.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -108,6 +110,37 @@ std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
     return std::vector<unsigned char>(static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull, 0u);
 }
 
+bool IsLibRawRuntimeErrorMessage(const std::string& message) {
+    return message == "RAW support is unavailable because libraw.dll is missing or could not be loaded. Restore the DLL next to Stack and relaunch." ||
+        message == "RAW support is unavailable in this build because LibRaw support is disabled.";
+}
+
+void RefreshDeserializedRawRuntimeErrors(EditorNodeGraph::Graph& graph) {
+    const Raw::LibRawRuntimeStatus& runtimeStatus = Raw::GetLibRawRuntimeStatus();
+    for (EditorNodeGraph::Node& node : graph.GetNodes()) {
+        if (node.kind != EditorNodeGraph::NodeKind::RawSource) {
+            continue;
+        }
+
+        if (node.rawSource.metadata.sourcePath.empty()) {
+            node.rawSource.metadata.sourcePath = node.rawSource.sourcePath;
+        }
+
+        const bool hasRawSourcePath =
+            !node.rawSource.sourcePath.empty() ||
+            !node.rawSource.metadata.sourcePath.empty();
+        if (!hasRawSourcePath) {
+            continue;
+        }
+
+        if (!runtimeStatus.runtimeAvailable) {
+            node.rawSource.metadata.error = runtimeStatus.message;
+        } else if (IsLibRawRuntimeErrorMessage(node.rawSource.metadata.error)) {
+            node.rawSource.metadata.error.clear();
+        }
+    }
+}
+
 std::vector<unsigned char> BuildThumbnailBytes(
     const std::vector<unsigned char>& pixels,
     int width,
@@ -149,7 +182,7 @@ nlohmann::json EditorModule::SerializePipeline() {
     return payload;
 }
 
-void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
+void EditorModule::ResetForPipelineDeserialization() {
     ResetRenderSubmissionState();
     ClearAutoGainMaskPreview();
     m_CompositeSelectedOutputNodeId = -1;
@@ -157,7 +190,9 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
     m_Pipeline.ClearOutput();
     m_CompositePreviewPipeline.Clear();
     m_CompositePreviewPipeline.ClearOutput();
+    m_NodeGraph.Clear();
     m_Layers.clear();
+    m_SelectedLayerIndex = -1;
     ClearCompositeRuntimeState();
     m_NodeDirtyGenerations.clear();
     m_DevelopAutoSolveTriggerHashes.clear();
@@ -175,21 +210,24 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
     m_PreviewRequestedGenerations.clear();
     m_PreviewCompletedGenerations.clear();
     m_ScopeDisplayedRevisions.clear();
-    const nlohmann::json layers = EditorNodeGraph::ExtractLayerArray(serialized);
-    if (!layers.is_array()) return;
+}
 
-    for (const auto& layerData : layers) {
-        std::string type = layerData.value("type", "");
-        std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(type);
-
-        if (newLayer) {
-            newLayer->InitializeGL();
-            newLayer->Deserialize(layerData);
-            m_Layers.push_back(newLayer);
-        }
+bool EditorModule::DeserializeSinglePipelineLayer(const nlohmann::json& layerData) {
+    std::string type = layerData.value("type", "");
+    std::shared_ptr<LayerBase> newLayer = LayerRegistry::CreateLayerFromTypeId(type);
+    if (!newLayer) {
+        return true;
     }
 
+    newLayer->InitializeGL();
+    newLayer->Deserialize(layerData);
+    m_Layers.push_back(newLayer);
+    return true;
+}
+
+bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized, bool restoreSourceFromGraphState) {
     m_SelectedLayerIndex = m_Layers.empty() ? -1 : 0;
+
     int sourceWidth = 0;
     int sourceHeight = 0;
     const std::vector<unsigned char>& sourcePixels = m_Pipeline.GetSourcePixelsRaw();
@@ -206,15 +244,20 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
         sourceWidth,
         sourceHeight,
         m_Pipeline.GetSourceChannels());
+    RefreshDeserializedRawRuntimeErrors(m_NodeGraph);
 
     DeserializeCompositePersistence(serialized);
     RefreshGraphLayerMetadata();
 
     const int activeImageNodeId = m_NodeGraph.GetActiveImageNodeId();
-    if (activeImageNodeId > 0) {
+    if (restoreSourceFromGraphState && activeImageNodeId > 0) {
         if (EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(activeImageNodeId)) {
             if (imageNode->kind == EditorNodeGraph::NodeKind::Image && !imageNode->image.pixels.empty()) {
-                LoadSourceFromPixels(imageNode->image.pixels.data(), imageNode->image.width, imageNode->image.height, imageNode->image.channels);
+                LoadSourceFromPixels(
+                    imageNode->image.pixels.data(),
+                    imageNode->image.width,
+                    imageNode->image.height,
+                    imageNode->image.channels);
             } else if (imageNode->kind == EditorNodeGraph::NodeKind::RawSource) {
                 const int width = Raw::DisplayWidth(imageNode->rawSource.metadata);
                 const int height = Raw::DisplayHeight(imageNode->rawSource.metadata);
@@ -222,11 +265,26 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
                 LoadSourceFromPixels(transparent.data(), width, height, 4);
             }
         }
+    }
+
+    if (activeImageNodeId > 0) {
         ApplyGraphLayerOrder();
     } else {
         m_Pipeline.ClearOutput();
     }
     MarkRenderDirty();
+    return true;
+}
+
+void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
+    ResetForPipelineDeserialization();
+    const nlohmann::json layers = EditorNodeGraph::ExtractLayerArray(serialized);
+    if (!layers.is_array()) return;
+
+    for (const auto& layerData : layers) {
+        DeserializeSinglePipelineLayer(layerData);
+    }
+    FinalizeDeserializedPipeline(serialized, true);
 }
 
 void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch) {
@@ -241,18 +299,339 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
         return false;
     }
 
-    ResetRenderSubmissionState();
-    ClearAutoGainMaskPreview();
-    m_Pipeline.ClearOutput();
-    m_CompositePreviewPipeline.ClearOutput();
+    ResetForPipelineDeserialization();
     LoadSourceFromPixels(projectData.sourcePixels.data(), projectData.width, projectData.height, projectData.channels);
-    DeserializePipeline(projectData.pipelineData);
+    const nlohmann::json layers = EditorNodeGraph::ExtractLayerArray(projectData.pipelineData);
+    if (!layers.is_array()) {
+        return false;
+    }
+    for (const auto& layerData : layers) {
+        DeserializeSinglePipelineLayer(layerData);
+    }
+    FinalizeDeserializedPipeline(projectData.pipelineData, false);
+    ResetNodeBrowserThumbnailState();
+    std::size_t nextThumbIndex = 0;
+    RestorePersistedNodeBrowserThumbnailEntries(
+        projectData.nodeBrowserThumbnailEntries,
+        0,
+        projectData.nodeBrowserThumbnailEntries.size(),
+        nextThumbIndex);
     SetCurrentProjectName(projectData.projectName);
     SetCurrentProjectFileName(projectData.projectFileName);
+    WarmNodeBrowserThumbnailPixelsAsync();
+    EnsureNodeBrowserThumbnailCatalog();
     ClearDirty();
     m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
     m_LastAutoSaveTime = -1.0;
     return true;
+}
+
+void EditorModule::RestorePersistedNodeBrowserThumbnailEntries(
+    const std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry>& entries,
+    std::size_t startIndex,
+    std::size_t maxCount,
+    std::size_t& outNextIndex) {
+    outNextIndex = std::min(startIndex, entries.size());
+    const std::size_t endIndex = std::min(entries.size(), startIndex + maxCount);
+    for (; outNextIndex < endIndex; ++outNextIndex) {
+        const auto& entry = entries[outNextIndex];
+        if (entry.previewKey.empty() || entry.pngBytes.empty()) {
+            continue;
+        }
+        NodeBrowserThumbnailRuntimeEntry& runtime = m_NodeBrowserThumbnailEntries[entry.previewKey];
+        runtime.previewSeedHash = entry.previewSeedHash;
+        runtime.previewRecipeVersion = entry.previewRecipeVersion;
+        runtime.pngBytes = entry.pngBytes;
+        runtime.decodedPixels.clear();
+        runtime.width = 0;
+        runtime.height = 0;
+        runtime.channels = 4;
+        runtime.revision = m_NodeBrowserThumbnailRevisionCounter++;
+        runtime.pending = false;
+        runtime.fallback = false;
+    }
+}
+
+void EditorModule::ResetDeferredLoadedProjectApplyState() {
+    m_DeferredLoadedProjectApply = {};
+}
+
+void EditorModule::FailDeferredLoadedProjectApply(std::string message) {
+    m_DeferredLoadedProjectApply.active = false;
+    m_DeferredLoadedProjectApply.failed = true;
+    m_DeferredLoadedProjectApply.allowRenderSubmission = false;
+    m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::Failed;
+    m_DeferredLoadedProjectApply.statusText = std::move(message);
+    m_DeferredLoadedProjectApply.project.reset();
+    m_DeferredLoadedProjectApply.layerArray = nlohmann::json::array();
+}
+
+bool EditorModule::BeginDeferredLoadedProjectApply(std::shared_ptr<LoadedProjectData> projectData) {
+    ResetDeferredLoadedProjectApplyState();
+    if (!projectData ||
+        projectData->sourcePixels.empty() ||
+        projectData->width <= 0 ||
+        projectData->height <= 0) {
+        FailDeferredLoadedProjectApply("Failed to apply the loaded project.");
+        return false;
+    }
+
+    m_DeferredLoadedProjectApply.active = true;
+    m_DeferredLoadedProjectApply.project = std::move(projectData);
+    m_DeferredLoadedProjectApply.layerArray =
+        EditorNodeGraph::ExtractLayerArray(m_DeferredLoadedProjectApply.project->pipelineData);
+    if (!m_DeferredLoadedProjectApply.layerArray.is_array()) {
+        FailDeferredLoadedProjectApply("Failed to read the project's editor state.");
+        return false;
+    }
+
+    m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::ResetRuntime;
+    m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+    return true;
+}
+
+bool EditorModule::IsDeferredLoadedProjectApplyActive() const {
+    return m_DeferredLoadedProjectApply.active;
+}
+
+bool EditorModule::HasDeferredLoadedProjectApplyFailed() const {
+    return m_DeferredLoadedProjectApply.failed;
+}
+
+bool EditorModule::HasDeferredLoadedProjectApplyCoreFinished() const {
+    switch (m_DeferredLoadedProjectApply.step) {
+    case DeferredLoadedProjectApplyState::Step::WaitForFirstRender:
+    case DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails:
+    case DeferredLoadedProjectApplyState::Step::Complete:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool EditorModule::HasDeferredLoadedProjectFirstRenderReady() const {
+    switch (m_DeferredLoadedProjectApply.step) {
+    case DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails:
+    case DeferredLoadedProjectApplyState::Step::Complete:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool EditorModule::IsDeferredLoadedProjectReadyForReveal() const {
+    return !m_DeferredLoadedProjectApply.active &&
+        !m_DeferredLoadedProjectApply.failed &&
+        m_DeferredLoadedProjectApply.step == DeferredLoadedProjectApplyState::Step::Complete;
+}
+
+const std::string& EditorModule::GetDeferredLoadedProjectStatusText() const {
+    return m_DeferredLoadedProjectApply.statusText;
+}
+
+const char* EditorModule::GetDeferredLoadedProjectPhaseLabel() const {
+    switch (m_DeferredLoadedProjectApply.step) {
+    case DeferredLoadedProjectApplyState::Step::ResetRuntime: return "ResetRuntime";
+    case DeferredLoadedProjectApplyState::Step::InstallSource: return "InstallSource";
+    case DeferredLoadedProjectApplyState::Step::DeserializeLayers: return "DeserializeLayers";
+    case DeferredLoadedProjectApplyState::Step::FinalizePipeline: return "FinalizePipeline";
+    case DeferredLoadedProjectApplyState::Step::RestorePersistedThumbnails: return "RestorePersistedThumbnails";
+    case DeferredLoadedProjectApplyState::Step::FinalizeBookkeeping: return "FinalizeBookkeeping";
+    case DeferredLoadedProjectApplyState::Step::PrepareNodeBrowserThumbnails: return "PrepareNodeBrowserThumbnails";
+    case DeferredLoadedProjectApplyState::Step::WaitForFirstRender: return "WaitForFirstRender";
+    case DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails: return "WaitForNodeBrowserThumbnails";
+    case DeferredLoadedProjectApplyState::Step::Complete: return "Complete";
+    case DeferredLoadedProjectApplyState::Step::Failed: return "Failed";
+    case DeferredLoadedProjectApplyState::Step::None:
+    default:
+        return "None";
+    }
+}
+
+std::size_t EditorModule::GetPendingNodeBrowserThumbnailWarmCount() const {
+    return m_NodeBrowserThumbnailWarmPendingEntries;
+}
+
+std::size_t EditorModule::GetPendingNodeBrowserThumbnailGenerationCount() const {
+    return m_NodeBrowserThumbnailPendingEntries;
+}
+
+void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
+    if (!m_DeferredLoadedProjectApply.active || !m_DeferredLoadedProjectApply.project) {
+        return;
+    }
+
+    using Clock = std::chrono::steady_clock;
+    const auto startTime = Clock::now();
+    auto elapsedMs = [&]() {
+        return std::chrono::duration<double, std::milli>(Clock::now() - startTime).count();
+    };
+
+    bool processedWorkThisFrame = false;
+    const double clampedBudgetMs = std::max(0.0, projectApplyBudgetMs);
+
+    while (m_DeferredLoadedProjectApply.active && !m_DeferredLoadedProjectApply.failed) {
+        const auto step = m_DeferredLoadedProjectApply.step;
+        if (processedWorkThisFrame && elapsedMs() >= clampedBudgetMs &&
+            step != DeferredLoadedProjectApplyState::Step::WaitForFirstRender &&
+            step != DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails) {
+            break;
+        }
+
+        switch (step) {
+        case DeferredLoadedProjectApplyState::Step::ResetRuntime:
+            m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+            ResetForPipelineDeserialization();
+            m_DeferredLoadedProjectApply.allowRenderSubmission = false;
+            m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::InstallSource;
+            processedWorkThisFrame = true;
+            break;
+
+        case DeferredLoadedProjectApplyState::Step::InstallSource: {
+            const auto& project = *m_DeferredLoadedProjectApply.project;
+            m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+            LoadSourceFromPixels(project.sourcePixels.data(), project.width, project.height, project.channels);
+            m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::DeserializeLayers;
+            processedWorkThisFrame = true;
+            break;
+        }
+
+        case DeferredLoadedProjectApplyState::Step::DeserializeLayers: {
+            m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+            const auto& layers = m_DeferredLoadedProjectApply.layerArray;
+            bool processedLayer = false;
+            while (m_DeferredLoadedProjectApply.nextLayerIndex < layers.size()) {
+                DeserializeSinglePipelineLayer(layers[m_DeferredLoadedProjectApply.nextLayerIndex]);
+                ++m_DeferredLoadedProjectApply.nextLayerIndex;
+                processedLayer = true;
+                processedWorkThisFrame = true;
+                if (elapsedMs() >= clampedBudgetMs) {
+                    break;
+                }
+            }
+
+            if (m_DeferredLoadedProjectApply.nextLayerIndex >= layers.size()) {
+                m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::FinalizePipeline;
+            } else if (!processedLayer) {
+                processedWorkThisFrame = true;
+            }
+            if (elapsedMs() >= clampedBudgetMs) {
+                return;
+            }
+            break;
+        }
+
+        case DeferredLoadedProjectApplyState::Step::FinalizePipeline:
+            m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+            FinalizeDeserializedPipeline(m_DeferredLoadedProjectApply.project->pipelineData, false);
+            m_DeferredLoadedProjectApply.targetRenderRevision = m_RenderRevision;
+            m_DeferredLoadedProjectApply.allowRenderSubmission = true;
+            m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::RestorePersistedThumbnails;
+            processedWorkThisFrame = true;
+            break;
+
+        case DeferredLoadedProjectApplyState::Step::RestorePersistedThumbnails: {
+            m_DeferredLoadedProjectApply.statusText = "Restoring saved node previews...";
+            if (m_DeferredLoadedProjectApply.nextThumbnailIndex == 0) {
+                ResetNodeBrowserThumbnailState();
+            }
+
+            const auto& entries = m_DeferredLoadedProjectApply.project->nodeBrowserThumbnailEntries;
+            if (m_DeferredLoadedProjectApply.nextThumbnailIndex >= entries.size()) {
+                m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::FinalizeBookkeeping;
+                processedWorkThisFrame = true;
+                break;
+            }
+
+            const std::size_t restoreBatchCount = 8;
+            RestorePersistedNodeBrowserThumbnailEntries(
+                entries,
+                m_DeferredLoadedProjectApply.nextThumbnailIndex,
+                restoreBatchCount,
+                m_DeferredLoadedProjectApply.nextThumbnailIndex);
+            processedWorkThisFrame = true;
+            if (m_DeferredLoadedProjectApply.nextThumbnailIndex >= entries.size()) {
+                m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::FinalizeBookkeeping;
+            }
+            if (elapsedMs() >= clampedBudgetMs) {
+                return;
+            }
+            break;
+        }
+
+        case DeferredLoadedProjectApplyState::Step::FinalizeBookkeeping: {
+            const auto& project = *m_DeferredLoadedProjectApply.project;
+            m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+            SetCurrentProjectName(project.projectName);
+            SetCurrentProjectFileName(project.projectFileName);
+            ClearDirty();
+            m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
+            m_LastAutoSaveTime = -1.0;
+            m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::PrepareNodeBrowserThumbnails;
+            processedWorkThisFrame = true;
+            break;
+        }
+
+        case DeferredLoadedProjectApplyState::Step::PrepareNodeBrowserThumbnails:
+            m_DeferredLoadedProjectApply.statusText = "Preparing node browser thumbnails...";
+            WarmNodeBrowserThumbnailPixelsAsync();
+            EnsureNodeBrowserThumbnailCatalog();
+            m_DeferredLoadedProjectApply.step = m_NodeGraph.IsOutputConnected()
+                ? DeferredLoadedProjectApplyState::Step::WaitForFirstRender
+                : DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails;
+            processedWorkThisFrame = true;
+            break;
+
+        case DeferredLoadedProjectApplyState::Step::WaitForFirstRender:
+            m_DeferredLoadedProjectApply.statusText = "Rendering first frame...";
+            if (!m_NodeGraph.IsOutputConnected() ||
+                (m_LastSubmittedRenderRevision >= m_DeferredLoadedProjectApply.targetRenderRevision &&
+                 !m_RenderDirty &&
+                 !m_RenderPending &&
+                 !m_RenderWorker.IsBusy())) {
+                m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails;
+                processedWorkThisFrame = true;
+                continue;
+            }
+            return;
+
+        case DeferredLoadedProjectApplyState::Step::WaitForNodeBrowserThumbnails:
+            m_DeferredLoadedProjectApply.statusText = "Preparing node browser thumbnails...";
+            if (m_NodeBrowserThumbnailWarmPendingEntries == 0 &&
+                m_NodeBrowserThumbnailPendingEntries == 0) {
+                m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::Complete;
+                processedWorkThisFrame = true;
+                continue;
+            }
+            return;
+
+        case DeferredLoadedProjectApplyState::Step::Complete:
+            m_DeferredLoadedProjectApply.active = false;
+            m_DeferredLoadedProjectApply.failed = false;
+            m_DeferredLoadedProjectApply.allowRenderSubmission = false;
+            m_DeferredLoadedProjectApply.project.reset();
+            m_DeferredLoadedProjectApply.layerArray = nlohmann::json::array();
+            m_DeferredLoadedProjectApply.statusText = "Project ready.";
+            processedWorkThisFrame = true;
+            return;
+
+        case DeferredLoadedProjectApplyState::Step::Failed:
+        case DeferredLoadedProjectApplyState::Step::None:
+        default:
+            return;
+        }
+    }
+}
+
+void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs) {
+    ConsumeRenderWorkerResults();
+    ConsumeNodeBrowserThumbnailWorkerResults();
+    TickDeferredLoadedProjectApply(projectApplyBudgetMs);
+    if (!m_DeferredLoadedProjectApply.active || m_DeferredLoadedProjectApply.allowRenderSubmission) {
+        SubmitRenderIfReady();
+    }
+    ConsumeRenderWorkerResults();
+    ConsumeNodeBrowserThumbnailWorkerResults();
 }
 
 void EditorModule::RequestLoadSourceImage(const std::string& path) {
@@ -261,9 +640,20 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
     }
 
     if (Raw::RawLoader::IsRawPath(path)) {
+        const Raw::LibRawRuntimeStatus& runtimeStatus = Raw::GetLibRawRuntimeStatus();
+        if (!runtimeStatus.runtimeAvailable) {
+            m_SourceLoadTaskState = Async::TaskState::Failed;
+            m_SourceLoadStatusText = runtimeStatus.message;
+            QueueUiNotification(UiNotificationSeverity::Error, runtimeStatus.message, "editor-raw-runtime");
+            return;
+        }
+
         if (AddGraphRawChainFromFile(path, EditorNodeGraph::Vec2{ 20.0f, 120.0f })) {
             m_SourceLoadTaskState = Async::TaskState::Idle;
             m_SourceLoadStatusText = "RAW source node loaded.";
+            SetCurrentProjectName("");
+            SetCurrentProjectFileName("");
+            MarkNodeBrowserThumbnailSourceChanged();
             QueueUiNotification(UiNotificationSeverity::Success, "RAW source node loaded.", "editor-source-load");
         } else {
             m_SourceLoadTaskState = Async::TaskState::Failed;
@@ -318,10 +708,12 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             if (imageNode) {
                 imageNode->title = payload.label.empty() ? "Image" : payload.label;
                 imageNode->image = std::move(payload);
+                EditorNodeGraph::InvalidateImagePayloadRuntime(imageNode->image);
                 m_NodeGraph.SetActiveImageNodeId(imageNode->id);
             }
             SetCurrentProjectName("");
             SetCurrentProjectFileName("");
+            MarkNodeBrowserThumbnailSourceChanged();
 
             m_SourceLoadTaskState = Async::TaskState::Idle;
             m_SourceLoadStatusText = "Source image loaded.";
@@ -520,6 +912,7 @@ bool EditorModule::BuildProjectDocumentForSave(
         ? std::move(sourcePngBytes)
         : EncodePngBytes(sourcePixels, sourceW, sourceH, 4);
     outDocument.pipelineData = pipeline;
+    outDocument.nodeBrowserThumbnailEntries = GetPersistedNodeBrowserThumbnails();
     return !outDocument.sourceImageBytes.empty();
 }
 

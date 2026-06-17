@@ -1,9 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
-project(Stack VERSION 1.0)
+include(cmake/StackVersion.cmake)
+project(Stack VERSION ${STACK_VERSION})
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppVersion.h.in"
+    "${CMAKE_BINARY_DIR}/generated/src/App/AppVersion.h"
+    @ONLY
+)
+
+if (WIN32)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/resources.rc.in"
+        "${CMAKE_BINARY_DIR}/generated/src/resources.rc"
+        @ONLY
+    )
+endif()
 
 # Ensure folders for outputs are nicely mapped directly to the build folder
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -135,7 +150,7 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 )
 
 if (WIN32)
-    list(APPEND SRC_FILES "src/resources.rc")
+    list(APPEND SRC_FILES "${CMAKE_BINARY_DIR}/generated/src/resources.rc")
 endif()
 
 # Legacy aggregate layer implementations were replaced by split, registry-backed
@@ -147,6 +162,7 @@ add_dependencies(${PROJECT_NAME} BakeAssets BakeTabIcons BakeFonts)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_BINARY_DIR}/generated/src
+    ${CMAKE_BINARY_DIR}/generated/src/App
     src
     src/ThirdParty
 )
@@ -159,18 +175,27 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 if (STACK_ENABLE_LIBRAW)
     target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_ENABLE_LIBRAW=1)
     target_link_libraries(${PROJECT_NAME} PRIVATE stack_libraw)
+    if (WIN32 AND MSVC)
+        target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:libraw.dll")
+        target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+    endif()
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
             "$<TARGET_FILE_DIR:${PROJECT_NAME}>/THIRD_PARTY_NOTICES.md"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${imgui_SOURCE_DIR}/LICENSE.txt"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/DearImGui-MIT.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${glfw_SOURCE_DIR}/LICENSE.md"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/GLFW-zlib-libpng.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${libraw_SOURCE_DIR}/LICENSE.LGPL"
             "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-LGPL-2.1.txt"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${libraw_SOURCE_DIR}/LICENSE.CDDL"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-CDDL-1.0.txt"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${libraw_SOURCE_DIR}/COPYRIGHT"
             "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-COPYRIGHT.txt"
@@ -180,7 +205,7 @@ endif()
 
 # Link OpenGL based on platform
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 dwmapi)
+    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 dwmapi shell32 ole32 shlwapi winhttp bcrypt)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE "-framework OpenGL")
 elseif (UNIX)
@@ -191,6 +216,7 @@ option(STACK_BUILD_GRAPH_TESTS "Build focused node graph behavior tests" ON)
 if (STACK_BUILD_GRAPH_TESTS)
     add_executable(StackGraphBehaviorTests
         tools/graph_behavior_tests.cpp
+        src/Color/LutImporter.cpp
         src/Editor/NodeGraph/EditorNodeGraph.cpp
         src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp
         src/Editor/NodeGraph/Model/EditorNodeGraphLayoutValidation.cpp

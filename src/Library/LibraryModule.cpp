@@ -712,6 +712,17 @@ void LibraryModule::RenderUI(
     m_OnLoadEditorProject = std::move(onLoadEditorProject);
     m_BlockLibraryGridContextMenuThisFrame = false;
     const float dt = ImGui::GetIO().DeltaTime;
+    const bool wallpaperSurfaces = appearance && appearance->GetBackgroundImageEnabled();
+    const StackAppearance::RuntimeSurfacePalette surfacePalette =
+        appearance ? appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
+    auto blendColor = [](const ImVec4& from, const ImVec4& to, float t) {
+        const float clamped = std::clamp(t, 0.0f, 1.0f);
+        return ImVec4(
+            from.x + (to.x - from.x) * clamped,
+            from.y + (to.y - from.y) * clamped,
+            from.z + (to.z - from.z) * clamped,
+            from.w + (to.w - from.w) * clamped);
+    };
 
     if (!m_PreviewProject && !m_PreviewAsset) {
         LibraryManager::Get().TickAutoRefresh();
@@ -758,14 +769,25 @@ void LibraryModule::RenderUI(
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
 
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(255, 255, 255, 18));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255, 255, 255, 24));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(255, 255, 255, 32));
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(255, 255, 255, 14));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 255, 255, 26));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(255, 255, 255, 34));
-    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(220, 236, 244, 34));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    if (wallpaperSurfaces) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, surfacePalette.controlSurface);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, surfacePalette.controlSurfaceHovered);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, surfacePalette.controlSurfaceActive);
+        ImGui::PushStyleColor(ImGuiCol_Button, surfacePalette.controlSurface);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, surfacePalette.controlSurfaceHovered);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, surfacePalette.controlSurfaceActive);
+        ImGui::PushStyleColor(ImGuiCol_Border, surfacePalette.border);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(255, 255, 255, 18));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255, 255, 255, 24));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(255, 255, 255, 32));
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(255, 255, 255, 14));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 255, 255, 26));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(255, 255, 255, 34));
+        ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(220, 236, 244, 34));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(80.0f, 32.0f));
     ImGui::BeginChild("LibraryTabContainer", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
@@ -796,6 +818,9 @@ void LibraryModule::RenderUI(
 
     if (headerHeight > 0.0f) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        if (wallpaperSurfaces) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+        }
         if (ImGui::BeginChild("LibraryHeader", ImVec2(0, headerHeight), false, ImGuiWindowFlags_NoScrollbar)) {
             bool hasPreviousStatus = false;
             auto renderInlineStatus = [&](const char* text, float& alphaState) {
@@ -815,6 +840,9 @@ void LibraryModule::RenderUI(
             renderInlineStatus(LibraryManager::Get().GetProjectLoadStatusText().c_str(), m_LoadStatusAlpha);
         }
         ImGui::EndChild();
+        if (wallpaperSurfaces) {
+            ImGui::PopStyleColor();
+        }
         ImGui::PopStyleVar(); // Pop LibraryHeader's WindowPadding
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
@@ -822,7 +850,25 @@ void LibraryModule::RenderUI(
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 18.0f));
     ImGuiStyle& style = ImGui::GetStyle();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x + 16.0f, style.ItemSpacing.y + 20.0f));
-    ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::BeginChild("LibraryGrid", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    if (m_ScrollTargetY < 0.0f) {
+        m_ScrollTargetY = ImGui::GetScrollY();
+        m_ScrollCurrentY = m_ScrollTargetY;
+    }
+
+    const float currentScrollY = ImGui::GetScrollY();
+    if (std::abs(currentScrollY - m_ScrollCurrentY) > 2.0f && m_ScrollCurrentY >= 0.0f) {
+        m_ScrollTargetY = currentScrollY;
+        m_ScrollCurrentY = currentScrollY;
+    }
+
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f) {
+            m_ScrollTargetY -= wheel * 90.0f;
+        }
+    }
 
     int renderedCount = 0;
     const ImVec2 layoutStartScreen = ImGui::GetCursorScreenPos();
@@ -920,7 +966,7 @@ void LibraryModule::RenderUI(
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(118, 162, 196, 210));
+    ImGui::PushStyleColor(ImGuiCol_Border, wallpaperSurfaces ? surfacePalette.border : ImVec4(118.0f / 255.0f, 162.0f / 255.0f, 196.0f / 255.0f, 210.0f / 255.0f));
     if (!m_BlockLibraryGridContextMenuThisFrame &&
         ImGui::BeginPopupContextWindow("LibraryGridContextMenu", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
         RenderLibraryMenuOptions(importBusy, exportBusy);
@@ -970,20 +1016,24 @@ void LibraryModule::RenderUI(
             // Feathered blend overlay background
             float gradientWidth = std::min(60.0f, m_FilterPanelWidthAnim);
             float solidWidth = m_FilterPanelWidthAnim - gradientWidth;
-            
-            ImVec4 workspaceColor = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
-            const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
-            const bool isLightBg = luminance >= 0.5f;
-
-            ImVec4 colBgOpaqueVec = workspaceColor;
-            colBgOpaqueVec.w = isLightBg ? 0.95f : 0.93f;
-            const ImU32 colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
-
-            ImVec4 colBgTransVec = workspaceColor;
-            colBgTransVec.w = 0.0f;
-            const ImU32 colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
-
-            const ImU32 colTitleText = isLightBg ? IM_COL32(18, 24, 30, 255) : IM_COL32(255, 255, 255, 255);
+            ImVec4 colBgOpaqueVec = surfacePalette.drawerSurface;
+            ImU32 colBgOpaque = 0;
+            ImU32 colBgTrans = 0;
+            if (wallpaperSurfaces) {
+                colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
+                colBgTrans = ImGui::ColorConvertFloat4ToU32(surfacePalette.drawerSurfaceTransparent);
+            } else {
+                ImVec4 workspaceColor = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+                const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
+                const bool isLightBg = luminance >= 0.5f;
+                colBgOpaqueVec = workspaceColor;
+                colBgOpaqueVec.w = isLightBg ? 0.95f : 0.93f;
+                colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
+                ImVec4 colBgTransVec = workspaceColor;
+                colBgTransVec.w = 0.0f;
+                colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
+            }
+            const ImU32 colTitleText = ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_Text));
             
             // Solid part
             if (solidWidth > 0.0f) {
@@ -1000,6 +1050,9 @@ void LibraryModule::RenderUI(
             float contentWidth = m_FilterPanelWidthAnim - 40.0f;
             if (contentWidth > 1.0f) {
                 ImGui::SetCursorScreenPos(ImVec2(gridPos.x + 16.0f, gridPos.y + 24.0f));
+                if (wallpaperSurfaces) {
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                }
                 ImGui::BeginChild("LibraryTagsDrawer", ImVec2(contentWidth, gridSize.y - 48.0f), false, ImGuiWindowFlags_NoScrollbar);
                 
                 ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
@@ -1063,9 +1116,16 @@ void LibraryModule::RenderUI(
                 ImGui::Spacing();
                 const bool tagReady = hasSelectionForTagging && (m_AddTagBuffer[0] != '\0');
                 if (tagReady) {
-                    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(64, 150, 84, 92));
-                    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(74, 168, 94, 104));
-                    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(82, 184, 102, 116));
+                    if (wallpaperSurfaces) {
+                        const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+                        ImGui::PushStyleColor(ImGuiCol_FrameBg, blendColor(surfacePalette.controlSurface, accent, 0.24f));
+                        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, blendColor(surfacePalette.controlSurfaceHovered, accent, 0.30f));
+                        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, blendColor(surfacePalette.controlSurfaceActive, accent, 0.36f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(64, 150, 84, 92));
+                        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(74, 168, 94, 104));
+                        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(82, 184, 102, 116));
+                    }
                 }
                 ImGui::SetNextItemWidth(-14.0f);
                 const bool submittedTag = ImGui::InputTextWithHint(
@@ -1102,6 +1162,9 @@ void LibraryModule::RenderUI(
                 }
 
                 ImGui::EndChild();
+                if (wallpaperSurfaces) {
+                    ImGui::PopStyleColor();
+                }
             }
         }
     }
@@ -1138,10 +1201,17 @@ void LibraryModule::RenderUI(
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f));
 
         // 1. Render Search Bar
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(24, 28, 34, 235));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(32, 38, 46, 245));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(38, 44, 52, 255));
-        ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(110, 186, 255, 64));
+        if (wallpaperSurfaces) {
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, surfacePalette.controlSurface);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, surfacePalette.controlSurfaceHovered);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, surfacePalette.controlSurfaceActive);
+            ImGui::PushStyleColor(ImGuiCol_Border, surfacePalette.border);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(24, 28, 34, 235));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(32, 38, 46, 245));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(38, 44, 52, 255));
+            ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(110, 186, 255, 64));
+        }
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 17.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 6.0f));
@@ -1188,9 +1258,25 @@ void LibraryModule::RenderUI(
         ImGui::BeginGroup();
         {
             auto renderModePill = [&](const char* label, bool active, bool showAssetsValue, unsigned int iconTex) {
-                ImGui::PushStyleColor(ImGuiCol_Button, active ? IM_COL32(110, 186, 255, 52) : IM_COL32(255, 255, 255, 10));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? IM_COL32(110, 186, 255, 68) : IM_COL32(255, 255, 255, 22));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? IM_COL32(110, 186, 255, 82) : IM_COL32(255, 255, 255, 30));
+                if (wallpaperSurfaces) {
+                    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+                    const ImVec4 button = active
+                        ? blendColor(surfacePalette.controlSurface, accent, 0.28f)
+                        : surfacePalette.controlSurface;
+                    const ImVec4 buttonHovered = active
+                        ? blendColor(surfacePalette.controlSurfaceHovered, accent, 0.34f)
+                        : surfacePalette.controlSurfaceHovered;
+                    const ImVec4 buttonActive = active
+                        ? blendColor(surfacePalette.controlSurfaceActive, accent, 0.40f)
+                        : surfacePalette.controlSurfaceActive;
+                    ImGui::PushStyleColor(ImGuiCol_Button, button);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, buttonHovered);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, buttonActive);
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, active ? IM_COL32(110, 186, 255, 52) : IM_COL32(255, 255, 255, 10));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? IM_COL32(110, 186, 255, 68) : IM_COL32(255, 255, 255, 22));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? IM_COL32(110, 186, 255, 82) : IM_COL32(255, 255, 255, 30));
+                }
                 
                 bool clicked = false;
                 if (iconTex != 0) {
@@ -1225,6 +1311,19 @@ void LibraryModule::RenderUI(
         ImGui::PopStyleVar(3);
     }
 
+    const float maxScrollY = ImGui::GetScrollMaxY();
+    m_ScrollTargetY = std::clamp(m_ScrollTargetY, 0.0f, maxScrollY);
+
+    if (std::abs(m_ScrollCurrentY - m_ScrollTargetY) > 0.05f) {
+        const float scrollT = 1.0f - std::exp(-dt * 14.0f);
+        m_ScrollCurrentY += (m_ScrollTargetY - m_ScrollCurrentY) * scrollT;
+        m_ScrollCurrentY = std::clamp(m_ScrollCurrentY, 0.0f, maxScrollY);
+        ImGui::SetScrollY(m_ScrollCurrentY);
+    } else {
+        m_ScrollCurrentY = m_ScrollTargetY;
+        ImGui::SetScrollY(m_ScrollCurrentY);
+    }
+
     ImGui::EndChild(); // End LibraryGrid
     ImGui::PopStyleVar(2); // Pop LibraryGrid's WindowPadding and ItemSpacing
     ImGui::EndChild(); // End LibraryTabContainer
@@ -1236,9 +1335,9 @@ void LibraryModule::RenderUI(
     PruneCardMotionStates(m_AssetCardMotion, ImGui::GetFrameCount());
 
     if (m_PreviewProject || m_ProjectPreviewTransition > 0.0f) {
-        RenderPreviewPopup(editor, composite, activeTab, onLoadEditorProject);
+        RenderPreviewPopup(editor, composite, activeTab);
     } else if (m_PreviewAsset || m_AssetPreviewTransition > 0.0f) {
-        RenderAssetPreviewPopup(editor, composite, activeTab, onLoadEditorProject);
+        RenderAssetPreviewPopup(editor, composite, activeTab);
     }
 
     if (importBusy) {
@@ -1250,6 +1349,27 @@ void LibraryModule::RenderUI(
     } else if (loadBusy) {
         ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetProjectLoadStatusText().c_str());
     }
+}
+
+void LibraryModule::RequestOpenEditorProject(const std::string& projectFileName) {
+    if (projectFileName.empty()) {
+        return;
+    }
+
+    if (m_OnLoadEditorProject) {
+        m_OnLoadEditorProject(projectFileName);
+        return;
+    }
+
+    if (m_CachedEditor == nullptr) {
+        return;
+    }
+
+    LibraryManager::Get().RequestLoadProject(projectFileName, m_CachedEditor, [this](bool success) {
+        if (success && m_CachedActiveTab != nullptr) {
+            *m_CachedActiveTab = 1;
+        }
+    });
 }
 
 bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule* editor) {
@@ -1386,18 +1506,13 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(118, 162, 196, 210));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_Border));
     if (ImGui::BeginPopup(popupId.c_str())) {
         const bool multiple = m_SelectedProjects.size() > 1;
         if (!multiple) {
             if (project.projectKind == "editor" || project.projectKind.empty()) {
                 if (ImGui::MenuItem("Open in Editor")) {
-                    if (m_OnLoadEditorProject) {
-                        m_OnLoadEditorProject(project.fileName);
-                    } else {
-                        LibraryManager::Get().RequestLoadProject(project.fileName, m_CachedEditor);
-                        if (m_CachedActiveTab) *m_CachedActiveTab = 1;
-                    }
+                    RequestOpenEditorProject(project.fileName);
                 }
             }
             if (project.projectKind == "composite") {
@@ -1563,7 +1678,7 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(118, 162, 196, 210));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_Border));
     if (ImGui::BeginPopup(popupId.c_str())) {
         if (ImGui::MenuItem("Add Selected To Editor Composite", nullptr, false, !m_SelectedAssets.empty() && editor != nullptr)) {
             for (const auto& fn : m_SelectedAssets) {
@@ -1593,8 +1708,7 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
 void LibraryModule::RenderPreviewPopup(
     EditorModule* editor,
     CompositeModule* composite,
-    int* activeTab,
-    const std::function<void(const std::string&)>& onLoadEditorProject) {
+    int* activeTab) {
     if (!m_PreviewProject && m_ProjectPreviewTransition <= 0.0f) {
         return;
     }
@@ -1854,19 +1968,9 @@ void LibraryModule::RenderPreviewPopup(
             } else {
                 m_ProjectPreviewClosing = true;
                 m_ProjectPreviewRefreshAfterClose = false;
-                if (onLoadEditorProject) {
-                    onLoadEditorProject(projectFileName);
-                } else {
-                    LibraryManager::Get().RequestLoadProject(projectFileName, editor, [this, activeTab](bool success) {
-                        if (!success) {
-                            return;
-                        }
-
-                        if (activeTab) {
-                            *activeTab = 1;
-                        }
-                    });
-                }
+                (void)editor;
+                (void)activeTab;
+                RequestOpenEditorProject(projectFileName);
             }
         }
     }
@@ -1952,8 +2056,7 @@ void LibraryModule::RenderPreviewPopup(
 void LibraryModule::RenderAssetPreviewPopup(
     EditorModule* editor,
     CompositeModule* composite,
-    int* activeTab,
-    const std::function<void(const std::string&)>& onLoadEditorProject) {
+    int* activeTab) {
     if (!m_PreviewAsset && m_AssetPreviewTransition <= 0.0f) {
         return;
     }
@@ -2203,19 +2306,9 @@ void LibraryModule::RenderAssetPreviewPopup(
                 m_ConfirmLoadOpen = true;
             } else {
                 m_AssetPreviewClosing = true;
-                if (onLoadEditorProject) {
-                    onLoadEditorProject(projectFileName);
-                } else {
-                    LibraryManager::Get().RequestLoadProject(projectFileName, editor, [this, activeTab](bool success) {
-                        if (!success) {
-                            return;
-                        }
-
-                        if (activeTab) {
-                            *activeTab = 1;
-                        }
-                    });
-                }
+                (void)editor;
+                (void)activeTab;
+                RequestOpenEditorProject(projectFileName);
             }
         }
     }
@@ -2252,7 +2345,7 @@ void LibraryModule::RenderAssetPreviewPopup(
 
 
 void LibraryModule::RenderGlobalPopups() {
-    RenderConfirmLoadPopup(m_OnLoadEditorProject);
+    RenderConfirmLoadPopup();
     RenderFolderImportPopup();
     RenderImportConflictPopup();
     RenderAssetConflictPopup();
@@ -2362,7 +2455,7 @@ void LibraryModule::RenderFolderImportPopup() {
     }
 }
 
-void LibraryModule::RenderConfirmLoadPopup(const std::function<void(const std::string&)>& onLoadEditorProject) {
+void LibraryModule::RenderConfirmLoadPopup() {
     if (m_ConfirmLoadOpen) {
         ImGui::OpenPopup("Project Already Open##Library");
         m_ConfirmLoadOpen = false;
@@ -2411,13 +2504,7 @@ void LibraryModule::RenderConfirmLoadPopup(const std::function<void(const std::s
                             if (m_PreviewAsset) {
                                 m_AssetPreviewClosing = true;
                             }
-                            if (m_OnLoadEditorProject) {
-                                m_OnLoadEditorProject(m_PendingLoadProjectFileName);
-                            } else {
-                                LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool loadSuccess) {
-                                    if (loadSuccess && m_CachedActiveTab) *m_CachedActiveTab = 1;
-                                });
-                            }
+                            RequestOpenEditorProject(m_PendingLoadProjectFileName);
                         });
                 }
             } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
@@ -2462,13 +2549,7 @@ void LibraryModule::RenderConfirmLoadPopup(const std::function<void(const std::s
                 if (m_PreviewAsset) {
                     m_AssetPreviewClosing = true;
                 }
-                if (onLoadEditorProject) {
-                    onLoadEditorProject(m_PendingLoadProjectFileName);
-                } else {
-                    LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool success) {
-                        if (success && m_CachedActiveTab) *m_CachedActiveTab = 1;
-                    });
-                }
+                RequestOpenEditorProject(m_PendingLoadProjectFileName);
             } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
                 if (m_PreviewProject) {
                     m_ProjectPreviewClosing = true;
@@ -2526,13 +2607,7 @@ void LibraryModule::RenderConfirmLoadPopup(const std::function<void(const std::s
                     if (m_PreviewAsset) {
                         m_AssetPreviewClosing = true;
                     }
-                    if (m_OnLoadEditorProject) {
-                        m_OnLoadEditorProject(m_PendingLoadProjectFileName);
-                    } else {
-                        LibraryManager::Get().RequestLoadProject(m_PendingLoadProjectFileName, m_CachedEditor, [this](bool loadSuccess) {
-                            if (loadSuccess && m_CachedActiveTab) *m_CachedActiveTab = 1;
-                        });
-                    }
+                    RequestOpenEditorProject(m_PendingLoadProjectFileName);
                 });
             } else if (m_PendingLoadTarget == PendingLoadTarget::Composite && m_CachedComposite) {
                 LibraryManager::Get().RequestSaveCompositeProject(newName, m_CachedComposite, "", [this](bool success) {

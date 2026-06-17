@@ -1,8 +1,9 @@
 #pragma once
 
 #include "ThirdParty/json.hpp"
-#include "Renderer/MaskRenderTypes.h"
 #include "Renderer/GLLoader.h"
+#include "Renderer/MaskRenderTypes.h"
+#include "Renderer/RenderPipeline.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -28,7 +29,7 @@ public:
     struct CompositeOutputRequest {
         int outputNodeId = -1;
         int sourceNodeId = -1;
-        std::vector<unsigned char> sourcePixels;
+        SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
         int channels = 4;
@@ -53,7 +54,7 @@ public:
         std::string sourceSocketId;
         bool maskInput = false;
         bool directSourceOutput = false;
-        std::vector<unsigned char> sourcePixels;
+        SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
         int channels = 4;
@@ -274,7 +275,7 @@ public:
         std::uint64_t generation = 0;
         bool outputConnected = false;
         int previewMaxDimension = 0;
-        std::vector<unsigned char> sourcePixels;
+        SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
         int channels = 4;
@@ -299,6 +300,12 @@ public:
         std::vector<PreviewResult> previews;
         std::vector<DevelopCandidateRenderResult> developCandidateRenders;
         std::vector<ToneCurveAutoRewriteFeedback> toneCurveAutoRewrites;
+        float mainRenderMs = 0.0f;
+        float previewRenderMs = 0.0f;
+        float compositeRenderMs = 0.0f;
+        int renderedPreviewCount = 0;
+        int renderedCompositeCount = 0;
+        GraphExecutionStats mainGraphStats;
     };
 
     struct RenderProgress {
@@ -343,6 +350,12 @@ public:
 private:
     void ThreadMain();
     Result RenderSnapshot(const Snapshot& snapshot);
+    void RenderDevelopCandidateRequests(
+        const Snapshot& snapshot,
+        RenderPipeline& pipeline,
+        Result& result,
+        int totalProgressSteps,
+        int& progressCompleted);
     void SetProgress(int completedSteps, int totalSteps, std::string label);
     void AdvanceProgress(std::string label = {});
     bool ShouldAbortStaleSnapshot(std::uint64_t currentGeneration) const;

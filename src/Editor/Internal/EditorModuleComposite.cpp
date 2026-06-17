@@ -1,6 +1,7 @@
 #include "Editor/EditorModule.h"
 
 #include "Library/LibraryManager.h"
+#include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
 #include "Renderer/GLHelpers.h"
 
@@ -246,6 +247,11 @@ const EditorModule::CompositeSceneItem* EditorModule::FindCompositeSceneItem(int
 
 bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition) {
     if (Raw::RawLoader::IsRawPath(path)) {
+        const Raw::LibRawRuntimeStatus& runtimeStatus = Raw::GetLibRawRuntimeStatus();
+        if (!runtimeStatus.runtimeAvailable) {
+            QueueUiNotification(UiNotificationSeverity::Error, runtimeStatus.message, "editor-raw-runtime");
+            return false;
+        }
         return AddGraphRawChainFromFile(path, sourcePosition);
     }
     const int completedBefore = GetCompletedChainCount();
@@ -283,6 +289,13 @@ bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeG
     if (sourceNodeId <= 0) {
         return false;
     }
+    if (EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId)) {
+        m_NodeGraph.SetActiveImageNodeId(sourceNodeId);
+        const int width = std::max(1, Raw::DisplayWidth(sourceNode->rawSource.metadata));
+        const int height = std::max(1, Raw::DisplayHeight(sourceNode->rawSource.metadata));
+        std::vector<unsigned char> transparentPixels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4ull, 0u);
+        LoadSourceFromPixels(transparentPixels.data(), width, height, 4);
+    }
 
     AddRawDevelopNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + 250.0f, sourcePosition.y });
     const int developNodeId = m_NodeGraph.GetSelectedNodeId();
@@ -306,6 +319,7 @@ bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeG
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
     MoveCompositeOutputToFront(outputNodeId);
     m_CompositeSelectedOutputNodeId = outputNodeId;
+    MarkNodeBrowserThumbnailSourceChanged();
     return true;
 }
 

@@ -29,6 +29,7 @@ constexpr std::array<char, 4> kMetaSection = { 'M', 'E', 'T', 'A' };
 constexpr std::array<char, 4> kThumbnailSection = { 'T', 'H', 'M', 'B' };
 constexpr std::array<char, 4> kSourceSection = { 'S', 'R', 'C', 'I' };
 constexpr std::array<char, 4> kPipelineSection = { 'P', 'I', 'P', 'E' };
+constexpr std::array<char, 4> kNodeBrowserSection = { 'N', 'B', 'R', 'W' };
 constexpr std::array<char, 4> kProjectsSection = { 'P', 'R', 'O', 'J' };
 constexpr std::array<char, 4> kAssetsSection = { 'A', 'S', 'S', 'T' };
 
@@ -156,7 +157,10 @@ bool IsCompressionCandidate(FileKind kind, const std::array<char, 4>& id, std::s
         return false;
     }
 
-    return id == kPipelineSection || id == kThumbnailSection || id == kSourceSection;
+    return id == kPipelineSection ||
+           id == kThumbnailSection ||
+           id == kSourceSection ||
+           id == kNodeBrowserSection;
 }
 
 bool CompressDeflateBytes(const std::vector<unsigned char>& input, std::vector<unsigned char>& output) {
@@ -637,6 +641,16 @@ json BundledProjectToJson(const BundledProjectDocument& project) {
     value["thumbnailPng"] = MakeBinaryJson(project.project.thumbnailBytes);
     value["sourcePng"] = MakeBinaryJson(project.project.sourceImageBytes);
     value["pipeline"] = project.project.pipelineData.is_null() ? json::array() : project.project.pipelineData;
+    json nodeBrowserThumbs = json::array();
+    for (const NodeBrowserThumbnailEntry& entry : project.project.nodeBrowserThumbnailEntries) {
+        nodeBrowserThumbs.push_back({
+            { "previewKey", entry.previewKey },
+            { "previewSeedHash", entry.previewSeedHash },
+            { "previewRecipeVersion", entry.previewRecipeVersion },
+            { "pngBytes", MakeBinaryJson(entry.pngBytes) }
+        });
+    }
+    value["nodeBrowserThumbnails"] = std::move(nodeBrowserThumbs);
     return value;
 }
 
@@ -649,6 +663,7 @@ bool BundledProjectFromJson(const json& value, BundledProjectDocument& project) 
     project.project.metadata.sourceWidth = value.value("sourceWidth", 0);
     project.project.metadata.sourceHeight = value.value("sourceHeight", 0);
     project.project.pipelineData = value.value("pipeline", json::array());
+    project.project.nodeBrowserThumbnailEntries.clear();
 
     if (value.contains("thumbnailPng") && value["thumbnailPng"].is_binary()) {
         const auto& binaryValue = value["thumbnailPng"].get_binary();
@@ -658,6 +673,26 @@ bool BundledProjectFromJson(const json& value, BundledProjectDocument& project) 
     if (value.contains("sourcePng") && value["sourcePng"].is_binary()) {
         const auto& binaryValue = value["sourcePng"].get_binary();
         project.project.sourceImageBytes.assign(binaryValue.begin(), binaryValue.end());
+    }
+
+    const json nodeBrowserThumbs = value.value("nodeBrowserThumbnails", json::array());
+    if (nodeBrowserThumbs.is_array()) {
+        for (const json& thumbValue : nodeBrowserThumbs) {
+            if (!thumbValue.is_object()) {
+                continue;
+            }
+            NodeBrowserThumbnailEntry entry;
+            entry.previewKey = thumbValue.value("previewKey", "");
+            entry.previewSeedHash = thumbValue.value("previewSeedHash", "");
+            entry.previewRecipeVersion = thumbValue.value("previewRecipeVersion", 0u);
+            if (thumbValue.contains("pngBytes") && thumbValue["pngBytes"].is_binary()) {
+                const auto& binaryValue = thumbValue["pngBytes"].get_binary();
+                entry.pngBytes.assign(binaryValue.begin(), binaryValue.end());
+            }
+            if (!entry.previewKey.empty()) {
+                project.project.nodeBrowserThumbnailEntries.push_back(std::move(entry));
+            }
+        }
     }
 
     return !project.fileName.empty();
@@ -697,11 +732,22 @@ bool AssetFromJson(const json& value, AssetDocument& asset) {
 } // namespace
 
 bool WriteProjectFile(const std::filesystem::path& path, const ProjectDocument& document) {
+    json nodeBrowserThumbs = json::array();
+    for (const NodeBrowserThumbnailEntry& entry : document.nodeBrowserThumbnailEntries) {
+        nodeBrowserThumbs.push_back({
+            { "previewKey", entry.previewKey },
+            { "previewSeedHash", entry.previewSeedHash },
+            { "previewRecipeVersion", entry.previewRecipeVersion },
+            { "pngBytes", MakeBinaryJson(entry.pngBytes) }
+        });
+    }
+
     std::vector<SectionData> sections;
     sections.push_back(MakeSectionData(FileKind::Project, kMetaSection, SerializeJson(ProjectMetadataToJson(document.metadata))));
     sections.push_back(MakeSectionData(FileKind::Project, kThumbnailSection, document.thumbnailBytes));
     sections.push_back(MakeSectionData(FileKind::Project, kSourceSection, document.sourceImageBytes));
     sections.push_back(MakeSectionData(FileKind::Project, kPipelineSection, SerializeJson(document.pipelineData.is_null() ? json::array() : document.pipelineData)));
+    sections.push_back(MakeSectionData(FileKind::Project, kNodeBrowserSection, SerializeJson(nodeBrowserThumbs)));
     return WriteSectionedFile(path, FileKind::Project, sections);
 }
 
@@ -743,6 +789,35 @@ bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& documen
         }
     } else {
         document.pipelineData = json();
+    }
+
+    if (options.includeNodeBrowserThumbnails) {
+        std::vector<unsigned char> nodeBrowserBytes;
+        document.nodeBrowserThumbnailEntries.clear();
+        if (ReadSectionBytes(file, sections, kNodeBrowserSection, nodeBrowserBytes)) {
+            json nodeBrowserJson;
+            if (!DeserializeJson(nodeBrowserBytes, nodeBrowserJson) || !nodeBrowserJson.is_array()) {
+                return false;
+            }
+            for (const json& thumbValue : nodeBrowserJson) {
+                if (!thumbValue.is_object()) {
+                    continue;
+                }
+                NodeBrowserThumbnailEntry entry;
+                entry.previewKey = thumbValue.value("previewKey", "");
+                entry.previewSeedHash = thumbValue.value("previewSeedHash", "");
+                entry.previewRecipeVersion = thumbValue.value("previewRecipeVersion", 0u);
+                if (thumbValue.contains("pngBytes") && thumbValue["pngBytes"].is_binary()) {
+                    const auto& binaryValue = thumbValue["pngBytes"].get_binary();
+                    entry.pngBytes.assign(binaryValue.begin(), binaryValue.end());
+                }
+                if (!entry.previewKey.empty()) {
+                    document.nodeBrowserThumbnailEntries.push_back(std::move(entry));
+                }
+            }
+        }
+    } else {
+        document.nodeBrowserThumbnailEntries.clear();
     }
 
     return true;

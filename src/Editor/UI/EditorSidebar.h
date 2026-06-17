@@ -17,7 +17,6 @@ public:
 
 private:
     void RenderExportSettings(EditorModule* editor);
-    void RenderSettings(EditorModule* editor);
     void RenderComplexNodeSettings(EditorModule* editor);
 
     EditorNodeGraphUI m_NodeGraphUI;

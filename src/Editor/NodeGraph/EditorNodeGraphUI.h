@@ -99,6 +99,12 @@ private:
     void RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph);
     void RenderNodeBrowser(EditorModule* editor);
     void RenderValidationStatus(const EditorNodeGraph::Graph& graph);
+    void RenderGraphZoomDial(
+        EditorModule* editor,
+        ImDrawList* drawList,
+        const ImVec2& canvasMin,
+        const ImVec2& canvasMax,
+        const ImVec2& canvasSize) const;
     void RenderInteractionDebugOverlay(const EditorNodeGraph::Graph& graph, int hoveredNodeId, GraphMouseOwner owner) const;
     void RenderChannelSplitConfirmPrompt(EditorModule* editor);
     bool IsGraphCanvasHovered() const;
@@ -120,7 +126,15 @@ private:
     bool IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const;
     unsigned int GetImagePreviewTexture(const EditorNodeGraph::Node& node);
     unsigned int GetGraphPreviewTexture(EditorModule* editor, const EditorNodeGraph::Node& node);
+    unsigned int GetNodeBrowserThumbnailTexture(
+        EditorModule* editor,
+        const std::string& previewKey,
+        ImVec2* outSize,
+        bool* outPending,
+        bool* outFallback);
     unsigned int UploadPreviewTexture(int nodeId, const std::vector<unsigned char>& pixels, int width, int height);
+    void ResetPerGraphVisualCaches();
+    void SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& graph);
     NodeLayoutCache BuildNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) const;
     void RefreshNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node);
     const NodeLayoutCache* FindNodeLayoutCache(int nodeId) const;
@@ -188,6 +202,9 @@ private:
     std::map<int, unsigned int> m_GraphPreviewTextures;
     std::map<int, std::uint64_t> m_GraphPreviewRevisions;
     std::map<int, ImVec2> m_GraphPreviewSizes;
+    std::map<std::string, unsigned int> m_NodeBrowserThumbnailTextures;
+    std::map<std::string, std::uint64_t> m_NodeBrowserThumbnailRevisions;
+    std::map<std::string, ImVec2> m_NodeBrowserThumbnailSizes;
     std::map<int, std::uint64_t> m_NodeFrontOrder;
     std::map<int, NodeLayoutCache> m_NodeLayoutCache;
     mutable std::map<int, float> m_NodeMeasuredBaseHeights;
@@ -207,6 +224,9 @@ private:
     int m_ChannelSplitConfirmNodeId = -1;
     double m_ChannelSplitConfirmStartTime = 0.0;
     CachedRect m_ChannelSplitConfirmRect {};
+    double m_ContextMenuOpenedAt = 0.0;
+    bool m_ContextMenuFadeActive = false;
+    std::uint64_t m_LastGraphStructureRevision = 0;
 
     void CopySelectedNodes(EditorModule* editor);
     void PasteNodes(EditorModule* editor);

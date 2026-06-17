@@ -8,10 +8,11 @@
 #endif
 
 #include "AppShell.h"
+#include "AppSettingsPopup.h"
+#include "AppVersion.h"
 #include "Async/TaskSystem.h"
 #include "Renderer/GLLoader.h"
 #include "settings/AppearanceTheme.h"
-#include "StyleModule.h"
 #include <GLFW/glfw3.h>
 #include "imgui.h"
 #include <imgui_internal.h>
@@ -27,6 +28,7 @@
 #include <vector>
 #include "../Library/LibraryManager.h"
 #include "../Utils/ImGuiExtras.h"
+#include "../Utils/NativeWindowTheme.h"
 #include "ThirdParty/stb_image.h"
 #include "Renderer/GLHelpers.h"
 #include "Resources/EmbeddedSplash.h"
@@ -41,67 +43,14 @@
 
 namespace {
 
-#if defined(_WIN32)
-#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
-#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
-#endif
-#ifndef DWMWA_CAPTION_COLOR
-#define DWMWA_CAPTION_COLOR 35
-#endif
-#ifndef DWMWA_TEXT_COLOR
-#define DWMWA_TEXT_COLOR 36
-#endif
-#ifndef DWMWA_BORDER_COLOR
-#define DWMWA_BORDER_COLOR 34
-#endif
-
-BYTE ColorByte(float value) {
-    return static_cast<BYTE>(std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
-}
-
-COLORREF ToColorRef(const ImVec4& color) {
-    return RGB(ColorByte(color.x), ColorByte(color.y), ColorByte(color.z));
-}
-
-bool IsDarkTitleColor(const ImVec4& color) {
-    const float luma = (0.2126f * color.x) + (0.7152f * color.y) + (0.0722f * color.z);
-    return luma < 0.50f;
-}
-
 void ApplyNativeTitleBarTheme(GLFWwindow* window) {
-    if (!window) {
-        return;
-    }
-
-    HWND hwnd = glfwGetWin32Window(window);
-    if (!hwnd) {
-        return;
-    }
-
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const ImVec4 caption = style.Colors[ImGuiCol_WindowBg];
-    const ImVec4 text = style.Colors[ImGuiCol_Text];
-    const ImVec4 border = style.Colors[ImGuiCol_WindowBg];
-    const BOOL darkMode = IsDarkTitleColor(caption) ? TRUE : FALSE;
-    const COLORREF captionColor = ToColorRef(caption);
-    const COLORREF textColor = ToColorRef(text);
-    const COLORREF borderColor = ToColorRef(border);
-
-    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
-    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &captionColor, sizeof(captionColor));
-    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
-    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
+    NativeWindowTheme::Apply(window);
 }
-#else
-void ApplyNativeTitleBarTheme(GLFWwindow*) {}
-#endif
 
 enum RootTabId {
     RootTabLibrary = 0,
     RootTabEditor = 1,
-    RootTabComposite = 2,
-    RootTabNotes = 3,
-    RootTabStyle = 4
+    RootTabComposite = 2
 };
 
 struct RootTabDescriptor {
@@ -117,6 +66,18 @@ constexpr double kLibraryLoadSpinnerMinVisibleSeconds = 0.85;
 constexpr double kLibraryLoadSpinnerFadeOutSeconds = 0.32;
 constexpr double kLibraryLoadEditorRevealSeconds = 1.90;
 constexpr bool kLibraryLoadTransitionDiagnostics = true;
+
+unsigned char* LoadImagePixelsWithExplicitFlip(
+    const std::filesystem::path& path,
+    const bool flipVertically,
+    int* outWidth,
+    int* outHeight,
+    int* outChannels) {
+    stbi_set_flip_vertically_on_load_thread(flipVertically ? 1 : 0);
+    unsigned char* pixels = stbi_load(path.string().c_str(), outWidth, outHeight, outChannels, 4);
+    stbi_set_flip_vertically_on_load_thread(0);
+    return pixels;
+}
 
 bool IsSupportedDroppedImagePath(const std::string& path) {
     std::string extension;
@@ -134,6 +95,15 @@ bool IsSupportedDroppedImagePath(const std::string& path) {
            extension == ".jpeg" ||
            extension == ".bmp" ||
            extension == ".tga";
+}
+
+ImVec2 ScreenToWindowCursorPos(GLFWwindow* window, const ImVec2& screenPos) {
+    int windowX = 0;
+    int windowY = 0;
+    glfwGetWindowPos(window, &windowX, &windowY);
+    return ImVec2(
+        screenPos.x - static_cast<float>(windowX),
+        screenPos.y - static_cast<float>(windowY));
 }
 
 unsigned int LoadEmbeddedPngTexture(const unsigned char* data, unsigned int size, const char* debugName) {
@@ -188,8 +158,15 @@ AppShell::AppShell()
     , m_SplashTexture(0)
     , m_EditorTabTexture(0)
     , m_LibraryTabTexture(0)
-    , m_ProgramLogoTexture(0)
-    , m_StyleTabTexture(0)
+    , m_HeaderSettingsTexture(0)
+    , m_BackgroundImageTexture(0)
+    , m_BackgroundImageWidth(0)
+    , m_BackgroundImageHeight(0)
+    , m_LockedScrubCursorActive(false)
+    , m_LockedScrubCursorAnchorScreenPos(0.0f, 0.0f)
+    , m_LockedScrubCursorRestoreScreenPos(0.0f, 0.0f)
+    , m_BackgroundImageTexturePath()
+    , m_BackgroundImageTextureRevision(0)
     , m_IsRunning(false)
     , m_FirstTimeLayout(true)
     , m_MainWindowShownTime(0.0) {}
@@ -257,6 +234,17 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     m_Appearance->SetupFonts(io);
     m_Appearance->ApplyCurrentTheme(io, ImGui::GetStyle());
     ApplyNativeTitleBarTheme(m_Window);
+    m_UpdateManager = std::make_unique<AppUpdate::UpdateManager>(
+        [this](UiNotificationSeverity severity, const std::string& message, const std::string& dedupeKey) {
+            PushToast(severity, message, dedupeKey);
+        },
+        [this]() {
+            if (m_Window != nullptr) {
+                glfwSetWindowShouldClose(m_Window, GLFW_TRUE);
+            }
+            m_IsRunning = false;
+        });
+    m_UpdateManager->Initialize();
 
     ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
     ImGui_ImplOpenGL3_Init("#version 430 core");
@@ -269,14 +257,10 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
         EmbeddedTabIcons::Library_png_data,
         EmbeddedTabIcons::Library_png_size,
         "Library");
-    m_ProgramLogoTexture = LoadEmbeddedPngTexture(
-        EmbeddedTabIcons::CharmLogo_png_data,
-        EmbeddedTabIcons::CharmLogo_png_size,
-        "Charm logo");
-    m_StyleTabTexture = LoadEmbeddedPngTexture(
-        EmbeddedTabIcons::Style_png_data,
-        EmbeddedTabIcons::Style_png_size,
-        "Style");
+    m_HeaderSettingsTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::Settings_png_data,
+        EmbeddedTabIcons::Settings_png_size,
+        "HeaderSettings");
 
     glfwSetWindowUserPointer(m_Window, this);
     glfwSetDropCallback(m_Window, OnFileDrop);
@@ -284,7 +268,6 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     Async::TaskSystem::Get().Initialize();
     m_Editor.Initialize(m_Window, m_Appearance.get());
     m_Composite.Initialize();
-    m_Notes.Initialize(m_Appearance.get());
     // m_Library.Initialize(); // We will call this manually in the splash screen
 
     ShowSplashScreen();
@@ -293,12 +276,13 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
         m_Appearance->Save();
     }
 
-    m_Style.Initialize(m_Appearance.get());
-
     glfwMaximizeWindow(m_Window);
     glfwShowWindow(m_Window);
     m_MainWindowShownTime = glfwGetTime();
     m_IsRunning = true;
+    if (m_UpdateManager) {
+        m_UpdateManager->StartBackgroundCheck();
+    }
     return true;
 }
 
@@ -326,6 +310,7 @@ void AppShell::Run() {
         ConsumeUiNotifications();
 
         RenderUI();
+        SyncCursorCaptureRequest();
 
         ImGui::Render();
         int display_w, display_h;
@@ -351,11 +336,177 @@ void AppShell::Run() {
     }
 }
 
+void AppShell::SyncCursorCaptureRequest() {
+    if (!m_Window) {
+        return;
+    }
+
+    ImGuiExtras::CursorCaptureRequest request {};
+    const bool hasRequest = ImGuiExtras::ConsumeCursorCaptureRequest(&request);
+    const bool windowFocused = glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
+    const bool shouldCapture =
+        hasRequest &&
+        request.mode == ImGuiExtras::CursorCaptureMode::LockedScrub &&
+        windowFocused;
+
+    const auto releaseCapture = [this]() {
+        if (!m_LockedScrubCursorActive || !m_Window) {
+            return;
+        }
+        glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        const ImVec2 restoreLocal = ScreenToWindowCursorPos(m_Window, m_LockedScrubCursorRestoreScreenPos);
+        glfwSetCursorPos(m_Window, restoreLocal.x, restoreLocal.y);
+        m_LockedScrubCursorActive = false;
+        m_LockedScrubCursorAnchorScreenPos = ImVec2(0.0f, 0.0f);
+        m_LockedScrubCursorRestoreScreenPos = ImVec2(0.0f, 0.0f);
+    };
+
+    if (!shouldCapture) {
+        releaseCapture();
+        return;
+    }
+
+    if (!m_LockedScrubCursorActive) {
+        m_LockedScrubCursorActive = true;
+        m_LockedScrubCursorRestoreScreenPos = request.restoreScreenPos;
+        glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+    }
+
+    m_LockedScrubCursorAnchorScreenPos = request.anchorScreenPos;
+    const ImVec2 anchorLocal = ScreenToWindowCursorPos(m_Window, m_LockedScrubCursorAnchorScreenPos);
+    glfwSetCursorPos(m_Window, anchorLocal.x, anchorLocal.y);
+}
+
+void AppShell::ReleaseBackgroundImageTexture() {
+    if (m_BackgroundImageTexture != 0) {
+        glDeleteTextures(1, &m_BackgroundImageTexture);
+        m_BackgroundImageTexture = 0;
+    }
+    m_BackgroundImageWidth = 0;
+    m_BackgroundImageHeight = 0;
+    m_BackgroundImageTexturePath.clear();
+}
+
+bool AppShell::LoadBackgroundImageTextureFromPath(const std::filesystem::path& path) {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    // Match the direct UI image convention used by other upright image surfaces:
+    // decode without an stb flip, then render through flipped V UVs in ImGui.
+    unsigned char* pixels = LoadImagePixelsWithExplicitFlip(path, false, &width, &height, &channels);
+    if (!pixels || width <= 0 || height <= 0) {
+        if (pixels) {
+            stbi_image_free(pixels);
+        }
+        return false;
+    }
+
+    const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    if (texture == 0) {
+        return false;
+    }
+
+    ReleaseBackgroundImageTexture();
+    m_BackgroundImageTexture = texture;
+    m_BackgroundImageWidth = width;
+    m_BackgroundImageHeight = height;
+    m_BackgroundImageTexturePath = path.lexically_normal().string();
+    return true;
+}
+
+void AppShell::SyncBackgroundImageTexture() {
+    if (m_Appearance == nullptr) {
+        ReleaseBackgroundImageTexture();
+        m_BackgroundImageTextureRevision = 0;
+        return;
+    }
+
+    const bool enabled = m_Appearance->GetBackgroundImageEnabled();
+    const std::filesystem::path resolvedPath = enabled ? m_Appearance->GetResolvedBackgroundImagePath() : std::filesystem::path();
+    const std::string normalizedPath = resolvedPath.empty() ? std::string() : resolvedPath.lexically_normal().string();
+    const std::uint64_t revision = m_Appearance->GetBackgroundImageRevision();
+
+    if (!enabled || normalizedPath.empty()) {
+        ReleaseBackgroundImageTexture();
+        m_BackgroundImageTextureRevision = revision;
+        if (!enabled) {
+            m_Appearance->SetBackgroundImageRuntimeStatus("");
+        }
+        return;
+    }
+
+    if (m_BackgroundImageTexture != 0 &&
+        m_BackgroundImageTexturePath == normalizedPath &&
+        m_BackgroundImageTextureRevision == revision) {
+        return;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(resolvedPath, ec) || ec) {
+        ReleaseBackgroundImageTexture();
+        m_BackgroundImageTextureRevision = revision;
+        m_Appearance->SetBackgroundImageRuntimeStatus("Managed background image file is missing.");
+        return;
+    }
+
+    if (!LoadBackgroundImageTextureFromPath(resolvedPath)) {
+        ReleaseBackgroundImageTexture();
+        m_BackgroundImageTextureRevision = revision;
+        m_Appearance->SetBackgroundImageRuntimeStatus("Failed to decode or upload the background image.");
+        return;
+    }
+
+    m_BackgroundImageTextureRevision = revision;
+    m_Appearance->SetBackgroundImageRuntimeStatus("");
+}
+
+void AppShell::RenderBackgroundImage(const ImVec2& regionMin, const ImVec2& regionSize) {
+    if (m_Appearance == nullptr ||
+        !m_Appearance->GetBackgroundImageEnabled() ||
+        m_BackgroundImageTexture == 0 ||
+        m_BackgroundImageWidth <= 0 ||
+        m_BackgroundImageHeight <= 0 ||
+        regionSize.x <= 0.0f ||
+        regionSize.y <= 0.0f) {
+        return;
+    }
+
+    const float scale = std::max(
+        regionSize.x / static_cast<float>(m_BackgroundImageWidth),
+        regionSize.y / static_cast<float>(m_BackgroundImageHeight));
+    const ImVec2 drawSize(
+        static_cast<float>(m_BackgroundImageWidth) * scale,
+        static_cast<float>(m_BackgroundImageHeight) * scale);
+    const ImVec2 drawMin(
+        regionMin.x + (regionSize.x - drawSize.x) * 0.5f,
+        regionMin.y + (regionSize.y - drawSize.y) * 0.5f);
+    const ImVec2 drawMax(drawMin.x + drawSize.x, drawMin.y + drawSize.y);
+    const float strength = std::clamp(m_Appearance->GetBackgroundImageStrength(), 0.0f, 1.0f);
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, strength));
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->PushClipRect(regionMin, ImVec2(regionMin.x + regionSize.x, regionMin.y + regionSize.y), true);
+    drawList->AddImage(
+        (ImTextureID)(intptr_t)m_BackgroundImageTexture,
+        drawMin,
+        drawMax,
+        ImVec2(0.0f, 1.0f),
+        ImVec2(1.0f, 0.0f),
+        tint);
+    drawList->PopClipRect();
+}
+
 void AppShell::RenderUI() {
     if (m_Appearance) {
         m_Appearance->ApplyCurrentTheme(ImGui::GetIO(), ImGui::GetStyle());
         ApplyNativeTitleBarTheme(m_Window);
     }
+
+    SyncBackgroundImageTexture();
+    const bool wallpaperSurfaces = m_Appearance && m_Appearance->GetBackgroundImageEnabled();
+    const StackAppearance::RuntimeSurfacePalette surfacePalette =
+        m_Appearance ? m_Appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -375,6 +526,8 @@ void AppShell::RenderUI() {
     ImGui::Begin("ModularStudioMain", nullptr, window_flags);
     ImGui::PopStyleVar(3);
 
+    RenderBackgroundImage(ImGui::GetWindowPos(), ImGui::GetWindowSize());
+
     const std::vector<RootTabDescriptor> tabs = {
         { RootTabLibrary, "Library", m_LibraryTabTexture, [this]() {
             m_Library.RenderUI(
@@ -386,9 +539,7 @@ void AppShell::RenderUI() {
                     BeginLibraryToEditorProjectLoad(projectFileName);
                 });
         } },
-        { RootTabEditor, "Editor", m_EditorTabTexture, [this]() { m_Editor.RenderUI(); } },
-        { RootTabNotes, "Notes", 0, [this]() { m_Notes.RenderUI(); } },
-        { RootTabStyle, "Style", m_StyleTabTexture, [this]() { m_Style.RenderUI(); } }
+        { RootTabEditor, "Editor", m_EditorTabTexture, [this]() { m_Editor.RenderUI(); } }
     };
 
     TickLibraryToEditorProjectLoadTransition();
@@ -409,21 +560,10 @@ void AppShell::RenderUI() {
             from.w + (to.w - from.w) * clamped);
     };
 
-    const bool notesTabActive = (m_CurrentTabId == RootTabNotes);
     ImGuiIO& io = ImGui::GetIO();
     const double now = ImGui::GetTime();
-    if (notesTabActive) {
-        const bool edgeHover = io.MousePos.y <= 56.0f;
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || edgeHover) {
-            m_ChromeRevealTime = now;
-        }
-        const bool shouldHide = (now - m_ChromeRevealTime) > 2.0;
-        const float target = shouldHide ? 1.0f : 0.0f;
-        m_ChromeHiddenT = std::clamp(m_ChromeHiddenT + (target - m_ChromeHiddenT) * std::min(io.DeltaTime * 8.0f, 1.0f), 0.0f, 1.0f);
-    } else {
-        m_ChromeRevealTime = now;
-        m_ChromeHiddenT = std::max(0.0f, m_ChromeHiddenT - io.DeltaTime * 8.0f);
-    }
+    m_ChromeRevealTime = now;
+    m_ChromeHiddenT = std::max(0.0f, m_ChromeHiddenT - io.DeltaTime * 8.0f);
 
     auto renderTabButton = [&](const RootTabDescriptor& tab, bool selected) {
         const ImVec4 button = ImGui::GetStyleColorVec4(ImGuiCol_Button);
@@ -488,18 +628,13 @@ void AppShell::RenderUI() {
     const float chromeOffset = -chromeHeight * (1.0f - std::pow(1.0f - m_ChromeHiddenT, 3.0f));
     const float chromeAlpha = 1.0f - m_ChromeHiddenT;
 
-    if (notesTabActive) {
-        ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
-        ImGui::BeginChild("NotesCanvasRoot", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        m_Notes.RenderUI();
-        ImGui::EndChild();
-    }
-
     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, chromeAlpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 10.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    ImGui::PushStyleColor(
+        ImGuiCol_ChildBg,
+        wallpaperSurfaces ? surfacePalette.chromeSurface : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::SetCursorPosY(chromeOffset);
     ImGui::BeginChild("GlobalProgramBar", ImVec2(0.0f, chromeHeight), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleColor();
@@ -518,19 +653,67 @@ void AppShell::RenderUI() {
     }
     ImGui::PopStyleVar();
 
-    if (m_ProgramLogoTexture != 0) {
-        constexpr float logoSize = 20.0f;
-        const float logoX = ImGui::GetWindowContentRegionMax().x - logoSize;
-        if (logoX > ImGui::GetCursorPosX()) {
+    ImVec2 settingsGearMin(0.0f, 0.0f);
+    ImVec2 settingsGearMax(0.0f, 0.0f);
+    bool settingsGearHovered = false;
+    if (m_HeaderSettingsTexture != 0) {
+        constexpr float hitSize = 28.0f;
+        constexpr float iconSize = 18.0f;
+        const float gearX = ImGui::GetWindowContentRegionMax().x - hitSize;
+        if (gearX > ImGui::GetCursorPosX()) {
             ImGui::SameLine(0.0f, 0.0f);
-            ImGui::SetCursorPosX(logoX);
+            ImGui::SetCursorPosX(gearX);
         }
-        const float logoY = (chromeHeight - logoSize) * 0.5f;
-        ImGui::SetCursorPosY(logoY);
-        ImGui::Image((ImTextureID)(intptr_t)m_ProgramLogoTexture, ImVec2(logoSize, logoSize));
+        const float gearY = (chromeHeight - hitSize) * 0.5f;
+        ImGui::SetCursorPosY(gearY);
+
+        const ImVec2 cursor = ImGui::GetCursorScreenPos();
+        settingsGearMin = cursor;
+        settingsGearMax = ImVec2(cursor.x + hitSize, cursor.y + hitSize);
+        ImGui::InvisibleButton("##HeaderSettingsGear", ImVec2(hitSize, hitSize));
+        settingsGearHovered = ImGui::IsItemHovered();
+        const bool gearHeld = ImGui::IsItemActive();
+        const bool gearClicked = ImGui::IsItemClicked();
+
+        const ImRect gearRect(settingsGearMin, settingsGearMax);
+        const bool gearSelected = m_SettingsPopupOpen;
+        const ImVec4 bgColor = gearSelected
+            ? blendColor(ImGui::GetStyleColorVec4(ImGuiCol_Button), ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive), 0.55f)
+            : (settingsGearHovered
+                ? blendColor(ImGui::GetStyleColorVec4(ImGuiCol_Button), ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered), 0.35f)
+                : ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        if (bgColor.w > 0.001f) {
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                gearRect.Min,
+                gearRect.Max,
+                ImGui::GetColorU32(bgColor),
+                8.0f);
+        }
+
+        const float iconOffset = (hitSize - iconSize) * 0.5f;
+        const ImVec2 iconMin(cursor.x + iconOffset, cursor.y + iconOffset);
+        const ImVec2 iconMax(iconMin.x + iconSize, iconMin.y + iconSize);
+        const ImU32 iconTint = (gearSelected || gearHeld)
+            ? IM_COL32(255, 255, 255, 255)
+            : (settingsGearHovered ? IM_COL32(220, 220, 220, 230) : IM_COL32(150, 150, 150, 165));
+        ImGui::GetWindowDrawList()->AddImage(
+            (ImTextureID)(intptr_t)m_HeaderSettingsTexture,
+            iconMin,
+            iconMax,
+            ImVec2(0, 0),
+            ImVec2(1, 1),
+            iconTint);
+        if (settingsGearHovered) {
+            ImGui::SetTooltip("Settings");
+        }
+        if (gearClicked) {
+            m_SettingsPopupOpen = !m_SettingsPopupOpen;
+        }
     }
     ImGui::EndChild();
     ImGui::PopStyleVar();
+
+    RenderHeaderSettingsPopup(settingsGearMin, settingsGearMax, settingsGearHovered);
 
     if (!loadTransitionActive) {
         m_Library.RenderGlobalPopups();
@@ -541,9 +724,14 @@ void AppShell::RenderUI() {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         const ImVec2 bodyPos = ImGui::GetCursorScreenPos();
         const ImVec2 bodySize = ImGui::GetContentRegionAvail();
+        (void)bodyPos;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, m_Appearance ? ImGui::GetStyleColorVec4(ImGuiCol_WindowBg) : ImVec4(0.02f, 0.08f, 0.09f, 1.0f));
+        ImGui::PushStyleColor(
+            ImGuiCol_ChildBg,
+            wallpaperSurfaces
+                ? surfacePalette.panelSurface
+                : (m_Appearance ? ImGui::GetStyleColorVec4(ImGuiCol_WindowBg) : ImVec4(0.02f, 0.08f, 0.09f, 1.0f)));
         ImGui::BeginChild("LibraryToEditorProjectLoadTransition", bodySize, false,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
 
@@ -561,7 +749,7 @@ void AppShell::RenderUI() {
                 });
             ImGui::PopStyleVar();
         } else if (m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::SpinnerFadeIn ||
-            m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::ApplyProject ||
+            m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::WaitForEditorReady ||
             m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::SpinnerFadeOut) {
             float spinnerAlpha = 1.0f;
             if (m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::SpinnerFadeIn) {
@@ -570,6 +758,22 @@ void AppShell::RenderUI() {
                 spinnerAlpha = 1.0f - ImGuiExtras::EaseOutCubic(std::clamp(static_cast<float>(phaseElapsed / kLibraryLoadSpinnerFadeOutSeconds), 0.0f, 1.0f));
             }
             ImGuiExtras::RenderSpinnerOnlyOverlay(spinnerAlpha);
+            std::string spinnerStatus = LibraryManager::Get().GetProjectLoadStatusText();
+            if (spinnerStatus.empty()) {
+                spinnerStatus = m_Editor.GetDeferredLoadedProjectStatusText();
+            }
+            if (!spinnerStatus.empty() && spinnerAlpha > 0.01f) {
+                const ImVec2 textSize = ImGui::CalcTextSize(spinnerStatus.c_str());
+                const ImVec2 windowPos = ImGui::GetWindowPos();
+                const ImVec2 windowSize = ImGui::GetWindowSize();
+                const ImVec2 textPos(
+                    windowPos.x + (windowSize.x - textSize.x) * 0.5f,
+                    windowPos.y + windowSize.y * 0.5f + 34.0f);
+                ImGui::GetWindowDrawList()->AddText(
+                    textPos,
+                    IM_COL32(255, 255, 255, static_cast<int>(235.0f * spinnerAlpha)),
+                    spinnerStatus.c_str());
+            }
         } else if (m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::EditorReveal) {
             m_Editor.RenderUI();
         }
@@ -579,7 +783,7 @@ void AppShell::RenderUI() {
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(2);
-    } else if (!notesTabActive) {
+    } else {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         for (const RootTabDescriptor& tab : tabs) {
             if (tab.id == m_CurrentTabId) {
@@ -592,6 +796,93 @@ void AppShell::RenderUI() {
     RenderToasts();
 
     ImGui::End(); // End ModularStudioMain
+
+    if (m_Editor.IsDetachedPreviewActive()) {
+        m_Editor.RenderDetachedPreviewWindow();
+    }
+}
+
+void AppShell::RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVec2& gearButtonMax, bool gearButtonHovered) {
+    if (!m_SettingsPopupOpen || !m_Appearance) {
+        return;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        m_SettingsPopupOpen = false;
+        return;
+    }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float popupWidth = std::clamp(viewport->WorkSize.x * 0.65f, 780.0f, 1024.0f);
+    const float popupHeight = std::clamp(viewport->WorkSize.y * 0.80f, 580.0f, 920.0f);
+
+    ImVec2 popupPos(gearButtonMax.x - popupWidth, gearButtonMax.y + 10.0f);
+    popupPos.x = std::clamp(
+        popupPos.x,
+        viewport->WorkPos.x + 16.0f,
+        viewport->WorkPos.x + viewport->WorkSize.x - popupWidth - 16.0f);
+    popupPos.y = std::clamp(
+        popupPos.y,
+        viewport->WorkPos.y + 16.0f,
+        viewport->WorkPos.y + viewport->WorkSize.y - popupHeight - 16.0f);
+
+    ImGui::SetNextWindowPos(popupPos, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(popupWidth, popupHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 16.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, m_Appearance->GetEffectivePopupBackgroundColor());
+    ImGui::PushStyleColor(ImGuiCol_Border, m_Appearance->GetRuntimeSurfacePalette().border);
+
+    bool popupOpen = m_SettingsPopupOpen;
+    ImGui::Begin(
+        "##GlobalHeaderSettingsPopup",
+        &popupOpen,
+        ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoScrollbar);
+
+    const bool popupHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+
+    // Make the header area draggable (excluding the Close button area on the right)
+    {
+        ImVec2 windowPos = ImGui::GetWindowPos();
+        ImVec2 windowSize = ImGui::GetWindowSize();
+        ImVec2 savedCursorPos = ImGui::GetCursorPos();
+        
+        ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
+        ImGui::InvisibleButton("##HeaderDragZone", ImVec2(std::max(10.0f, windowSize.x - 80.0f), 40.0f));
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            ImVec2 delta = ImGui::GetIO().MouseDelta;
+            ImGui::SetWindowPos(ImVec2(windowPos.x + delta.x, windowPos.y + delta.y));
+        }
+        
+        ImGui::SetCursorPos(savedCursorPos);
+    }
+
+    ImGui::TextUnformatted("Settings");
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 58.0f));
+    if (ImGui::Button("Close", ImVec2(58.0f, 0.0f))) {
+        popupOpen = false;
+    }
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    AppSettingsPopup::RenderContents(m_Appearance.get(), &m_Editor, m_UpdateManager.get(), m_SettingsPopupState);
+
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+
+    const bool outsideClick =
+        (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) &&
+        !popupHovered &&
+        !gearButtonHovered;
+    m_SettingsPopupOpen = popupOpen && !outsideClick;
 }
 
 void AppShell::BeginLibraryToEditorProjectLoad(const std::string& projectFileName) {
@@ -604,16 +895,20 @@ void AppShell::BeginLibraryToEditorProjectLoad(const std::string& projectFileNam
     m_LoadTransitionProjectFileName = projectFileName;
     m_LoadTransitionDecodeReady = false;
     m_LoadTransitionDecodeSucceeded = false;
-    m_LoadTransitionApplyAttempted = false;
     m_LoadTransitionApplySucceeded = false;
     m_LoadTransitionDismissLibraryPreviewsPending = true;
     m_LoadTransitionLoadRequested = false;
+    m_LoadTransitionFirstRenderReady = false;
+    m_LoadTransitionNodeBrowserThumbnailsReady = false;
     m_LoadTransitionStartedAt = ImGui::GetTime();
     m_LoadTransitionDecodeRequestedAt = 0.0;
     m_LoadTransitionDecodeReadyAt = 0.0;
     m_LoadTransitionApplyStartedAt = 0.0;
     m_LoadTransitionApplyFinishedAt = 0.0;
-    m_LoadTransitionApplyProject = {};
+    m_LoadTransitionFirstRenderReadyAt = 0.0;
+    m_LoadTransitionThumbnailsReadyAt = 0.0;
+    m_LoadTransitionReadyToRevealAt = 0.0;
+    m_LoadTransitionDecodedProject.reset();
     m_LoadTransitionTrace.clear();
     TraceLibraryLoadTransition("load clicked");
     SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::LibraryFadeOut);
@@ -627,13 +922,13 @@ void AppShell::RequestDeferredLibraryProjectLoad() {
     m_LoadTransitionLoadRequested = true;
     m_LoadTransitionDecodeRequestedAt = ImGui::GetTime();
     TraceLibraryLoadTransition("decode requested");
+    LibraryManager::Get().SetProjectLoadApplyingStatus("Loading project data...");
     LibraryManager::Get().RequestLoadProjectDeferredApply(
         m_LoadTransitionProjectFileName,
-        &m_Editor,
-        [this](bool success, std::function<bool()> applyProject) {
+        [this](bool success, std::shared_ptr<EditorLoadedProjectData> decodedProject) {
             m_LoadTransitionDecodeReady = true;
             m_LoadTransitionDecodeSucceeded = success;
-            m_LoadTransitionApplyProject = std::move(applyProject);
+            m_LoadTransitionDecodedProject = std::move(decodedProject);
             m_LoadTransitionDecodeReadyAt = ImGui::GetTime();
             TraceLibraryLoadTransition(success ? "decode ready" : "decode failed");
         });
@@ -648,7 +943,7 @@ void AppShell::SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhas
         switch (value) {
         case LibraryToEditorProjectLoadPhase::LibraryFadeOut: return "LibraryFadeOut";
         case LibraryToEditorProjectLoadPhase::SpinnerFadeIn: return "SpinnerFadeIn";
-        case LibraryToEditorProjectLoadPhase::ApplyProject: return "ApplyProject";
+        case LibraryToEditorProjectLoadPhase::WaitForEditorReady: return "WaitForEditorReady";
         case LibraryToEditorProjectLoadPhase::SpinnerFadeOut: return "SpinnerFadeOut";
         case LibraryToEditorProjectLoadPhase::EditorReveal: return "EditorReveal";
         case LibraryToEditorProjectLoadPhase::None: default: return "None";
@@ -672,22 +967,26 @@ void AppShell::TickLibraryToEditorProjectLoadTransition() {
         return;
     }
 
+    m_Editor.PumpNonRenderingWork(2.5);
+
     const double now = ImGui::GetTime();
     const double elapsed = now - m_LoadTransitionPhaseStartTime;
     auto finishToLibrary = [&]() {
         SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::None);
         m_LoadTransitionProjectFileName.clear();
-        m_LoadTransitionApplyProject = {};
+        m_LoadTransitionDecodedProject.reset();
         m_LoadTransitionDecodeReady = false;
         m_LoadTransitionDecodeSucceeded = false;
-        m_LoadTransitionApplyAttempted = false;
         m_LoadTransitionApplySucceeded = false;
         m_LoadTransitionDismissLibraryPreviewsPending = false;
         m_LoadTransitionLoadRequested = false;
+        m_LoadTransitionFirstRenderReady = false;
+        m_LoadTransitionNodeBrowserThumbnailsReady = false;
         m_CurrentTabId = RootTabLibrary;
     };
 
-    if (m_LoadTransitionDismissLibraryPreviewsPending) {
+    if (m_LoadTransitionDismissLibraryPreviewsPending &&
+        m_LoadTransitionPhase != LibraryToEditorProjectLoadPhase::LibraryFadeOut) {
         m_Library.DismissPreviewsForProjectLoad();
         m_LoadTransitionDismissLibraryPreviewsPending = false;
     }
@@ -704,12 +1003,81 @@ void AppShell::TickLibraryToEditorProjectLoadTransition() {
         if (m_LoadTransitionDecodeReady && !m_LoadTransitionDecodeSucceeded && elapsed >= kLibraryLoadSpinnerFadeInSeconds && minimumSpinnerShown) {
             SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
         } else if (m_LoadTransitionDecodeReady && elapsed >= kLibraryLoadSpinnerFadeInSeconds && minimumSpinnerShown) {
-            SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::ApplyProject);
+            m_LoadTransitionApplyStartedAt = ImGui::GetTime();
+            TraceLibraryLoadTransition("apply start");
+            if (!m_Editor.BeginDeferredLoadedProjectApply(m_LoadTransitionDecodedProject)) {
+                m_LoadTransitionApplySucceeded = false;
+                m_LoadTransitionApplyFinishedAt = ImGui::GetTime();
+                TraceLibraryLoadTransition("apply start failed");
+                LibraryManager::Get().FinishDeferredProjectLoad(
+                    false,
+                    m_Editor.GetDeferredLoadedProjectStatusText().empty()
+                        ? "Failed to apply the loaded project."
+                        : m_Editor.GetDeferredLoadedProjectStatusText());
+                SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
+                break;
+            }
+            LibraryManager::Get().SetProjectLoadApplyingStatus("Applying editor state...");
+            SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::WaitForEditorReady);
         }
         break;
     }
-    case LibraryToEditorProjectLoadPhase::ApplyProject:
+    case LibraryToEditorProjectLoadPhase::WaitForEditorReady: {
+        if (m_LoadTransitionApplyFinishedAt <= 0.0 && m_Editor.HasDeferredLoadedProjectApplyCoreFinished()) {
+            m_LoadTransitionApplyFinishedAt = now;
+            TraceLibraryLoadTransition("apply state finished");
+        }
+
+        const bool firstRenderReady = m_Editor.HasDeferredLoadedProjectFirstRenderReady();
+        if (!m_LoadTransitionFirstRenderReady && firstRenderReady) {
+            m_LoadTransitionFirstRenderReady = true;
+            m_LoadTransitionFirstRenderReadyAt = now;
+            TraceLibraryLoadTransition("first render ready");
+        }
+
+        const bool thumbnailsReady =
+            m_Editor.HasDeferredLoadedProjectApplyCoreFinished() &&
+            m_Editor.GetPendingNodeBrowserThumbnailWarmCount() == 0 &&
+            m_Editor.GetPendingNodeBrowserThumbnailGenerationCount() == 0;
+        if (!m_LoadTransitionNodeBrowserThumbnailsReady && thumbnailsReady) {
+            m_LoadTransitionNodeBrowserThumbnailsReady = true;
+            m_LoadTransitionThumbnailsReadyAt = now;
+            TraceLibraryLoadTransition("node browser thumbnails ready");
+        }
+
+        if (m_Editor.HasDeferredLoadedProjectApplyFailed()) {
+            m_LoadTransitionApplySucceeded = false;
+            if (m_LoadTransitionApplyFinishedAt <= 0.0) {
+                m_LoadTransitionApplyFinishedAt = ImGui::GetTime();
+            }
+            TraceLibraryLoadTransition("apply end failed");
+            LibraryManager::Get().FinishDeferredProjectLoad(
+                false,
+                m_Editor.GetDeferredLoadedProjectStatusText().empty()
+                    ? "Failed to apply the loaded project."
+                    : m_Editor.GetDeferredLoadedProjectStatusText());
+            SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
+            break;
+        }
+
+        const std::string statusText = m_Editor.GetDeferredLoadedProjectStatusText();
+        if (!statusText.empty()) {
+            LibraryManager::Get().SetProjectLoadApplyingStatus(statusText);
+        }
+
+        if (m_Editor.IsDeferredLoadedProjectReadyForReveal()) {
+            m_LoadTransitionApplySucceeded = true;
+            if (m_LoadTransitionApplyFinishedAt <= 0.0) {
+                m_LoadTransitionApplyFinishedAt = ImGui::GetTime();
+            }
+            m_LoadTransitionReadyToRevealAt = ImGui::GetTime();
+            TraceLibraryLoadTransition("apply end ok");
+            TraceLibraryLoadTransition("ready to reveal");
+            LibraryManager::Get().FinishDeferredProjectLoad(true, "Project loaded into the editor.");
+            SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
+        }
         break;
+    }
     case LibraryToEditorProjectLoadPhase::SpinnerFadeOut:
         if (elapsed >= kLibraryLoadSpinnerFadeOutSeconds) {
             if (m_LoadTransitionApplySucceeded) {
@@ -729,10 +1097,12 @@ void AppShell::TickLibraryToEditorProjectLoadTransition() {
             m_LoadTransitionProjectFileName.clear();
             m_LoadTransitionDecodeReady = false;
             m_LoadTransitionDecodeSucceeded = false;
-            m_LoadTransitionApplyAttempted = false;
             m_LoadTransitionApplySucceeded = false;
             m_LoadTransitionDismissLibraryPreviewsPending = false;
             m_LoadTransitionLoadRequested = false;
+            m_LoadTransitionDecodedProject.reset();
+            m_LoadTransitionFirstRenderReady = false;
+            m_LoadTransitionNodeBrowserThumbnailsReady = false;
         }
         break;
     case LibraryToEditorProjectLoadPhase::None:
@@ -749,7 +1119,7 @@ void AppShell::OnFramePresented() {
         switch (value) {
         case LibraryToEditorProjectLoadPhase::LibraryFadeOut: return "LibraryFadeOut";
         case LibraryToEditorProjectLoadPhase::SpinnerFadeIn: return "SpinnerFadeIn";
-        case LibraryToEditorProjectLoadPhase::ApplyProject: return "ApplyProject";
+        case LibraryToEditorProjectLoadPhase::WaitForEditorReady: return "WaitForEditorReady";
         case LibraryToEditorProjectLoadPhase::SpinnerFadeOut: return "SpinnerFadeOut";
         case LibraryToEditorProjectLoadPhase::EditorReveal: return "EditorReveal";
         case LibraryToEditorProjectLoadPhase::None: default: return "None";
@@ -767,20 +1137,6 @@ void AppShell::OnFramePresented() {
         m_LoadTransitionPhasePresentedFrames >= 1 &&
         !m_LoadTransitionLoadRequested) {
         RequestDeferredLibraryProjectLoad();
-        return;
-    }
-
-    if (m_LoadTransitionPhase == LibraryToEditorProjectLoadPhase::ApplyProject &&
-        m_LoadTransitionPhasePresentedFrames >= 1 &&
-        !m_LoadTransitionApplyAttempted) {
-        m_LoadTransitionApplyAttempted = true;
-        m_LoadTransitionApplyStartedAt = ImGui::GetTime();
-        TraceLibraryLoadTransition("apply start");
-        m_LoadTransitionApplySucceeded = m_LoadTransitionApplyProject ? m_LoadTransitionApplyProject() : false;
-        m_LoadTransitionApplyProject = {};
-        m_LoadTransitionApplyFinishedAt = ImGui::GetTime();
-        TraceLibraryLoadTransition(m_LoadTransitionApplySucceeded ? "apply end ok" : "apply end failed");
-        SetLibraryToEditorProjectLoadPhase(LibraryToEditorProjectLoadPhase::SpinnerFadeOut);
     }
 }
 
@@ -794,7 +1150,7 @@ void AppShell::RenderLibraryLoadTransitionDiagnostics() {
         switch (value) {
         case LibraryToEditorProjectLoadPhase::LibraryFadeOut: return "LibraryFadeOut";
         case LibraryToEditorProjectLoadPhase::SpinnerFadeIn: return "SpinnerFadeIn";
-        case LibraryToEditorProjectLoadPhase::ApplyProject: return "ApplyProject";
+        case LibraryToEditorProjectLoadPhase::WaitForEditorReady: return "WaitForEditorReady";
         case LibraryToEditorProjectLoadPhase::SpinnerFadeOut: return "SpinnerFadeOut";
         case LibraryToEditorProjectLoadPhase::EditorReveal: return "EditorReveal";
         case LibraryToEditorProjectLoadPhase::None: default: return "None";
@@ -809,6 +1165,15 @@ void AppShell::RenderLibraryLoadTransitionDiagnostics() {
     const double applyMs = (m_LoadTransitionApplyStartedAt > 0.0 && m_LoadTransitionApplyFinishedAt > 0.0)
         ? (m_LoadTransitionApplyFinishedAt - m_LoadTransitionApplyStartedAt) * 1000.0
         : 0.0;
+    const double firstRenderMs = (m_LoadTransitionApplyStartedAt > 0.0 && m_LoadTransitionFirstRenderReadyAt > 0.0)
+        ? (m_LoadTransitionFirstRenderReadyAt - m_LoadTransitionApplyStartedAt) * 1000.0
+        : 0.0;
+    const double thumbnailReadyMs = (m_LoadTransitionApplyStartedAt > 0.0 && m_LoadTransitionThumbnailsReadyAt > 0.0)
+        ? (m_LoadTransitionThumbnailsReadyAt - m_LoadTransitionApplyStartedAt) * 1000.0
+        : 0.0;
+    const double revealReadyMs = (m_LoadTransitionStartedAt > 0.0 && m_LoadTransitionReadyToRevealAt > 0.0)
+        ? (m_LoadTransitionReadyToRevealAt - m_LoadTransitionStartedAt) * 1000.0
+        : 0.0;
 
     const ImVec2 basePos = ImGui::GetWindowPos();
     ImGui::SetCursorScreenPos(ImVec2(basePos.x + 12.0f, basePos.y + 12.0f));
@@ -816,20 +1181,34 @@ void AppShell::RenderLibraryLoadTransitionDiagnostics() {
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(8, 28, 34, 210));
     ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(112, 190, 176, 110));
-    ImGui::BeginChild("LibraryLoadTransitionDiagnostics", ImVec2(360.0f, 176.0f), true,
+    ImGui::BeginChild("LibraryLoadTransitionDiagnostics", ImVec2(380.0f, 232.0f), true,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
     ImGui::Text("Library -> Editor load");
     ImGui::Text("Phase: %s  frames: %d", phaseName(m_LoadTransitionPhase), m_LoadTransitionPhasePresentedFrames);
+    ImGui::Text("Editor phase: %s", m_Editor.GetDeferredLoadedProjectPhaseLabel());
     ImGui::Text("Elapsed: %.2fs", elapsed);
     ImGui::Text("Decode: requested=%s ready=%s ok=%s %.1fms",
         m_LoadTransitionLoadRequested ? "yes" : "no",
         m_LoadTransitionDecodeReady ? "yes" : "no",
         m_LoadTransitionDecodeSucceeded ? "yes" : "no",
         decodeMs);
-    ImGui::Text("Apply: attempted=%s ok=%s %.1fms",
-        m_LoadTransitionApplyAttempted ? "yes" : "no",
+    ImGui::Text("Apply: started=%s ok=%s %.1fms",
+        m_LoadTransitionApplyStartedAt > 0.0 ? "yes" : "no",
         m_LoadTransitionApplySucceeded ? "yes" : "no",
         applyMs);
+    ImGui::Text("First render: ready=%s %.1fms", m_LoadTransitionFirstRenderReady ? "yes" : "no", firstRenderMs);
+    ImGui::Text(
+        "Thumbs: warm=%zu pending=%zu ready=%s %.1fms",
+        m_Editor.GetPendingNodeBrowserThumbnailWarmCount(),
+        m_Editor.GetPendingNodeBrowserThumbnailGenerationCount(),
+        m_LoadTransitionNodeBrowserThumbnailsReady ? "yes" : "no",
+        thumbnailReadyMs);
+    ImGui::Text("Ready to reveal: %s %.1fms",
+        m_LoadTransitionReadyToRevealAt > 0.0 ? "yes" : "no",
+        revealReadyMs);
+    if (!LibraryManager::Get().GetProjectLoadStatusText().empty()) {
+        ImGui::TextWrapped("Status: %s", LibraryManager::Get().GetProjectLoadStatusText().c_str());
+    }
     ImGui::Separator();
     const int firstTrace = std::max(0, static_cast<int>(m_LoadTransitionTrace.size()) - 5);
     for (int i = firstTrace; i < static_cast<int>(m_LoadTransitionTrace.size()); ++i) {
@@ -1048,6 +1427,7 @@ void AppShell::OnTabChanged(int oldTab, int newTab) {
 void AppShell::Shutdown() {
     if (!m_Window) return;
 
+    m_Editor.CloseDetachedPreviewFullscreen();
     if (m_Appearance) {
         m_Appearance->Save();
     }
@@ -1059,18 +1439,17 @@ void AppShell::Shutdown() {
         glDeleteTextures(1, &m_LibraryTabTexture);
         m_LibraryTabTexture = 0;
     }
-    if (m_ProgramLogoTexture) {
-        glDeleteTextures(1, &m_ProgramLogoTexture);
-        m_ProgramLogoTexture = 0;
+    if (m_HeaderSettingsTexture) {
+        glDeleteTextures(1, &m_HeaderSettingsTexture);
+        m_HeaderSettingsTexture = 0;
     }
-    if (m_StyleTabTexture) {
-        glDeleteTextures(1, &m_StyleTabTexture);
-        m_StyleTabTexture = 0;
-    }
-    m_Notes.Shutdown();
-    m_Style.Shutdown();
+    ReleaseBackgroundImageTexture();
     m_Composite.Shutdown();
     Async::TaskSystem::Get().Shutdown();
+    if (m_LockedScrubCursorActive) {
+        glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        m_LockedScrubCursorActive = false;
+    }
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -1121,21 +1500,6 @@ void AppShell::HandleDrop(int count, const char** paths) {
                     RequestTabSwitch(tabId);
                 });
             }
-            return;
-        }
-    }
-
-    if (m_CurrentTabId == RootTabNotes) {
-        std::vector<std::string> noteImagePaths;
-        noteImagePaths.reserve(count);
-        for (int i = 0; i < count; ++i) {
-            const std::string path = paths[i] ? paths[i] : "";
-            if (IsSupportedDroppedImagePath(path)) {
-                noteImagePaths.push_back(path);
-            }
-        }
-        if (!noteImagePaths.empty() &&
-            m_Notes.HandleImageDrop(noteImagePaths, static_cast<float>(cursorX), static_cast<float>(cursorY))) {
             return;
         }
     }

@@ -1,5 +1,6 @@
 #include "AppearanceTheme.h"
 
+#include "App/AppPaths.h"
 #include "Composite/EmbeddedCompositeFont.h"
 #include "Persistence/StackBinaryFormat.h"
 
@@ -17,7 +18,6 @@ namespace {
 
 using json = StackBinaryFormat::json;
 
-constexpr const char* kSettingsFileName = "StackSettings.json";
 constexpr const char* kVersionKey = "version";
 constexpr const char* kAppearanceKey = "appearance";
 constexpr const char* kActivePresetIdKey = "activePresetId";
@@ -30,7 +30,12 @@ constexpr const char* kLegacyThemeKey = "themePreset";
 constexpr const char* kGraphVisualModeKey = "graphVisualMode";
 constexpr const char* kGraphSpotlightHaloOutlinesKey = "graphSpotlightHaloOutlines";
 constexpr const char* kGraphDottedMaskLinksKey = "graphDottedMaskLinks";
+constexpr const char* kBackgroundImageEnabledKey = "backgroundImageEnabled";
+constexpr const char* kBackgroundImagePathKey = "backgroundImagePath";
+constexpr const char* kBackgroundImageStrengthKey = "backgroundImageStrength";
+constexpr const char* kUiSurfaceTransparencyKey = "uiSurfaceTransparency";
 constexpr const char* kFactoryThemeToken = "premium-dark-studio";
+constexpr const char* kManagedBackgroundImageBaseName = "StackBackgroundImage";
 constexpr float kMinTextScale = 0.75f;
 constexpr float kMaxTextScale = 1.60f;
 
@@ -45,6 +50,77 @@ ImVec4 Blend(const ImVec4& from, const ImVec4& to, float t) {
         from.y + (to.y - from.y) * clampedT,
         from.z + (to.z - from.z) * clampedT,
         from.w + (to.w - from.w) * clampedT);
+}
+
+float ClampUnit(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+ImVec4 ApplyAlphaMultiplier(const ImVec4& color, float multiplier) {
+    ImVec4 tinted = color;
+    tinted.w *= std::clamp(multiplier, 0.0f, 1.0f);
+    return tinted;
+}
+
+float Luminance(const ImVec4& color) {
+    return (0.2126f * color.x) + (0.7152f * color.y) + (0.0722f * color.z);
+}
+
+float ComputeSurfaceAlphaMultiplier(float transparency) {
+    return 1.0f - (ClampUnit(transparency) * 0.75f);
+}
+
+float ComputePopupAlphaMultiplier(float transparency) {
+    return 1.0f - (ClampUnit(transparency) * 0.42f);
+}
+
+RuntimeSurfacePalette BuildRuntimeSurfacePalette(const ThemeDefinition& theme, float transparency, bool backgroundImageEnabled) {
+    RuntimeSurfacePalette palette;
+
+    if (!backgroundImageEnabled) {
+        palette.appSurface = theme.colors[ImGuiCol_WindowBg];
+        palette.panelSurface = theme.colors[ImGuiCol_ChildBg];
+        palette.popupSurface = theme.colors[ImGuiCol_PopupBg];
+        palette.chromeSurface = theme.colors[ImGuiCol_Header];
+        palette.drawerSurface = theme.colors[ImGuiCol_ChildBg];
+        palette.drawerSurfaceTransparent = palette.drawerSurface;
+        palette.drawerSurfaceTransparent.w = 0.0f;
+        palette.border = theme.colors[ImGuiCol_Border];
+        palette.separator = theme.colors[ImGuiCol_Separator];
+        palette.controlSurface = theme.colors[ImGuiCol_FrameBg];
+        palette.controlSurfaceHovered = theme.colors[ImGuiCol_FrameBgHovered];
+        palette.controlSurfaceActive = theme.colors[ImGuiCol_FrameBgActive];
+        return palette;
+    }
+
+    const float surfaceAlpha = ComputeSurfaceAlphaMultiplier(transparency);
+    const float popupAlpha = ComputePopupAlphaMultiplier(transparency);
+    const ImVec4& windowBg = theme.colors[ImGuiCol_WindowBg];
+    const ImVec4& childBg = theme.colors[ImGuiCol_ChildBg];
+    const ImVec4& popupBg = theme.colors[ImGuiCol_PopupBg];
+    const ImVec4& header = theme.colors[ImGuiCol_Header];
+    const ImVec4& border = theme.colors[ImGuiCol_Border];
+    const ImVec4& separator = theme.colors[ImGuiCol_Separator];
+    const ImVec4& frameBg = theme.colors[ImGuiCol_FrameBg];
+    const ImVec4& frameBgHovered = theme.colors[ImGuiCol_FrameBgHovered];
+    const ImVec4& frameBgActive = theme.colors[ImGuiCol_FrameBgActive];
+    const bool isLightTheme = Luminance(windowBg) >= 0.5f;
+    const ImVec4 baseSurface = Blend(windowBg, childBg, isLightTheme ? 0.10f : 0.16f);
+    const float controlAlpha = std::clamp(surfaceAlpha + 0.06f, 0.0f, 1.0f);
+
+    palette.appSurface = ApplyAlphaMultiplier(baseSurface, surfaceAlpha);
+    palette.panelSurface = palette.appSurface;
+    palette.chromeSurface = palette.appSurface;
+    palette.drawerSurface = palette.appSurface;
+    palette.drawerSurfaceTransparent = palette.drawerSurface;
+    palette.drawerSurfaceTransparent.w = 0.0f;
+    palette.popupSurface = ApplyAlphaMultiplier(Blend(popupBg, baseSurface, 0.16f), std::max(popupAlpha, std::min(1.0f, surfaceAlpha + 0.12f)));
+    palette.border = ApplyAlphaMultiplier(border, std::clamp(surfaceAlpha * 0.36f, 0.08f, 0.44f));
+    palette.separator = ApplyAlphaMultiplier(separator, std::clamp(surfaceAlpha * 0.28f, 0.06f, 0.34f));
+    palette.controlSurface = ApplyAlphaMultiplier(Blend(frameBg, baseSurface, 0.15f), controlAlpha);
+    palette.controlSurfaceHovered = ApplyAlphaMultiplier(Blend(frameBgHovered, header, 0.12f), std::clamp(controlAlpha + 0.05f, 0.0f, 1.0f));
+    palette.controlSurfaceActive = ApplyAlphaMultiplier(Blend(frameBgActive, header, 0.10f), std::clamp(controlAlpha + 0.08f, 0.0f, 1.0f));
+    return palette;
 }
 
 ImVec2 Blend(const ImVec2& from, const ImVec2& to, float t) {
@@ -350,12 +426,38 @@ std::string MakeUniqueDisplayName(const std::string& baseName, const std::unorde
 }
 
 std::filesystem::path GetSettingsPath() {
-    std::error_code ec;
-    const std::filesystem::path current = std::filesystem::current_path(ec);
-    if (ec) {
-        return std::filesystem::path(kSettingsFileName);
+    return AppPaths::GetSettingsFilePath();
+}
+
+std::filesystem::path GetWorkingDirectoryPath() {
+    return AppPaths::GetSettingsDirectory();
+}
+
+std::string NormalizeExtension(std::string extension) {
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (extension.empty()) {
+        extension = ".png";
     }
-    return current / kSettingsFileName;
+    if (extension.front() != '.') {
+        extension.insert(extension.begin(), '.');
+    }
+    return extension;
+}
+
+std::filesystem::path ResolveManagedBackgroundImagePath(const std::string& storedPath) {
+    if (storedPath.empty()) {
+        return {};
+    }
+
+    std::filesystem::path path(storedPath);
+    if (path.is_absolute()) {
+        return path;
+    }
+
+    const std::filesystem::path workingDirectory = GetWorkingDirectoryPath();
+    return workingDirectory.empty() ? path : (workingDirectory / path);
 }
 
 bool ThemeDefinitionEquals(const ThemeDefinition& lhs, const ThemeDefinition& rhs) {
@@ -961,6 +1063,10 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
     root[kAppearanceKey][kGraphVisualModeKey] = GraphVisualModeToString(library.graphVisualMode);
     root[kAppearanceKey][kGraphSpotlightHaloOutlinesKey] = library.graphSpotlightHaloOutlines;
     root[kAppearanceKey][kGraphDottedMaskLinksKey] = library.graphDottedMaskLinks;
+    root[kAppearanceKey][kBackgroundImageEnabledKey] = library.backgroundImageEnabled;
+    root[kAppearanceKey][kBackgroundImagePathKey] = library.backgroundImagePath;
+    root[kAppearanceKey][kBackgroundImageStrengthKey] = ClampUnit(library.backgroundImageStrength);
+    root[kAppearanceKey][kUiSurfaceTransparencyKey] = ClampUnit(library.uiSurfaceTransparency);
     root[kAppearanceKey][kPresetsKey] = json::array();
     for (const ThemeDefinition& preset : library.customPresets) {
         root[kAppearanceKey][kPresetsKey].push_back(ThemePresetRecordToJson(preset));
@@ -974,6 +1080,10 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
     outLibrary.graphVisualMode = GraphVisualMode::BlackNodes;
     outLibrary.graphSpotlightHaloOutlines = false;
     outLibrary.graphDottedMaskLinks = true;
+    outLibrary.backgroundImageEnabled = false;
+    outLibrary.backgroundImagePath.clear();
+    outLibrary.backgroundImageStrength = 0.58f;
+    outLibrary.uiSurfaceTransparency = 0.18f;
     outLibrary.customPresets.clear();
 
     if (!root.is_object()) {
@@ -997,8 +1107,11 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         return true;
     }
 
-    if (version != static_cast<int>(kAppearanceSettingsVersion)) {
+    if (version != 2 && version != static_cast<int>(kAppearanceSettingsVersion)) {
         return false;
+    }
+    if (version < static_cast<int>(kAppearanceSettingsVersion) && outNeedsMigration) {
+        *outNeedsMigration = true;
     }
 
     const json appearance = root.value(kAppearanceKey, json::object());
@@ -1007,6 +1120,10 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::BlackNodes))));
     outLibrary.graphSpotlightHaloOutlines = appearance.value(kGraphSpotlightHaloOutlinesKey, false);
     outLibrary.graphDottedMaskLinks = appearance.value(kGraphDottedMaskLinksKey, true);
+    outLibrary.backgroundImageEnabled = appearance.value(kBackgroundImageEnabledKey, false);
+    outLibrary.backgroundImagePath = appearance.value(kBackgroundImagePathKey, std::string());
+    outLibrary.backgroundImageStrength = ClampUnit(appearance.value(kBackgroundImageStrengthKey, 0.58f));
+    outLibrary.uiSurfaceTransparency = ClampUnit(appearance.value(kUiSurfaceTransparencyKey, 0.18f));
 
     const json presets = appearance.value(kPresetsKey, json::array());
     if (!presets.is_array()) {
@@ -1065,7 +1182,7 @@ ThemeDefinition ResolveActiveTheme(
 }
 
 std::string GetSettingsFileToken() {
-    return kSettingsFileName;
+    return AppPaths::GetSettingsFilePath().filename().string();
 }
 
 } // namespace
@@ -1277,6 +1394,8 @@ bool AppearanceManager::Load() {
     m_FactoryTheme = m_FactoryThemes.front();
     m_WorkingTheme = m_FactoryTheme;
     m_Library = {};
+    m_BackgroundImageRevision = 0;
+    m_BackgroundImageRuntimeStatus.clear();
 
     if (!LoadAppearanceLibrary(m_Library)) {
         m_Library.activePresetId = kFactoryThemeToken;
@@ -1345,6 +1464,57 @@ bool AppearanceManager::GetGraphDottedMaskLinks() const {
     return m_Library.graphDottedMaskLinks;
 }
 
+bool AppearanceManager::GetBackgroundImageEnabled() const {
+    return m_Library.backgroundImageEnabled;
+}
+
+const std::string& AppearanceManager::GetBackgroundImagePath() const {
+    return m_Library.backgroundImagePath;
+}
+
+float AppearanceManager::GetBackgroundImageStrength() const {
+    return ClampUnit(m_Library.backgroundImageStrength);
+}
+
+float AppearanceManager::GetUiSurfaceTransparency() const {
+    return ClampUnit(m_Library.uiSurfaceTransparency);
+}
+
+float AppearanceManager::GetUiSurfaceAlphaMultiplier() const {
+    if (!m_Library.backgroundImageEnabled) {
+        return 1.0f;
+    }
+    return ComputeSurfaceAlphaMultiplier(m_Library.uiSurfaceTransparency);
+}
+
+RuntimeSurfacePalette AppearanceManager::GetRuntimeSurfacePalette() const {
+    return BuildRuntimeSurfacePalette(m_WorkingTheme, m_Library.uiSurfaceTransparency, m_Library.backgroundImageEnabled);
+}
+
+std::uint64_t AppearanceManager::GetBackgroundImageRevision() const {
+    return m_BackgroundImageRevision;
+}
+
+const std::string& AppearanceManager::GetBackgroundImageRuntimeStatus() const {
+    return m_BackgroundImageRuntimeStatus;
+}
+
+std::filesystem::path AppearanceManager::GetResolvedBackgroundImagePath() const {
+    return ResolveManagedBackgroundImagePath(m_Library.backgroundImagePath);
+}
+
+ImVec4 AppearanceManager::GetEffectiveWindowBackgroundColor() const {
+    return GetRuntimeSurfacePalette().appSurface;
+}
+
+ImVec4 AppearanceManager::GetEffectiveChildBackgroundColor() const {
+    return GetRuntimeSurfacePalette().panelSurface;
+}
+
+ImVec4 AppearanceManager::GetEffectivePopupBackgroundColor() const {
+    return GetRuntimeSurfacePalette().popupSurface;
+}
+
 bool AppearanceManager::ActivePresetIsFactory() const {
     return std::any_of(
         m_FactoryThemes.begin(),
@@ -1398,6 +1568,123 @@ bool AppearanceManager::SetGraphDottedMaskLinks(bool enabled) {
     }
     m_Library.graphDottedMaskLinks = enabled;
     return Save();
+}
+
+bool AppearanceManager::SetBackgroundImageEnabled(bool enabled) {
+    if (m_Library.backgroundImageEnabled == enabled) {
+        return true;
+    }
+    m_Library.backgroundImageEnabled = enabled;
+    return Save();
+}
+
+bool AppearanceManager::SetBackgroundImageStrength(float strength) {
+    const float clamped = ClampUnit(strength);
+    if (std::abs(m_Library.backgroundImageStrength - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.backgroundImageStrength = clamped;
+    return Save();
+}
+
+bool AppearanceManager::SetUiSurfaceTransparency(float transparency) {
+    const float clamped = ClampUnit(transparency);
+    if (std::abs(m_Library.uiSurfaceTransparency - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.uiSurfaceTransparency = clamped;
+    return Save();
+}
+
+bool AppearanceManager::ImportBackgroundImageFromPath(const std::filesystem::path& sourcePath, std::string* errorMessage) {
+    std::error_code ec;
+    if (sourcePath.empty() || !std::filesystem::exists(sourcePath, ec) || ec) {
+        if (errorMessage) {
+            *errorMessage = "Selected background image file does not exist.";
+        }
+        m_BackgroundImageRuntimeStatus = errorMessage ? *errorMessage : "Selected background image file does not exist.";
+        return false;
+    }
+
+    const std::string extension = NormalizeExtension(sourcePath.extension().string());
+    const std::string fileName = std::string(kManagedBackgroundImageBaseName) + extension;
+    const std::filesystem::path destinationPath = ResolveManagedBackgroundImagePath(fileName);
+    if (destinationPath.empty()) {
+        if (errorMessage) {
+            *errorMessage = "Unable to resolve the app background image path.";
+        }
+        m_BackgroundImageRuntimeStatus = errorMessage ? *errorMessage : "Unable to resolve the app background image path.";
+        return false;
+    }
+
+    const std::filesystem::path previousPath = ResolveManagedBackgroundImagePath(m_Library.backgroundImagePath);
+    if (!destinationPath.parent_path().empty()) {
+        std::filesystem::create_directories(destinationPath.parent_path(), ec);
+        if (ec) {
+            if (errorMessage) {
+                *errorMessage = "Unable to create the background image folder.";
+            }
+            m_BackgroundImageRuntimeStatus = errorMessage ? *errorMessage : "Unable to create the background image folder.";
+            return false;
+        }
+    }
+
+    bool sourceAlreadyManaged = false;
+    const std::filesystem::path normalizedSource = sourcePath.lexically_normal();
+    const std::filesystem::path normalizedDestination = destinationPath.lexically_normal();
+    if (normalizedSource == normalizedDestination) {
+        sourceAlreadyManaged = true;
+    } else {
+        sourceAlreadyManaged = std::filesystem::equivalent(sourcePath, destinationPath, ec) && !ec;
+        ec.clear();
+    }
+
+    if (!sourceAlreadyManaged) {
+        std::filesystem::copy_file(sourcePath, destinationPath, std::filesystem::copy_options::overwrite_existing, ec);
+    }
+    if (ec) {
+        if (errorMessage) {
+            *errorMessage = "Unable to copy the selected background image into the app folder.";
+        }
+        m_BackgroundImageRuntimeStatus = errorMessage ? *errorMessage : "Unable to copy the selected background image into the app folder.";
+        return false;
+    }
+
+    if (!m_Library.backgroundImagePath.empty() && previousPath != destinationPath) {
+        std::filesystem::remove(previousPath, ec);
+        ec.clear();
+    }
+
+    m_Library.backgroundImagePath = fileName;
+    m_Library.backgroundImageEnabled = true;
+    m_BackgroundImageRuntimeStatus.clear();
+    ++m_BackgroundImageRevision;
+    return Save();
+}
+
+bool AppearanceManager::ClearBackgroundImage(std::string* errorMessage) {
+    std::error_code ec;
+    const std::filesystem::path previousPath = ResolveManagedBackgroundImagePath(m_Library.backgroundImagePath);
+    if (!m_Library.backgroundImagePath.empty()) {
+        std::filesystem::remove(previousPath, ec);
+        if (ec) {
+            if (errorMessage) {
+                *errorMessage = "Unable to remove the managed background image file.";
+            }
+            m_BackgroundImageRuntimeStatus = errorMessage ? *errorMessage : "Unable to remove the managed background image file.";
+            return false;
+        }
+    }
+
+    m_Library.backgroundImageEnabled = false;
+    m_Library.backgroundImagePath.clear();
+    m_BackgroundImageRuntimeStatus.clear();
+    ++m_BackgroundImageRevision;
+    return Save();
+}
+
+void AppearanceManager::SetBackgroundImageRuntimeStatus(std::string statusMessage) {
+    m_BackgroundImageRuntimeStatus = std::move(statusMessage);
 }
 
 bool AppearanceManager::ResetWorkingTheme() {
@@ -1469,6 +1756,8 @@ bool AppearanceManager::ExportWorkingTheme(const std::filesystem::path& path, st
 
 void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const {
     ImGui::StyleColorsDark(&style);
+    const RuntimeSurfacePalette palette = GetRuntimeSurfacePalette();
+    const bool backgroundImageEnabled = m_Library.backgroundImageEnabled;
 
     // Premium hardcoded style values for a clean, consistent modern look
     style.Alpha = 1.0f;
@@ -1504,6 +1793,23 @@ void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const 
         style.Colors[index] = m_WorkingTheme.colors[static_cast<std::size_t>(index)];
     }
 
+    if (backgroundImageEnabled) {
+        style.Colors[ImGuiCol_WindowBg] = palette.appSurface;
+        style.Colors[ImGuiCol_ChildBg] = palette.panelSurface;
+        style.Colors[ImGuiCol_PopupBg] = palette.popupSurface;
+        style.Colors[ImGuiCol_Header] = palette.chromeSurface;
+        style.Colors[ImGuiCol_HeaderHovered] = palette.controlSurfaceHovered;
+        style.Colors[ImGuiCol_HeaderActive] = palette.controlSurfaceActive;
+        style.Colors[ImGuiCol_FrameBg] = palette.controlSurface;
+        style.Colors[ImGuiCol_FrameBgHovered] = palette.controlSurfaceHovered;
+        style.Colors[ImGuiCol_FrameBgActive] = palette.controlSurfaceActive;
+        style.Colors[ImGuiCol_Border] = palette.border;
+        style.Colors[ImGuiCol_Separator] = palette.separator;
+        style.Colors[ImGuiCol_SeparatorHovered] = palette.border;
+        style.Colors[ImGuiCol_SeparatorActive] = palette.border;
+        style.Colors[ImGuiCol_DockingEmptyBg] = palette.appSurface;
+    }
+
     io.FontGlobalScale = 1.0f; // Hardcode global font scale for consistent typography
 }
 
@@ -1537,7 +1843,7 @@ void AppearanceManager::SetupFonts(ImGuiIO& io) const {
 }
 
 ImVec4 AppearanceManager::GetClearColor() const {
-    return m_WorkingTheme.colors[ImGuiCol_DockingEmptyBg];
+    return GetRuntimeSurfacePalette().appSurface;
 }
 
 } // namespace StackAppearance

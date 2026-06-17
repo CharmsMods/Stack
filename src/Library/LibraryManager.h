@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Async/TaskState.h"
+#include "Editor/LoadedProjectData.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "ProjectData.h"
 #include "Utils/UiNotifications.h"
@@ -95,11 +96,15 @@ public:
     int GetProjectCount() const;
 
     void RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName = "", std::function<void(bool)> onComplete = {});
+    void RequestPersistNodeBrowserThumbnails(
+        const std::string& fileName,
+        std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry> entries);
     void RequestLoadProject(const std::string& fileName, EditorModule* editor, std::function<void(bool)> onComplete = {});
     void RequestLoadProjectDeferredApply(
         const std::string& fileName,
-        EditorModule* editor,
-        std::function<void(bool, std::function<bool()>)> onReady);
+        std::function<void(bool, std::shared_ptr<EditorLoadedProjectData>)> onReady);
+    void SetProjectLoadApplyingStatus(const std::string& statusText);
+    void FinishDeferredProjectLoad(bool success, const std::string& message = "");
     bool OverwriteEditorProject(
         const std::string& fileName,
         const std::string& projectName,
@@ -212,6 +217,7 @@ private:
     std::vector<std::shared_ptr<ProjectEntry>> m_Projects;
     std::vector<std::shared_ptr<AssetEntry>> m_Assets;
     std::mutex m_ProjectsMutex;
+    std::mutex m_ProjectFileIoMutex;
 
     std::filesystem::path m_LibraryPath;
     std::filesystem::path m_AssetsPath;

@@ -9,11 +9,18 @@ namespace ImGuiExtras {
         bool active = false;
         bool edited = false;
         bool popupOpen = false;
+        bool rightClickConsumed = false;
         bool lastHovered = false;
         bool lastActive = false;
         bool lastEdited = false;
         bool lastPopupOpen = false;
+        bool lastRightClickConsumed = false;
         ImGuiID id = 0;
+    };
+
+    enum class GraphSliderRangePolicy {
+        Bounded,
+        Unclamped
     };
 
     struct GraphNodeControlScopeConfig {
@@ -21,6 +28,21 @@ namespace ImGuiExtras {
         float valueWidth = 48.0f;
         float minSliderWidth = 78.0f;
         float scale = 1.0f;
+        bool allowSliderTextEntry = false;
+        bool useScrubHandles = false;
+        GraphSliderRangePolicy rangePolicy = GraphSliderRangePolicy::Bounded;
+        float scrubSensitivity = 1.0f;
+    };
+
+    enum class CursorCaptureMode {
+        None,
+        LockedScrub
+    };
+
+    struct CursorCaptureRequest {
+        CursorCaptureMode mode = CursorCaptureMode::None;
+        ImVec2 anchorScreenPos = ImVec2(0.0f, 0.0f);
+        ImVec2 restoreScreenPos = ImVec2(0.0f, 0.0f);
     };
 
     float AnimateTowards(float current, float target, float deltaTime, float speed = 18.0f);
@@ -38,6 +60,8 @@ namespace ImGuiExtras {
     void BeginGraphNodeControlScope(const GraphNodeControlScopeConfig& config = {});
     void EndGraphNodeControlScope();
     bool IsGraphNodeControlScopeActive();
+    void SubmitCursorCaptureRequest(const CursorCaptureRequest& request);
+    bool ConsumeCursorCaptureRequest(CursorCaptureRequest* outRequest);
     void RichSectionLabel(const char* label, float spacingAfter = 0.0f);
     bool RichFullWidthButton(const char* label, float width, float height = 0.0f);
     void RichColorSwatchRow(

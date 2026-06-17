@@ -45,9 +45,11 @@ int LayoutKindPriority(const Node& node) {
         case NodeKind::CustomMask:
             return 1;
         case NodeKind::RawNeuralDenoise:
+        case NodeKind::RawDecode:
         case NodeKind::RawDevelop:
             return 2;
         case NodeKind::Layer:
+        case NodeKind::Lut:
         case NodeKind::RawDetailAutoMask:
         case NodeKind::RawDetailFusion:
         case NodeKind::ImageToMask:
@@ -333,7 +335,7 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Link uses an invalid socket direction.");
         }
-        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDevelop) {
+        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDecode || from->kind == NodeKind::RawDevelop) {
             outgoingImages.insert(from->id);
         }
 
@@ -364,7 +366,7 @@ ValidationResult Graph::Validate() const {
                 toSocket.type == SocketType::Raw &&
                 (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
                 link.fromSocketId == kRawOutputSocketId &&
-                (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDevelop) &&
+                (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop) &&
                 link.toSocketId == kRawInputSocketId;
             if (!validRawLink) {
                 result.valid = false;
@@ -391,11 +393,13 @@ ValidationResult Graph::Validate() const {
                 const bool validScalarTarget =
                     (to->kind == NodeKind::RawDevelop && link.toSocketId == kMaskInputSocketId) ||
                     (to->kind == NodeKind::Layer && link.toSocketId == kMaskInputSocketId) ||
+                    (to->kind == NodeKind::Lut && link.toSocketId == kMaskInputSocketId) ||
                     (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kMaskInputSocketId) ||
                     (to->kind == NodeKind::Mix && link.toSocketId == kMixFactorSocketId) ||
                     (to->kind == NodeKind::MaskCombine &&
                         (link.toSocketId == kMaskCombineInputASocketId || link.toSocketId == kMaskCombineInputBSocketId)) ||
                     (to->kind == NodeKind::MaskUtility && link.toSocketId == kMaskUtilityInputSocketId) ||
+                    (to->kind == NodeKind::Lut && IsChannelSocketId(link.toSocketId)) ||
                     (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(link.toSocketId)) ||
                     (to->kind == NodeKind::Output && IsChannelSocketId(link.toSocketId));
                 if (!validScalarSource || !validScalarTarget) {
@@ -405,6 +409,7 @@ ValidationResult Graph::Validate() const {
             } else if (isScalarToImage) {
                 const bool validImageTarget =
                     (to->kind == NodeKind::Layer && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::Lut && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::RawDetailAutoMask && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::Mix && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
@@ -425,7 +430,7 @@ ValidationResult Graph::Validate() const {
                 result.valid = false;
                 result.messages.push_back("Render-chain links must connect image sockets.");
             }
-            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
+            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
                 result.valid = false;
                 result.messages.push_back("Invalid render-chain link.");
             }
@@ -481,7 +486,7 @@ std::vector<int> Graph::GetRenderLayerNodePath(int outputNodeId) const {
             return {};
         }
         visited.insert(from->id);
-        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDevelop) {
+        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDecode || from->kind == NodeKind::RawDevelop) {
             std::reverse(reversePath.begin(), reversePath.end());
             return reversePath;
         }
@@ -524,10 +529,12 @@ bool Graph::IsRenderChainNode(const Node& node) const {
     return node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
         node.kind == NodeKind::RawNeuralDenoise ||
+        node.kind == NodeKind::RawDecode ||
         node.kind == NodeKind::RawDevelop ||
         node.kind == NodeKind::RawDetailAutoMask ||
         node.kind == NodeKind::RawDetailFusion ||
         node.kind == NodeKind::HdrMerge ||
+        node.kind == NodeKind::Lut ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::Layer ||
         node.kind == NodeKind::Output ||

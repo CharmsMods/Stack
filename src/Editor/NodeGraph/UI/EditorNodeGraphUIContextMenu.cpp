@@ -3,6 +3,8 @@
 #include "Editor/EditorModule.h"
 #include "Library/LibraryManager.h"
 #include "Utils/FileDialogs.h"
+#include "Utils/ImGuiExtras.h"
+#include <algorithm>
 #include <cctype>
 
 namespace {
@@ -41,6 +43,17 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         m_OpenRenameProjectPopup = false;
     }
 
+    float popupAlpha = 1.0f;
+    if (m_ContextMenuFadeActive) {
+        const float elapsed = static_cast<float>(ImGui::GetTime() - m_ContextMenuOpenedAt);
+        const float appearT = std::clamp(elapsed / 0.11f, 0.0f, 1.0f);
+        popupAlpha = ImGuiExtras::EaseOutCubic(appearT);
+        if (appearT >= 1.0f) {
+            m_ContextMenuFadeActive = false;
+        }
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, popupAlpha);
     const bool contextMenuOpen = ImGui::BeginPopup("EditorNodeGraphContextMenu");
 
     if (contextMenuOpen && m_ContextTarget == ContextTarget::Node) {
@@ -59,13 +72,29 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 DuplicateSelectedNodes(editor);
             }
+            if (node->kind == EditorNodeGraph::NodeKind::Image) {
+                if (ImGui::BeginMenu("Rotate")) {
+                    if (ImGui::MenuItem("90 CW")) {
+                        editor->RotateImageNode(node->id, 1);
+                    }
+                    if (ImGui::MenuItem("90 CCW")) {
+                        editor->RotateImageNode(node->id, -1);
+                    }
+                    if (ImGui::MenuItem("180")) {
+                        editor->RotateImageNode(node->id, 2);
+                    }
+                    ImGui::EndMenu();
+                }
+            }
             const bool hasAdvancedEditor =
                 (node->kind == EditorNodeGraph::NodeKind::RawSource ||
                  node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+                 node->kind == EditorNodeGraph::NodeKind::RawDecode ||
                  node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
                  node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
                  node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
                  node->kind == EditorNodeGraph::NodeKind::HdrMerge ||
+                 node->kind == EditorNodeGraph::NodeKind::Lut ||
                  node->kind == EditorNodeGraph::NodeKind::Layer) &&
                 editor->GetNodeSurfaceSpec(node->id).presentation == NodeSurfacePresentation::RichExpandedSurface;
             if (hasAdvancedEditor) {
@@ -219,67 +248,67 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Scalar / Data")) {
-                if (ImGui::MenuItem("Add Scalars")) {
+            if (ImGui::BeginMenu("Mask / Math")) {
+                if (ImGui::MenuItem("Add Mask")) {
                     editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Add, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Subtract Scalars")) {
+                if (ImGui::MenuItem("Subtract Mask")) {
                     editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Subtract, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Intersect Scalars")) {
+                if (ImGui::MenuItem("Intersect Mask")) {
                     editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Intersect, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Difference Scalars")) {
+                if (ImGui::MenuItem("Difference Mask")) {
                     editor->AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode::Exclude, m_ContextGraphPos);
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Invert Scalar")) {
+                if (ImGui::MenuItem("Invert Mask")) {
                     editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Invert, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Remap Scalar")) {
+                if (ImGui::MenuItem("Remap Mask")) {
                     editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Levels, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Threshold Scalar")) {
+                if (ImGui::MenuItem("Threshold Mask")) {
                     editor->AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind::Threshold, m_ContextGraphPos);
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Clamp Data")) {
+                if (ImGui::MenuItem("Clamp")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Clamp, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Add Data")) {
+                if (ImGui::MenuItem("Add")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Add, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Subtract Data")) {
+                if (ImGui::MenuItem("Subtract")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Subtract, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Multiply Data")) {
+                if (ImGui::MenuItem("Multiply")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Multiply, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Divide Data")) {
+                if (ImGui::MenuItem("Divide")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Divide, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Average Data")) {
+                if (ImGui::MenuItem("Average")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Average, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Minimum Data")) {
+                if (ImGui::MenuItem("Minimum")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Min, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Maximum Data")) {
+                if (ImGui::MenuItem("Maximum")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Max, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Difference Data")) {
+                if (ImGui::MenuItem("Difference")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Difference, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Remap Data")) {
+                if (ImGui::MenuItem("Remap")) {
                     editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::Remap, m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Generator")) {
-                if (ImGui::MenuItem("Image To Scalar")) {
+                if (ImGui::MenuItem("Luminance Mask")) {
                     editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::Luminance, m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Sampled Range Scalar")) {
+                if (ImGui::MenuItem("Sampled Range Mask")) {
                     editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::SampledRange, m_ContextGraphPos);
                 }
                 if (ImGui::MenuItem("Solid Color Image")) {
@@ -305,6 +334,15 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 if (ImGui::MenuItem("HDR Merge")) {
                     editor->AddHdrMergeNodeAt(m_ContextGraphPos);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Image Operations")) {
+                if (ImGui::MenuItem("LUT")) {
+                    editor->AddLutNodeAt(m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Blend Images")) {
+                    editor->AddMixNodeAt(m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }
@@ -355,6 +393,10 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
 
         ImGui::EndPopup();
     }
+    if (!ImGui::IsPopupOpen("EditorNodeGraphContextMenu")) {
+        m_ContextMenuFadeActive = false;
+    }
+    ImGui::PopStyleVar();
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));

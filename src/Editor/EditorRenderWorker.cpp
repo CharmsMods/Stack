@@ -26,7 +26,6 @@ void ReleaseResultResources(EditorRenderWorker::Result& result) {
         result.outputTexture.texture = 0;
     }
 }
-
 int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot& snapshot) {
     int steps = 0;
     if (!snapshot.compositeOutputs.empty()) {
@@ -1298,295 +1297,46 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         auto reportSupersededWork = [&]() {
             reportProgress("Newer render queued; skipping stale feedback...");
         };
+        auto resolveGraphImageSourceBuffer = [&](int sourceNodeId,
+                                               SharedPixelBuffer& outBuffer,
+                                               int& outWidth,
+                                               int& outHeight,
+                                               int& outChannels) -> bool {
+            if (sourceNodeId <= 0) {
+                return false;
+            }
+            const auto sourceIt = std::find_if(
+                snapshot.graph.nodes.begin(),
+                snapshot.graph.nodes.end(),
+                [sourceNodeId](const RenderGraphNode& node) { return node.nodeId == sourceNodeId; });
+            if (sourceIt == snapshot.graph.nodes.end() ||
+                sourceIt->kind != RenderGraphNodeKind::Image ||
+                sourceIt->image.pixels.empty() ||
+                sourceIt->image.width <= 0 ||
+                sourceIt->image.height <= 0) {
+                return false;
+            }
+
+            outBuffer = sourceIt->image.pixels;
+            outWidth = sourceIt->image.width;
+            outHeight = sourceIt->image.height;
+            outChannels = std::max(1, sourceIt->image.channels);
+            return true;
+        };
+        auto loadSourceBuffer = [&](const SharedPixelBuffer& sourceBuffer,
+                                    int sourceWidth,
+                                    int sourceHeight,
+                                    int sourceChannels) {
+            pipeline.LoadSourceFromSharedPixels(
+                sourceBuffer,
+                sourceWidth,
+                sourceHeight,
+                sourceChannels);
+        };
         reportProgress("Preparing render...");
 
         auto renderDevelopCandidateRequests = [&]() {
-            if (snapshot.developCandidateRenders.empty()) {
-                return;
-            }
-            if (shouldAbortStaleWork()) {
-                reportSupersededWork();
-                return;
-            }
-
-            result.developCandidateRenders.reserve(snapshot.developCandidateRenders.size());
-            const unsigned char* sourceData = snapshot.sourcePixels.empty() ? nullptr : snapshot.sourcePixels.data();
-            int candidateIndex = 0;
-            const int candidateCount = static_cast<int>(snapshot.developCandidateRenders.size());
-            if (snapshot.width <= 0 || snapshot.height <= 0) {
-                for (const DevelopCandidateRenderRequest& request : snapshot.developCandidateRenders) {
-                    if (shouldAbortStaleWork()) {
-                        reportSupersededWork();
-                        break;
-                    }
-                    reportProgress(BuildDevelopCandidateProgressLabel(
-                        request.candidateLabel,
-                        request.candidateRevisionStage,
-                        candidateIndex,
-                        candidateCount));
-                    DevelopCandidateRenderResult candidateResult;
-                    candidateResult.developNodeId = request.developNodeId;
-                    candidateResult.candidateId = request.candidateId;
-                    candidateResult.candidateLabel = request.candidateLabel;
-                    candidateResult.candidateRevisionStage = request.candidateRevisionStage;
-                    candidateResult.activeRevisionStage = request.activeRevisionStage;
-                    candidateResult.activeRefineIntent = request.activeRefineIntent;
-                    candidateResult.stageSchedulerExpectedDirtyBoundary = request.stageSchedulerExpectedDirtyBoundary;
-                    candidateResult.stageSchedulerReason = request.stageSchedulerReason;
-                    candidateResult.dirtyGeneration = request.dirtyGeneration;
-                    candidateResult.solveFingerprint = request.solveFingerprint;
-                    candidateResult.rawDevelopInteractionSerial = request.rawDevelopInteractionSerial;
-                    candidateResult.guidanceFingerprint = request.guidanceFingerprint;
-                    candidateResult.solveScore = request.solveScore;
-                    candidateResult.stageSchedulerOrder = request.stageSchedulerOrder;
-                    candidateResult.stageSchedulerRank = request.stageSchedulerRank;
-                    candidateResult.adaptiveRenderBudget = request.adaptiveRenderBudget;
-                    candidateResult.adaptiveRenderBudgetVersion = request.adaptiveRenderBudgetVersion;
-                    candidateResult.adaptiveRenderBudgetReason = request.adaptiveRenderBudgetReason;
-                    candidateResult.adaptiveRenderBudgetContinuationDecision =
-                        request.adaptiveRenderBudgetContinuationDecision;
-                    candidateResult.adaptiveRenderBudgetConvergenceState =
-                        request.adaptiveRenderBudgetConvergenceState;
-                    candidateResult.adaptiveRenderBudgetConvergenceDecision =
-                        request.adaptiveRenderBudgetConvergenceDecision;
-                    candidateResult.adaptiveRenderBudgetConvergenceReason =
-                        request.adaptiveRenderBudgetConvergenceReason;
-                    candidateResult.activeStageMatch = request.activeStageMatch;
-                    candidateResult.stageReservedRequest = request.stageReservedRequest;
-                    candidateResult.activeRefineIntentMatch = request.activeRefineIntentMatch;
-                    candidateResult.refineIntentReservedRequest = request.refineIntentReservedRequest;
-                    candidateResult.adaptiveRenderBudgetExpanded =
-                        request.adaptiveRenderBudgetExpanded;
-                    candidateResult.adaptiveRenderBudgetNarrowed =
-                        request.adaptiveRenderBudgetNarrowed;
-                    candidateResult.metricReadbackMaxDimension = request.metricReadbackMaxDimension;
-                    candidateResult.error = "No source image for candidate render.";
-                    result.developCandidateRenders.push_back(std::move(candidateResult));
-                    ++candidateIndex;
-                    finishProgressStep("Develop feedback measured.");
-                }
-                return;
-            }
-
-            for (const DevelopCandidateRenderRequest& request : snapshot.developCandidateRenders) {
-                if (shouldAbortStaleWork()) {
-                    reportSupersededWork();
-                    break;
-                }
-                reportProgress(BuildDevelopCandidateProgressLabel(
-                    request.candidateLabel,
-                    request.candidateRevisionStage,
-                    candidateIndex,
-                    candidateCount));
-                DevelopCandidateRenderResult candidateResult;
-                candidateResult.developNodeId = request.developNodeId;
-                candidateResult.candidateId = request.candidateId;
-                candidateResult.candidateLabel = request.candidateLabel;
-                candidateResult.candidateRevisionStage = request.candidateRevisionStage;
-                candidateResult.activeRevisionStage = request.activeRevisionStage;
-                candidateResult.activeRefineIntent = request.activeRefineIntent;
-                candidateResult.stageSchedulerExpectedDirtyBoundary = request.stageSchedulerExpectedDirtyBoundary;
-                candidateResult.stageSchedulerReason = request.stageSchedulerReason;
-                candidateResult.dirtyGeneration = request.dirtyGeneration;
-                candidateResult.solveFingerprint = request.solveFingerprint;
-                candidateResult.rawDevelopInteractionSerial = request.rawDevelopInteractionSerial;
-                candidateResult.guidanceFingerprint = request.guidanceFingerprint;
-                candidateResult.solveScore = request.solveScore;
-                candidateResult.stageSchedulerOrder = request.stageSchedulerOrder;
-                candidateResult.stageSchedulerRank = request.stageSchedulerRank;
-                candidateResult.adaptiveRenderBudget = request.adaptiveRenderBudget;
-                candidateResult.adaptiveRenderBudgetVersion = request.adaptiveRenderBudgetVersion;
-                candidateResult.adaptiveRenderBudgetReason = request.adaptiveRenderBudgetReason;
-                candidateResult.adaptiveRenderBudgetContinuationDecision =
-                    request.adaptiveRenderBudgetContinuationDecision;
-                candidateResult.adaptiveRenderBudgetConvergenceState =
-                    request.adaptiveRenderBudgetConvergenceState;
-                candidateResult.adaptiveRenderBudgetConvergenceDecision =
-                    request.adaptiveRenderBudgetConvergenceDecision;
-                candidateResult.adaptiveRenderBudgetConvergenceReason =
-                    request.adaptiveRenderBudgetConvergenceReason;
-                candidateResult.activeStageMatch = request.activeStageMatch;
-                candidateResult.stageReservedRequest = request.stageReservedRequest;
-                candidateResult.activeRefineIntentMatch = request.activeRefineIntentMatch;
-                candidateResult.refineIntentReservedRequest = request.refineIntentReservedRequest;
-                candidateResult.adaptiveRenderBudgetExpanded =
-                    request.adaptiveRenderBudgetExpanded;
-                candidateResult.adaptiveRenderBudgetNarrowed =
-                    request.adaptiveRenderBudgetNarrowed;
-                candidateResult.metricReadbackMaxDimension = request.metricReadbackMaxDimension;
-
-                auto nodeIt = std::find_if(
-                    snapshot.graph.nodes.begin(),
-                    snapshot.graph.nodes.end(),
-                    [&request](const RenderGraphNode& node) {
-                        return node.nodeId == request.developNodeId &&
-                               node.kind == RenderGraphNodeKind::RawDevelop;
-                    });
-                if (nodeIt == snapshot.graph.nodes.end()) {
-                    candidateResult.error = "Develop node was not present in the render snapshot.";
-                    result.developCandidateRenders.push_back(std::move(candidateResult));
-                    continue;
-                }
-
-                const std::size_t developNodeIndex =
-                    static_cast<std::size_t>(std::distance(snapshot.graph.nodes.begin(), nodeIt));
-                RenderGraphSnapshot candidateGraph = snapshot.graph;
-                if (developNodeIndex >= candidateGraph.nodes.size()) {
-                    candidateResult.error = "Develop node was not present in the copied render snapshot.";
-                    result.developCandidateRenders.push_back(std::move(candidateResult));
-                    continue;
-                }
-                RenderGraphNode& candidateNode = candidateGraph.nodes[developNodeIndex];
-                candidateNode.rawDevelop = request.rawDevelop;
-                candidateNode.requestRevision = std::max<std::uint64_t>(1, request.dirtyGeneration);
-
-                const int syntheticOutputId =
-                    -200000 - static_cast<int>(result.developCandidateRenders.size()) - 1;
-                const int syntheticPreFinishOutputId = syntheticOutputId - 100000;
-                RenderGraphNode finalOutputNode;
-                finalOutputNode.nodeId = syntheticOutputId;
-                finalOutputNode.kind = RenderGraphNodeKind::Output;
-                candidateGraph.nodes.push_back(std::move(finalOutputNode));
-                candidateGraph.links.push_back(RenderGraphLink{
-                    request.developNodeId,
-                    EditorNodeGraph::kImageOutputSocketId,
-                    syntheticOutputId,
-                    EditorNodeGraph::kImageInputSocketId
-                });
-
-                RenderGraphNode preFinishOutputNode;
-                preFinishOutputNode.nodeId = syntheticPreFinishOutputId;
-                preFinishOutputNode.kind = RenderGraphNodeKind::Output;
-                candidateGraph.nodes.push_back(std::move(preFinishOutputNode));
-                candidateGraph.links.push_back(RenderGraphLink{
-                    request.developNodeId,
-                    EditorNodeGraph::kPreFinishImageOutputSocketId,
-                    syntheticPreFinishOutputId,
-                    EditorNodeGraph::kImageInputSocketId
-                });
-                candidateGraph.outputSocketId.clear();
-
-                auto renderCandidateSocket = [&](
-                    int syntheticOutputId,
-                    int& outWidth,
-                    int& outHeight,
-                    bool* outRawBaseCacheHit = nullptr,
-                    bool* outPreFinishCacheHit = nullptr,
-                    int metricReadbackMaxDimension = 0,
-                    float* outGraphMs = nullptr,
-                    float* outReadbackMs = nullptr) {
-                    candidateGraph.outputNodeId = syntheticOutputId;
-
-                    pipeline.LoadSourceFromPixels(sourceData, snapshot.width, snapshot.height, snapshot.channels);
-                    const auto graphBegin = std::chrono::steady_clock::now();
-                    pipeline.ExecuteGraph(candidateGraph);
-                    const auto graphEnd = std::chrono::steady_clock::now();
-                    if (outGraphMs) {
-                        *outGraphMs = MillisecondsBetween(graphBegin, graphEnd);
-                    }
-                    if (outRawBaseCacheHit) {
-                        *outRawBaseCacheHit = pipeline.WasGraphImageCacheHit(
-                            request.developNodeId,
-                            "__rawDevelopBase");
-                    }
-                    if (outPreFinishCacheHit) {
-                        *outPreFinishCacheHit = pipeline.WasGraphImageCacheHit(
-                            request.developNodeId,
-                            EditorNodeGraph::kPreFinishImageOutputSocketId);
-                    }
-                    const auto readbackBegin = std::chrono::steady_clock::now();
-                    std::vector<unsigned char> pixels = metricReadbackMaxDimension > 0
-                        ? pipeline.GetOutputPixels(outWidth, outHeight, metricReadbackMaxDimension)
-                        : pipeline.GetOutputPixels(outWidth, outHeight);
-                    const auto readbackEnd = std::chrono::steady_clock::now();
-                    if (outReadbackMs) {
-                        *outReadbackMs = MillisecondsBetween(readbackBegin, readbackEnd);
-                    }
-                    return pixels;
-                };
-
-                const auto candidateBegin = std::chrono::steady_clock::now();
-                std::vector<unsigned char> candidatePixels = renderCandidateSocket(
-                    syntheticOutputId,
-                    candidateResult.width,
-                    candidateResult.height,
-                    &candidateResult.rawBaseCacheHitDuringFinalRender,
-                    &candidateResult.preFinishCacheHitDuringFinalRender,
-                    request.metricReadbackMaxDimension,
-                    &candidateResult.finalGraphMs,
-                    &candidateResult.finalReadbackMs);
-                candidateResult.success =
-                    !candidatePixels.empty() &&
-                    candidateResult.width > 0 &&
-                    candidateResult.height > 0;
-                candidateResult.metricsReadbackDownsampled =
-                    candidateResult.success &&
-                    request.metricReadbackMaxDimension > 0 &&
-                    std::max(snapshot.width, snapshot.height) > request.metricReadbackMaxDimension;
-                if (candidateResult.success) {
-                    const auto analysisBegin = std::chrono::steady_clock::now();
-                    candidateResult.metrics = AnalyzeDevelopCandidatePixels(
-                        candidatePixels,
-                        candidateResult.width,
-                        candidateResult.height,
-                        &request.subjectSampling);
-                    const auto analysisEnd = std::chrono::steady_clock::now();
-                    candidateResult.finalAnalysisMs =
-                        MillisecondsBetween(analysisBegin, analysisEnd);
-                } else {
-                    candidateResult.error = "Candidate render produced no pixels.";
-                }
-                if (request.measurePreFinish && !shouldAbortStaleWork()) {
-                    const auto preFinishReadbackBegin = std::chrono::steady_clock::now();
-                    std::vector<unsigned char> preFinishPixels =
-                        pipeline.GetCachedGraphImagePixels(
-                            request.developNodeId,
-                            EditorNodeGraph::kPreFinishImageOutputSocketId,
-                            candidateResult.preFinishWidth,
-                            candidateResult.preFinishHeight,
-                            request.metricReadbackMaxDimension);
-                    const auto preFinishReadbackEnd = std::chrono::steady_clock::now();
-                    candidateResult.preFinishReadbackMs =
-                        MillisecondsBetween(preFinishReadbackBegin, preFinishReadbackEnd);
-                    candidateResult.preFinishReusedFromFinalRender = !preFinishPixels.empty();
-                    if (preFinishPixels.empty()) {
-                        preFinishPixels = renderCandidateSocket(
-                            syntheticPreFinishOutputId,
-                            candidateResult.preFinishWidth,
-                            candidateResult.preFinishHeight,
-                            nullptr,
-                            nullptr,
-                            request.metricReadbackMaxDimension,
-                            &candidateResult.preFinishGraphMs,
-                            &candidateResult.preFinishReadbackMs);
-                    }
-                    candidateResult.preFinishSuccess =
-                        !preFinishPixels.empty() &&
-                        candidateResult.preFinishWidth > 0 &&
-                        candidateResult.preFinishHeight > 0;
-                    candidateResult.preFinishMetricsReadbackDownsampled =
-                        candidateResult.preFinishSuccess &&
-                        request.metricReadbackMaxDimension > 0 &&
-                        std::max(snapshot.width, snapshot.height) > request.metricReadbackMaxDimension;
-                    if (candidateResult.preFinishSuccess) {
-                        const auto preFinishAnalysisBegin = std::chrono::steady_clock::now();
-                        candidateResult.preFinishMetrics = AnalyzeDevelopCandidatePixels(
-                            preFinishPixels,
-                            candidateResult.preFinishWidth,
-                            candidateResult.preFinishHeight,
-                            &request.subjectSampling);
-                        const auto preFinishAnalysisEnd = std::chrono::steady_clock::now();
-                        candidateResult.preFinishAnalysisMs =
-                            MillisecondsBetween(preFinishAnalysisBegin, preFinishAnalysisEnd);
-                    }
-                }
-                const auto candidateEnd = std::chrono::steady_clock::now();
-                candidateResult.totalElapsedMs =
-                    MillisecondsBetween(candidateBegin, candidateEnd);
-                result.developCandidateRenders.push_back(std::move(candidateResult));
-                ++candidateIndex;
-                finishProgressStep("Develop feedback measured.");
-            }
+            RenderDevelopCandidateRequests(snapshot, pipeline, result, totalProgressSteps, progressCompleted);
         };
 
         auto renderPreviewRequests = [&]() {
@@ -1601,6 +1351,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.previews.reserve(snapshot.previews.size());
             int previewIndex = 0;
             const int previewCount = static_cast<int>(snapshot.previews.size());
+            const auto previewBegin = std::chrono::steady_clock::now();
             for (const PreviewRequest& request : snapshot.previews) {
                 if (shouldAbortStaleWork()) {
                     reportSupersededWork();
@@ -1616,27 +1367,25 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 previewResult.previewNodeId = request.previewNodeId;
                 previewResult.dirtyGeneration = request.dirtyGeneration;
 
-                const unsigned char* sourceData = request.sourcePixels.empty() ? nullptr : request.sourcePixels.data();
-                int sourceWidth = request.width;
-                int sourceHeight = request.height;
-                int sourceChannels = request.channels;
-                if ((!sourceData || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
-                    const auto sourceIt = std::find_if(
-                        snapshot.graph.nodes.begin(),
-                        snapshot.graph.nodes.end(),
-                        [&request](const RenderGraphNode& node) { return node.nodeId == request.sourceNodeId; });
-                    if (sourceIt != snapshot.graph.nodes.end() &&
-                        sourceIt->kind == RenderGraphNodeKind::Image &&
-                        !sourceIt->image.pixels.empty() &&
-                        sourceIt->image.width > 0 &&
-                        sourceIt->image.height > 0) {
-                        sourceData = sourceIt->image.pixels.data();
-                        sourceWidth = sourceIt->image.width;
-                        sourceHeight = sourceIt->image.height;
-                        sourceChannels = std::max(1, sourceIt->image.channels);
-                    }
+                const bool useRequestSourcePixels =
+                    !request.sourcePixels.empty() &&
+                    request.width > 0 &&
+                    request.height > 0;
+                SharedPixelBuffer sourceBuffer = useRequestSourcePixels
+                    ? request.sourcePixels
+                    : snapshot.sourcePixels;
+                int sourceWidth = useRequestSourcePixels ? request.width : snapshot.width;
+                int sourceHeight = useRequestSourcePixels ? request.height : snapshot.height;
+                int sourceChannels = useRequestSourcePixels ? request.channels : snapshot.channels;
+                if ((sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
+                    resolveGraphImageSourceBuffer(
+                        request.sourceNodeId,
+                        sourceBuffer,
+                        sourceWidth,
+                        sourceHeight,
+                        sourceChannels);
                 }
-                if (!sourceData || sourceWidth <= 0 || sourceHeight <= 0) {
+                if (sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
                     previewResult.error = "No source image.";
                     result.previews.push_back(std::move(previewResult));
                     ++previewIndex;
@@ -1644,7 +1393,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     continue;
                 }
 
-                pipeline.LoadSourceFromPixels(sourceData, sourceWidth, sourceHeight, sourceChannels);
+                loadSourceBuffer(sourceBuffer, sourceWidth, sourceHeight, sourceChannels);
                 RenderGraphSnapshot graph = snapshot.graph;
                 if (request.directSourceOutput || request.maskInput) {
                     graph.outputNodeId = request.sourceNodeId;
@@ -1675,9 +1424,11 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     previewResult.error = "Preview produced no pixels.";
                 }
                 result.previews.push_back(std::move(previewResult));
+                ++result.renderedPreviewCount;
                 ++previewIndex;
                 finishProgressStep("Preview rendered.");
             }
+            result.previewRenderMs += MillisecondsBetween(previewBegin, std::chrono::steady_clock::now());
         };
 
         if (!snapshot.compositeOutputs.empty()) {
@@ -1685,6 +1436,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.compositeOutputs.reserve(snapshot.compositeOutputs.size());
             int compositeIndex = 0;
             const int compositeCount = static_cast<int>(snapshot.compositeOutputs.size());
+            const auto compositeBegin = std::chrono::steady_clock::now();
             for (const CompositeOutputRequest& request : snapshot.compositeOutputs) {
                 if (shouldAbortStaleWork()) {
                     reportSupersededWork();
@@ -1700,27 +1452,19 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 outputResult.outputNodeId = request.outputNodeId;
                 outputResult.dirtyGeneration = request.dirtyGeneration;
                 outputResult.chainFingerprint = request.chainFingerprint;
-                const unsigned char* sourceData = request.sourcePixels.empty() ? nullptr : request.sourcePixels.data();
+                SharedPixelBuffer sourceBuffer = request.sourcePixels;
                 int sourceWidth = request.width;
                 int sourceHeight = request.height;
                 int sourceChannels = request.channels;
-                if ((!sourceData || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
-                    const auto sourceIt = std::find_if(
-                        snapshot.graph.nodes.begin(),
-                        snapshot.graph.nodes.end(),
-                        [&request](const RenderGraphNode& node) { return node.nodeId == request.sourceNodeId; });
-                    if (sourceIt != snapshot.graph.nodes.end() &&
-                        sourceIt->kind == RenderGraphNodeKind::Image &&
-                        !sourceIt->image.pixels.empty() &&
-                        sourceIt->image.width > 0 &&
-                        sourceIt->image.height > 0) {
-                        sourceData = sourceIt->image.pixels.data();
-                        sourceWidth = sourceIt->image.width;
-                        sourceHeight = sourceIt->image.height;
-                        sourceChannels = std::max(1, sourceIt->image.channels);
-                    }
+                if ((sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
+                    resolveGraphImageSourceBuffer(
+                        request.sourceNodeId,
+                        sourceBuffer,
+                        sourceWidth,
+                        sourceHeight,
+                        sourceChannels);
                 }
-                if (!sourceData || sourceWidth <= 0 || sourceHeight <= 0) {
+                if (sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
                     outputResult.error = "No source image.";
                     result.success = false;
                     result.compositeOutputs.push_back(std::move(outputResult));
@@ -1729,11 +1473,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     continue;
                 }
 
-                pipeline.LoadSourceFromPixels(
-                    sourceData,
-                    sourceWidth,
-                    sourceHeight,
-                    sourceChannels);
+                loadSourceBuffer(sourceBuffer, sourceWidth, sourceHeight, sourceChannels);
                 RenderGraphSnapshot graph = snapshot.graph;
                 graph.outputNodeId = request.outputNodeId;
                 pipeline.ExecuteGraph(graph);
@@ -1753,9 +1493,11 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     result.success = false;
                 }
                 result.compositeOutputs.push_back(std::move(outputResult));
+                ++result.renderedCompositeCount;
                 ++compositeIndex;
                 finishProgressStep("Canvas output rendered.");
             }
+            result.compositeRenderMs += MillisecondsBetween(compositeBegin, std::chrono::steady_clock::now());
             renderDevelopCandidateRequests();
             renderPreviewRequests();
             return result;
@@ -1774,12 +1516,14 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             renderPreviewRequests();
             return result;
         }
-        const unsigned char* sourceData = snapshot.sourcePixels.empty() ? nullptr : snapshot.sourcePixels.data();
-        pipeline.LoadSourceFromPixels(sourceData, snapshot.width, snapshot.height, snapshot.channels);
+        loadSourceBuffer(snapshot.sourcePixels, snapshot.width, snapshot.height, snapshot.channels);
 
         if (!snapshot.graph.nodes.empty()) {
             reportProgress("Rendering main output...");
+            const auto mainRenderBegin = std::chrono::steady_clock::now();
             pipeline.ExecuteGraph(snapshot.graph);
+            result.mainRenderMs = MillisecondsBetween(mainRenderBegin, std::chrono::steady_clock::now());
+            result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
             result.toneCurveAutoRewrites = pipeline.GetToneCurveAutoRewriteFeedback();
             if (shouldAbortStaleWork()) {
                 finishProgressStep("Newer render queued.");

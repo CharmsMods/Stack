@@ -5,6 +5,7 @@ namespace StackAppearance {
 }
 
 #include "Async/TaskState.h"
+#include "Editor/LoadedProjectData.h"
 #include "Layers/LayerBase.h"
 #include "LayerRegistry.h"
 #include "EditorRenderWorker.h"
@@ -157,6 +158,26 @@ public:
         std::uint64_t revision = 0;
     };
 
+    struct GraphPerformanceStats {
+        bool lastInvalidationWasFull = true;
+        bool lastSubmissionIncludedMainOutput = false;
+        int lastTouchedNodeId = -1;
+        int lastDirtyNodeCount = 0;
+        int lastDirtyOutputCount = 0;
+        int lastSubmittedPreviewCount = 0;
+        int lastSubmittedCompositeCount = 0;
+        int lastRenderedPreviewCount = 0;
+        int lastRenderedCompositeCount = 0;
+        std::uint64_t lastSubmittedGeneration = 0;
+        double lastSnapshotBuildMs = 0.0;
+        double lastPreviewRequestBuildMs = 0.0;
+        double lastCompositeRequestBuildMs = 0.0;
+        double lastMainRenderMs = 0.0;
+        double lastPreviewRenderMs = 0.0;
+        double lastCompositeRenderMs = 0.0;
+        GraphExecutionStats lastMainGraphStats;
+    };
+
     enum class HdrMergeRenderState {
         Idle,
         Ready,
@@ -217,14 +238,17 @@ public:
         bool locked = false;
     };
 
-    struct LoadedProjectData {
-        std::vector<unsigned char> sourcePixels;
+    using LoadedProjectData = EditorLoadedProjectData;
+
+    struct NodeBrowserThumbnailView {
+        const std::vector<unsigned char>* pngBytes = nullptr;
+        const std::vector<unsigned char>* decodedPixels = nullptr;
         int width = 0;
         int height = 0;
         int channels = 4;
-        nlohmann::json pipelineData = nlohmann::json::array();
-        std::string projectName;
-        std::string projectFileName;
+        std::uint64_t revision = 0;
+        bool pending = false;
+        bool fallback = false;
     };
 
     EditorModule();
@@ -234,7 +258,22 @@ public:
     
     // Called every frame by the AppShell
     void RenderUI();
+    void RenderDetachedPreviewWindow();
     void BeginLibraryLoadReveal();
+    void PumpNonRenderingWork(double projectApplyBudgetMs = 2.5);
+    bool BeginDeferredLoadedProjectApply(std::shared_ptr<LoadedProjectData> projectData);
+    bool IsDeferredLoadedProjectApplyActive() const;
+    bool HasDeferredLoadedProjectApplyFailed() const;
+    bool HasDeferredLoadedProjectApplyCoreFinished() const;
+    bool HasDeferredLoadedProjectFirstRenderReady() const;
+    bool IsDeferredLoadedProjectReadyForReveal() const;
+    const std::string& GetDeferredLoadedProjectStatusText() const;
+    const char* GetDeferredLoadedProjectPhaseLabel() const;
+    std::size_t GetPendingNodeBrowserThumbnailWarmCount() const;
+    std::size_t GetPendingNodeBrowserThumbnailGenerationCount() const;
+    void ToggleDetachedPreviewFullscreen();
+    void CloseDetachedPreviewFullscreen();
+    bool IsDetachedPreviewActive() const { return m_DetachedPreviewActive; }
 
     RenderPipeline& GetPipeline() { return m_Pipeline; }
     std::vector<std::shared_ptr<LayerBase>>& GetLayers() { return m_Layers; }
@@ -260,6 +299,9 @@ public:
     void PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
+    bool LoadLutNodeFromFile(int nodeId, const std::string& path, bool notifyOnFailure = true);
+    bool ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure = true);
+    bool ClearLutNodeData(int nodeId);
     bool AddCompositeImageChainFromFile(const std::string& path);
     bool AddCompositeLibraryAssetChain(const std::string& assetFileName);
     bool AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind generatorKind);
@@ -453,6 +495,7 @@ public:
     bool ToggleOutputNodeEnabled(int outputNodeId);
     bool ConnectGraphImageNode(int nodeId);
     bool ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
+    bool RotateImageNode(int nodeId, int quarterTurnsClockwise);
     int FindDirectDownstreamToneCurveNode(int sourceNodeId) const;
     int FindNearestDownstreamToneCurveNode(int sourceNodeId) const;
     bool RawDevelopNodeUsesIntegratedTone(int nodeId) const;
@@ -480,10 +523,12 @@ public:
     void AddChannelSplitNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddRawDecodeNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool CreateToneCurveSelectionMask(
         int toneCurveNodeId,
@@ -503,10 +548,12 @@ public:
         ToneCurveScopeMaskAction action);
     void RenderRawSourceControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderRawDecodeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDevelopControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDetailAutoMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderRawDetailFusionControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderHdrMergeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
+    void RenderLutControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void RenderCustomMaskControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced);
     void AutoLayoutGraph();
     void DisconnectGraphOutput();
@@ -552,6 +599,9 @@ public:
     std::uint64_t GetScopeNodeRevision(int sourceNodeId) const;
     const GraphPreviewPixels* GetCachedPreviewPixelsForNode(int previewNodeId) const;
     HdrMergeNodeStatus GetHdrMergeNodeStatus(int nodeId) const;
+    bool GetGraphPerformancePopupEnabled() const { return m_ShowGraphPerformancePopup; }
+    void SetGraphPerformancePopupEnabled(bool enabled) { m_ShowGraphPerformancePopup = enabled; }
+    const GraphPerformanceStats& GetGraphPerformanceStats() const { return m_GraphPerformanceStats; }
 
     // Persistence & Serialization
     nlohmann::json SerializePipeline();
@@ -565,6 +615,9 @@ public:
     bool BuildProjectDocumentForSave(
         const std::string& displayName,
         StackBinaryFormat::ProjectDocument& outDocument);
+    void EnsureNodeBrowserThumbnailCatalog();
+    bool GetNodeBrowserThumbnailView(const std::string& previewKey, NodeBrowserThumbnailView& outView) const;
+    std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry> GetPersistedNodeBrowserThumbnails() const;
 
     const std::string& GetCurrentProjectName() const { return m_CurrentProjectName; }
     void SetCurrentProjectName(const std::string& name) { m_CurrentProjectName = name; }
@@ -631,8 +684,7 @@ public:
     enum class EditorSubWindow {
         NodeGraph = 0,
         ExportSettings = 1,
-        Settings = 2,
-        ComplexNode = 3
+        ComplexNode = 2
     };
     EditorSubWindow GetActiveSubWindow() const { return m_ActiveSubWindow; }
     int GetActiveComplexNodeId() const { return m_ActiveComplexNodeId; }
@@ -754,11 +806,46 @@ private:
         float exposureStops = 0.0f;
     };
 
+    struct NodeBrowserThumbnailRuntimeEntry {
+        std::string previewSeedHash;
+        std::uint32_t previewRecipeVersion = 0;
+        std::vector<unsigned char> pngBytes;
+        std::vector<unsigned char> decodedPixels;
+        int width = 0;
+        int height = 0;
+        int channels = 4;
+        std::uint64_t revision = 0;
+        bool pending = false;
+        bool fallback = false;
+    };
+
+    struct NodeBrowserPreviewRequestMeta {
+        std::string previewKey;
+        std::uint32_t previewRecipeVersion = 0;
+    };
+
+    struct NodeBrowserPreviewSeed {
+        enum class Kind {
+            None,
+            Image,
+            Raw
+        };
+
+        Kind kind = Kind::None;
+        std::string seedHash;
+        std::vector<unsigned char> pixels;
+        int width = 0;
+        int height = 0;
+        int channels = 4;
+        EditorNodeGraph::RawSourcePayload rawSource;
+    };
+
     EditorSidebar m_Sidebar;
     EditorViewport m_Viewport;
     EditorScopes m_Scopes;
     RenderPipeline m_Pipeline;
     EditorRenderWorker m_RenderWorker;
+    EditorRenderWorker m_NodeBrowserRenderWorker;
     std::deque<EditorRenderWorker::Result> m_DeferredRenderResults;
     EditorSubWindow m_ActiveSubWindow = EditorSubWindow::NodeGraph;
     EditorSubWindow m_TargetSubWindow = EditorSubWindow::NodeGraph;
@@ -849,6 +936,7 @@ private:
     std::function<void(float, float, float)> m_ColorPickerCallback;
     int m_LastToneCurveProbeNodeId = -1;
     bool m_RenderWorkerAvailable = false;
+    bool m_NodeBrowserRenderWorkerAvailable = false;
     bool m_RenderDirty = true;
     bool m_RenderPending = false;
     std::uint64_t m_RenderGeneration = 0;
@@ -857,6 +945,8 @@ private:
     std::uint64_t m_LastSubmittedRenderRevision = 0;
     int m_AutoGainMaskPreviewNodeId = -1;
     double m_LastRenderDirtyTime = 0.0;
+    bool m_ShowGraphPerformancePopup = false;
+    GraphPerformanceStats m_GraphPerformanceStats;
     double m_LastRawDevelopInteractionTime = -1.0;
     std::uint64_t m_RawDevelopInteractionSerialCounter = 1;
     std::unordered_map<int, double> m_RawDevelopInteractionTimes;
@@ -890,6 +980,7 @@ private:
     bool m_DraggingSplitHandle = false;
     bool m_SplitHandlePressed = false;
     bool m_SplitHandleMoved = false;
+    bool m_SplitHandlePressedFromViewportPane = false;
     bool m_SplitAutoAnimating = false;
     float m_SplitAutoAnimFrom = 0.0f;
     float m_SplitAutoAnimTo = 0.0f;
@@ -902,6 +993,14 @@ private:
     };
     CompositeEdgeSnapMode m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
     CompositeEdgeSnapMode m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
+    bool m_DetachedPreviewActive = false;
+    bool m_DetachedPreviewRequestFocus = false;
+    bool m_DetachedPreviewPlacementInitialized = false;
+    float m_DetachedPreviewRestoreLeftPaneWidth = 0.0f;
+    ImVec2 m_DetachedPreviewMonitorPos = ImVec2(0.0f, 0.0f);
+    ImVec2 m_DetachedPreviewMonitorSize = ImVec2(0.0f, 0.0f);
+    ImVec2 m_DetachedPreviewWindowPos = ImVec2(0.0f, 0.0f);
+    ImVec2 m_DetachedPreviewWindowSize = ImVec2(0.0f, 0.0f);
     RenderPipeline m_CompositePreviewPipeline;
     std::vector<CompositeSceneItem> m_CompositeSceneItems;
     std::vector<int> m_CompositeZOrder;
@@ -949,7 +1048,58 @@ private:
     std::unordered_set<int> m_HdrMergeRenderingNodeIds;
     std::unordered_map<std::uint64_t, std::vector<int>> m_HdrMergeSubmittedNodesByGeneration;
     mutable std::unordered_map<int, ToneCurveViewportInteractionCache> m_IntegratedToneViewportInteractionCache;
+    std::unordered_map<std::string, NodeBrowserThumbnailRuntimeEntry> m_NodeBrowserThumbnailEntries;
+    std::unordered_map<int, NodeBrowserPreviewRequestMeta> m_NodeBrowserPreviewRequestMeta;
+    std::uint64_t m_NodeBrowserThumbnailGeneration = 0;
+    std::uint64_t m_NodeBrowserThumbnailRevisionCounter = 1;
+    std::size_t m_NodeBrowserThumbnailWarmPendingEntries = 0;
+    std::size_t m_NodeBrowserThumbnailPendingEntries = 0;
+    bool m_NodeBrowserThumbnailBatchHasChanges = false;
+    bool m_NodeBrowserThumbnailGenerationQueued = false;
+    std::string m_NodeBrowserThumbnailSeedHash;
+    std::uint64_t m_NodeBrowserThumbnailSeedSerial = 0;
 
+    struct DeferredLoadedProjectApplyState {
+        enum class Step {
+            None,
+            ResetRuntime,
+            InstallSource,
+            DeserializeLayers,
+            FinalizePipeline,
+            RestorePersistedThumbnails,
+            FinalizeBookkeeping,
+            PrepareNodeBrowserThumbnails,
+            WaitForFirstRender,
+            WaitForNodeBrowserThumbnails,
+            Complete,
+            Failed
+        };
+
+        bool active = false;
+        bool failed = false;
+        bool allowRenderSubmission = false;
+        Step step = Step::None;
+        std::shared_ptr<LoadedProjectData> project;
+        nlohmann::json layerArray = nlohmann::json::array();
+        std::size_t nextLayerIndex = 0;
+        std::size_t nextThumbnailIndex = 0;
+        std::uint64_t targetRenderRevision = 0;
+        std::string statusText;
+    };
+
+    DeferredLoadedProjectApplyState m_DeferredLoadedProjectApply;
+
+    void ResetForPipelineDeserialization();
+    bool DeserializeSinglePipelineLayer(const nlohmann::json& layerData);
+    bool FinalizeDeserializedPipeline(const nlohmann::json& serialized, bool restoreSourceFromGraphState);
+    void RestorePersistedNodeBrowserThumbnailEntries(
+        const std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry>& entries,
+        std::size_t startIndex,
+        std::size_t maxCount,
+        std::size_t& outNextIndex);
+    void ResetDeferredLoadedProjectApplyState();
+    void FailDeferredLoadedProjectApply(std::string message);
+    void TickDeferredLoadedProjectApply(double projectApplyBudgetMs);
     void ApplyGraphLayerOrder();
     std::vector<std::shared_ptr<LayerBase>> BuildGraphRenderLayers() const;
     std::vector<RenderLayerStep> BuildGraphRenderSteps() const;
@@ -966,6 +1116,13 @@ private:
     void ApplyDevelopCandidateRenderFeedback(
         const std::vector<EditorRenderWorker::DevelopCandidateRenderResult>& results);
     void SubmitRenderIfReady();
+    void ConsumeNodeBrowserThumbnailWorkerResults();
+    void ResetNodeBrowserThumbnailState();
+    void MarkNodeBrowserThumbnailSourceChanged();
+    NodeBrowserPreviewSeed ResolveNodeBrowserPreviewSeed() const;
+    void StartNodeBrowserThumbnailGeneration(bool forceRefresh);
+    void FinalizeNodeBrowserThumbnailBatch(std::uint64_t generation);
+    void WarmNodeBrowserThumbnailPixelsAsync();
     void RefreshCompletedChainCacheIfNeeded() const;
     void RefreshCompositeMetadataCacheIfNeeded();
     void MarkDownstreamNodesDirty(int touchedNodeId);
@@ -1007,10 +1164,12 @@ private:
     bool AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawDecodeNodeFromPayload(EditorNodeGraph::RawDecodePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddLutNodeFromPayload(EditorNodeGraph::LutPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
     bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
@@ -1022,10 +1181,18 @@ private:
     std::string BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(int outputNodeId) const;
     void QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
+    SharedPixelBuffer EnsureSharedImagePixels(const EditorNodeGraph::ImagePayload& payload) const;
+    RenderGraphImagePayload BuildRenderImagePayload(const EditorNodeGraph::ImagePayload& payload) const;
+    SharedPixelBuffer MakeSharedSourcePixelBufferCopy(const std::vector<unsigned char>& pixels) const;
+    bool TryCopyImageNodeSharedPixels(int sourceNodeId, SharedPixelBuffer& outPixels, int& outW, int& outH, int& outChannels) const;
+    bool TryResolveReferenceSourceBuffer(int nodeId, const std::string& socketId, SharedPixelBuffer& outPixels, int& outW, int& outH, int& outChannels) const;
+    bool TryResolveReferenceSourceBufferForOutput(int outputNodeId, SharedPixelBuffer& outPixels, int& outW, int& outH, int& outChannels) const;
     bool TryCopyImageNodePixels(int sourceNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
     bool TryResolveReferenceSourcePixels(int nodeId, const std::string& socketId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
     bool TryResolveReferenceSourcePixelsForOutput(int outputNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const;
     bool TryResolveReferenceSourceDimensions(int nodeId, const std::string& socketId, int& outW, int& outH) const;
+    bool ShouldDeferPreviewLikeWork(double now = -1.0) const;
+    void RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const ImVec2& graphPaneMax);
     int ResolveFocusedToneCurveNodeId() const;
     bool SampleToneCurveViewportPixel(int toneCurveNodeId, ToneCurveSamplingBasis basis, float u, float v, std::array<float, 4>& outRgba) const;
     void ClearTrackedToneCurveProbe();

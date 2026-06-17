@@ -7,11 +7,16 @@ class EditorModule;
 
 class EditorViewport {
 public:
+    enum class HostMode {
+        DockedPane,
+        DetachedFullscreen
+    };
+
     EditorViewport();
     ~EditorViewport();
 
     void Initialize();
-    void Render(EditorModule* editor, float revealAlpha = 1.0f);
+    void Render(EditorModule* editor, float revealAlpha = 1.0f, HostMode hostMode = HostMode::DockedPane);
     void ResetSinglePreviewState();
 
 private:

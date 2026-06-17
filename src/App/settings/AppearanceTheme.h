@@ -17,7 +17,7 @@ inline constexpr const char* kSolarizedPresetId = "solarized";
 inline constexpr const char* kSolarizedLightPresetId = "solarized-light";
 inline constexpr const char* kYellowDarkPresetId = "yellow-dark";
 inline constexpr const char* kYellowLightPresetId = "yellow-light";
-inline constexpr std::uint32_t kAppearanceSettingsVersion = 2;
+inline constexpr std::uint32_t kAppearanceSettingsVersion = 3;
 inline constexpr std::uint32_t kThemePresetFileVersion = 2;
 
 enum class GraphVisualMode {
@@ -73,7 +73,25 @@ struct AppearanceLibrary {
     GraphVisualMode graphVisualMode = GraphVisualMode::BlackNodes;
     bool graphSpotlightHaloOutlines = false;
     bool graphDottedMaskLinks = true;
+    bool backgroundImageEnabled = false;
+    std::string backgroundImagePath;
+    float backgroundImageStrength = 0.58f;
+    float uiSurfaceTransparency = 0.18f;
     std::vector<ThemeDefinition> customPresets;
+};
+
+struct RuntimeSurfacePalette {
+    ImVec4 appSurface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 panelSurface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 popupSurface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 chromeSurface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 drawerSurface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 drawerSurfaceTransparent = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    ImVec4 border = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 separator = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 controlSurface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 controlSurfaceHovered = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ImVec4 controlSurfaceActive = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
 };
 
 std::vector<ThemeDefinition> MakeFactoryThemes();
@@ -110,6 +128,18 @@ public:
     GraphVisualMode GetGraphVisualMode() const;
     bool GetGraphSpotlightHaloOutlines() const;
     bool GetGraphDottedMaskLinks() const;
+    bool GetBackgroundImageEnabled() const;
+    const std::string& GetBackgroundImagePath() const;
+    float GetBackgroundImageStrength() const;
+    float GetUiSurfaceTransparency() const;
+    float GetUiSurfaceAlphaMultiplier() const;
+    RuntimeSurfacePalette GetRuntimeSurfacePalette() const;
+    std::uint64_t GetBackgroundImageRevision() const;
+    const std::string& GetBackgroundImageRuntimeStatus() const;
+    std::filesystem::path GetResolvedBackgroundImagePath() const;
+    ImVec4 GetEffectiveWindowBackgroundColor() const;
+    ImVec4 GetEffectiveChildBackgroundColor() const;
+    ImVec4 GetEffectivePopupBackgroundColor() const;
     bool ActivePresetIsFactory() const;
     bool HasUnsavedChanges() const;
 
@@ -117,6 +147,12 @@ public:
     bool SetGraphVisualMode(GraphVisualMode mode);
     bool SetGraphSpotlightHaloOutlines(bool enabled);
     bool SetGraphDottedMaskLinks(bool enabled);
+    bool SetBackgroundImageEnabled(bool enabled);
+    bool SetBackgroundImageStrength(float strength);
+    bool SetUiSurfaceTransparency(float transparency);
+    bool ImportBackgroundImageFromPath(const std::filesystem::path& sourcePath, std::string* errorMessage = nullptr);
+    bool ClearBackgroundImage(std::string* errorMessage = nullptr);
+    void SetBackgroundImageRuntimeStatus(std::string statusMessage);
     bool ResetWorkingTheme();
     bool SaveWorkingTheme();
     bool SaveWorkingThemeAsNew(std::string displayName);
@@ -133,6 +169,8 @@ private:
     std::vector<ThemeDefinition> m_FactoryThemes;
     ThemeDefinition m_WorkingTheme;
     AppearanceLibrary m_Library;
+    std::uint64_t m_BackgroundImageRevision = 0;
+    std::string m_BackgroundImageRuntimeStatus;
 };
 
 } // namespace StackAppearance

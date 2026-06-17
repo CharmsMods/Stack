@@ -28,6 +28,15 @@ struct RenderTextureStats {
     float displayClipPercent = 0.0f;
 };
 
+struct GraphExecutionStats {
+    int imageCacheHits = 0;
+    int imageCacheMisses = 0;
+    int maskCacheHits = 0;
+    int maskCacheMisses = 0;
+    int rawStageCacheHits = 0;
+    int rawStageCacheMisses = 0;
+};
+
 // The sequential rendering pipeline. 
 // Enforces the core architectural rule: Layer N+1 only sees Layer N's output.
 // Uses ping-pong FBOs to chain processing stages.
@@ -42,6 +51,7 @@ public:
     // Load a source image from disk into the pipeline
     bool LoadSourceImage(const std::string& filepath);
     void LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch);
+    void LoadSourceFromSharedPixels(const SharedPixelBuffer& data, int w, int h, int ch);
     void Clear();
     void ClearOutput();
     void UploadOutputFromPixels(const unsigned char* data, int w, int h, int ch);
@@ -102,8 +112,9 @@ public:
     const std::vector<ToneCurveAutoRewriteFeedback>& GetToneCurveAutoRewriteFeedback() const { return m_ToneCurveAutoRewriteFeedback; }
 
     // Read-only access to raw source pixels
-    const std::vector<unsigned char>& GetSourcePixelsRaw() const { return m_SourcePixels; }
+    const std::vector<unsigned char>& GetSourcePixelsRaw() const { return m_SourcePixelsShared ? *m_SourcePixelsShared : m_SourcePixels; }
     int GetSourceChannels() const { return m_SourceChannels; }
+    const GraphExecutionStats& GetLastGraphExecutionStats() const { return m_LastGraphExecutionStats; }
 
     FullscreenQuad& GetQuad() { return m_Quad; }
 
@@ -170,6 +181,7 @@ private:
     unsigned int m_DataMathProgram;
     unsigned int m_ChannelSplitProgram;
     unsigned int m_ChannelCombineProgram;
+    unsigned int m_LutProgram;
     unsigned int m_HdrMergeProgram;
     unsigned int m_RawDetailFusionAnalysisProgram;
     unsigned int m_RawDetailFusionMetricsProgram;
@@ -177,9 +189,12 @@ private:
     unsigned int m_RawDetailFusionApplyProgram;
     unsigned int m_AutoGainStatsProgram;
     std::vector<unsigned char> m_SourcePixels;
+    std::shared_ptr<const std::vector<unsigned char>> m_SourcePixelsShared;
     std::size_t m_SourceFingerprint = 0;
+    GraphExecutionStats m_LastGraphExecutionStats;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphImageCache;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphMaskCache;
+    std::unordered_map<std::string, CachedGraphTexture> m_LutTextureCache;
     std::unordered_map<std::string, std::vector<CachedGraphTexture>> m_RawDevelopStageImageCache;
     std::unordered_set<std::string> m_LastGraphImageCacheHits;
     std::unordered_map<std::size_t, AutoGainSceneStats> m_AutoGainSceneStatsCache;
@@ -193,11 +208,13 @@ private:
     void DestroyGraphCache(std::unordered_map<std::string, CachedGraphTexture>& cache);
     void DestroyRawDevelopStageCache();
     void InvalidateGraphCaches();
+    void ExecuteGraphImpl(const RenderGraphSnapshot& graph);
     void EnsureMaskPrograms();
     void EnsureMixProgram();
     void EnsureUtilityPrograms();
     void EnsureChannelPrograms();
     void EnsureDataMathProgram();
+    void EnsureLutProgram();
     void EnsureHdrMergeProgram();
     void EnsureRawDetailFusionPrograms();
     void EnsureAutoGainStatsProgram();

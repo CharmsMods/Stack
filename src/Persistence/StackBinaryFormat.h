@@ -23,6 +23,7 @@ struct ProjectLoadOptions {
     bool includeThumbnail = true;
     bool includeSourceImage = true;
     bool includePipelineData = true;
+    bool includeNodeBrowserThumbnails = true;
     bool verifyChecksum = true;
 };
 
@@ -34,11 +35,19 @@ struct ProjectMetadata {
     int sourceHeight = 0;
 };
 
+struct NodeBrowserThumbnailEntry {
+    std::string previewKey;
+    std::string previewSeedHash;
+    std::uint32_t previewRecipeVersion = 0;
+    std::vector<unsigned char> pngBytes;
+};
+
 struct ProjectDocument {
     ProjectMetadata metadata;
     std::vector<unsigned char> thumbnailBytes;
     std::vector<unsigned char> sourceImageBytes;
     json pipelineData = json();
+    std::vector<NodeBrowserThumbnailEntry> nodeBrowserThumbnailEntries;
 };
 
 struct BundledProjectDocument {

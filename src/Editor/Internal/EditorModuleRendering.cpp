@@ -3,6 +3,7 @@
 #include "Editor/Layers/ToneLayers.h"
 #include "Renderer/GLHelpers.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <imgui.h>
 #include <limits>
@@ -22,8 +23,15 @@ constexpr int kDevelopCandidateMetricReadbackMidMaxDimension = 1800;
 constexpr int kDevelopCandidateMetricReadbackLargeMaxDimension = 1536;
 constexpr int kDevelopCandidateMetricReadbackVeryLargeMaxDimension = 1280;
 constexpr double kDevelopCandidateFeedbackQuietSeconds = 0.60;
+constexpr double kPreviewLikeRefreshQuietSeconds = 0.18;
 constexpr std::size_t kDevelopSubjectMetricMaxRegions = 32;
 constexpr std::size_t kDevelopSubjectMetricMaxStrokes = 32;
+
+double MillisecondsBetween(
+    const std::chrono::steady_clock::time_point& start,
+    const std::chrono::steady_clock::time_point& end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 constexpr std::size_t kDevelopSubjectMetricMaxStrokePoints = 64;
 
 struct DevelopCandidateRenderBudgetLimits {
@@ -3192,9 +3200,25 @@ void EditorModule::MarkRenderDirty(int touchedNodeId) {
         m_LastRenderDirtyTime = ImGui::GetTime();
     }
     if (touchedNodeId > 0) {
+        const std::vector<int> downstreamNodeIds = m_NodeGraph.GetDownstreamRenderNodeIds(touchedNodeId);
+        const std::vector<int> downstreamOutputNodeIds = m_NodeGraph.GetDownstreamOutputNodeIds(touchedNodeId);
+        m_GraphPerformanceStats.lastInvalidationWasFull = false;
+        m_GraphPerformanceStats.lastTouchedNodeId = touchedNodeId;
+        m_GraphPerformanceStats.lastDirtyNodeCount = static_cast<int>(downstreamNodeIds.size());
+        m_GraphPerformanceStats.lastDirtyOutputCount = static_cast<int>(downstreamOutputNodeIds.size());
         MarkDownstreamNodesDirty(touchedNodeId);
-        MarkCompositeOutputsDirty(m_NodeGraph.GetDownstreamOutputNodeIds(touchedNodeId));
+        MarkCompositeOutputsDirty(downstreamOutputNodeIds);
     } else {
+        m_GraphPerformanceStats.lastInvalidationWasFull = true;
+        m_GraphPerformanceStats.lastTouchedNodeId = -1;
+        m_GraphPerformanceStats.lastDirtyNodeCount = 0;
+        for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+            if (m_NodeGraph.IsRenderChainNode(node)) {
+                ++m_GraphPerformanceStats.lastDirtyNodeCount;
+            }
+        }
+        m_GraphPerformanceStats.lastDirtyOutputCount =
+            static_cast<int>(m_NodeGraph.GetConnectedOutputNodeIds().size());
         MarkAllRenderNodesDirty();
         MarkCompositeOutputsDirty(m_NodeGraph.GetConnectedOutputNodeIds());
         m_PreviewDisplayedRevisions.clear();
@@ -3244,7 +3268,7 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     }
     if (snapshot.outputConnected) {
         if (autoGainMaskPreviewActive &&
-            TryResolveReferenceSourcePixels(
+            TryResolveReferenceSourceBuffer(
                 m_AutoGainMaskPreviewNodeId,
                 EditorNodeGraph::kMaskOutputSocketId,
                 snapshot.sourcePixels,
@@ -3253,7 +3277,7 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
                 snapshot.channels)) {
             // Use the inspected Pre-Local Exposure node's reference canvas.
         } else if (!autoGainMaskPreviewActive &&
-            TryResolveReferenceSourcePixelsForOutput(
+            TryResolveReferenceSourceBufferForOutput(
                 snapshot.graph.outputNodeId,
                 snapshot.sourcePixels,
                 snapshot.width,
@@ -3265,7 +3289,7 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
                 !activeImage->image.pixels.empty() &&
                 activeImage->image.width > 0 &&
                 activeImage->image.height > 0) {
-                snapshot.sourcePixels = activeImage->image.pixels;
+                snapshot.sourcePixels = EnsureSharedImagePixels(activeImage->image);
                 snapshot.width = activeImage->image.width;
                 snapshot.height = activeImage->image.height;
                 snapshot.channels = std::max(1, activeImage->image.channels);
@@ -3276,7 +3300,7 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
             }
         }
         if (snapshot.sourcePixels.empty() && (snapshot.width <= 0 || snapshot.height <= 0)) {
-            snapshot.sourcePixels = m_Pipeline.GetSourcePixelsRaw();
+            snapshot.sourcePixels = MakeSharedSourcePixelBufferCopy(m_Pipeline.GetSourcePixelsRaw());
             snapshot.width = m_Pipeline.GetCanvasWidth();
             snapshot.height = m_Pipeline.GetCanvasHeight();
             snapshot.channels = m_Pipeline.GetSourceChannels();
@@ -3287,7 +3311,7 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
                     !node.image.pixels.empty() &&
                     node.image.width > 0 &&
                     node.image.height > 0) {
-                    snapshot.sourcePixels = node.image.pixels;
+                    snapshot.sourcePixels = EnsureSharedImagePixels(node.image);
                     snapshot.width = node.image.width;
                     snapshot.height = node.image.height;
                     snapshot.channels = std::max(1, node.image.channels);
@@ -3306,17 +3330,20 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
             snapshot.width = 256;
             snapshot.height = 256;
             snapshot.channels = 4;
-            snapshot.sourcePixels = BuildTransparentPixels(snapshot.width, snapshot.height);
+            snapshot.sourcePixels = MakeSharedPixelBufferOwned(BuildTransparentPixels(snapshot.width, snapshot.height));
         }
     }
-    snapshot.masks = BuildGraphRenderMasks();
-    for (const RenderLayerStep& step : BuildGraphRenderSteps()) {
-        if (step.layer) {
-            nlohmann::json item = nlohmann::json::object();
-            item["layer"] = step.layer->Serialize();
-            item["maskNodeId"] = step.maskNodeId;
-            snapshot.layerSteps.push_back(std::move(item));
-            snapshot.layers.push_back(step.layer->Serialize());
+    const bool requiresLegacyLayerStack = snapshot.graph.nodes.empty();
+    if (requiresLegacyLayerStack) {
+        snapshot.masks = BuildGraphRenderMasks();
+        for (const RenderLayerStep& step : BuildGraphRenderSteps()) {
+            if (step.layer) {
+                nlohmann::json item = nlohmann::json::object();
+                item["layer"] = step.layer->Serialize();
+                item["maskNodeId"] = step.maskNodeId;
+                snapshot.layerSteps.push_back(std::move(item));
+                snapshot.layers.push_back(step.layer->Serialize());
+            }
         }
     }
     if (snapshot.outputConnected) {
@@ -3539,7 +3566,29 @@ bool EditorModule::GetDevelopCandidateFeedbackDeferredStatus(
 }
 
 bool EditorModule::CanRefreshPreviewLikeNodes() const {
-    return !m_RenderDirty && !m_RenderPending && !m_RenderWorker.IsBusy() && !IsRecentRawDevelopInteraction();
+    return !ShouldDeferPreviewLikeWork();
+}
+
+bool EditorModule::ShouldDeferPreviewLikeWork(double now) const {
+    if (m_RenderDirty || m_RenderPending || m_RenderWorker.IsBusy()) {
+        return true;
+    }
+
+    if (now < 0.0) {
+        now = ImGui::GetCurrentContext() ? ImGui::GetTime() : -1.0;
+    }
+    if (now >= 0.0) {
+        if (now - m_LastRenderDirtyTime < kPreviewLikeRefreshQuietSeconds) {
+            return true;
+        }
+        if (IsRecentRawDevelopInteraction(now)) {
+            return true;
+        }
+    } else if (IsRecentRawDevelopInteraction()) {
+        return true;
+    }
+
+    return false;
 }
 
 bool EditorModule::HasPendingPreviewRefreshes() const {
@@ -3570,6 +3619,7 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
 
     std::vector<EditorRenderWorker::CompositeOutputRequest> requests;
     requests.reserve(m_CachedCompletedChains.size());
+    SharedPixelBuffer pipelineSourcePixels;
     for (const CachedCompositeChainState& chainState : m_CachedCompletedChains) {
         CompositeSceneItem* item = FindCompositeSceneItem(chainState.info.outputNodeId);
         if (!item) {
@@ -3630,32 +3680,40 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
             request.sourceNodeId = chainState.info.sourceNodeId;
         }
 
-        const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(request.sourceNodeId);
-        if (TryResolveReferenceSourcePixelsForOutput(
+        if (TryResolveReferenceSourceBufferForOutput(
                 chainState.info.outputNodeId,
                 request.sourcePixels,
                 request.width,
                 request.height,
                 request.channels)) {
             // Render this output against its own reference canvas.
-        } else if (sourceNode &&
-            sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
-            !sourceNode->image.pixels.empty() &&
-            sourceNode->image.width > 0 &&
-            sourceNode->image.height > 0) {
-            request.width = sourceNode->image.width;
-            request.height = sourceNode->image.height;
-            request.channels = std::max(1, sourceNode->image.channels);
+        } else if (TryCopyImageNodeSharedPixels(
+            request.sourceNodeId,
+            request.sourcePixels,
+            request.width,
+            request.height,
+            request.channels)) {
+            // Reuse source-node pixels or a transparent RAW reference buffer.
+        } else if (!m_Pipeline.GetSourcePixelsRaw().empty() &&
+            m_Pipeline.GetCanvasWidth() > 0 &&
+            m_Pipeline.GetCanvasHeight() > 0) {
+            if (pipelineSourcePixels.empty()) {
+                pipelineSourcePixels = MakeSharedSourcePixelBufferCopy(m_Pipeline.GetSourcePixelsRaw());
+            }
+            request.sourcePixels = pipelineSourcePixels;
+            request.width = m_Pipeline.GetCanvasWidth();
+            request.height = m_Pipeline.GetCanvasHeight();
+            request.channels = std::max(1, m_Pipeline.GetSourceChannels());
         } else if (scalableGenerator) {
             request.width = desiredRasterWidth;
             request.height = desiredRasterHeight;
             request.channels = 4;
-            request.sourcePixels = BuildTransparentPixels(request.width, request.height);
+            request.sourcePixels = MakeSharedPixelBufferOwned(BuildTransparentPixels(request.width, request.height));
         } else {
             request.width = 256;
             request.height = 256;
             request.channels = 4;
-            request.sourcePixels = BuildTransparentPixels(request.width, request.height);
+            request.sourcePixels = MakeSharedPixelBufferOwned(BuildTransparentPixels(request.width, request.height));
         }
 
         request.dirtyGeneration = dirtyGeneration;
@@ -4152,6 +4210,11 @@ std::vector<EditorRenderWorker::DevelopCandidateRenderRequest> EditorModule::Bui
 
 std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewRequests() {
     std::vector<EditorRenderWorker::PreviewRequest> requests;
+    SharedPixelBuffer pipelineSourcePixels;
+    SharedPixelBuffer fallbackImagePixels;
+    int fallbackImageWidth = 0;
+    int fallbackImageHeight = 0;
+    int fallbackImageChannels = 4;
     for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::Preview &&
             node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask) {
@@ -4194,11 +4257,6 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             continue;
         }
 
-        const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
-        if (!sourceNode) {
-            continue;
-        }
-
         EditorRenderWorker::PreviewRequest request;
         request.previewNodeId = node.id;
         request.sourceNodeId = sourceNodeId;
@@ -4207,7 +4265,7 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         request.directSourceOutput = true;
         request.dirtyGeneration = dirtyGeneration;
 
-        if (TryResolveReferenceSourcePixels(
+        if (TryResolveReferenceSourceBuffer(
                 sourceNodeId,
                 sourceSocketId,
                 request.sourcePixels,
@@ -4215,48 +4273,49 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
                 request.height,
                 request.channels)) {
             // Preview channel/combined streams on their resolved reference canvas.
-        } else if (sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
-            !sourceNode->image.pixels.empty() &&
-            sourceNode->image.width > 0 &&
-            sourceNode->image.height > 0) {
-            request.sourcePixels = sourceNode->image.pixels;
-            request.width = sourceNode->image.width;
-            request.height = sourceNode->image.height;
-            request.channels = std::max(1, sourceNode->image.channels);
-        } else if (sourceNode->kind == EditorNodeGraph::NodeKind::RawSource &&
-            sourceNode->rawSource.metadata.visibleWidth > 0 &&
-            sourceNode->rawSource.metadata.visibleHeight > 0) {
-            ResolveRawDisplayDimensions(sourceNode->rawSource.metadata, request.width, request.height);
-            request.channels = 4;
-            request.sourcePixels = BuildTransparentPixels(request.width, request.height);
+        } else if (TryCopyImageNodeSharedPixels(
+            sourceNodeId,
+            request.sourcePixels,
+            request.width,
+            request.height,
+            request.channels)) {
+            // Direct image/RAW source preview.
         } else {
-            request.sourcePixels = m_Pipeline.GetSourcePixelsRaw();
+            if (pipelineSourcePixels.empty() && !m_Pipeline.GetSourcePixelsRaw().empty()) {
+                pipelineSourcePixels = MakeSharedSourcePixelBufferCopy(m_Pipeline.GetSourcePixelsRaw());
+            }
+            request.sourcePixels = pipelineSourcePixels;
             request.width = m_Pipeline.GetCanvasWidth();
             request.height = m_Pipeline.GetCanvasHeight();
             request.channels = std::max(1, m_Pipeline.GetSourceChannels());
         }
         if (request.sourcePixels.empty()) {
-            for (const EditorNodeGraph::Node& graphNode : m_NodeGraph.GetNodes()) {
-                if (graphNode.kind == EditorNodeGraph::NodeKind::Image &&
-                    !graphNode.image.pixels.empty() &&
-                    graphNode.image.width > 0 &&
-                    graphNode.image.height > 0) {
-                    request.sourcePixels = graphNode.image.pixels;
-                    request.width = graphNode.image.width;
-                    request.height = graphNode.image.height;
-                    request.channels = std::max(1, graphNode.image.channels);
+            if (fallbackImagePixels.empty()) {
+                for (const EditorNodeGraph::Node& graphNode : m_NodeGraph.GetNodes()) {
+                    if (graphNode.kind != EditorNodeGraph::NodeKind::Image ||
+                        graphNode.image.pixels.empty() ||
+                        graphNode.image.width <= 0 ||
+                        graphNode.image.height <= 0) {
+                        continue;
+                    }
+                    fallbackImagePixels = EnsureSharedImagePixels(graphNode.image);
+                    fallbackImageWidth = graphNode.image.width;
+                    fallbackImageHeight = graphNode.image.height;
+                    fallbackImageChannels = std::max(1, graphNode.image.channels);
                     break;
                 }
             }
+            request.sourcePixels = fallbackImagePixels;
+            request.width = fallbackImageWidth;
+            request.height = fallbackImageHeight;
+            request.channels = fallbackImageChannels;
         }
         if (request.sourcePixels.empty() || request.width <= 0 || request.height <= 0) {
             request.width = 256;
             request.height = 256;
             request.channels = 4;
-            request.sourcePixels.assign(static_cast<size_t>(request.width * request.height * request.channels), 0);
-            for (size_t i = 3; i < request.sourcePixels.size(); i += 4) {
-                request.sourcePixels[i] = 255;
-            }
+            request.sourcePixels = MakeSharedPixelBufferOwned(
+                BuildTransparentPixels(request.width, request.height));
         }
 
         m_PreviewRequestedGenerations[node.id] = dirtyGeneration;
@@ -5472,6 +5531,12 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 : std::vector<int>{};
         m_RenderPending = m_RenderWorkerAvailable && m_RenderWorker.IsBusy();
         m_HdrMergeRenderingNodeIds.clear();
+        m_GraphPerformanceStats.lastMainRenderMs = result.mainRenderMs;
+        m_GraphPerformanceStats.lastPreviewRenderMs = result.previewRenderMs;
+        m_GraphPerformanceStats.lastCompositeRenderMs = result.compositeRenderMs;
+        m_GraphPerformanceStats.lastRenderedPreviewCount = result.renderedPreviewCount;
+        m_GraphPerformanceStats.lastRenderedCompositeCount = result.renderedCompositeCount;
+        m_GraphPerformanceStats.lastMainGraphStats = result.mainGraphStats;
         if (result.success && result.outputTexture.texture != 0) {
             m_Pipeline.AdoptExternalOutputTexture(
                 result.outputTexture.texture,
@@ -5598,14 +5663,22 @@ void EditorModule::SubmitRenderIfReady() {
     const double now = ImGui::GetTime();
     RefreshDeferredDevelopCandidateFeedbackIfReady(now);
     const bool recentRawDevelopInteraction = IsRecentRawDevelopInteraction(now);
-    const double renderSubmitDelay = recentRawDevelopInteraction ? 0.006 : 0.02;
+    const bool localGraphEdit =
+        !m_GraphPerformanceStats.lastInvalidationWasFull &&
+        m_GraphPerformanceStats.lastTouchedNodeId > 0;
+    const double renderSubmitDelay = (recentRawDevelopInteraction || localGraphEdit) ? 0.006 : 0.02;
     if (m_RenderDirty && now - m_LastRenderDirtyTime < renderSubmitDelay) {
         return;
     }
     const bool workerBusy = m_RenderWorkerAvailable && (m_RenderPending || m_RenderWorker.IsBusy());
+    m_GraphPerformanceStats.lastPreviewRequestBuildMs = 0.0f;
+    m_GraphPerformanceStats.lastCompositeRequestBuildMs = 0.0f;
     std::vector<EditorRenderWorker::PreviewRequest> previewRequests;
-    if (m_RenderWorkerAvailable && !workerBusy && !recentRawDevelopInteraction) {
+    if (m_RenderWorkerAvailable && !workerBusy && !ShouldDeferPreviewLikeWork(now)) {
+        const auto previewBuildBegin = std::chrono::steady_clock::now();
         previewRequests = BuildPreviewRequests();
+        m_GraphPerformanceStats.lastPreviewRequestBuildMs =
+            MillisecondsBetween(previewBuildBegin, std::chrono::steady_clock::now());
     }
     if (!m_RenderDirty && previewRequests.empty()) {
         return;
@@ -5626,11 +5699,18 @@ void EditorModule::SubmitRenderIfReady() {
             return;
         }
         ++m_RenderGeneration;
+        const auto snapshotBuildBegin = std::chrono::steady_clock::now();
         EditorRenderWorker::Snapshot snapshot = BuildRenderSnapshot(m_RenderGeneration);
+        m_GraphPerformanceStats.lastSnapshotBuildMs =
+            MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
         snapshot.outputConnected = false;
-        snapshot.sourcePixels.clear();
+        snapshot.sourcePixels = {};
         snapshot.developCandidateRenders.clear();
         snapshot.previews = std::move(requests);
+        m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(snapshot.previews.size());
+        m_GraphPerformanceStats.lastSubmittedCompositeCount = 0;
+        m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = false;
+        m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
         m_RenderPending = true;
         m_RenderWorker.Submit(std::move(snapshot));
     };
@@ -5678,7 +5758,10 @@ void EditorModule::SubmitRenderIfReady() {
     };
 
     if (compositeMode) {
+        const auto compositeBuildBegin = std::chrono::steady_clock::now();
         std::vector<EditorRenderWorker::CompositeOutputRequest> requests = BuildCompositeOutputRequests();
+        m_GraphPerformanceStats.lastCompositeRequestBuildMs =
+            MillisecondsBetween(compositeBuildBegin, std::chrono::steady_clock::now());
         if (requests.empty() && previewRequests.empty()) {
             m_RenderDirty = false;
             if (!m_RenderWorkerAvailable || !m_RenderWorker.IsBusy()) {
@@ -5690,12 +5773,23 @@ void EditorModule::SubmitRenderIfReady() {
         ++m_RenderGeneration;
         m_LastSubmittedRenderRevision = m_RenderRevision;
         m_RenderDirty = false;
+        m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(previewRequests.size());
+        m_GraphPerformanceStats.lastSubmittedCompositeCount = static_cast<int>(requests.size());
+        m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = false;
+        m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
 
         if (m_RenderWorkerAvailable) {
+            const auto snapshotBuildBegin = std::chrono::steady_clock::now();
             EditorRenderWorker::Snapshot snapshot = BuildRenderSnapshot(m_RenderGeneration);
+            m_GraphPerformanceStats.lastSnapshotBuildMs =
+                MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
             snapshot.outputConnected = false;
             snapshot.compositeOutputs = std::move(requests);
             snapshot.previews = std::move(previewRequests);
+            m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(snapshot.previews.size());
+            m_GraphPerformanceStats.lastSubmittedCompositeCount = static_cast<int>(snapshot.compositeOutputs.size());
+            m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = false;
+            m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
             m_RenderPending = true;
             m_RenderWorker.Submit(std::move(snapshot));
         } else {
@@ -5759,12 +5853,23 @@ void EditorModule::SubmitRenderIfReady() {
     ++m_RenderGeneration;
     m_LastSubmittedRenderRevision = m_RenderRevision;
     m_RenderDirty = false;
+    m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(previewRequests.size());
+    m_GraphPerformanceStats.lastSubmittedCompositeCount = 0;
+    m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = true;
+    m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
 
     if (m_RenderWorkerAvailable) {
         recordHdrMergeSubmission();
         m_RenderPending = true;
+        const auto snapshotBuildBegin = std::chrono::steady_clock::now();
         EditorRenderWorker::Snapshot snapshot = BuildRenderSnapshot(m_RenderGeneration);
+        m_GraphPerformanceStats.lastSnapshotBuildMs =
+            MillisecondsBetween(snapshotBuildBegin, std::chrono::steady_clock::now());
         snapshot.previews = std::move(previewRequests);
+        m_GraphPerformanceStats.lastSubmittedPreviewCount = static_cast<int>(snapshot.previews.size());
+        m_GraphPerformanceStats.lastSubmittedCompositeCount = 0;
+        m_GraphPerformanceStats.lastSubmissionIncludedMainOutput = true;
+        m_GraphPerformanceStats.lastSubmittedGeneration = m_RenderGeneration;
         m_RenderWorker.Submit(std::move(snapshot));
     } else {
         RenderGraphSnapshot graphSnapshot = BuildGraphSnapshot();
@@ -5778,7 +5883,15 @@ void EditorModule::SubmitRenderIfReady() {
             graphSnapshot.outputSocketId = EditorNodeGraph::kMaskOutputSocketId;
             graphSnapshot.autoGainMaskPreview = true;
         }
+        const auto mainRenderBegin = std::chrono::steady_clock::now();
         m_Pipeline.ExecuteGraph(graphSnapshot);
+        m_GraphPerformanceStats.lastMainRenderMs =
+            MillisecondsBetween(mainRenderBegin, std::chrono::steady_clock::now());
+        m_GraphPerformanceStats.lastMainGraphStats = m_Pipeline.GetLastGraphExecutionStats();
+        m_GraphPerformanceStats.lastPreviewRenderMs = 0.0f;
+        m_GraphPerformanceStats.lastCompositeRenderMs = 0.0f;
+        m_GraphPerformanceStats.lastRenderedPreviewCount = 0;
+        m_GraphPerformanceStats.lastRenderedCompositeCount = 0;
         ApplyToneCurveAutoRewriteFeedback(m_Pipeline.GetToneCurveAutoRewriteFeedback());
         for (int nodeId : activeHdrMergeNodeIds) {
             m_HdrMergeRequestedGenerations[nodeId] = GetNodeDirtyGeneration(nodeId);

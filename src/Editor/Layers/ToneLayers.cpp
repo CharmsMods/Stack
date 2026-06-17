@@ -1748,14 +1748,14 @@ void ToneCurveLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeS
     bool changed = false;
     m_FreeEndpoints = true;
     RefreshProbeOutput();
-    AutoAuthoredState authoredResetState = m_LastAutoAuthoredStateValid ? m_LastAutoAuthoredState : AutoAuthoredState{};
-    if (!m_LastAutoAuthoredStateValid) {
-        authoredResetState.localBaseline.radius = 72.0f;
-        authoredResetState.localBaseline.edgeProtection = 0.65f;
-        authoredResetState.localBaseline.rangeProtection = 0.45f;
-        authoredResetState.foundationAssistStrength = 0.68f;
-        authoredResetState.points = BuildLinearToneCurvePoints();
+    AutoAuthoredState authoredResetState = m_LastAutoAuthoredStateValid ? m_LastAutoAuthoredState : CaptureCurrentAutoAuthoredState();
+    if (m_ActiveGraphView != ToneCurveGraphView::Finish) {
+        m_ActiveGraphView = ToneCurveGraphView::Finish;
+        m_SelectedPoint = -1;
+        m_DraggingPoint = -1;
+        m_ContextPoint = -1;
     }
+
     ImGuiExtras::RichSectionLabel("Tone Curve");
     const struct ModeButton { ToneCurveMode mode; const char* label; } modeButtons[] = {
         { ToneCurveMode::Luminance, "Y" },
@@ -1784,6 +1784,7 @@ void ToneCurveLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeS
             ImGui::SameLine(0.0f, modeGap);
         }
     }
+
     ImGui::Dummy(ImVec2(0.0f, context.itemGap));
     const char* domainLabels[] = { "Scene Linear", "Log Scene" };
     int domain = static_cast<int>(m_Domain);
@@ -1792,371 +1793,79 @@ void ToneCurveLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeS
         m_Domain = static_cast<ToneCurveDomain>(std::clamp(domain, 0, 1));
         changed = true;
     }
-    if (ImGuiExtras::RichFullWidthButton("Reset Curve", context.safeContentWidth * 0.48f)) {
+
+    const float actionGap = 8.0f;
+    const float actionWidth = std::max(110.0f, (context.safeContentWidth - actionGap) * 0.5f);
+    if (ImGuiExtras::RichFullWidthButton("Reset Curve", actionWidth, 0.0f)) {
         ResetActiveCurveToLinear();
         changed = true;
     }
-    ImGui::SameLine(0.0f, 8.0f);
-    if (ImGuiExtras::RichFullWidthButton(
-            m_ShowAdvancedControls ? "Simple View" : "Advanced Controls",
-            context.safeContentWidth * 0.48f)) {
-        m_ShowAdvancedControls = !m_ShowAdvancedControls;
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::RichSectionLabel("Auto Calibrate");
-    ImGui::TextDisabled("Analyze the current Develop output, write a suggested tone state into this node, then return to manual editing.");
-    ImGui::TextDisabled("These shared finish-guidance controls are mirrored in Develop when you use the upstream finish bridge.");
-    const bool autoStrengthChanged = ResettableToneSliderFloat(
-        "Auto Strength",
-        "##ToneCurveAutoSceneAssistStrength",
-        &m_AutoSceneAssistStrength,
-        0.78f,
-        0.0f,
-        2.4f,
-        "%.2f",
-        context.safeContentWidth);
-    changed |= autoStrengthChanged;
-    const bool autoDynamicRangeChanged = ResettableToneSliderFloat(
-        "Auto Dynamic Range",
-        "##ToneCurveAutoDynamicRange",
-        &m_AutoDynamicRange,
-        1.0f,
-        0.25f,
-        3.00f,
-        "%.2f",
-        context.safeContentWidth);
-    const bool autoShadowBiasChanged = ResettableToneSliderFloat(
-        "Shadow Lift",
-        "##ToneCurveAutoShadowBias",
-        &m_AutoShadowBias,
-        0.0f,
-        -1.25f,
-        1.25f,
-        "%.2f",
-        context.safeContentWidth);
-    const bool autoHighlightBiasChanged = ResettableToneSliderFloat(
-        "Highlight Guard",
-        "##ToneCurveAutoHighlightBias",
-        &m_AutoHighlightBias,
-        0.0f,
-        -1.25f,
-        1.25f,
-        "%.2f",
-        context.safeContentWidth);
-    const bool autoHighlightCharacterChanged = ResettableToneSliderFloat(
-        "Highlight Character",
-        "##ToneCurveAutoHighlightCharacter",
-        &m_AutoHighlightCharacter,
-        0.0f,
-        -1.25f,
-        1.25f,
-        "%.2f",
-        context.safeContentWidth);
-    const bool autoContrastBiasChanged = ResettableToneSliderFloat(
-        "Contrast Bias",
-        "##ToneCurveAutoContrastBias",
-        &m_AutoContrastBias,
-        0.0f,
-        -1.25f,
-        1.25f,
-        "%.2f",
-        context.safeContentWidth);
-    changed |= autoDynamicRangeChanged;
-    changed |= autoShadowBiasChanged;
-    changed |= autoHighlightBiasChanged;
-    changed |= autoHighlightCharacterChanged;
-    changed |= autoContrastBiasChanged;
-    if ((autoStrengthChanged ||
-            autoDynamicRangeChanged ||
-            autoShadowBiasChanged ||
-            autoHighlightBiasChanged ||
-            autoHighlightCharacterChanged ||
-            autoContrastBiasChanged) &&
-        m_AutoSceneStatsValid) {
-        RequestAutoCalibration(ToneCurveAutoVariant::Recommended, false);
-    }
-    if (ImGuiExtras::RichFullWidthButton("Auto Calibrate", context.safeContentWidth, 0.0f)) {
-        RequestAutoCalibration(ToneCurveAutoVariant::Recommended);
+    ImGui::SameLine(0.0f, actionGap);
+    if (ImGuiExtras::RichFullWidthButton("Reset Domain", actionWidth, 0.0f)) {
+        m_Domain = ToneCurveDomain::Linear;
+        m_LogMinEv = authoredResetState.logMinEv;
+        m_LogMaxEv = authoredResetState.logMaxEv;
         changed = true;
     }
-    if (m_AutoCalibratePending) {
-        ImGui::TextDisabled("Calibration queued for the next render.");
-    }
-    if (m_AutoSceneStatsValid) {
-        const EffectiveLocalBaselineSettings localBaseline = ComputeEffectiveLocalBaselineSettings();
-        const float effectiveTargetShadowProtection = ComputeEffectiveTargetShadowProtection();
-        const float effectiveTargetHighlightProtection = ComputeEffectiveTargetHighlightProtection();
-        ImGui::TextDisabled(
-            "Scene profile: %s  (spread %.2f EV)",
-            ToneCurveAutoSceneProfileLabel(m_AutoSceneProfile),
-            m_AutoSceneHdrSpreadEv);
-        ImGui::TextDisabled(
-            "Auto tone anchor: %.3f",
-            ComputeEffectiveToneAnchor());
-        ImGui::TextDisabled(
-            "Scene pressure: shadows %.2f  highlights %.2f  clip %.2f%%",
-            m_AutoSceneNoiseRisk,
-            m_AutoSceneHighlightPressure,
-            m_AutoSceneClippingRatio * 100.0f);
-        ImGui::TextDisabled(
-            "Auto local bias: strength %.2f  shadow %.2f  highlight %.2f  radius %.0f",
-            localBaseline.strength,
-            localBaseline.shadowOpening,
-            localBaseline.highlightCompression,
-            localBaseline.radius);
-        ImGui::TextDisabled(
-            "Auto target bias: width %.3f  shadow protect %.2f  highlight protect %.2f",
-            ComputeEffectiveTargetAffectWidth(),
-            effectiveTargetShadowProtection,
-            effectiveTargetHighlightProtection);
-        ImGui::TextDisabled(
-            "Auto DR shaping: %.2f  (%s)",
-            m_AutoDynamicRange,
-            m_AutoDynamicRange >= 1.05f ? "wider / punchier" : (m_AutoDynamicRange <= 0.95f ? "gentler / denser" : "balanced"));
-        ImGui::TextDisabled(
-            "Auto bias: shadow %.2f  highlight %.2f  contrast %.2f",
-            m_AutoShadowBias,
-            m_AutoHighlightBias,
-            m_AutoContrastBias);
-        ImGui::TextDisabled(
-            "Highlight character: %.2f  (%s)",
-            m_AutoHighlightCharacter,
-            m_AutoHighlightCharacter >= 0.18f
-                ? "brighter / whiter highlight pop"
-                : (m_AutoHighlightCharacter <= -0.18f ? "more color / headroom preservation" : "balanced"));
-    } else {
-        ImGui::TextDisabled("Press Auto Calibrate to analyze the current input.");
-    }
-    ImGui::TextDisabled("Lower Highlight Character keeps more highlight color/headroom. Higher allows brighter neon-like whites when that is part of the look.");
-    if (!m_ShowAdvancedControls) {
-        ImGui::TextDisabled("Simple view keeps the node focused on manual curve editing. Advanced Controls unlock local baseline, targeting, and masking.");
-    }
+    ImGui::TextDisabled("Manual scene-referred finish curve. Usually place View Transform downstream.");
 
     ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::RichSectionLabel("Develop Workflow");
-    const int upstreamRawDevelopNodeId = editor ? editor->FindNearestUpstreamRawDevelopNode(context.nodeId) : -1;
-    if (upstreamRawDevelopNodeId > 0 && editor && editor->RawDevelopNodeUsesIntegratedTone(upstreamRawDevelopNodeId)) {
-        ImGui::TextDisabled("This standalone Tone Curve is now an internal / legacy finish stage.");
-        ImGui::TextDisabled("New work should stay inside the merged Develop node instead of editing finish tone here.");
-    } else if (upstreamRawDevelopNodeId > 0) {
-        ImGui::TextDisabled("Develop is the merged RAW workflow now. Use the Develop node for automatic processing and manual finish controls.");
-    } else {
-        ImGui::TextDisabled("Standalone Tone Curve is no longer part of the normal workflow.");
-        ImGui::TextDisabled("Use Develop for RAW conversion, automatic processing, and finish tone editing.");
-    }
-
-    if (m_ShowAdvancedControls) {
-        ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-        ImGuiExtras::RichSectionLabel("Local Baseline");
-        ImGui::TextDisabled("Open dark regions and compress bright regions locally before global tone shaping.");
-    changed |= ImGuiExtras::NodeCheckbox("Automatic Local Baseline", "##ToneCurveLocalBaselineEnabled", &m_LocalBaselineEnabled, context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Local Strength", "##ToneCurveLocalBaselineStrength", &m_LocalBaselineStrength, authoredResetState.localBaseline.strength, 0.0f, 1.6f, "%.2f", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Shadow Opening", "##ToneCurveLocalShadowOpening", &m_LocalShadowOpening, authoredResetState.localBaseline.shadowOpening, 0.0f, 2.2f, "%.2f", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Highlight Compression", "##ToneCurveLocalHighlightCompression", &m_LocalHighlightCompression, authoredResetState.localBaseline.highlightCompression, 0.0f, 2.2f, "%.2f", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Radius", "##ToneCurveLocalBaselineRadius", &m_LocalBaselineRadius, authoredResetState.localBaseline.radius, 8.0f, 220.0f, "%.0f px", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Edge Protection", "##ToneCurveLocalEdgeProtection", &m_LocalEdgeProtection, authoredResetState.localBaseline.edgeProtection, 0.0f, 1.0f, "%.2f", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Range Protection", "##ToneCurveLocalRangeProtection", &m_LocalRangeProtection, authoredResetState.localBaseline.rangeProtection, 0.0f, 1.0f, "%.2f", context.safeContentWidth);
-
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::RichSectionLabel("Foundation Tone");
-    ImGui::TextDisabled("Set the overall global tonal balance after the local baseline stage.");
-    if (m_AutoSceneStatsValid && m_AutoSceneAssistStrength > 0.001f) {
-        const float effectiveFoundationAssist = ComputeEffectiveFoundationAssistStrength();
-        const float effectiveFoundationBandWidth = ComputeEffectiveFoundationBandWidth();
-        ImGui::TextDisabled(
-            "Last recommended foundation: %.2f %.2f %.2f %.2f %.2f EV",
-            m_AutoRecommendedFoundationEv[0] * m_AutoSceneAssistStrength,
-            m_AutoRecommendedFoundationEv[1] * m_AutoSceneAssistStrength,
-            m_AutoRecommendedFoundationEv[2] * m_AutoSceneAssistStrength,
-            m_AutoRecommendedFoundationEv[3] * m_AutoSceneAssistStrength,
-            m_AutoRecommendedFoundationEv[4] * m_AutoSceneAssistStrength);
-        ImGui::TextDisabled(
-            "Recommended shaping: strength %.2f  band %.2f EV",
-            effectiveFoundationAssist,
-            effectiveFoundationBandWidth);
-    }
-    changed |= ResettableToneSliderFloat("Shadows", "##ToneCurveFoundationShadows", &m_FoundationShadows, authoredResetState.foundationRegionEv[0], -5.0f, 5.0f, "%.2f EV", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Darks", "##ToneCurveFoundationDarks", &m_FoundationDarks, authoredResetState.foundationRegionEv[1], -5.0f, 5.0f, "%.2f EV", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Midtones", "##ToneCurveFoundationMidtones", &m_FoundationMidtones, authoredResetState.foundationRegionEv[2], -5.0f, 5.0f, "%.2f EV", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Lights", "##ToneCurveFoundationLights", &m_FoundationLights, authoredResetState.foundationRegionEv[3], -5.0f, 5.0f, "%.2f EV", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Highlights", "##ToneCurveFoundationHighlights", &m_FoundationHighlights, authoredResetState.foundationRegionEv[4], -5.0f, 5.0f, "%.2f EV", context.safeContentWidth);
-    changed |= ImGuiExtras::NodeCheckbox("Adaptive Assist", "##ToneCurveFoundationAdaptiveAssist", &m_FoundationAdaptiveAssist, context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Assist Strength", "##ToneCurveFoundationAssistStrength", &m_FoundationAssistStrength, authoredResetState.foundationAssistStrength, 0.0f, 1.0f, "%.2f", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Middle Grey", "##ToneCurveFoundationMiddleGrey", &m_MiddleGrey, authoredResetState.middleGrey, 0.01f, 1.0f, "%.3f", context.safeContentWidth);
-    changed |= ResettableToneSliderFloat("Band Width", "##ToneCurveFoundationBandWidth", &m_FoundationBandWidth, authoredResetState.foundationBandWidth, 0.5f, 8.0f, "%.2f EV", context.safeContentWidth);
-    changed |= ImGuiExtras::NodeCheckbox("Preserve Hue", "##ToneCurveFoundationPreserveHue", &m_FoundationPreserveHue, context.safeContentWidth);
-
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::RichSectionLabel("On-Image Targeting");
-    const bool targetActive = editor && editor->IsCanvasToolActiveForNode(context.nodeId, EditorModule::CanvasToolKind::ToneCurveTarget);
-    if (targetActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 128, 176, 215));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(72, 146, 198, 235));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(80, 156, 210, 255));
-    }
-    if (ImGuiExtras::RichFullWidthButton(targetActive ? "Stop On-Image Target" : "On-Image Target", context.safeContentWidth, 0.0f)) {
-        if (editor) {
-            if (targetActive) {
-                editor->CancelCanvasTool();
-            } else {
-                editor->BeginToneCurveTargeting(
-                    context.nodeId,
-                    m_TargetingMode == ToneCurveTargetingMode::RegionTarget
-                        ? "Drag in the main viewport to rebalance local baseline and nearby tonal regions."
-                        : "Click and drag in the main viewport to move a point on the curve.");
-            }
-        }
-    }
-    if (targetActive) {
-        ImGui::PopStyleColor(3);
-    }
-    const char* samplingLabels[] = { "Curve Input", "Final Preview" };
-    int samplingBasis = static_cast<int>(m_SamplingBasis);
-    ImGui::SetNextItemWidth(context.safeContentWidth);
-    if (ImGui::Combo("Sampling", &samplingBasis, samplingLabels, 2)) {
-        m_SamplingBasis = static_cast<ToneCurveSamplingBasis>(std::clamp(samplingBasis, 0, 1));
-        changed = true;
-    }
-    const char* targetingLabels[] = { "Region Target", "Point Target" };
-    int targetingMode = static_cast<int>(m_TargetingMode);
-    ImGui::SetNextItemWidth(context.safeContentWidth);
-    if (ImGui::Combo("Targeting Mode", &targetingMode, targetingLabels, 2)) {
-        m_TargetingMode = static_cast<ToneCurveTargetingMode>(std::clamp(targetingMode, 0, 1));
-        changed = true;
-    }
-    changed |= ResettableToneSliderFloat(
-        "Affect Width",
-        "##ToneCurveTargetAffectWidth",
-        &m_TargetAffectWidth,
-        authoredResetState.targetAffectWidth,
-        0.02f,
-        0.30f,
-        "%.3f",
-        context.safeContentWidth);
-    changed |= ImGuiExtras::NodeCheckbox("Auto Anchor Protection", "##ToneCurveAutoAnchorProtection", &m_AutoAnchorProtection, context.safeContentWidth);
-    changed |= ImGuiExtras::NodeCheckbox("Protect Endpoints", "##ToneCurveProtectEndpointsDuringTargeting", &m_ProtectEndpointsDuringTargeting, context.safeContentWidth);
-    changed |= ResettableToneSliderFloat(
-        "Protect Shadows",
-        "##ToneCurveTargetShadowProtection",
-        &m_TargetShadowProtection,
-        authoredResetState.targetShadowProtection,
-        0.0f,
-        1.0f,
-        "%.2f",
-        context.safeContentWidth);
-    changed |= ResettableToneSliderFloat(
-        "Protect Highlights",
-        "##ToneCurveTargetHighlightProtection",
-        &m_TargetHighlightProtection,
-        authoredResetState.targetHighlightProtection,
-        0.0f,
-        1.0f,
-        "%.2f",
-        context.safeContentWidth);
-    if (m_ProbeValid) {
-        ImGui::TextDisabled(
-            "Sample %.3f -> %.3f  (%s)",
-            m_ProbeInputX,
-            m_ProbeOutputY,
-            ToneCurveSamplingBasisLabel(m_ProbeSamplingBasis));
-        if (m_TargetingMode == ToneCurveTargetingMode::RegionTarget) {
-            const std::array<float, 5> regionWeights = ComputeFoundationTargetWeights(m_ProbeSceneValue);
-            int dominantRegion = 0;
-            float dominantWeight = regionWeights[0];
-            for (int i = 1; i < 5; ++i) {
-                if (regionWeights[static_cast<std::size_t>(i)] > dominantWeight) {
-                    dominantWeight = regionWeights[static_cast<std::size_t>(i)];
-                    dominantRegion = i;
-                }
-            }
-            ImGui::TextDisabled("Dominant region: %s", ToneFoundationRegionLabel(dominantRegion));
-        }
-    } else {
-        ImGui::TextDisabled("Hover the main viewport to inspect where tones land on the curve.");
-    }
-    if (targetActive) {
-        const char* statusText = context.canvasToolStatusText
-            ? context.canvasToolStatusText
-            : (m_TargetingMode == ToneCurveTargetingMode::RegionTarget
-                ? "Click and drag in the main viewport to rebalance local baseline and nearby tonal regions"
-                : "Click and drag in the main viewport to adjust a point on the curve");
-        ImGui::TextDisabled("%s", statusText);
-    }
-    ImGui::Dummy(ImVec2(0.0f, context.itemGap));
-    changed |= RenderScopedMaskPanel(editor, context.nodeId, context.safeContentWidth, true, false);
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
-    ImGuiExtras::RichSectionLabel("Point Curves");
-    ImGui::TextDisabled("Use Finish Graph for normal user edits. Prepared Graph belongs to the automatic prep stage.");
-    const float graphToggleGap = 6.0f;
-    const float graphToggleWidth = std::max(110.0f, (context.safeContentWidth - graphToggleGap) * 0.5f);
-    const struct GraphToggleButton { ToneCurveGraphView view; const char* label; } graphButtons[] = {
-        { ToneCurveGraphView::Finish, "Finish Graph" },
-        { ToneCurveGraphView::Prepared, "Prepared Graph" }
-    };
-    for (int i = 0; i < 2; ++i) {
-        const bool selected = m_ActiveGraphView == graphButtons[i].view;
-        if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 128, 176, 215));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(72, 146, 198, 235));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(80, 156, 210, 255));
-        }
-        if (ImGuiExtras::RichFullWidthButton(graphButtons[i].label, graphToggleWidth, 0.0f) &&
-            m_ActiveGraphView != graphButtons[i].view) {
-            m_ActiveGraphView = graphButtons[i].view;
-            m_SelectedPoint = -1;
-            m_DraggingPoint = -1;
-            m_ContextPoint = -1;
-            if (m_ProbeValid) {
-                UpdateViewportProbe(m_ProbeSamplingBasis, m_ProbeU, m_ProbeV, m_ProbeRgba);
-            }
-        }
-        if (selected) {
-            ImGui::PopStyleColor(3);
-        }
-        if (i == 0) {
-            ImGui::SameLine(0.0f, graphToggleGap);
-        }
-    }
-    ImGui::TextDisabled(
-        "%s edits %s. The green overlay shows the combined post-processing result.",
-        ToneCurveGraphViewLabel(m_ActiveGraphView),
-        m_ActiveGraphView == ToneCurveGraphView::Prepared
-            ? "the auto/prep curve before your final finish pass"
-            : "the manual finish curve layered on top of the prepared result");
-    if (m_ActiveGraphView == ToneCurveGraphView::Prepared) {
-        ImGui::TextDisabled("Prepared Graph changes can be overwritten by later recalibration, so Finish Graph is the safer place for user taste adjustments.");
-    }
+    ImGuiExtras::RichSectionLabel("Curve");
+    ImGui::TextDisabled("Right-click a point for point actions. This standalone node edits the finish curve directly.");
     const float graphSize = std::min(context.safeContentWidth, 390.0f * std::max(0.75f, context.layoutScale));
     RenderCurveEditor(graphSize, graphSize);
-    changed = changed || m_LutDirty;
+    changed |= m_LutDirty;
 
     ImGui::Dummy(ImVec2(0.0f, context.itemGap));
     const std::vector<ToneCurvePoint>& editablePoints = EditablePoints();
     if (m_SelectedPoint >= 0 && m_SelectedPoint < static_cast<int>(editablePoints.size())) {
         const ToneCurvePoint& point = editablePoints[static_cast<std::size_t>(m_SelectedPoint)];
-        ImGui::TextDisabled("Selected: input %.3f  output %.3f", point.x, point.y);
+        ImGui::TextDisabled("Selected point: input %.3f  output %.3f", point.x, point.y);
         ImGui::SameLine();
         ImGui::TextDisabled("Segment: %s", ToneCurveSegmentShapeLabel(point.shape));
         ImGui::SameLine();
-        ImGui::BeginDisabled(editablePoints.size() <= 2 || m_SelectedPoint == 0 || m_SelectedPoint == static_cast<int>(editablePoints.size()) - 1);
+        ImGui::BeginDisabled(
+            editablePoints.size() <= 2 ||
+            m_SelectedPoint == 0 ||
+            m_SelectedPoint == static_cast<int>(editablePoints.size()) - 1);
         if (ImGui::Button("Delete Point")) {
             DeleteSelectedPoint();
             changed = true;
         }
         ImGui::EndDisabled();
     } else {
-        ImGui::TextDisabled("%s: %zu / %d points", ToneCurveGraphViewLabel(m_ActiveGraphView), editablePoints.size(), kToneCurveMaxPoints);
+        ImGui::TextDisabled("Finish Graph: %zu / %d points", editablePoints.size(), kToneCurveMaxPoints);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
+    ImGuiExtras::RichSectionLabel("On-Image Targeting");
+    changed |= RenderDevelopTargetingPanel(editor, context.nodeId, context.safeContentWidth, false);
+    if (context.canvasToolStatusText && context.canvasToolStatusText[0] != '\0') {
+        ImGui::TextDisabled("%s", context.canvasToolStatusText);
     }
 
     ImGui::Dummy(ImVec2(0.0f, context.sectionGap));
     ImGuiExtras::RichSectionLabel("Curve Domain");
-    ImGui::TextDisabled("Shape the point curve precisely after the foundation tone stage.");
+    ImGui::TextDisabled("Use Scene Linear for most manual RAW/HDR work. Switch to Log Scene for a broader tonal graph domain.");
     if (m_Domain == ToneCurveDomain::LogScene) {
-        changed |= ResettableToneSliderFloat("Graph Black EV", "##ToneCurveLogMinEv", &m_LogMinEv, authoredResetState.logMinEv, -20.0f, 0.0f, "%.2f", context.safeContentWidth);
-        changed |= ResettableToneSliderFloat("Graph White EV", "##ToneCurveLogMaxEv", &m_LogMaxEv, authoredResetState.logMaxEv, 0.0f, 20.0f, "%.2f", context.safeContentWidth);
+        changed |= ResettableToneSliderFloat(
+            "Graph Black EV",
+            "##ToneCurveLogMinEv",
+            &m_LogMinEv,
+            authoredResetState.logMinEv,
+            -20.0f,
+            0.0f,
+            "%.2f",
+            context.safeContentWidth);
+        changed |= ResettableToneSliderFloat(
+            "Graph White EV",
+            "##ToneCurveLogMaxEv",
+            &m_LogMaxEv,
+            authoredResetState.logMaxEv,
+            0.0f,
+            20.0f,
+            "%.2f",
+            context.safeContentWidth);
         if (m_LogMaxEv <= m_LogMinEv + 0.1f) {
             m_LogMaxEv = m_LogMinEv + 0.1f;
             changed = true;

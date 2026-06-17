@@ -1,5 +1,6 @@
 #include "RawLoader.h"
 
+#include "LibRawRuntime.h"
 #include "LibRawDecoder.h"
 
 #include <algorithm>
@@ -43,6 +44,19 @@ bool RawLoader::LoadMetadata(const std::string& path, RawMetadata& outMetadata) 
 }
 
 bool RawLoader::LoadFile(const std::string& path, RawImageData& outData) {
+    outData = {};
+    outData.metadata.sourcePath = path;
+    if (path.empty()) {
+        outData.metadata.error = "No RAW source path.";
+        return false;
+    }
+
+    const LibRawRuntimeStatus& runtimeStatus = GetLibRawRuntimeStatus();
+    if (!runtimeStatus.runtimeAvailable) {
+        outData.metadata.error = runtimeStatus.message;
+        return false;
+    }
+
     return DecodeWithLibRaw(path, outData);
 }
 

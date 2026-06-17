@@ -4,10 +4,7 @@ setlocal
 set "ROOT=%~dp0."
 set "BUILD_DIR=%~dp0build"
 set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
-set "BUILD_SCRIPT=%~dp0tools\build_release.ps1"
-
-echo Closing any running instances of Stack.exe...
-"%SystemRoot%\System32\taskkill.exe" /F /IM Stack.exe >nul 2>&1
+set "BUILD_SCRIPT=%~dp0tools\build_stack.ps1"
 
 echo.
 echo Configuring and building Stack...
@@ -22,3 +19,4 @@ exit /b %BUILD_EXIT%
 
 echo Build complete!
 echo Executable: %BUILD_DIR%\Stack.exe
+echo Full menu: %~dp0stack-tools.cmd

@@ -1,5 +1,4 @@
 #include "EditorSidebar.h"
-#include "App/settings/AppearanceTheme.h"
 
 #include "Editor/EditorModule.h"
 #include "Editor/LayerRegistry.h"
@@ -87,68 +86,6 @@ namespace {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
 
-    void RenderGraphSettingsPanel(EditorModule* editor, float controlWidth) {
-        ImGuiExtras::RichSectionLabel("GRAPH", 4.0f);
-        ImGui::TextWrapped("Graph appearance and link rendering options are listed below.");
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-
-        auto* appearance = editor ? editor->GetAppearance() : nullptr;
-        if (appearance == nullptr) {
-            ImGui::TextDisabled("Graph appearance settings are unavailable.");
-            return;
-        }
-
-        StackAppearance::GraphVisualMode graphMode = appearance->GetGraphVisualMode();
-        const StackAppearance::GraphVisualMode graphModes[] = {
-            StackAppearance::GraphVisualMode::BlackNodes,
-            StackAppearance::GraphVisualMode::Classic,
-            StackAppearance::GraphVisualMode::SpotlightPrototype
-        };
-
-        ImGui::Text("Graph Visual Mode");
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::BeginCombo("##SettingsGraphVisualMode", StackAppearance::GraphVisualModeLabel(graphMode))) {
-            for (const StackAppearance::GraphVisualMode candidate : graphModes) {
-                const bool selected = graphMode == candidate;
-                if (ImGui::Selectable(StackAppearance::GraphVisualModeLabel(candidate), selected)) {
-                    if (appearance->SetGraphVisualMode(candidate)) {
-                        graphMode = candidate;
-                    }
-                }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(120.0f, controlWidth));
-        ImGui::TextDisabled("%s", StackAppearance::GraphVisualModeDescription(graphMode));
-        ImGui::PopTextWrapPos();
-
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-        bool dottedMaskLinks = appearance->GetGraphDottedMaskLinks();
-        if (ImGui::Checkbox("Dotted mask-endpoint links", &dottedMaskLinks)) {
-            appearance->SetGraphDottedMaskLinks(dottedMaskLinks);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Render links as dotted when either endpoint is a mask-typed graph socket.");
-        }
-
-        if (graphMode == StackAppearance::GraphVisualMode::SpotlightPrototype) {
-            bool haloOutlines = appearance->GetGraphSpotlightHaloOutlines();
-            if (ImGui::Checkbox("Halo edge outlines", &haloOutlines)) {
-                appearance->SetGraphSpotlightHaloOutlines(haloOutlines);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Draw a faint edge halo around spotlight nodes.");
-            }
-        }
-
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGui::Text("Grid Spacing: 32 px");
-    }
 }
 
 EditorSidebar::EditorSidebar() {}
@@ -183,188 +120,12 @@ void EditorSidebar::Render(EditorModule* editor) {
         RenderExportSettings(editor);
     } else if (editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode) {
         RenderComplexNodeSettings(editor);
-    } else {
-        RenderSettings(editor);
     }
 
     if (!isNodeGraph) {
         ImGui::PopItemWidth();
         ImGui::Unindent(18.0f);
     }
-}
-
-static const char* CompositeSnapPresetLabel(EditorModule::CompositeSnapModePreset preset) {
-    switch (preset) {
-        case EditorModule::CompositeSnapModePreset::ObjectOnly: return "Object Only";
-        case EditorModule::CompositeSnapModePreset::Full: return "Full";
-        case EditorModule::CompositeSnapModePreset::Custom: return "Custom";
-        case EditorModule::CompositeSnapModePreset::Off:
-        default:
-            return "Off";
-    }
-}
-
-void EditorSidebar::RenderSettings(EditorModule* editor) {
-    const float contentWidth = ImGui::GetContentRegionAvail().x;
-    enum SettingsCategory : int {
-        SettingsCategoryGeneral = 0,
-        SettingsCategoryGraph = 1,
-        SettingsCategoryCanvasComposition = 2
-    };
-    static int activeCategory = SettingsCategoryGeneral;
-    
-    ImGui::Columns(2, "##SettingsColumns", false);
-    ImGui::SetColumnWidth(0, 95.0f * ImGui::GetIO().FontGlobalScale);
-    
-    // Left column: Category selection
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-    ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(50, 50, 60, 200));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(70, 70, 85, 230));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(90, 90, 110, 255));
-    
-    if (ImGui::Selectable("General", activeCategory == SettingsCategoryGeneral, 0, ImVec2(0, 26.0f))) {
-        activeCategory = SettingsCategoryGeneral;
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    if (ImGui::Selectable("Graph", activeCategory == SettingsCategoryGraph, 0, ImVec2(0, 26.0f))) {
-        activeCategory = SettingsCategoryGraph;
-    }
-
-    const bool hasComposite = editor->GetCompletedChainCount() >= 2;
-    if (hasComposite) {
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        if (ImGui::Selectable("Canvas\nComposition", activeCategory == SettingsCategoryCanvasComposition, 0, ImVec2(0, 36.0f))) {
-            activeCategory = SettingsCategoryCanvasComposition;
-        }
-    } else {
-        if (activeCategory == SettingsCategoryCanvasComposition) {
-            activeCategory = SettingsCategoryGeneral;
-        }
-    }
-    
-    ImGui::PopStyleColor(3);
-    ImGui::PopStyleVar();
-    
-    ImGui::NextColumn();
-    
-    // Right column: Content for category
-    const float rightColWidth = ImGui::GetContentRegionAvail().x;
-    
-    if (activeCategory == SettingsCategoryGeneral) {
-        ImGuiExtras::RichSectionLabel("THEME & GENERAL", 4.0f);
-        ImGui::TextWrapped("Theme options are listed below.");
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        
-        auto* appearance = editor->GetAppearance();
-        if (appearance != nullptr) {
-            const std::string activePresetId = appearance->GetActivePresetId();
-            const StackAppearance::ThemeDefinition* activePreset = appearance->GetActivePreset();
-            std::string currentPresetName = activePreset ? activePreset->displayName : "Custom";
-
-            ImGui::Text("Theme Preset");
-            ImGui::SetNextItemWidth(rightColWidth);
-            if (ImGui::BeginCombo("##EditorThemePresetCombo", currentPresetName.c_str())) {
-                // Draw factory presets
-                for (const auto& preset : appearance->GetFactoryThemes()) {
-                    const bool selected = activePresetId == preset.id;
-                    if (ImGui::Selectable(preset.displayName.c_str(), selected)) {
-                        appearance->SelectPresetById(preset.id);
-                        appearance->ApplyCurrentTheme(ImGui::GetIO(), ImGui::GetStyle());
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        }
-        
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGui::Text("Renderer: OpenGL 4.3 Core");
-        
-        ImGui::Dummy(ImVec2(0.0f, 12.0f));
-        ImGui::TextDisabled("Stack Image Editor");
-        ImGui::TextDisabled("Version 1.0.0");
-    } else if (activeCategory == SettingsCategoryGraph) {
-        RenderGraphSettingsPanel(editor, rightColWidth);
-    } else if (activeCategory == SettingsCategoryCanvasComposition && hasComposite) {
-        ImGuiExtras::RichSectionLabel("CANVAS COMPOSITION", 4.0f);
-        
-        // Snap Mode
-        EditorModule::CompositeSnapModePreset snapPreset = editor->GetCompositeSnapModePreset();
-        static const EditorModule::CompositeSnapModePreset snapPresets[] = {
-            EditorModule::CompositeSnapModePreset::Off,
-            EditorModule::CompositeSnapModePreset::ObjectOnly,
-            EditorModule::CompositeSnapModePreset::Full,
-            EditorModule::CompositeSnapModePreset::Custom
-        };
-        
-        ImGui::SetNextItemWidth(rightColWidth);
-        if (ImGui::BeginCombo("##SnapMode", CompositeSnapPresetLabel(snapPreset))) {
-            for (const auto preset : snapPresets) {
-                const bool selected = preset == snapPreset;
-                if (ImGui::Selectable(CompositeSnapPresetLabel(preset), selected)) {
-                    editor->ApplyCompositeSnapModePreset(preset);
-                    snapPreset = editor->GetCompositeSnapModePreset();
-                }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        
-        // Snap settings checkboxes
-        auto& snapSettings = editor->GetMutableCompositeSnapSettings();
-        ImGui::TextDisabled("Advanced snap tuning:");
-        bool tuningChanged = false;
-        
-        tuningChanged |= ImGui::Checkbox("Snap To Objects", &snapSettings.snapToObjects);
-        tuningChanged |= ImGui::Checkbox("Snap To Centers", &snapSettings.snapToCenters);
-        tuningChanged |= ImGui::Checkbox("Snap To Canvas Center", &snapSettings.snapToCanvasCenter);
-        tuningChanged |= ImGui::Checkbox("Snap To Export Bounds", &snapSettings.snapToExportBounds);
-        
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        
-        // Input Floats for Step Tuning
-        ImGui::SetNextItemWidth(rightColWidth * 0.7f);
-        if (ImGui::DragFloat("Rotate Step", &snapSettings.rotateSnapStep, 1.0f, 0.0f, 180.0f, "%.0f deg")) {
-            snapSettings.rotateSnapStep = std::clamp(snapSettings.rotateSnapStep, 0.0f, 180.0f);
-            if (snapSettings.rotateSnapStep > 0.0f) {
-                snapSettings.lastNonZeroRotateSnapStep = snapSettings.rotateSnapStep;
-            }
-            tuningChanged = true;
-        }
-        
-        ImGui::SetNextItemWidth(rightColWidth * 0.7f);
-        if (ImGui::DragFloat("Scale Step", &snapSettings.scaleSnapStep, 0.01f, 0.0f, 1.0f, "%.2f")) {
-            snapSettings.scaleSnapStep = std::clamp(snapSettings.scaleSnapStep, 0.0f, 1.0f);
-            if (snapSettings.scaleSnapStep > 0.0f) {
-                snapSettings.lastNonZeroScaleSnapStep = snapSettings.scaleSnapStep;
-            }
-            tuningChanged = true;
-        }
-        
-        if (tuningChanged) {
-            snapSettings.enabled =
-                snapSettings.snapToObjects ||
-                snapSettings.snapToCenters ||
-                snapSettings.snapToCanvasCenter ||
-                snapSettings.snapToExportBounds ||
-                snapSettings.rotateSnapStep > 0.0f ||
-                snapSettings.scaleSnapStep > 0.0f;
-        }
-        
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        ImGui::Separator();
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        
-        // Info about modes
-        ImGui::TextDisabled("Resize Mode: %s", editor->GetCompositeResizeMode() == EditorModule::CompositeResizeMode::Stretch ? "Stretch" : "Scale");
-        ImGui::TextDisabled("Origin Mode: %s", editor->GetCompositeScaleOriginMode() == EditorModule::CompositeScaleOriginMode::Center ? "Center" : "Opposite");
-    }
-    
-    ImGui::Columns(1);
 }
 
 void EditorSidebar::RenderExportSettings(EditorModule* editor) {
@@ -542,6 +303,11 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
         ImGui::EndChild();
         return;
     }
+    if (node->kind == EditorNodeGraph::NodeKind::RawDecode) {
+        editor->RenderRawDecodeControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
     if (node->kind == EditorNodeGraph::NodeKind::RawDevelop) {
         editor->RenderRawDevelopControls(*node, controlWidth, true);
         ImGui::EndChild();
@@ -559,6 +325,11 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
     }
     if (node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
         editor->RenderHdrMergeControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::Lut) {
+        editor->RenderLutControls(*node, controlWidth, true);
         ImGui::EndChild();
         return;
     }

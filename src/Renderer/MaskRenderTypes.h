@@ -1,9 +1,11 @@
 #pragma once
 
+#include "Color/LutData.h"
 #include "Editor/Layers/LayerBase.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
 #include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
+#include "Utils/SharedPixelBuffer.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -154,10 +156,12 @@ enum class RenderGraphNodeKind {
     Image,
     RawSource,
     RawNeuralDenoise,
+    RawDecode,
     RawDevelop,
     RawDetailAutoMask,
     RawDetailFusion,
     HdrMerge,
+    Lut,
     Layer,
     Output,
     MaskGenerator,
@@ -204,7 +208,7 @@ struct RenderDataMathSettings {
 };
 
 struct RenderGraphImagePayload {
-    std::vector<unsigned char> pixels;
+    SharedPixelBuffer pixels;
     int width = 0;
     int height = 0;
     int channels = 4;
@@ -224,6 +228,10 @@ struct RenderGraphRawDevelopPayload {
     nlohmann::json integratedToneLayerJson;
 };
 
+struct RenderGraphRawDecodePayload {
+    Raw::RawDevelopSettings settings;
+};
+
 struct RenderGraphRawNeuralDenoisePayload {
     NeuralDenoise::NeuralDenoiseSettings settings;
 };
@@ -239,6 +247,8 @@ struct RenderGraphRawDetailAutoMaskPayload {
 struct RenderGraphHdrMergePayload {
     Raw::HdrMergeSettings settings;
 };
+
+using RenderGraphLutPayload = ColorLut::LutPayload;
 
 struct ToneCurveAutoRewriteFeedback {
     bool valid = false;
@@ -270,10 +280,12 @@ struct RenderGraphNode {
     RenderGraphImagePayload image;
     RenderGraphRawSourcePayload rawSource;
     RenderGraphRawNeuralDenoisePayload rawNeuralDenoise;
+    RenderGraphRawDecodePayload rawDecode;
     RenderGraphRawDevelopPayload rawDevelop;
     RenderGraphRawDetailAutoMaskPayload rawDetailAutoMask;
     RenderGraphRawDetailFusionPayload rawDetailFusion;
     RenderGraphHdrMergePayload hdrMerge;
+    RenderGraphLutPayload lut;
     nlohmann::json layerJson;
     RenderMaskGeneratorKind maskKind = RenderMaskGeneratorKind::Solid;
     RenderMaskSettings maskSettings;

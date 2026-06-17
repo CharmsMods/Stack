@@ -88,7 +88,7 @@ bool Graph::CanConnectSockets(
     }
 
     const std::string upstreamChannel = ResolveSocketChannel(fromNodeId, fromSocketId);
-    if (to->kind == NodeKind::Output &&
+    if ((to->kind == NodeKind::Output || to->kind == NodeKind::Lut) &&
         toSocketId == kImageInputSocketId &&
         !upstreamChannel.empty()) {
         std::string ignored;
@@ -106,10 +106,10 @@ bool Graph::CanConnectSockets(
             toSocket.type == SocketType::Raw &&
             (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
             fromSocketId == kRawOutputSocketId &&
-            (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDevelop) &&
+            (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop) &&
             toSocketId == kRawInputSocketId;
         if (!validRawLink) {
-            if (errorMessage) *errorMessage = "RAW sockets connect from RAW Source or RAW neural nodes into RAW neural or RAW Develop nodes.";
+            if (errorMessage) *errorMessage = "RAW sockets connect from RAW Source or RAW neural nodes into RAW neural, RAW Decode, or RAW Develop nodes.";
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
@@ -138,12 +138,14 @@ bool Graph::CanConnectSockets(
         if (isScalarToScalar || isScalarImageToScalar) {
             const bool validScalarTarget =
                 (to->kind == NodeKind::Layer && toSocketId == kMaskInputSocketId) ||
+                (to->kind == NodeKind::Lut && toSocketId == kMaskInputSocketId) ||
                 (to->kind == NodeKind::RawDevelop && toSocketId == kMaskInputSocketId) ||
                 (to->kind == NodeKind::RawDetailFusion && toSocketId == kMaskInputSocketId) ||
                 (to->kind == NodeKind::Mix && toSocketId == kMixFactorSocketId) ||
                 (to->kind == NodeKind::MaskCombine &&
                     (toSocketId == kMaskCombineInputASocketId || toSocketId == kMaskCombineInputBSocketId)) ||
                 (to->kind == NodeKind::MaskUtility && toSocketId == kMaskUtilityInputSocketId) ||
+                (to->kind == NodeKind::Lut && IsChannelSocketId(toSocketId)) ||
                 (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(toSocketId)) ||
                 (to->kind == NodeKind::Output && IsChannelSocketId(toSocketId));
             if (!validScalarSource || !validScalarTarget) {
@@ -153,6 +155,7 @@ bool Graph::CanConnectSockets(
         } else if (isScalarToImage) {
             const bool validImageTarget =
                 (to->kind == NodeKind::Layer && toSocketId == kImageInputSocketId) ||
+                (to->kind == NodeKind::Lut && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::RawDetailAutoMask && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::RawDetailFusion && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
@@ -180,7 +183,7 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Only image sockets can be connected in the render chain in this pass.";
         return false;
     }
-    if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
+    if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
         if (errorMessage) *errorMessage = "Only image-producing nodes, layer, mix, and output nodes can be in the render chain.";
         return false;
     }
@@ -190,6 +193,10 @@ bool Graph::CanConnectSockets(
     }
     if (to->kind == NodeKind::Layer && toSocketId != kImageInputSocketId) {
         if (errorMessage) *errorMessage = "Image links must target the layer image input.";
+        return false;
+    }
+    if (to->kind == NodeKind::Lut && toSocketId != kImageInputSocketId) {
+        if (errorMessage) *errorMessage = "Image links must target the LUT image input.";
         return false;
     }
     if (to->kind == NodeKind::RawDetailAutoMask && toSocketId != kImageInputSocketId) {
@@ -223,8 +230,8 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Image links must target Data Math input A or B.";
         return false;
     }
-    if (to->kind != NodeKind::Layer && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath) {
-        if (errorMessage) *errorMessage = "Image links must target a layer, HDR Merge, blend node, data math node, split node, scalar converter, or the output.";
+    if (to->kind != NodeKind::Layer && to->kind != NodeKind::Lut && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath) {
+        if (errorMessage) *errorMessage = "Image links must target a layer, LUT, HDR Merge, blend node, data math node, split node, scalar converter, or the output.";
         return false;
     }
     if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
@@ -274,7 +281,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
     }
 
     if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask) {
-        if (to->kind == NodeKind::Output && IsChannelSocketId(resolvedToSocketId)) {
+        if ((to->kind == NodeKind::Output || to->kind == NodeKind::Lut) && IsChannelSocketId(resolvedToSocketId)) {
             RemoveLinksForNodeInput(toNodeId, kImageInputSocketId);
         }
         RemoveLinksForNodeInput(toNodeId, resolvedToSocketId);
@@ -283,7 +290,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         return true;
     }
 
-    if (to->kind == NodeKind::Output && resolvedToSocketId == kImageInputSocketId) {
+    if ((to->kind == NodeKind::Output || to->kind == NodeKind::Lut) && resolvedToSocketId == kImageInputSocketId) {
         RemoveLinksForNodeInput(toNodeId, "r");
         RemoveLinksForNodeInput(toNodeId, "g");
         RemoveLinksForNodeInput(toNodeId, "b");

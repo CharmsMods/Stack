@@ -33,6 +33,64 @@ ImU32 ApplyAlpha(ImU32 color, float alpha) {
     return ImGui::ColorConvertFloat4ToU32(rgba);
 }
 
+bool DrawDetachedPreviewToggle(
+    EditorModule* editor,
+    ImDrawList* drawList,
+    const ImVec2& contentScreen,
+    const ImVec2& avail,
+    float alpha,
+    EditorViewport::HostMode hostMode) {
+    if (!editor || !drawList || alpha <= 0.01f || avail.x <= 48.0f || avail.y <= 32.0f) {
+        return false;
+    }
+
+    const char* label = hostMode == EditorViewport::HostMode::DetachedFullscreen ? "Dock Back" : "Pop Out";
+    const ImVec2 textSize = ImGui::CalcTextSize(label);
+    const ImVec2 buttonSize(
+        std::max(78.0f, textSize.x + 24.0f),
+        26.0f);
+    const ImVec2 buttonMin(
+        contentScreen.x + std::max(0.0f, avail.x - buttonSize.x - 14.0f),
+        contentScreen.y + 12.0f);
+    const ImVec2 buttonMax(buttonMin.x + buttonSize.x, buttonMin.y + buttonSize.y);
+
+    const bool hovered = ImGui::IsMouseHoveringRect(buttonMin, buttonMax, false);
+    const bool active = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
+    ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_Button);
+    ImVec4 border = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+    ImVec4 text = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    if (active) {
+        bg = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+    } else if (hovered) {
+        bg = ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered);
+    }
+
+    bg.w = std::clamp(bg.w * alpha, 0.0f, 1.0f);
+    border.w = std::clamp(std::max(border.w, 0.55f) * alpha, 0.0f, 1.0f);
+    text.w = std::clamp(text.w * alpha, 0.0f, 1.0f);
+
+    drawList->AddRectFilled(buttonMin, buttonMax, ImGui::GetColorU32(bg), 9.0f);
+    drawList->AddRect(buttonMin, buttonMax, ImGui::GetColorU32(border), 9.0f, 0, 1.0f);
+    drawList->AddText(
+        ImVec2(
+            buttonMin.x + std::max(0.0f, (buttonSize.x - textSize.x) * 0.5f),
+            buttonMin.y + std::max(0.0f, (buttonSize.y - textSize.y) * 0.5f) - 1.0f),
+        ImGui::GetColorU32(text),
+        label);
+
+    if (clicked) {
+        editor->ToggleDetachedPreviewFullscreen();
+    }
+
+    return hovered;
+}
+
 ImU32 DevelopSubjectModeColor(EditorNodeGraph::DevelopSubjectImportanceMode mode, float alpha) {
     const int a = static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f));
     switch (mode) {
@@ -419,17 +477,26 @@ void EditorViewport::Initialize() {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
+void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode hostMode) {
     const float viewportRevealAlpha = std::clamp(revealAlpha, 0.0f, 1.0f);
     auto& pipeline = editor->GetPipeline();
     const bool compositeMode = editor->IsCompositeViewportMode();
-    const bool inputBlocked = false;
+    const ImVec2 hostAvail = ImGui::GetContentRegionAvail();
+    const ImVec2 hostScreen = ImGui::GetCursorScreenPos();
+    ImDrawList* hostDrawList = ImGui::GetWindowDrawList();
+    const bool inputBlocked = DrawDetachedPreviewToggle(
+        editor,
+        hostDrawList,
+        hostScreen,
+        hostAvail,
+        viewportRevealAlpha,
+        hostMode);
 
     if (compositeMode) {
         editor->ClearToneCurveViewportProbe();
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
-        const ImVec2 screenPos = ImGui::GetCursorScreenPos();
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const ImVec2 avail = hostAvail;
+        const ImVec2 screenPos = hostScreen;
+        ImDrawList* drawList = hostDrawList;
         constexpr float kCanvasRounding = 18.0f;
         editor->EnsureCompositeSceneState(avail);
         editor->SetLastCompositeCanvasSize(avail);
@@ -1410,7 +1477,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
         } else {
             emptyMessage = "Graph render produced no output.";
         }
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const ImVec2 avail = hostAvail;
         const ImVec2 textSize = ImGui::CalcTextSize(emptyMessage);
         ImGui::SetCursorPos(ImVec2(
             std::max(0.0f, (avail.x - textSize.x) * 0.5f),
@@ -1427,9 +1494,9 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
     }
 
     bool isHovered = !inputBlocked && ImGui::IsWindowHovered();
-    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 avail = hostAvail;
     ImVec2 mousePos = ImGui::GetMousePos();
-    ImVec2 contentScreen = ImGui::GetCursorScreenPos();
+    ImVec2 contentScreen = hostScreen;
     ImVec2 relativeMouse = ImVec2(mousePos.x - contentScreen.x, mousePos.y - contentScreen.y);
 
     if (isHovered && !m_IsLocked) {
@@ -1452,7 +1519,6 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
     const bool hasDevelopSubjectOverlay =
         singleOutputMode && editor->GetDevelopSubjectImportanceViewportState(developSubjectState);
     const bool canStaticCompare = singleOutputMode && sourceTex != 0 && sourceTex != outputTex;
-    const bool viewportFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (!canStaticCompare || !singleOutputMode) {
         m_ShowStaticSingleCompare = false;
     }
@@ -1463,7 +1529,6 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
     if (!inputBlocked &&
         canStaticCompare &&
         editor->CanConsumeEditorCommandKeys() &&
-        (isHovered || viewportFocused) &&
         ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
         m_ShowStaticSingleCompare = !m_ShowStaticSingleCompare;
         editor->SetHoverFade(0.0f);
@@ -1494,7 +1559,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
     }
 
     const ImVec2 contentCursor = ImGui::GetCursorPos();
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImDrawList* drawList = hostDrawList;
     float offsetX = (avail.x - dispW) * 0.5f + m_PanX;
     float offsetY = (avail.y - dispH) * 0.5f + m_PanY;
     const ImVec2 singleImageMin(contentScreen.x + offsetX, contentScreen.y + offsetY);
@@ -1530,9 +1595,19 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha) {
         const float sideSlotW = std::max(1.0f, (drawAvailW - gap) * 0.5f);
         const float stackedArea = fitArea(drawAvailW, stackedSlotH);
         const float sideArea = fitArea(sideSlotW, drawAvailH);
-        const bool stacked = std::abs(stackedArea - sideArea) < 1.0f
-            ? imgW >= imgH
-            : stackedArea > sideArea;
+        const float imageAspect = imgH > 0 ? (static_cast<float>(imgW) / static_cast<float>(imgH)) : 1.0f;
+        const float viewportAspect = drawAvailH > 0.0f ? (drawAvailW / drawAvailH) : 1.0f;
+        const float horizontalBias = std::clamp((imageAspect - 1.0f) / 0.85f, 0.0f, 1.0f);
+        const float verticalBias = std::clamp((1.0f - imageAspect) / 0.55f, 0.0f, 1.0f);
+        const float stackedScore = stackedArea * (1.0f + verticalBias * 0.18f - horizontalBias * 0.18f);
+        const float sideScore = sideArea * (1.0f + horizontalBias * 0.28f);
+        const bool forceStacked = viewportAspect < 0.92f;
+        const bool forceSideBySide = imageAspect >= 1.22f && viewportAspect >= 0.98f;
+        const bool stacked = forceStacked
+            ? true
+            : (forceSideBySide
+                ? false
+                : (std::abs(stackedScore - sideScore) < 1.0f ? imgW < imgH : stackedScore > sideScore));
 
         const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
         const float uInset = imgW > 1 ? (0.5f / static_cast<float>(imgW)) : 0.0f;

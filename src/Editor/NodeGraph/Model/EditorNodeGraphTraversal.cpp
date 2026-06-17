@@ -66,6 +66,7 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     }
                     valid = true;
                     break;
+                case NodeKind::RawDecode:
                 case NodeKind::RawDevelop: {
                     const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
                     valid = upstream ? visit(upstream->fromNodeId) : false;
@@ -79,6 +80,37 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 case NodeKind::Layer: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
                     valid = upstream ? visit(upstream->fromNodeId) : false;
+                    break;
+                }
+                case NodeKind::Lut: {
+                    if (const Link* upstream = FindInputLink(nodeId, kImageInputSocketId)) {
+                        valid = visit(upstream->fromNodeId);
+                        break;
+                    }
+
+                    const Link* upstreamR = FindInputLink(nodeId, "r");
+                    const Link* upstreamG = FindInputLink(nodeId, "g");
+                    const Link* upstreamB = FindInputLink(nodeId, "b");
+                    const Link* upstreamA = FindInputLink(nodeId, "a");
+                    bool hasConnection = false;
+                    bool allValid = true;
+                    if (upstreamR) {
+                        hasConnection = true;
+                        if (!visit(upstreamR->fromNodeId)) allValid = false;
+                    }
+                    if (upstreamG) {
+                        hasConnection = true;
+                        if (!visit(upstreamG->fromNodeId)) allValid = false;
+                    }
+                    if (upstreamB) {
+                        hasConnection = true;
+                        if (!visit(upstreamB->fromNodeId)) allValid = false;
+                    }
+                    if (upstreamA) {
+                        hasConnection = true;
+                        if (!visit(upstreamA->fromNodeId)) allValid = false;
+                    }
+                    valid = hasConnection && allValid;
                     break;
                 }
                 case NodeKind::RawDetailFusion: {
@@ -313,11 +345,13 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
         switch (kind) {
             case NodeKind::Image:
             case NodeKind::RawSource:
+            case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
             case NodeKind::RawNeuralDenoise:
             case NodeKind::RawDetailAutoMask:
             case NodeKind::RawDetailFusion:
             case NodeKind::HdrMerge:
+            case NodeKind::Lut:
             case NodeKind::Layer:
             case NodeKind::Mix:
             case NodeKind::DataMath:
@@ -375,16 +409,30 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
 
         switch (node->kind) {
             case NodeKind::Layer:
+            case NodeKind::Lut:
             case NodeKind::Output:
             case NodeKind::RawDetailAutoMask:
             case NodeKind::RawDetailFusion:
                 addInputCandidate(kImageInputSocketId);
+                if (node->kind == NodeKind::Lut && FindInputLink(nodeId, kImageInputSocketId) == nullptr) {
+                    addInputCandidate("r");
+                    addInputCandidate("g");
+                    addInputCandidate("b");
+                    addInputCandidate("a");
+                }
+                if (node->kind == NodeKind::Output && FindInputLink(nodeId, kImageInputSocketId) == nullptr) {
+                    addInputCandidate("r");
+                    addInputCandidate("g");
+                    addInputCandidate("b");
+                    addInputCandidate("a");
+                }
                 break;
             case NodeKind::HdrMerge:
                 addInputCandidate(kHdrMergeInput1SocketId);
                 addInputCandidate(kHdrMergeInput2SocketId);
                 addInputCandidate(kHdrMergeInput3SocketId);
                 break;
+            case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
             case NodeKind::RawNeuralDenoise:
                 addInputCandidate(kRawInputSocketId);

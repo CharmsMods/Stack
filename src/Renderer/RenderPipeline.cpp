@@ -25,6 +25,18 @@
 #define GL_R32F 0x822E
 #endif
 
+#ifndef GL_RGB32F
+#define GL_RGB32F 0x8815
+#endif
+
+#ifndef GL_TEXTURE_3D
+#define GL_TEXTURE_3D 0x806F
+#endif
+
+#ifndef GL_TEXTURE_WRAP_R
+#define GL_TEXTURE_WRAP_R 0x8072
+#endif
+
 #ifndef GL_RED
 #define GL_RED 0x1903
 #endif
@@ -44,7 +56,6 @@ constexpr std::uint64_t kRawDevelopStageCacheSingleEntryByteLimit = 384ull * 102
 inline void HashCombine(std::size_t& seed, std::size_t value) {
     seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
 }
-
 template <typename T>
 std::size_t HashValue(const T& value) {
     return std::hash<T>{}(value);
@@ -1446,7 +1457,7 @@ RenderPipeline::RenderPipeline()
       m_PingFBO(0), m_PongFBO(0), m_OutputTexture(0), m_ExternalOutputTexture(0), m_GraphSourceTexture(0),
       m_MaskProgram(0), m_MaskCombineProgram(0), m_MaskBlendProgram(0), m_MixProgram(0),
       m_MaskUtilityProgram(0), m_ImageToMaskProgram(0), m_ImageGeneratorProgram(0),
-      m_DataMathProgram(0), m_ChannelSplitProgram(0), m_ChannelCombineProgram(0),
+      m_DataMathProgram(0), m_ChannelSplitProgram(0), m_ChannelCombineProgram(0), m_LutProgram(0),
       m_HdrMergeProgram(0),
       m_RawDetailFusionAnalysisProgram(0), m_RawDetailFusionMetricsProgram(0), m_RawDetailFusionSmoothProgram(0), m_RawDetailFusionApplyProgram(0),
       m_AutoGainStatsProgram(0)
@@ -1467,6 +1478,7 @@ RenderPipeline::~RenderPipeline() {
     if (m_DataMathProgram) glDeleteProgram(m_DataMathProgram);
     if (m_ChannelSplitProgram) glDeleteProgram(m_ChannelSplitProgram);
     if (m_ChannelCombineProgram) glDeleteProgram(m_ChannelCombineProgram);
+    if (m_LutProgram) glDeleteProgram(m_LutProgram);
     if (m_HdrMergeProgram) glDeleteProgram(m_HdrMergeProgram);
     if (m_RawDetailFusionAnalysisProgram) glDeleteProgram(m_RawDetailFusionAnalysisProgram);
     if (m_RawDetailFusionMetricsProgram) glDeleteProgram(m_RawDetailFusionMetricsProgram);
@@ -1521,6 +1533,7 @@ bool RenderPipeline::ShouldCacheRawDevelopStageTextureForValidation(int width, i
 void RenderPipeline::InvalidateGraphCaches() {
     DestroyGraphCache(m_GraphImageCache);
     DestroyGraphCache(m_GraphMaskCache);
+    DestroyGraphCache(m_LutTextureCache);
     DestroyRawDevelopStageCache();
     m_LastGraphImageCacheHits.clear();
     m_AutoGainSceneStatsCache.clear();
@@ -1553,6 +1566,7 @@ bool RenderPipeline::LoadSourceImage(const std::string& filepath) {
     if (m_SourceTexture) glDeleteTextures(1, &m_SourceTexture);
     m_SourceTexture = GLHelpers::CreateTextureFromPixels(data, w, h, 4);
     m_SourceChannels = 4;
+    m_SourcePixelsShared.reset();
     m_SourcePixels.assign(data, data + (w * h * 4));
     m_SourceFingerprint = HashBytes(m_SourcePixels);
     stbi_image_free(data);
@@ -1592,11 +1606,54 @@ void RenderPipeline::LoadSourceFromPixels(const unsigned char* data, int w, int 
     if (m_SourceTexture) glDeleteTextures(1, &m_SourceTexture);
     m_SourceTexture = data ? GLHelpers::CreateTextureFromPixels(data, w, h, ch) : 0;
     m_SourceChannels = ch;
+    m_SourcePixelsShared.reset();
     if (data && incomingSize > 0) {
         m_SourcePixels.assign(data, data + incomingSize);
     } else {
         m_SourcePixels.clear();
     }
+    m_SourceFingerprint = incomingFingerprint;
+    Resize(targetWidth, targetHeight);
+}
+
+void RenderPipeline::LoadSourceFromSharedPixels(const SharedPixelBuffer& data, int w, int h, int ch) {
+    const int clampedChannels = std::max(1, ch);
+    int targetWidth = w;
+    int targetHeight = h;
+    if (data.empty() && m_PreviewMaxDimension > 0 && targetWidth > 0 && targetHeight > 0) {
+        const int longestSide = std::max(targetWidth, targetHeight);
+        if (longestSide > m_PreviewMaxDimension) {
+            targetWidth = std::max(1, static_cast<int>(
+                (static_cast<long long>(targetWidth) * m_PreviewMaxDimension + longestSide / 2) / longestSide));
+            targetHeight = std::max(1, static_cast<int>(
+                (static_cast<long long>(targetHeight) * m_PreviewMaxDimension + longestSide / 2) / longestSide));
+        }
+    }
+
+    const std::size_t incomingFingerprint =
+        data.fingerprint != 0
+            ? data.fingerprint
+            : (data.empty() ? 0 : StackHash::HashBytes(*data.bytes));
+    if (m_SourceTexture != 0 &&
+        m_Width == targetWidth &&
+        m_Height == targetHeight &&
+        m_SourceChannels == ch &&
+        m_SourceFingerprint == incomingFingerprint &&
+        m_SourcePixelsShared == data.bytes &&
+        m_SourcePixels.empty()) {
+        return;
+    }
+
+    InvalidateGraphCaches();
+    if (m_SourceTexture) {
+        glDeleteTextures(1, &m_SourceTexture);
+    }
+    m_SourceTexture = !data.empty()
+        ? GLHelpers::CreateTextureFromPixels(data.data(), w, h, ch)
+        : 0;
+    m_SourceChannels = ch;
+    m_SourcePixels.clear();
+    m_SourcePixelsShared = data.bytes;
     m_SourceFingerprint = incomingFingerprint;
     Resize(targetWidth, targetHeight);
 }
@@ -1612,6 +1669,7 @@ void RenderPipeline::Clear() {
     }
     m_OutputTexture = 0;
     m_GraphSourceTexture = 0;
+    m_SourcePixelsShared.reset();
     m_SourcePixels.clear();
     m_SourceFingerprint = 0;
     m_SourceChannels = 4;
@@ -2015,7 +2073,7 @@ void RenderPipeline::EnsureMixProgram() {
         void main() {
             vec4 a = texture(uImageA, vTexCoord);
             vec4 b = texture(uImageB, vTexCoord);
-            float factor = clamp(uFactor, 0.0, 1.0);
+            float factor = uFactor;
             if (uHasFactorMask != 0) {
                 factor *= clamp(texture(uFactorMask, vTexCoord).r, 0.0, 1.0);
             }
@@ -2074,6 +2132,149 @@ void RenderPipeline::RenderMixBlend(unsigned int textureA, unsigned int textureB
     m_Quad.Draw();
 
     glActiveTexture(GL_TEXTURE0);
+}
+
+void RenderPipeline::EnsureLutProgram() {
+    static const char* vertexSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTex;
+        out vec2 vTexCoord;
+        void main() {
+            vTexCoord = aTex;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }
+    )";
+
+    static const char* fragmentSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+
+        uniform sampler2D uImage;
+        uniform sampler2D uLut1D;
+        uniform sampler2D uShaper1D;
+        uniform sampler3D uLut3D;
+        uniform int uHasLut1D;
+        uniform int uHasShaper1D;
+        uniform int uHasLut3D;
+        uniform int uInputTransform;
+        uniform int uOutputTransform;
+        uniform vec3 uLut1DDomainMin;
+        uniform vec3 uLut1DDomainMax;
+        uniform vec3 uShaperDomainMin;
+        uniform vec3 uShaperDomainMax;
+        uniform vec3 uLut3DDomainMin;
+        uniform vec3 uLut3DDomainMax;
+
+        float linearToSrgbChannel(float value) {
+            float v = max(value, 0.0);
+            if (v <= 0.0031308) {
+                return 12.92 * v;
+            }
+            return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+        }
+
+        float srgbToLinearChannel(float value) {
+            float v = clamp(value, 0.0, 1.0);
+            if (v <= 0.04045) {
+                return v / 12.92;
+            }
+            return pow((v + 0.055) / 1.055, 2.4);
+        }
+
+        float gammaEncode22(float value) {
+            return pow(max(value, 0.0), 1.0 / 2.2);
+        }
+
+        float gammaDecode22(float value) {
+            return pow(clamp(value, 0.0, 1.0), 2.2);
+        }
+
+        vec3 applyTransfer(vec3 color, int mode) {
+            if (mode == 1) {
+                return vec3(
+                    linearToSrgbChannel(color.r),
+                    linearToSrgbChannel(color.g),
+                    linearToSrgbChannel(color.b));
+            }
+            if (mode == 2) {
+                return vec3(
+                    gammaEncode22(color.r),
+                    gammaEncode22(color.g),
+                    gammaEncode22(color.b));
+            }
+            if (mode == 3) {
+                return vec3(
+                    srgbToLinearChannel(color.r),
+                    srgbToLinearChannel(color.g),
+                    srgbToLinearChannel(color.b));
+            }
+            if (mode == 4) {
+                return vec3(
+                    gammaDecode22(color.r),
+                    gammaDecode22(color.g),
+                    gammaDecode22(color.b));
+            }
+            return color;
+        }
+
+        float remapToUnit(float value, float domainMin, float domainMax) {
+            float span = domainMax - domainMin;
+            if (abs(span) < 1e-6) {
+                return 0.0;
+            }
+            return clamp((value - domainMin) / span, 0.0, 1.0);
+        }
+
+        float lutCoord1D(float value, float domainMin, float domainMax, sampler2D lutTex) {
+            float t = remapToUnit(value, domainMin, domainMax);
+            int size = textureSize(lutTex, 0).x;
+            return ((t * float(max(size - 1, 0))) + 0.5) / float(max(size, 1));
+        }
+
+        vec3 apply1DStage(vec3 color, sampler2D lutTex, vec3 domainMin, vec3 domainMax) {
+            float coordR = lutCoord1D(color.r, domainMin.r, domainMax.r, lutTex);
+            float coordG = lutCoord1D(color.g, domainMin.g, domainMax.g, lutTex);
+            float coordB = lutCoord1D(color.b, domainMin.b, domainMax.b, lutTex);
+            vec3 sampleR = texture(lutTex, vec2(coordR, 0.5)).rgb;
+            vec3 sampleG = texture(lutTex, vec2(coordG, 0.5)).rgb;
+            vec3 sampleB = texture(lutTex, vec2(coordB, 0.5)).rgb;
+            return vec3(sampleR.r, sampleG.g, sampleB.b);
+        }
+
+        vec3 apply3DStage(vec3 color, sampler3D lutTex, vec3 domainMin, vec3 domainMax) {
+            vec3 coord = vec3(
+                remapToUnit(color.r, domainMin.r, domainMax.r),
+                remapToUnit(color.g, domainMin.g, domainMax.g),
+                remapToUnit(color.b, domainMin.b, domainMax.b));
+            vec3 size = vec3(textureSize(lutTex, 0));
+            coord = ((coord * (size - 1.0)) + 0.5) / size;
+            return texture(lutTex, coord).rgb;
+        }
+
+        void main() {
+            vec4 source = texture(uImage, vTexCoord);
+            vec3 color = applyTransfer(source.rgb, uInputTransform);
+
+            if (uHasLut1D != 0) {
+                color = apply1DStage(color, uLut1D, uLut1DDomainMin, uLut1DDomainMax);
+            }
+            if (uHasShaper1D != 0) {
+                color = apply1DStage(color, uShaper1D, uShaperDomainMin, uShaperDomainMax);
+            }
+            if (uHasLut3D != 0) {
+                color = apply3DStage(color, uLut3D, uLut3DDomainMin, uLut3DDomainMax);
+            }
+
+            color = applyTransfer(color, uOutputTransform);
+            FragColor = vec4(color, source.a);
+        }
+    )";
+
+    if (!m_LutProgram) {
+        m_LutProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
+    }
 }
 
 void RenderPipeline::EnsureDataMathProgram() {
@@ -3882,2046 +4083,7 @@ unsigned int RenderPipeline::RenderRawDetailFusion(
 }
 
 void RenderPipeline::ExecuteGraph(const RenderGraphSnapshot& graph) {
-    m_GraphSourceTexture = 0;
-    m_LastGraphImageCacheHits.clear();
-    m_AutoGainSceneStatsCache.clear();
-    m_PreLocalExposureSummaries.clear();
-    m_ToneCurveAutoRewriteFeedback.clear();
-    if (m_Width == 0 || m_Height == 0 || graph.outputNodeId <= 0) {
-        m_OutputTexture = 0;
-        return;
-    }
-
-    GLint prevViewport[4];
-    glGetIntegerv(GL_VIEWPORT, prevViewport);
-    GLint prevFBO;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-
-    GLboolean prevScissor = glIsEnabled(GL_SCISSOR_TEST);
-    GLboolean prevDepth = glIsEnabled(GL_DEPTH_TEST);
-    GLboolean prevStencil = glIsEnabled(GL_STENCIL_TEST);
-    GLboolean prevBlend = glIsEnabled(GL_BLEND);
-
-    glDisable(GL_SCISSOR_TEST);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_BLEND);
-    glViewport(0, 0, m_Width, m_Height);
-
-    if (m_ExternalOutputTexture) {
-        glDeleteTextures(1, &m_ExternalOutputTexture);
-        m_ExternalOutputTexture = 0;
-    }
-
-    std::unordered_map<int, const RenderGraphNode*> nodes;
-    std::set<int> activeNodeIds;
-    for (const RenderGraphNode& node : graph.nodes) {
-        nodes[node.nodeId] = &node;
-        activeNodeIds.insert(node.nodeId);
-    }
-
-    auto findInputLink = [&](int nodeId, const std::string& socketId) -> const RenderGraphLink* {
-        for (const RenderGraphLink& link : graph.links) {
-            if (link.toNodeId == nodeId && link.toSocketId == socketId) {
-                return &link;
-            }
-        }
-        return nullptr;
-    };
-
-    auto isChannelSocketId = [](const std::string& socketId) {
-        return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
-    };
-
-    std::set<std::string> scalarSocketVisiting;
-    std::function<bool(int, const std::string&)> isScalarRenderSocket = [&](int nodeId, const std::string& socketId) -> bool {
-        const std::string key = std::to_string(nodeId) + ":" + socketId;
-        if (!scalarSocketVisiting.insert(key).second) {
-            return false;
-        }
-        auto finish = [&](bool result) {
-            scalarSocketVisiting.erase(key);
-            return result;
-        };
-        const auto nodeIt = nodes.find(nodeId);
-        if (nodeIt == nodes.end() || !nodeIt->second) {
-            return finish(false);
-        }
-        const RenderGraphNode& node = *nodeIt->second;
-        auto inputIsScalar = [&](const char* inputSocketId) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, inputSocketId);
-            return input ? isScalarRenderSocket(input->fromNodeId, input->fromSocketId) : false;
-        };
-
-        bool result = false;
-        if (isChannelSocketId(socketId)) {
-            result = true;
-        } else {
-            switch (node.kind) {
-                case RenderGraphNodeKind::MaskGenerator:
-                case RenderGraphNodeKind::MaskCombine:
-                case RenderGraphNodeKind::MaskUtility:
-                case RenderGraphNodeKind::CustomMask:
-                case RenderGraphNodeKind::ImageToMask:
-                    result = socketId == "maskOut";
-                    break;
-                case RenderGraphNodeKind::RawDetailAutoMask:
-                case RenderGraphNodeKind::RawDetailFusion:
-                    result = socketId == "maskOut" || (socketId == "imageOut" && inputIsScalar("imageIn"));
-                    break;
-                case RenderGraphNodeKind::Layer:
-                    result = socketId == "imageOut" && inputIsScalar("imageIn");
-                    break;
-                case RenderGraphNodeKind::Mix: {
-                    const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-                    const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-                    const bool hasA = inputA != nullptr;
-                    const bool hasB = inputB != nullptr;
-                    result = socketId == "imageOut" &&
-                        (hasA || hasB) &&
-                        (!hasA || isScalarRenderSocket(inputA->fromNodeId, inputA->fromSocketId)) &&
-                        (!hasB || isScalarRenderSocket(inputB->fromNodeId, inputB->fromSocketId));
-                    break;
-                }
-                case RenderGraphNodeKind::DataMath: {
-                    const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-                    const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-                    const bool hasA = inputA != nullptr;
-                    const bool hasB = inputB != nullptr;
-                    result = socketId == "imageOut" &&
-                        (hasA || hasB) &&
-                        (!hasA || isScalarRenderSocket(inputA->fromNodeId, inputA->fromSocketId)) &&
-                        (!hasB || isScalarRenderSocket(inputB->fromNodeId, inputB->fromSocketId));
-                    break;
-                }
-                case RenderGraphNodeKind::ChannelSplit:
-                    result = isChannelSocketId(socketId);
-                    break;
-                default:
-                    result = false;
-                    break;
-            }
-        }
-        return finish(result);
-    };
-
-    std::function<int(int)> findReferenceSourceNode = [&](int nodeId) -> int {
-        const auto nodeIt = nodes.find(nodeId);
-        if (nodeIt == nodes.end() || !nodeIt->second) {
-            return -1;
-        }
-        const RenderGraphNode& node = *nodeIt->second;
-        switch (node.kind) {
-            case RenderGraphNodeKind::Image:
-            case RenderGraphNodeKind::RawSource:
-            case RenderGraphNodeKind::ImageGenerator:
-            case RenderGraphNodeKind::RawDevelop:
-                return node.nodeId;
-            case RenderGraphNodeKind::RawDetailFusion: {
-                const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
-            }
-            case RenderGraphNodeKind::HdrMerge: {
-                const char* sockets[] = { "image1", "image2", "image3" };
-                for (const char* socket : sockets) {
-                    if (const RenderGraphLink* input = findInputLink(node.nodeId, socket)) {
-                        const int source = findReferenceSourceNode(input->fromNodeId);
-                        if (source > 0) return source;
-                    }
-                }
-                return -1;
-            }
-            case RenderGraphNodeKind::RawDetailAutoMask: {
-                const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
-            }
-            case RenderGraphNodeKind::RawNeuralDenoise: {
-                const RenderGraphLink* input = findInputLink(node.nodeId, "rawIn");
-                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
-            }
-            case RenderGraphNodeKind::Layer:
-            case RenderGraphNodeKind::Output:
-            case RenderGraphNodeKind::ImageToMask:
-            case RenderGraphNodeKind::MaskCombine:
-            case RenderGraphNodeKind::MaskUtility:
-            case RenderGraphNodeKind::ChannelSplit: {
-                const RenderGraphLink* input = findInputLink(node.nodeId, node.kind == RenderGraphNodeKind::Output ? "imageIn" : "imageIn");
-                if (!input && node.kind == RenderGraphNodeKind::MaskCombine) input = findInputLink(node.nodeId, "maskA");
-                if (!input && node.kind == RenderGraphNodeKind::MaskUtility) input = findInputLink(node.nodeId, "maskIn");
-                if (!input && node.kind == RenderGraphNodeKind::ChannelSplit) input = findInputLink(node.nodeId, "imageIn");
-                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
-            }
-            case RenderGraphNodeKind::Mix: {
-                const RenderGraphLink* input = findInputLink(node.nodeId, "imageA");
-                if (!input) input = findInputLink(node.nodeId, "imageB");
-                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
-            }
-            case RenderGraphNodeKind::DataMath: {
-                const RenderGraphLink* input = findInputLink(node.nodeId, "imageA");
-                if (!input) input = findInputLink(node.nodeId, "imageB");
-                return input ? findReferenceSourceNode(input->fromNodeId) : -1;
-            }
-            case RenderGraphNodeKind::ChannelCombine: {
-                const char* sockets[] = { "r", "g", "b", "a" };
-                for (const char* socket : sockets) {
-                    if (const RenderGraphLink* input = findInputLink(node.nodeId, socket)) {
-                        const int source = findReferenceSourceNode(input->fromNodeId);
-                        if (source > 0) return source;
-                    }
-                }
-                return -1;
-            }
-            case RenderGraphNodeKind::MaskGenerator:
-            default:
-                return -1;
-        }
-    };
-
-    std::function<int(int, const std::string&)> findRawDetailAutoMaskSource = [&](int nodeId, const std::string& socketId) -> int {
-        const auto nodeIt = nodes.find(nodeId);
-        if (nodeIt == nodes.end() || !nodeIt->second) {
-            return -1;
-        }
-        const RenderGraphNode& node = *nodeIt->second;
-        if (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") {
-            return node.nodeId;
-        }
-        if (node.kind == RenderGraphNodeKind::MaskCombine && socketId == "maskOut") {
-            if (const RenderGraphLink* inputA = findInputLink(node.nodeId, "maskA")) {
-                const int source = findRawDetailAutoMaskSource(inputA->fromNodeId, inputA->fromSocketId);
-                if (source > 0) {
-                    return source;
-                }
-            }
-            if (const RenderGraphLink* inputB = findInputLink(node.nodeId, "maskB")) {
-                return findRawDetailAutoMaskSource(inputB->fromNodeId, inputB->fromSocketId);
-            }
-        }
-        if (node.kind == RenderGraphNodeKind::MaskUtility && socketId == "maskOut") {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "maskIn");
-            return input ? findRawDetailAutoMaskSource(input->fromNodeId, input->fromSocketId) : -1;
-        }
-        return -1;
-    };
-
-    auto resolveRawDetailFusionApplySettings = [&](const RenderGraphNode& node) {
-        Raw::RawDetailFusionSettings settings = node.rawDetailFusion.settings;
-        if (const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn")) {
-            const int autoMaskNodeId = findRawDetailAutoMaskSource(maskLink->fromNodeId, maskLink->fromSocketId);
-            const auto autoIt = nodes.find(autoMaskNodeId);
-            if (autoIt != nodes.end() && autoIt->second) {
-                const Raw::RawDetailFusionSettings& autoSettings = autoIt->second->rawDetailAutoMask.settings;
-                settings.minEv = autoSettings.minEv;
-                settings.maxEv = autoSettings.maxEv;
-                settings.baseEv = autoSettings.baseEv;
-            }
-        }
-        return settings;
-    };
-
-    auto resolveHdrMergeInputContext = [&](int sourceNodeId) {
-        HdrMergeInputContext context;
-        const int referenceNodeId = findReferenceSourceNode(sourceNodeId);
-        if (referenceNodeId <= 0) {
-            return context;
-        }
-
-        const auto referenceIt = nodes.find(referenceNodeId);
-        if (referenceIt == nodes.end() || !referenceIt->second) {
-            return context;
-        }
-
-        const RenderGraphNode& referenceNode = *referenceIt->second;
-        context.active = true;
-        if (referenceNode.kind == RenderGraphNodeKind::RawSource) {
-            context.hasRawMetadata = true;
-            context.metadata = referenceNode.rawSource.metadata;
-        } else if (referenceNode.kind == RenderGraphNodeKind::RawDevelop) {
-            context.developExposureStops = referenceNode.rawDevelop.settings.exposureStops;
-            context.developExposureScale = std::exp2(context.developExposureStops);
-
-            const RenderGraphLink* rawInput = findInputLink(referenceNode.nodeId, "rawIn");
-            std::set<int> rawVisit;
-            while (rawInput) {
-                if (!rawVisit.insert(rawInput->fromNodeId).second) {
-                    break;
-                }
-                const auto rawIt = nodes.find(rawInput->fromNodeId);
-                if (rawIt == nodes.end() || !rawIt->second) {
-                    break;
-                }
-                if (rawIt->second->kind == RenderGraphNodeKind::RawSource) {
-                    context.hasRawMetadata = true;
-                    context.metadata = rawIt->second->rawSource.metadata;
-                    break;
-                }
-                if (rawIt->second->kind != RenderGraphNodeKind::RawNeuralDenoise) {
-                    break;
-                }
-                rawInput = findInputLink(rawIt->second->nodeId, "rawIn");
-            }
-        }
-
-        if (context.hasRawMetadata && HasHdrMergeCaptureExposure(context.metadata)) {
-            context.hasCaptureExposure = true;
-            context.captureExposureEv = ComputeHdrMergeCaptureExposureEv(context.metadata);
-        }
-        return context;
-    };
-
-    auto resolveHdrMergeSettings = [&](const Raw::HdrMergeSettings& settings,
-                                       const std::array<HdrMergeInputContext, 3>& contexts,
-                                       const std::array<bool, 3>& activeInputs) {
-        HdrMergeResolvedSettings resolved;
-        std::array<float, 3> absoluteExposureEv {
-            settings.manualExposureEv[0],
-            settings.manualExposureEv[1],
-            settings.manualExposureEv[2]
-        };
-
-        bool metadataExposureValid = settings.exposureMode == Raw::HdrMergeExposureMode::Metadata;
-        std::vector<float> referenceDistances;
-        referenceDistances.reserve(3);
-        for (int i = 0; i < 3; ++i) {
-            if (!activeInputs[i]) {
-                continue;
-            }
-            if (metadataExposureValid) {
-                if (!contexts[i].hasCaptureExposure) {
-                    metadataExposureValid = false;
-                    break;
-                }
-                absoluteExposureEv[i] = contexts[i].captureExposureEv + contexts[i].developExposureStops + settings.exposureOffsetEv[i];
-            }
-            referenceDistances.push_back(absoluteExposureEv[i]);
-        }
-
-        if (metadataExposureValid) {
-            resolved.metadataExposureValid = true;
-            const float exposureAnchor = SelectRepresentativeExposureAnchor(absoluteExposureEv, activeInputs);
-            const float medianExposure = MedianFloat(referenceDistances);
-            for (int i = 0; i < 3; ++i) {
-                if (!activeInputs[i]) {
-                    continue;
-                }
-                resolved.exposureEv[i] = absoluteExposureEv[i] - exposureAnchor;
-                resolved.referenceExposureDistance[i] = std::abs(absoluteExposureEv[i] - medianExposure);
-            }
-        } else {
-            referenceDistances.clear();
-            for (int i = 0; i < 3; ++i) {
-                if (activeInputs[i]) {
-                    referenceDistances.push_back(settings.manualExposureEv[i]);
-                    resolved.exposureEv[i] = settings.manualExposureEv[i];
-                }
-            }
-            const float medianExposure = MedianFloat(referenceDistances);
-            for (int i = 0; i < 3; ++i) {
-                if (!activeInputs[i]) {
-                    continue;
-                }
-                resolved.referenceExposureDistance[i] = std::abs(settings.manualExposureEv[i] - medianExposure);
-            }
-        }
-
-        for (int i = 0; i < 3; ++i) {
-            resolved.clipThreshold[i] = settings.clipThreshold;
-            resolved.clipFeather[i] = settings.clipFeather;
-            resolved.blackThreshold[i] = settings.blackThreshold;
-            resolved.blackFeather[i] = settings.blackFeather;
-            resolved.readNoise[i] = settings.readNoise;
-
-            if (!activeInputs[i] || !settings.autoReliability || !contexts[i].hasRawMetadata) {
-                continue;
-            }
-
-            const float sourceScale = std::max(0.0625f, contexts[i].developExposureScale);
-            const float rangeStep = EstimateHdrMergeRangeStep(contexts[i].metadata);
-            const float isoMultiplier = EstimateHdrMergeIsoMultiplier(contexts[i].metadata);
-
-            resolved.clipThreshold[i] = std::clamp(0.98f * sourceScale, 0.50f, 4.0f);
-            resolved.clipFeather[i] = std::clamp(std::max(0.04f * sourceScale, rangeStep * 48.0f * sourceScale), 0.001f, 1.0f);
-            resolved.blackThreshold[i] = std::clamp(rangeStep * (12.0f + 4.0f * isoMultiplier) * sourceScale, 0.0f, 0.25f);
-            resolved.blackFeather[i] = std::clamp(std::max(resolved.blackThreshold[i] * 6.0f, rangeStep * 24.0f * sourceScale), 0.001f, 0.50f);
-            resolved.readNoise[i] = std::clamp(rangeStep * (6.0f + 2.0f * isoMultiplier) * sourceScale, 0.0f, 0.10f);
-        }
-
-        return resolved;
-    };
-
-    std::unordered_map<std::string, unsigned int> imageCache;
-    std::unordered_map<std::string, unsigned int> maskCache;
-    std::unordered_map<std::string, std::size_t> imageFingerprintCache;
-    std::unordered_map<std::string, std::size_t> maskFingerprintCache;
-    std::set<std::string> visitingImages;
-    std::set<std::string> visitingMasks;
-    std::set<std::string> fingerprintingImages;
-    std::set<std::string> fingerprintingMasks;
-
-    auto releaseCacheEntry = [&](std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key) {
-        auto it = cache.find(key);
-        if (it == cache.end()) {
-            return;
-        }
-        if (it->second.owned && it->second.texture != 0 && it->second.texture != m_SourceTexture && it->second.texture != m_ExternalOutputTexture) {
-            glDeleteTextures(1, &it->second.texture);
-        }
-        cache.erase(it);
-    };
-
-    auto storeCacheEntry = [&](std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key, unsigned int texture, std::size_t fingerprint, bool owned) {
-        auto& entry = cache[key];
-        if (entry.owned && entry.texture != 0 && entry.texture != texture && entry.texture != m_SourceTexture && entry.texture != m_ExternalOutputTexture) {
-            glDeleteTextures(1, &entry.texture);
-        }
-        entry.texture = texture;
-        entry.fingerprint = fingerprint;
-        entry.width = m_Width;
-        entry.height = m_Height;
-        entry.owned = owned;
-    };
-
-    auto cloneTextureForStageCache = [&](unsigned int sourceTexture) -> unsigned int {
-        if (sourceTexture == 0 || m_Width <= 0 || m_Height <= 0) {
-            return 0;
-        }
-
-        unsigned int copyTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
-        if (copyTexture == 0) {
-            return 0;
-        }
-
-        const ScopedFramebufferState savedState(true);
-        unsigned int sourceFbo = GLHelpers::CreateFBO(sourceTexture);
-        unsigned int copyFbo = GLHelpers::CreateFBO(copyTexture);
-        if (sourceFbo == 0 || copyFbo == 0) {
-            if (sourceFbo != 0) glDeleteFramebuffers(1, &sourceFbo);
-            if (copyFbo != 0) glDeleteFramebuffers(1, &copyFbo);
-            glDeleteTextures(1, &copyTexture);
-            savedState.Restore(true);
-            return 0;
-        }
-
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copyFbo);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glDrawBuffer(GL_COLOR_ATTACHMENT0);
-        glBlitFramebuffer(
-            0, 0, m_Width, m_Height,
-            0, 0, m_Width, m_Height,
-            GL_COLOR_BUFFER_BIT,
-            GL_NEAREST);
-
-        const GLenum copyError = glGetError();
-        savedState.Restore(true);
-        glDeleteFramebuffers(1, &sourceFbo);
-        glDeleteFramebuffers(1, &copyFbo);
-        if (copyError != GL_NO_ERROR) {
-            glDeleteTextures(1, &copyTexture);
-            return 0;
-        }
-        return copyTexture;
-    };
-
-    auto findRawDevelopStageCacheEntry = [&](const std::string& key, std::size_t fingerprint) -> CachedGraphTexture {
-        if (fingerprint == 0) {
-            return {};
-        }
-        auto cacheIt = m_RawDevelopStageImageCache.find(key);
-        if (cacheIt == m_RawDevelopStageImageCache.end()) {
-            return {};
-        }
-        auto& entries = cacheIt->second;
-        for (auto entryIt = entries.begin(); entryIt != entries.end(); ++entryIt) {
-            if (entryIt->fingerprint != fingerprint || entryIt->texture == 0) {
-                continue;
-            }
-            const CachedGraphTexture hit = *entryIt;
-            if (entryIt != entries.begin()) {
-                entries.erase(entryIt);
-                entries.insert(entries.begin(), hit);
-            }
-            return hit;
-        }
-        return {};
-    };
-
-    auto deleteRawDevelopStageCacheEntry = [&](CachedGraphTexture& entry) {
-        if (entry.owned && entry.texture != 0 && entry.texture != m_SourceTexture && entry.texture != m_ExternalOutputTexture) {
-            glDeleteTextures(1, &entry.texture);
-        }
-        entry.texture = 0;
-        entry.owned = false;
-    };
-
-    auto rawDevelopStageCacheEntryBytes = [](const CachedGraphTexture& entry) -> std::uint64_t {
-        if (!entry.owned || entry.texture == 0) {
-            return 0;
-        }
-        return EstimateRawDevelopStageCacheTextureBytes(entry.width, entry.height);
-    };
-
-    auto trimRawDevelopStageCacheVector = [&](std::vector<CachedGraphTexture>& entries, std::size_t maxEntries) {
-        while (entries.size() > maxEntries) {
-            CachedGraphTexture& stale = entries.back();
-            deleteRawDevelopStageCacheEntry(stale);
-            entries.pop_back();
-        }
-    };
-
-    auto rawDevelopStageCacheTotalBytes = [&]() -> std::uint64_t {
-        std::uint64_t total = 0;
-        for (const auto& [cacheKey, entries] : m_RawDevelopStageImageCache) {
-            (void)cacheKey;
-            for (const CachedGraphTexture& entry : entries) {
-                const std::uint64_t bytes = rawDevelopStageCacheEntryBytes(entry);
-                if (total > std::numeric_limits<std::uint64_t>::max() - bytes) {
-                    return std::numeric_limits<std::uint64_t>::max();
-                }
-                total += bytes;
-            }
-        }
-        return total;
-    };
-
-    auto trimRawDevelopStageCacheToBudget = [&]() {
-        while (rawDevelopStageCacheTotalBytes() > kRawDevelopStageCacheSoftByteBudget) {
-            std::string victimKey;
-            std::uint64_t victimBytes = 0;
-            for (const auto& [cacheKey, entries] : m_RawDevelopStageImageCache) {
-                if (entries.empty()) {
-                    continue;
-                }
-                const std::uint64_t bytes = rawDevelopStageCacheEntryBytes(entries.back());
-                if (bytes > victimBytes) {
-                    victimKey = cacheKey;
-                    victimBytes = bytes;
-                }
-            }
-            if (victimKey.empty() || victimBytes == 0) {
-                break;
-            }
-            auto victimIt = m_RawDevelopStageImageCache.find(victimKey);
-            if (victimIt == m_RawDevelopStageImageCache.end() || victimIt->second.empty()) {
-                break;
-            }
-            CachedGraphTexture& stale = victimIt->second.back();
-            deleteRawDevelopStageCacheEntry(stale);
-            victimIt->second.pop_back();
-            if (victimIt->second.empty()) {
-                m_RawDevelopStageImageCache.erase(victimIt);
-            }
-        }
-    };
-
-    auto storeRawDevelopStageCacheEntry = [&](const std::string& key, unsigned int texture, std::size_t fingerprint) {
-        if (key.empty() || texture == 0 || fingerprint == 0 || m_Width <= 0 || m_Height <= 0) {
-            return;
-        }
-
-        const std::size_t maxEntriesForDimensions = ResolveRawDevelopStageCacheMaxEntries(m_Width, m_Height);
-        if (maxEntriesForDimensions == 0) {
-            return;
-        }
-
-        unsigned int copyTexture = cloneTextureForStageCache(texture);
-        if (copyTexture == 0) {
-            return;
-        }
-
-        CachedGraphTexture newEntry;
-        newEntry.texture = copyTexture;
-        newEntry.fingerprint = fingerprint;
-        newEntry.width = m_Width;
-        newEntry.height = m_Height;
-        newEntry.owned = true;
-
-        auto& entries = m_RawDevelopStageImageCache[key];
-        for (auto entryIt = entries.begin(); entryIt != entries.end(); ++entryIt) {
-            if (entryIt->fingerprint != fingerprint) {
-                continue;
-            }
-            deleteRawDevelopStageCacheEntry(*entryIt);
-            entries.erase(entryIt);
-            break;
-        }
-
-        entries.insert(entries.begin(), newEntry);
-        // Large RAWs can make each RGBA16F boundary snapshot hundreds of MB.
-        // Keep reuse generous for small files, but trade cache hits for stability on large candidate runs.
-        trimRawDevelopStageCacheVector(entries, maxEntriesForDimensions);
-        trimRawDevelopStageCacheToBudget();
-    };
-
-    auto createTarget = [&]() {
-        return GLHelpers::CreateEmptyTexture(m_Width, m_Height);
-    };
-
-    auto renderToTexture = [&](unsigned int texture, const std::function<void(unsigned int)>& renderFn) -> bool {
-        if (texture == 0) {
-            return false;
-        }
-        unsigned int fbo = GLHelpers::CreateFBO(texture);
-        if (fbo == 0) {
-            return false;
-        }
-        GLint prevFBO = 0;
-        GLint prevViewport[4] = { 0, 0, 0, 0 };
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-        glGetIntegerv(GL_VIEWPORT, prevViewport);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glViewport(0, 0, m_Width, m_Height);
-        glClear(GL_COLOR_BUFFER_BIT);
-        renderFn(fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-        glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
-        glDeleteFramebuffers(1, &fbo);
-        return true;
-    };
-
-    std::function<unsigned int(int, const std::string&)> evalMask;
-    std::function<unsigned int(int, const std::string&)> evalImage;
-    std::function<std::size_t(int, const std::string&)> fingerprintMask;
-    std::function<std::size_t(int, const std::string&)> fingerprintImage;
-
-    fingerprintMask = [&](int nodeId, const std::string& socketId) -> std::size_t {
-        std::string key = std::to_string(nodeId) + ":" + socketId;
-        auto cached = maskFingerprintCache.find(key);
-        if (cached != maskFingerprintCache.end()) {
-            return cached->second;
-        }
-        if (fingerprintingMasks.count(key)) {
-            return 0;
-        }
-        fingerprintingMasks.insert(key);
-
-        const auto it = nodes.find(nodeId);
-        if (it == nodes.end()) {
-            fingerprintingMasks.erase(key);
-            return 0;
-        }
-
-        const RenderGraphNode& node = *it->second;
-        if (node.kind == RenderGraphNodeKind::Image ||
-            node.kind == RenderGraphNodeKind::RawNeuralDenoise ||
-            node.kind == RenderGraphNodeKind::RawDevelop ||
-            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId != "maskOut") ||
-            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId != "maskOut") ||
-            node.kind == RenderGraphNodeKind::HdrMerge ||
-            node.kind == RenderGraphNodeKind::Layer ||
-            node.kind == RenderGraphNodeKind::Mix ||
-            (node.kind == RenderGraphNodeKind::DataMath && !isScalarRenderSocket(nodeId, socketId)) ||
-            node.kind == RenderGraphNodeKind::ImageGenerator ||
-            node.kind == RenderGraphNodeKind::ChannelCombine ||
-            node.kind == RenderGraphNodeKind::Output) {
-            std::size_t imgFp = fingerprintImage(nodeId, socketId);
-            fingerprintingMasks.erase(key);
-            maskFingerprintCache[key] = imgFp;
-            return imgFp;
-        }
-        std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
-        HashCombine(fingerprint, HashValue(node.nodeId));
-        HashCombine(fingerprint, HashValue(socketId));
-
-        if (node.kind == RenderGraphNodeKind::MaskGenerator) {
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.maskKind)));
-            HashCombine(fingerprint, HashValue(node.maskSettings.value));
-            HashCombine(fingerprint, HashValue(node.maskSettings.angle));
-            HashCombine(fingerprint, HashValue(node.maskSettings.offset));
-            HashCombine(fingerprint, HashValue(node.maskSettings.scale));
-            HashCombine(fingerprint, HashValue(node.maskSettings.centerX));
-            HashCombine(fingerprint, HashValue(node.maskSettings.centerY));
-            HashCombine(fingerprint, HashValue(node.maskSettings.radius));
-            HashCombine(fingerprint, HashValue(node.maskSettings.feather));
-            HashCombine(fingerprint, HashValue(node.maskSettings.invert));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::MaskCombine) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "maskA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "maskB");
-            HashCombine(fingerprint, inputA ? fingerprintMask(inputA->fromNodeId, inputA->fromSocketId) : 0);
-            HashCombine(fingerprint, inputB ? fingerprintMask(inputB->fromNodeId, inputB->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.maskCombineMode)));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::CustomMask) {
-            const RenderCustomMaskPayload& payload = node.customMask;
-            HashCombine(fingerprint, HashValue(payload.width));
-            HashCombine(fingerprint, HashValue(payload.height));
-            HashCombine(fingerprint, HashValue(payload.invert));
-            HashCombine(fingerprint, HashValue(payload.blurRadius));
-            HashCombine(fingerprint, HashValue(payload.expandContract));
-            HashCombine(fingerprint, HashValue(payload.rasterLayer.size()));
-            if (!payload.rasterLayer.empty()) {
-                HashCombine(
-                    fingerprint,
-                    HashBytes(
-                        reinterpret_cast<const unsigned char*>(payload.rasterLayer.data()),
-                        payload.rasterLayer.size() * sizeof(float)));
-            }
-            HashCombine(fingerprint, HashValue(payload.objects.size()));
-            for (const RenderCustomMaskObject& object : payload.objects) {
-                HashCombine(fingerprint, HashValue(object.id));
-                HashCombine(fingerprint, HashValue(static_cast<int>(object.type)));
-                HashCombine(fingerprint, HashValue(static_cast<int>(object.operation)));
-                HashCombine(fingerprint, HashValue(object.enabled));
-                HashCombine(fingerprint, HashValue(object.invert));
-                HashCombine(fingerprint, HashValue(object.strength));
-                HashCombine(fingerprint, HashValue(object.feather));
-                HashCombine(fingerprint, HashValue(object.blur));
-                HashCombine(fingerprint, HashValue(object.points.size()));
-                for (const RenderCustomMaskPoint& point : object.points) {
-                    HashCombine(fingerprint, HashValue(point.x));
-                    HashCombine(fingerprint, HashValue(point.y));
-                }
-            }
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::MaskUtility) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "maskIn");
-            HashCombine(fingerprint, input ? fingerprintMask(input->fromNodeId, input->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.maskUtilityKind)));
-            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.blackPoint));
-            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.whitePoint));
-            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.gamma));
-            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.threshold));
-            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.softness));
-            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.invert));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::ImageToMask) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.imageToMaskKind)));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.low));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.high));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.softness));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.invert));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleCount));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleRgb[0]));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleRgb[1]));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleRgb[2]));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleLuma));
-            for (int i = 0; i < 4; ++i) {
-                HashCombine(fingerprint, HashValue(node.imageToMaskSettings.extraSampleRgb[i][0]));
-                HashCombine(fingerprint, HashValue(node.imageToMaskSettings.extraSampleRgb[i][1]));
-                HashCombine(fingerprint, HashValue(node.imageToMaskSettings.extraSampleRgb[i][2]));
-                HashCombine(fingerprint, HashValue(node.imageToMaskSettings.extraSampleLuma[i]));
-            }
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleU));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.sampleV));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.toneSimilarity));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.colorSimilarity));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.regionRadius));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.regionFeather));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.edgeSensitivity));
-            HashCombine(fingerprint, HashValue(node.imageToMaskSettings.localCoherence));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::ChannelSplit) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::DataMath) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            HashCombine(fingerprint, inputA ? fingerprintMask(inputA->fromNodeId, inputA->fromSocketId) : 0);
-            HashCombine(fingerprint, inputB ? fingerprintMask(inputB->fromNodeId, inputB->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.constantA));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.constantB));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.minValue));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.maxValue));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.outMin));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.outMax));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask) {
-            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
-            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
-            const Raw::RawDetailFusionSettings& settings = node.rawDetailAutoMask.settings;
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.mode)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.debugView)));
-            HashCombine(fingerprint, HashValue(settings.autoSafetyEnabled));
-            HashCombine(fingerprint, HashValue(settings.overrideMinEv));
-            HashCombine(fingerprint, HashValue(settings.overrideMaxEv));
-            HashCombine(fingerprint, HashValue(settings.overrideBaseEv));
-            HashCombine(fingerprint, HashValue(settings.overrideNoiseProtection));
-            HashCombine(fingerprint, HashValue(settings.overrideHighlightProtection));
-            HashCombine(fingerprint, HashValue(settings.overrideShadowLiftLimit));
-            HashCombine(fingerprint, HashValue(settings.overrideWellExposedTarget));
-            HashCombine(fingerprint, HashValue(settings.minEvBias));
-            HashCombine(fingerprint, HashValue(settings.maxEvBias));
-            HashCombine(fingerprint, HashValue(settings.baseEvBias));
-            HashCombine(fingerprint, HashValue(settings.noiseProtectionBias));
-            HashCombine(fingerprint, HashValue(settings.highlightProtectionBias));
-            HashCombine(fingerprint, HashValue(settings.shadowLiftLimitBias));
-            HashCombine(fingerprint, HashValue(settings.wellExposedTargetBias));
-            HashCombine(fingerprint, HashValue(settings.minEv));
-            HashCombine(fingerprint, HashValue(settings.maxEv));
-            HashCombine(fingerprint, HashValue(settings.baseEv));
-            HashCombine(fingerprint, HashValue(settings.strength));
-            HashCombine(fingerprint, HashValue(settings.sampleCount));
-            HashCombine(fingerprint, HashValue(settings.baseRadiusPercent));
-            HashCombine(fingerprint, HashValue(settings.highlightProtection));
-            HashCombine(fingerprint, HashValue(settings.shadowLiftLimit));
-            HashCombine(fingerprint, HashValue(settings.noiseProtection));
-            HashCombine(fingerprint, HashValue(settings.detailWeight));
-            HashCombine(fingerprint, HashValue(settings.wellExposedTarget));
-            HashCombine(fingerprint, HashValue(settings.smoothGradientProtection));
-            HashCombine(fingerprint, HashValue(settings.textureSensitivity));
-            HashCombine(fingerprint, HashValue(settings.skyBias));
-            HashCombine(fingerprint, HashValue(settings.invertMask));
-            HashCombine(fingerprint, HashValue(settings.maskBlackPoint));
-            HashCombine(fingerprint, HashValue(settings.maskWhitePoint));
-            HashCombine(fingerprint, HashValue(settings.maskGamma));
-            HashCombine(fingerprint, HashValue(settings.smoothnessRadius));
-            HashCombine(fingerprint, HashValue(settings.smoothAreaRadius));
-            HashCombine(fingerprint, HashValue(settings.edgeAwareness));
-            HashCombine(fingerprint, HashValue(settings.haloGuard));
-            HashCombine(fingerprint, HashValue(settings.maskDebandDither));
-            HashCombine(fingerprint, HashValue(settings.manualBlend));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
-            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
-            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
-            HashCombine(fingerprint, maskLink ? fingerprintMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0);
-            const Raw::RawDetailFusionSettings& settings = node.rawDetailFusion.settings;
-            HashCombine(fingerprint, HashValue(settings.autoSafetyEnabled));
-            HashCombine(fingerprint, HashValue(settings.overrideMinEv));
-            HashCombine(fingerprint, HashValue(settings.overrideMaxEv));
-            HashCombine(fingerprint, HashValue(settings.overrideBaseEv));
-            HashCombine(fingerprint, HashValue(settings.overrideNoiseProtection));
-            HashCombine(fingerprint, HashValue(settings.overrideHighlightProtection));
-            HashCombine(fingerprint, HashValue(settings.overrideShadowLiftLimit));
-            HashCombine(fingerprint, HashValue(settings.overrideWellExposedTarget));
-            HashCombine(fingerprint, HashValue(settings.minEvBias));
-            HashCombine(fingerprint, HashValue(settings.maxEvBias));
-            HashCombine(fingerprint, HashValue(settings.baseEvBias));
-            HashCombine(fingerprint, HashValue(settings.noiseProtectionBias));
-            HashCombine(fingerprint, HashValue(settings.highlightProtectionBias));
-            HashCombine(fingerprint, HashValue(settings.shadowLiftLimitBias));
-            HashCombine(fingerprint, HashValue(settings.wellExposedTargetBias));
-            HashCombine(fingerprint, HashValue(settings.minEv));
-            HashCombine(fingerprint, HashValue(settings.maxEv));
-            HashCombine(fingerprint, HashValue(settings.baseEv));
-            HashCombine(fingerprint, HashValue(settings.sampleCount));
-            HashCombine(fingerprint, HashValue(settings.baseRadiusPercent));
-            HashCombine(fingerprint, HashValue(settings.highlightProtection));
-            HashCombine(fingerprint, HashValue(settings.shadowLiftLimit));
-            HashCombine(fingerprint, HashValue(settings.noiseProtection));
-            HashCombine(fingerprint, HashValue(settings.detailWeight));
-            HashCombine(fingerprint, HashValue(settings.wellExposedTarget));
-            HashCombine(fingerprint, HashValue(settings.smoothGradientProtection));
-            HashCombine(fingerprint, HashValue(settings.textureSensitivity));
-            HashCombine(fingerprint, HashValue(settings.skyBias));
-            HashCombine(fingerprint, HashValue(settings.invertMask));
-            HashCombine(fingerprint, HashValue(settings.maskBlackPoint));
-            HashCombine(fingerprint, HashValue(settings.maskWhitePoint));
-            HashCombine(fingerprint, HashValue(settings.maskGamma));
-            HashCombine(fingerprint, HashValue(settings.smoothnessRadius));
-            HashCombine(fingerprint, HashValue(settings.smoothAreaRadius));
-            HashCombine(fingerprint, HashValue(settings.edgeAwareness));
-            HashCombine(fingerprint, HashValue(settings.haloGuard));
-            HashCombine(fingerprint, HashValue(settings.maskDebandDither));
-            HashCombine(fingerprint, HashValue(settings.manualBlend));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        }
-
-        fingerprintingMasks.erase(key);
-        maskFingerprintCache[key] = fingerprint;
-        return fingerprint;
-    };
-
-    fingerprintImage = [&](int nodeId, const std::string& socketId) -> std::size_t {
-        std::string key = std::to_string(nodeId) + ":" + socketId;
-        auto cached = imageFingerprintCache.find(key);
-        if (cached != imageFingerprintCache.end()) {
-            return cached->second;
-        }
-        if (fingerprintingImages.count(key)) {
-            return 0;
-        }
-        fingerprintingImages.insert(key);
-
-        const auto it = nodes.find(nodeId);
-        if (it == nodes.end()) {
-            fingerprintingImages.erase(key);
-            return 0;
-        }
-
-        const RenderGraphNode& node = *it->second;
-        if (node.kind == RenderGraphNodeKind::MaskGenerator ||
-            node.kind == RenderGraphNodeKind::MaskCombine ||
-            node.kind == RenderGraphNodeKind::MaskUtility ||
-            node.kind == RenderGraphNodeKind::CustomMask ||
-            node.kind == RenderGraphNodeKind::ImageToMask ||
-            node.kind == RenderGraphNodeKind::ChannelSplit ||
-            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
-            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
-            std::size_t maskFp = fingerprintMask(nodeId, socketId);
-            fingerprintingImages.erase(key);
-            imageFingerprintCache[key] = maskFp;
-            return maskFp;
-        }
-        std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
-        HashCombine(fingerprint, HashValue(node.nodeId));
-        HashCombine(fingerprint, HashValue(socketId));
-
-        if (node.kind == RenderGraphNodeKind::Image) {
-            if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
-                HashCombine(fingerprint, HashValue(node.image.width));
-                HashCombine(fingerprint, HashValue(node.image.height));
-                HashCombine(fingerprint, HashValue(node.image.channels));
-                HashCombine(fingerprint, HashBytes(node.image.pixels));
-            } else {
-                HashCombine(fingerprint, m_SourceFingerprint);
-                HashCombine(fingerprint, HashValue(m_Width));
-                HashCombine(fingerprint, HashValue(m_Height));
-                HashCombine(fingerprint, HashValue(m_SourceChannels));
-            }
-        } else if (node.kind == RenderGraphNodeKind::RawSource) {
-            HashCombine(fingerprint, HashValue(node.rawSource.sourcePath));
-            const bool hasEmbeddedRaw =
-                !node.rawSource.embeddedRawData.rawBuffer.empty() ||
-                !node.rawSource.embeddedRawData.linearUInt16Buffer.empty() ||
-                !node.rawSource.embeddedRawData.linearFloatBuffer.empty();
-            HashCombine(fingerprint, HashValue(hasEmbeddedRaw));
-            if (hasEmbeddedRaw) {
-                const Raw::RawImageData& embedded = node.rawSource.embeddedRawData;
-                HashCombine(fingerprint, HashValue(embedded.metadata.rawWidth));
-                HashCombine(fingerprint, HashValue(embedded.metadata.rawHeight));
-                HashCombine(fingerprint, HashValue(static_cast<int>(embedded.metadata.pixelLayout)));
-                HashCombine(fingerprint, HashValue(embedded.metadata.bitDepth));
-                HashCombine(fingerprint, HashValue(embedded.rawBuffer.size()));
-                if (!embedded.rawBuffer.empty()) {
-                    HashCombine(
-                        fingerprint,
-                        HashBytes(
-                            reinterpret_cast<const unsigned char*>(embedded.rawBuffer.data()),
-                            embedded.rawBuffer.size() * sizeof(std::uint16_t)));
-                }
-                HashCombine(fingerprint, HashValue(embedded.linearUInt16Buffer.size()));
-                if (!embedded.linearUInt16Buffer.empty()) {
-                    HashCombine(
-                        fingerprint,
-                        HashBytes(
-                            reinterpret_cast<const unsigned char*>(embedded.linearUInt16Buffer.data()),
-                            embedded.linearUInt16Buffer.size() * sizeof(std::uint16_t)));
-                }
-                HashCombine(fingerprint, HashValue(embedded.linearFloatBuffer.size()));
-                if (!embedded.linearFloatBuffer.empty()) {
-                    HashCombine(
-                        fingerprint,
-                        HashBytes(
-                            reinterpret_cast<const unsigned char*>(embedded.linearFloatBuffer.data()),
-                            embedded.linearFloatBuffer.size() * sizeof(float)));
-                }
-            }
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.rawWidth));
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.rawHeight));
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.visibleWidth));
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.visibleHeight));
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.orientation));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.rawSource.metadata.cfaPattern)));
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.blackLevel));
-            for (float value : node.rawSource.metadata.perChannelBlack) {
-                HashCombine(fingerprint, HashValue(value));
-            }
-            HashCombine(fingerprint, HashValue(node.rawSource.metadata.whiteLevel));
-        } else if (node.kind == RenderGraphNodeKind::RawNeuralDenoise) {
-            const RenderGraphLink* rawInput = findInputLink(node.nodeId, "rawIn");
-            HashCombine(fingerprint, rawInput ? fingerprintImage(rawInput->fromNodeId, rawInput->fromSocketId) : 0);
-            HashCombine(fingerprint, HashJson(NeuralDenoise::SerializeSettings(node.rawNeuralDenoise.settings)));
-        } else if (node.kind == RenderGraphNodeKind::RawDevelop) {
-            const RenderGraphLink* rawInput = findInputLink(node.nodeId, "rawIn");
-            HashCombine(fingerprint, rawInput ? fingerprintImage(rawInput->fromNodeId, rawInput->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.exposureStops));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.whiteBalanceMode)));
-            for (float value : node.rawDevelop.settings.manualWhiteBalance) {
-                HashCombine(fingerprint, HashValue(value));
-            }
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.overrideBlackLevel));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.blackLevelOverride));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.overrideWhiteLevel));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.whiteLevelOverride));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.highlightMode)));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.highlightStrength));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.highlightThreshold));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.demosaicMethod)));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.cameraTransformEnabled));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.debugBypassCameraTransform));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.debugTransposeCameraMatrix));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.debugView)));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.rotationDegrees));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.rotateToFitFrame));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.flipHorizontally));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.flipVertically));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.falseColorSuppression));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.defringeStrength));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.highlightEdgeCleanup));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.chromaRadius));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.preserveRealColor));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.lateralRedCyan));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.lateralBlueYellow));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.rawDevelop.settings.cameraTransformSource)));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.enabled));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.hotPixelSuppression));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.hotPixelThreshold));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.lumaStrength));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.chromaStrength));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.radius));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.edgeProtection));
-            HashCombine(fingerprint, HashValue(node.rawDevelop.settings.mosaicDenoise.iterations));
-            const bool rawBaseSocket = socketId == "__rawDevelopBase";
-            if (!rawBaseSocket) {
-                HashCombine(fingerprint, HashValue(node.rawDevelop.scenePrepEnabled));
-            }
-            if (!rawBaseSocket && node.rawDevelop.scenePrepEnabled) {
-                const Raw::RawDetailFusionSettings& prep = node.rawDevelop.scenePrepSettings;
-                HashCombine(fingerprint, HashValue(prep.autoSafetyEnabled));
-                HashCombine(fingerprint, HashValue(prep.overrideMinEv));
-                HashCombine(fingerprint, HashValue(prep.overrideMaxEv));
-                HashCombine(fingerprint, HashValue(prep.overrideBaseEv));
-                HashCombine(fingerprint, HashValue(prep.overrideNoiseProtection));
-                HashCombine(fingerprint, HashValue(prep.overrideHighlightProtection));
-                HashCombine(fingerprint, HashValue(prep.overrideShadowLiftLimit));
-                HashCombine(fingerprint, HashValue(prep.overrideWellExposedTarget));
-                HashCombine(fingerprint, HashValue(prep.minEvBias));
-                HashCombine(fingerprint, HashValue(prep.maxEvBias));
-                HashCombine(fingerprint, HashValue(prep.baseEvBias));
-                HashCombine(fingerprint, HashValue(prep.noiseProtectionBias));
-                HashCombine(fingerprint, HashValue(prep.highlightProtectionBias));
-                HashCombine(fingerprint, HashValue(prep.shadowLiftLimitBias));
-                HashCombine(fingerprint, HashValue(prep.wellExposedTargetBias));
-                HashCombine(fingerprint, HashValue(prep.minEv));
-                HashCombine(fingerprint, HashValue(prep.maxEv));
-                HashCombine(fingerprint, HashValue(prep.baseEv));
-                HashCombine(fingerprint, HashValue(prep.strength));
-                HashCombine(fingerprint, HashValue(prep.sampleCount));
-                HashCombine(fingerprint, HashValue(prep.baseRadiusPercent));
-                HashCombine(fingerprint, HashValue(prep.highlightProtection));
-                HashCombine(fingerprint, HashValue(prep.shadowLiftLimit));
-                HashCombine(fingerprint, HashValue(prep.noiseProtection));
-                HashCombine(fingerprint, HashValue(prep.detailWeight));
-                HashCombine(fingerprint, HashValue(prep.wellExposedTarget));
-                HashCombine(fingerprint, HashValue(prep.smoothGradientProtection));
-                HashCombine(fingerprint, HashValue(prep.textureSensitivity));
-                HashCombine(fingerprint, HashValue(prep.skyBias));
-                HashCombine(fingerprint, HashValue(prep.smoothnessRadius));
-                HashCombine(fingerprint, HashValue(prep.smoothAreaRadius));
-                HashCombine(fingerprint, HashValue(prep.edgeAwareness));
-                HashCombine(fingerprint, HashValue(prep.haloGuard));
-                HashCombine(fingerprint, HashValue(prep.maskDebandDither));
-            }
-            const bool preFinishSocket = socketId == EditorNodeGraph::kPreFinishImageOutputSocketId;
-            if (!preFinishSocket && !rawBaseSocket) {
-                HashCombine(fingerprint, HashValue(node.rawDevelop.integratedToneEnabled));
-            }
-            if (!preFinishSocket && !rawBaseSocket && node.rawDevelop.integratedToneEnabled) {
-                HashCombine(fingerprint, HashValue(node.rawDevelop.integratedToneLayerJson.dump()));
-                HashCombine(fingerprint, fingerprintMask(node.nodeId, "maskIn"));
-            }
-        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
-            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
-            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
-            HashCombine(fingerprint, fingerprintMask(node.nodeId, "maskOut"));
-            const Raw::RawDetailFusionSettings settings = resolveRawDetailFusionApplySettings(node);
-            HashCombine(fingerprint, HashValue(settings.autoSafetyEnabled));
-            HashCombine(fingerprint, HashValue(settings.overrideMinEv));
-            HashCombine(fingerprint, HashValue(settings.overrideMaxEv));
-            HashCombine(fingerprint, HashValue(settings.overrideBaseEv));
-            HashCombine(fingerprint, HashValue(settings.overrideNoiseProtection));
-            HashCombine(fingerprint, HashValue(settings.overrideHighlightProtection));
-            HashCombine(fingerprint, HashValue(settings.overrideShadowLiftLimit));
-            HashCombine(fingerprint, HashValue(settings.overrideWellExposedTarget));
-            HashCombine(fingerprint, HashValue(settings.minEvBias));
-            HashCombine(fingerprint, HashValue(settings.maxEvBias));
-            HashCombine(fingerprint, HashValue(settings.baseEvBias));
-            HashCombine(fingerprint, HashValue(settings.noiseProtectionBias));
-            HashCombine(fingerprint, HashValue(settings.highlightProtectionBias));
-            HashCombine(fingerprint, HashValue(settings.shadowLiftLimitBias));
-            HashCombine(fingerprint, HashValue(settings.wellExposedTargetBias));
-            HashCombine(fingerprint, HashValue(settings.minEv));
-            HashCombine(fingerprint, HashValue(settings.maxEv));
-            HashCombine(fingerprint, HashValue(settings.baseEv));
-            HashCombine(fingerprint, HashValue(settings.noiseProtection));
-            HashCombine(fingerprint, HashValue(settings.highlightProtection));
-            HashCombine(fingerprint, HashValue(settings.shadowLiftLimit));
-            HashCombine(fingerprint, HashValue(settings.wellExposedTarget));
-            HashCombine(fingerprint, HashValue(settings.strength));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::HdrMerge) {
-            const RenderGraphLink* input1 = findInputLink(node.nodeId, "image1");
-            const RenderGraphLink* input2 = findInputLink(node.nodeId, "image2");
-            const RenderGraphLink* input3 = findInputLink(node.nodeId, "image3");
-            HashCombine(fingerprint, input1 ? fingerprintImage(input1->fromNodeId, input1->fromSocketId) : 0);
-            HashCombine(fingerprint, input2 ? fingerprintImage(input2->fromNodeId, input2->fromSocketId) : 0);
-            HashCombine(fingerprint, input3 ? fingerprintImage(input3->fromNodeId, input3->fromSocketId) : 0);
-            const Raw::HdrMergeSettings& settings = node.hdrMerge.settings;
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.debugView)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.alignmentMode)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.exposureMode)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.referenceMode)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.deghostMode)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(settings.motionPriority)));
-            for (float exposureEv : settings.manualExposureEv) {
-                HashCombine(fingerprint, HashValue(exposureEv));
-            }
-            for (float exposureEv : settings.exposureOffsetEv) {
-                HashCombine(fingerprint, HashValue(exposureEv));
-            }
-            HashCombine(fingerprint, HashValue(settings.autoReliability));
-            HashCombine(fingerprint, HashValue(settings.clipThreshold));
-            HashCombine(fingerprint, HashValue(settings.clipFeather));
-            HashCombine(fingerprint, HashValue(settings.blackThreshold));
-            HashCombine(fingerprint, HashValue(settings.blackFeather));
-            HashCombine(fingerprint, HashValue(settings.readNoise));
-            HashCombine(fingerprint, HashValue(settings.noiseAware));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::ImageGenerator) {
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.imageGeneratorKind)));
-            for (float channel : node.imageGeneratorSettings.colorA) {
-                HashCombine(fingerprint, HashValue(channel));
-            }
-            for (float channel : node.imageGeneratorSettings.colorB) {
-                HashCombine(fingerprint, HashValue(channel));
-            }
-            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.angle));
-            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.offset));
-            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.text));
-            HashCombine(fingerprint, HashValue(node.imageGeneratorSettings.fontSize));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::Layer) {
-            const RenderGraphLink* imageLink = findInputLink(node.nodeId, "imageIn");
-            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-            HashCombine(fingerprint, imageLink ? fingerprintImage(imageLink->fromNodeId, imageLink->fromSocketId) : 0);
-            HashCombine(fingerprint, maskLink ? fingerprintMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0);
-            HashCombine(fingerprint, HashJson(node.layerJson));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::Mix) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            const RenderGraphLink* factorLink = findInputLink(node.nodeId, "factor");
-            HashCombine(fingerprint, inputA ? fingerprintImage(inputA->fromNodeId, inputA->fromSocketId) : 0);
-            HashCombine(fingerprint, inputB ? fingerprintImage(inputB->fromNodeId, inputB->fromSocketId) : 0);
-            HashCombine(fingerprint, factorLink ? fingerprintMask(factorLink->fromNodeId, factorLink->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.mixBlendMode)));
-            HashCombine(fingerprint, HashValue(node.mixFactor));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::DataMath) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            const bool scalarA = inputA && isScalarRenderSocket(inputA->fromNodeId, inputA->fromSocketId);
-            const bool scalarB = inputB && isScalarRenderSocket(inputB->fromNodeId, inputB->fromSocketId);
-            HashCombine(fingerprint, inputA ? (scalarA ? fingerprintMask(inputA->fromNodeId, inputA->fromSocketId) : fingerprintImage(inputA->fromNodeId, inputA->fromSocketId)) : 0);
-            HashCombine(fingerprint, inputB ? (scalarB ? fingerprintMask(inputB->fromNodeId, inputB->fromSocketId) : fingerprintImage(inputB->fromNodeId, inputB->fromSocketId)) : 0);
-            HashCombine(fingerprint, HashValue(scalarA));
-            HashCombine(fingerprint, HashValue(scalarB));
-            HashCombine(fingerprint, HashValue(isScalarRenderSocket(node.nodeId, socketId)));
-            HashCombine(fingerprint, HashValue(static_cast<int>(node.dataMathMode)));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.constantA));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.constantB));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.minValue));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.maxValue));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.outMin));
-            HashCombine(fingerprint, HashValue(node.dataMathSettings.outMax));
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::Output) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            if (input) {
-                HashCombine(fingerprint, fingerprintImage(input->fromNodeId, input->fromSocketId));
-            } else {
-                const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
-                const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");
-                const RenderGraphLink* linkB = findInputLink(node.nodeId, "b");
-                const RenderGraphLink* linkA = findInputLink(node.nodeId, "a");
-                HashCombine(fingerprint, linkR ? fingerprintMask(linkR->fromNodeId, linkR->fromSocketId) : 0);
-                HashCombine(fingerprint, linkG ? fingerprintMask(linkG->fromNodeId, linkG->fromSocketId) : 0);
-                HashCombine(fingerprint, linkB ? fingerprintMask(linkB->fromNodeId, linkB->fromSocketId) : 0);
-                HashCombine(fingerprint, linkA ? fingerprintMask(linkA->fromNodeId, linkA->fromSocketId) : 0);
-            }
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        } else if (node.kind == RenderGraphNodeKind::ChannelCombine) {
-            const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
-            const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");
-            const RenderGraphLink* linkB = findInputLink(node.nodeId, "b");
-            const RenderGraphLink* linkA = findInputLink(node.nodeId, "a");
-            HashCombine(fingerprint, linkR ? fingerprintMask(linkR->fromNodeId, linkR->fromSocketId) : 0);
-            HashCombine(fingerprint, linkG ? fingerprintMask(linkG->fromNodeId, linkG->fromSocketId) : 0);
-            HashCombine(fingerprint, linkB ? fingerprintMask(linkB->fromNodeId, linkB->fromSocketId) : 0);
-            HashCombine(fingerprint, linkA ? fingerprintMask(linkA->fromNodeId, linkA->fromSocketId) : 0);
-            HashCombine(fingerprint, HashValue(m_Width));
-            HashCombine(fingerprint, HashValue(m_Height));
-        }
-
-        fingerprintingImages.erase(key);
-        imageFingerprintCache[key] = fingerprint;
-        return fingerprint;
-    };
-
-    evalMask = [&](int nodeId, const std::string& socketId) -> unsigned int {
-        std::string key = std::to_string(nodeId) + ":" + socketId;
-        if (maskCache.count(key)) {
-            return maskCache[key];
-        }
-        if (visitingMasks.count(key)) {
-            return 0;
-        }
-        visitingMasks.insert(key);
-        const auto it = nodes.find(nodeId);
-        if (it == nodes.end()) {
-            visitingMasks.erase(key);
-            return 0;
-        }
-
-        const RenderGraphNode& node = *it->second;
-        if (node.kind == RenderGraphNodeKind::Image ||
-            node.kind == RenderGraphNodeKind::RawNeuralDenoise ||
-            node.kind == RenderGraphNodeKind::RawDevelop ||
-            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId != "maskOut") ||
-            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId != "maskOut") ||
-            node.kind == RenderGraphNodeKind::HdrMerge ||
-            node.kind == RenderGraphNodeKind::Layer ||
-            node.kind == RenderGraphNodeKind::Mix ||
-            (node.kind == RenderGraphNodeKind::DataMath && !isScalarRenderSocket(nodeId, socketId)) ||
-            node.kind == RenderGraphNodeKind::ImageGenerator ||
-            node.kind == RenderGraphNodeKind::ChannelCombine ||
-            node.kind == RenderGraphNodeKind::Output) {
-            unsigned int imgTex = evalImage(nodeId, socketId);
-            visitingMasks.erase(key);
-            return imgTex;
-        }
-        const std::size_t fingerprint = fingerprintMask(nodeId, socketId);
-        if (const auto cached = m_GraphMaskCache.find(key);
-            cached != m_GraphMaskCache.end() &&
-            cached->second.fingerprint == fingerprint &&
-            cached->second.texture != 0) {
-            maskCache[key] = cached->second.texture;
-            visitingMasks.erase(key);
-            return cached->second.texture;
-        }
-
-        unsigned int result = 0;
-        bool resultOwned = false;
-        if (node.kind == RenderGraphNodeKind::MaskGenerator) {
-            RenderMaskSource mask;
-            mask.nodeId = node.nodeId;
-            mask.kind = node.maskKind;
-            mask.settings = node.maskSettings;
-            result = GenerateMaskTexture(mask);
-            resultOwned = result != 0;
-        } else if (node.kind == RenderGraphNodeKind::MaskCombine) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "maskA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "maskB");
-            const unsigned int maskA = inputA ? evalMask(inputA->fromNodeId, inputA->fromSocketId) : 0;
-            const unsigned int maskB = inputB ? evalMask(inputB->fromNodeId, inputB->fromSocketId) : 0;
-            if (maskA && maskB) {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderMaskCombine(maskA, maskB, node.maskCombineMode, fbo);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::CustomMask) {
-            result = GenerateCustomMaskTexture(node.customMask);
-            resultOwned = result != 0;
-        } else if (node.kind == RenderGraphNodeKind::MaskUtility) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "maskIn");
-            const unsigned int inputMask = input ? evalMask(input->fromNodeId, input->fromSocketId) : 0;
-            if (inputMask) {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderMaskUtility(inputMask, node, fbo);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::ImageToMask) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-            if (inputImage) {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderImageToMask(inputImage, node, fbo);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::ChannelSplit) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-            if (inputImage) {
-                result = createTarget();
-                int channelIdx = 0;
-                if (socketId == "g") channelIdx = 1;
-                else if (socketId == "b") channelIdx = 2;
-                else if (socketId == "a") channelIdx = 3;
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderChannelSplit(inputImage, channelIdx, fbo);
-                });
-                resultOwned = result != 0;
-            } else {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    GLfloat previousClearColor[4];
-                    glGetFloatv(GL_COLOR_CLEAR_VALUE, previousClearColor);
-                    if (socketId == "a") {
-                        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
-                    } else {
-                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-                    }
-                    glClear(GL_COLOR_BUFFER_BIT);
-                    glClearColor(
-                        previousClearColor[0],
-                        previousClearColor[1],
-                        previousClearColor[2],
-                        previousClearColor[3]);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::DataMath) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            const bool scalarA = inputA && isScalarRenderSocket(inputA->fromNodeId, inputA->fromSocketId);
-            const bool scalarB = inputB && isScalarRenderSocket(inputB->fromNodeId, inputB->fromSocketId);
-            const unsigned int textureA = inputA ? evalMask(inputA->fromNodeId, inputA->fromSocketId) : 0;
-            const unsigned int textureB = inputB ? evalMask(inputB->fromNodeId, inputB->fromSocketId) : 0;
-            if ((!inputA || textureA) && (!inputB || textureB)) {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderDataMath(
-                        textureA,
-                        textureB,
-                        inputA != nullptr,
-                        inputB != nullptr,
-                        scalarA,
-                        scalarB,
-                        node.dataMathMode,
-                        node.dataMathSettings,
-                        true,
-                        fbo);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-            if (inputImage) {
-                const bool debugPreview = graph.autoGainMaskPreview &&
-                    graph.outputNodeId == node.nodeId &&
-                    graph.outputSocketId == "maskOut";
-                result = RenderRawDetailAutoMask(inputImage, node, 0, debugPreview);
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-            const unsigned int manualMask = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
-            if (inputImage) {
-                const bool debugPreview = graph.autoGainMaskPreview &&
-                    graph.outputNodeId == node.nodeId &&
-                    graph.outputSocketId == "maskOut";
-                result = RenderRawDetailAutoMask(inputImage, node, manualMask, debugPreview);
-                resultOwned = result != 0;
-            }
-        }
-
-        if (result) {
-            maskCache[key] = result;
-            storeCacheEntry(m_GraphMaskCache, key, result, fingerprint, resultOwned);
-        } else {
-            releaseCacheEntry(m_GraphMaskCache, key);
-        }
-        visitingMasks.erase(key);
-        return result;
-    };
-
-    evalImage = [&](int nodeId, const std::string& socketId) -> unsigned int {
-        std::string key = std::to_string(nodeId) + ":" + socketId;
-        if (imageCache.count(key)) {
-            return imageCache[key];
-        }
-        if (visitingImages.count(key)) {
-            return 0;
-        }
-        visitingImages.insert(key);
-
-        const auto it = nodes.find(nodeId);
-        if (it == nodes.end()) {
-            visitingImages.erase(key);
-            return 0;
-        }
-
-        const RenderGraphNode& node = *it->second;
-        if (node.kind == RenderGraphNodeKind::MaskGenerator ||
-            node.kind == RenderGraphNodeKind::MaskCombine ||
-            node.kind == RenderGraphNodeKind::MaskUtility ||
-            node.kind == RenderGraphNodeKind::CustomMask ||
-            node.kind == RenderGraphNodeKind::ImageToMask ||
-            node.kind == RenderGraphNodeKind::ChannelSplit ||
-            (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
-            (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
-            unsigned int maskTex = evalMask(nodeId, socketId);
-            visitingImages.erase(key);
-            return maskTex;
-        }
-        const std::size_t fingerprint = fingerprintImage(nodeId, socketId);
-        const bool rawDevelopStageSocket =
-            node.kind == RenderGraphNodeKind::RawDevelop &&
-            (socketId == "__rawDevelopBase" ||
-             socketId == EditorNodeGraph::kPreFinishImageOutputSocketId);
-        if (!rawDevelopStageSocket) {
-            if (const auto cached = m_GraphImageCache.find(key);
-                cached != m_GraphImageCache.end() &&
-                cached->second.fingerprint == fingerprint &&
-                cached->second.texture != 0) {
-                if (cached->second.width > 0 && cached->second.height > 0) {
-                    m_Width = cached->second.width;
-                    m_Height = cached->second.height;
-                }
-                imageCache[key] = cached->second.texture;
-                m_LastGraphImageCacheHits.insert(key);
-                visitingImages.erase(key);
-                return cached->second.texture;
-            }
-        }
-
-        unsigned int result = 0;
-        bool resultOwned = false;
-        if (node.kind == RenderGraphNodeKind::Image) {
-            if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
-                result = GLHelpers::CreateTextureFromPixels(node.image.pixels.data(), node.image.width, node.image.height, node.image.channels);
-                resultOwned = result != 0;
-            } else {
-                result = m_SourceTexture;
-            }
-        } else if (node.kind == RenderGraphNodeKind::RawSource) {
-            result = 0;
-        } else if (node.kind == RenderGraphNodeKind::RawNeuralDenoise) {
-            result = 0;
-        } else if (node.kind == RenderGraphNodeKind::RawDevelop) {
-            const RenderGraphLink* rawInput = findInputLink(node.nodeId, "rawIn");
-            const RenderGraphNode* rawSource = nullptr;
-            std::set<int> rawVisit;
-            while (rawInput) {
-                if (!rawVisit.insert(rawInput->fromNodeId).second) {
-                    break;
-                }
-                const auto rawIt = nodes.find(rawInput->fromNodeId);
-                if (rawIt == nodes.end() || !rawIt->second) {
-                    break;
-                }
-                if (rawIt->second->kind == RenderGraphNodeKind::RawSource) {
-                    rawSource = rawIt->second;
-                    break;
-                }
-                if (rawIt->second->kind != RenderGraphNodeKind::RawNeuralDenoise) {
-                    break;
-                }
-                rawInput = findInputLink(rawIt->second->nodeId, "rawIn");
-            }
-            if (rawSource) {
-                const bool hasEmbeddedRaw =
-                    !rawSource->rawSource.embeddedRawData.rawBuffer.empty() ||
-                    !rawSource->rawSource.embeddedRawData.linearUInt16Buffer.empty() ||
-                    !rawSource->rawSource.embeddedRawData.linearFloatBuffer.empty();
-                const std::string path = rawSource->rawSource.sourcePath.empty()
-                    ? rawSource->rawSource.metadata.sourcePath
-                    : rawSource->rawSource.sourcePath;
-                Raw::RawImageData& rawData = m_RawDataCache[rawSource->nodeId];
-                std::string& cachedPath = m_RawDataCachePaths[rawSource->nodeId];
-                const std::string cacheKeyPath = hasEmbeddedRaw
-                    ? std::string("__embedded_raw__:") + std::to_string(fingerprintImage(rawSource->nodeId, "rawOut"))
-                    : path;
-                if (hasEmbeddedRaw) {
-                    if (cachedPath != cacheKeyPath) {
-                        rawData = rawSource->rawSource.embeddedRawData;
-                        cachedPath = cacheKeyPath;
-                    }
-                } else if (cachedPath != cacheKeyPath || rawData.rawBuffer.empty()) {
-                    Raw::RawImageData loadedRaw;
-                    if (Raw::RawLoader::LoadFile(path, loadedRaw)) {
-                        rawData = std::move(loadedRaw);
-                        cachedPath = cacheKeyPath;
-                    } else {
-                        rawData = std::move(loadedRaw);
-                        cachedPath = cacheKeyPath;
-                    }
-                }
-                const bool rawDataHasPixels =
-                    !rawData.rawBuffer.empty() ||
-                    !rawData.linearUInt16Buffer.empty() ||
-                    !rawData.linearFloatBuffer.empty();
-                if (rawDataHasPixels && rawData.metadata.error.empty()) {
-                    if (rawSource->rawSource.metadata.visibleWidth > 0) {
-                        rawData.metadata.visibleWidth = rawSource->rawSource.metadata.visibleWidth;
-                    }
-                    if (rawSource->rawSource.metadata.visibleHeight > 0) {
-                        rawData.metadata.visibleHeight = rawSource->rawSource.metadata.visibleHeight;
-                    }
-                    const std::string preFinishKey = std::to_string(node.nodeId) + ":" + EditorNodeGraph::kPreFinishImageOutputSocketId;
-                    const std::string rawBaseKey = std::to_string(node.nodeId) + ":__rawDevelopBase";
-                    const std::size_t rawBaseFingerprint = fingerprintImage(node.nodeId, "__rawDevelopBase");
-                    const bool wantsPreFinishSocket = socketId == EditorNodeGraph::kPreFinishImageOutputSocketId;
-                    const bool wantsIntegratedFinal =
-                        !wantsPreFinishSocket &&
-                        node.rawDevelop.integratedToneEnabled &&
-                        node.rawDevelop.settings.debugView == Raw::RawDebugView::FinalOutput &&
-                        node.rawDevelop.integratedToneLayerJson.is_object();
-
-                    if (wantsPreFinishSocket) {
-                        const CachedGraphTexture cachedPreFinish =
-                            findRawDevelopStageCacheEntry(preFinishKey, fingerprint);
-                        if (cachedPreFinish.texture != 0 &&
-                            cachedPreFinish.width > 0 &&
-                            cachedPreFinish.height > 0) {
-                            m_Width = cachedPreFinish.width;
-                            m_Height = cachedPreFinish.height;
-                            imageCache[key] = cachedPreFinish.texture;
-                            storeCacheEntry(m_GraphImageCache, key, cachedPreFinish.texture, fingerprint, false);
-                            m_LastGraphImageCacheHits.insert(key);
-                            visitingImages.erase(key);
-                            return cachedPreFinish.texture;
-                        }
-                    }
-
-                    unsigned int rawDevelopBase = 0;
-                    int rawDevelopBaseWidth = 0;
-                    int rawDevelopBaseHeight = 0;
-                    bool rawDevelopBaseRendered = false;
-                    const CachedGraphTexture stageCachedBase =
-                        findRawDevelopStageCacheEntry(rawBaseKey, rawBaseFingerprint);
-                    if (stageCachedBase.texture != 0 &&
-                        stageCachedBase.width > 0 &&
-                        stageCachedBase.height > 0) {
-                        rawDevelopBase = stageCachedBase.texture;
-                        rawDevelopBaseWidth = stageCachedBase.width;
-                        rawDevelopBaseHeight = stageCachedBase.height;
-                        m_Width = rawDevelopBaseWidth;
-                        m_Height = rawDevelopBaseHeight;
-                        storeCacheEntry(m_GraphImageCache, rawBaseKey, rawDevelopBase, rawBaseFingerprint, false);
-                        m_LastGraphImageCacheHits.insert(rawBaseKey);
-                    } else if (const auto cachedBase = m_GraphImageCache.find(rawBaseKey);
-                        cachedBase != m_GraphImageCache.end() &&
-                        cachedBase->second.fingerprint == rawBaseFingerprint &&
-                        cachedBase->second.texture != 0 &&
-                        cachedBase->second.owned &&
-                        cachedBase->second.width > 0 &&
-                        cachedBase->second.height > 0) {
-                        rawDevelopBase = cachedBase->second.texture;
-                        rawDevelopBaseWidth = cachedBase->second.width;
-                        rawDevelopBaseHeight = cachedBase->second.height;
-                        m_Width = rawDevelopBaseWidth;
-                        m_Height = rawDevelopBaseHeight;
-                        m_LastGraphImageCacheHits.insert(rawBaseKey);
-                    }
-                    if (rawDevelopBase == 0) {
-                        rawDevelopBase = m_RawPipelines[node.nodeId].Render(rawData, node.rawDevelop.settings, m_PreviewMaxDimension);
-                        if (rawDevelopBase == 0) {
-                            releaseCacheEntry(m_GraphImageCache, rawBaseKey);
-                            const std::string& error = m_RawPipelines[node.nodeId].GetLastError();
-                            std::cerr << "[RAW] Render failed for develop node " << node.nodeId
-                                      << " (" << path << "): "
-                                      << (error.empty() ? "unknown RAW GPU failure" : error)
-                                      << "\n";
-                        } else {
-                            rawDevelopBaseWidth = m_RawPipelines[node.nodeId].GetOutputWidth();
-                            rawDevelopBaseHeight = m_RawPipelines[node.nodeId].GetOutputHeight();
-                            if (rawDevelopBaseWidth > 0 && rawDevelopBaseHeight > 0) {
-                                m_Width = rawDevelopBaseWidth;
-                                m_Height = rawDevelopBaseHeight;
-                            }
-                            rawDevelopBaseRendered = true;
-                        }
-                    }
-                    if (rawDevelopBase != 0) {
-                        const int rawOutputWidth = rawDevelopBaseWidth > 0
-                            ? rawDevelopBaseWidth
-                            : m_RawPipelines[node.nodeId].GetOutputWidth();
-                        const int rawOutputHeight = rawDevelopBaseHeight > 0
-                            ? rawDevelopBaseHeight
-                            : m_RawPipelines[node.nodeId].GetOutputHeight();
-                        if (rawOutputWidth > 0 && rawOutputHeight > 0) {
-                            m_Width = rawOutputWidth;
-                            m_Height = rawOutputHeight;
-                        }
-                        if (rawDevelopBaseRendered) {
-                            // RawGpuPipeline owns and reuses its output texture, so stage snapshots
-                            // must clone it before later candidate renders overwrite the same object.
-                            storeRawDevelopStageCacheEntry(rawBaseKey, rawDevelopBase, rawBaseFingerprint);
-                        }
-                    }
-                    imageCache[rawBaseKey] = rawDevelopBase;
-
-                    if (wantsIntegratedFinal && rawDevelopBase != 0) {
-                        const unsigned int preToneTexture = evalImage(node.nodeId, EditorNodeGraph::kPreFinishImageOutputSocketId);
-                        if (preToneTexture != 0) {
-                            std::shared_ptr<LayerBase> integratedToneLayer = LayerRegistry::CreateLayerFromTypeId("ToneCurve");
-                            if (integratedToneLayer) {
-                                integratedToneLayer->InitializeGL();
-                                integratedToneLayer->Deserialize(node.rawDevelop.integratedToneLayerJson);
-                                if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(integratedToneLayer.get())) {
-                                    toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
-                                    toneCurve->SetDevelopScenePrepToneBudget(
-                                        node.rawDevelop.scenePrepEnabled,
-                                        node.rawDevelop.scenePrepSettings.strength,
-                                        node.rawDevelop.scenePrepSettings.maxEvBias);
-                                }
-
-                                unsigned int finishedResult = createTarget();
-                                const bool renderedIntegratedTone = renderToTexture(finishedResult, [&](unsigned int) {
-                                    integratedToneLayer->ExecuteWithSource(preToneTexture, preToneTexture, m_Width, m_Height, m_Quad);
-                                });
-                                bool useFinishedResult = renderedIntegratedTone && finishedResult != 0;
-                                if (useFinishedResult) {
-                                    const QuickTextureStats inputStats = ProbeTextureStats(preToneTexture, m_Width, m_Height);
-                                    const QuickTextureStats outputStats = ProbeTextureStats(finishedResult, m_Width, m_Height);
-                                    const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-                                    const bool outputIsBlank =
-                                        outputStats.valid &&
-                                        outputStats.p99Luma <= 0.000001f &&
-                                        outputStats.maxRgb <= 0.00001f;
-                                    if (inputHasSignal && outputIsBlank) {
-                                        glDeleteTextures(1, &finishedResult);
-                                        finishedResult = 0;
-                                        useFinishedResult = false;
-                                        std::cerr << "[RenderPipeline] Integrated Develop ToneCurve produced a blank output for RawDevelop node "
-                                                  << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                                                  << ", output p99 luma " << outputStats.p99Luma
-                                                  << "); passing pre-finish texture through.\n";
-                                    }
-                                }
-                                if (useFinishedResult) {
-                                    result = finishedResult;
-                                    resultOwned = true;
-                                } else {
-                                    if (finishedResult != 0) {
-                                        glDeleteTextures(1, &finishedResult);
-                                    }
-                                    result = preToneTexture;
-                                    resultOwned = false;
-                                }
-
-                                if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(integratedToneLayer.get());
-                                    toneCurve && toneCurve->HasPendingAutoRewriteFeedback()) {
-                                    m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
-                                }
-
-                                if (useFinishedResult && finishedResult != 0) {
-                                    const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-                                    const unsigned int finishMaskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
-                                    if (finishMaskTexture != 0) {
-                                        unsigned int blended = createTarget();
-                                        renderToTexture(blended, [&](unsigned int fbo) {
-                                            RenderMaskBlend(preToneTexture, finishedResult, finishMaskTexture, fbo);
-                                        });
-                                        if (blended != 0 && finishedResult != 0) {
-                                            glDeleteTextures(1, &finishedResult);
-                                        }
-                                        result = blended != 0 ? blended : finishedResult;
-                                        resultOwned = true;
-                                    }
-                                }
-                            } else {
-                                result = preToneTexture;
-                                resultOwned = false;
-                            }
-                        }
-                    } else {
-                        result = rawDevelopBase;
-                        resultOwned = false;
-                        if (result != 0 &&
-                            node.rawDevelop.scenePrepEnabled &&
-                            node.rawDevelop.settings.debugView == Raw::RawDebugView::FinalOutput) {
-                            Raw::RawDetailFusionSettings prepSettings = node.rawDevelop.scenePrepSettings;
-                            prepSettings.mode = Raw::RawDetailFusionMode::AutoAnalyze;
-                            prepSettings.debugView = Raw::RawDetailFusionDebugView::FinalImage;
-                            prepSettings.invertMask = false;
-                            prepSettings.maskBlackPoint = 0.0f;
-                            prepSettings.maskWhitePoint = 1.0f;
-                            prepSettings.maskGamma = 1.0f;
-                            prepSettings.manualBlend = 0.0f;
-                            if (prepSettings.autoSafetyEnabled && !prepSettings.overrideBaseEv) {
-                                // Develop already chose the RAW baseline exposure. Keep Scene Prep from
-                                // recomputing a second global base that can cancel that authored intent.
-                                prepSettings.baseEv = std::clamp(prepSettings.baseEvBias, -1.0f, 1.0f);
-                                prepSettings.overrideBaseEv = true;
-                            }
-
-                            m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
-                                result,
-                                prepSettings,
-                                false,
-                                !prepSettings.autoSafetyEnabled);
-
-                            RenderGraphNode prepMapNode;
-                            prepMapNode.nodeId = node.nodeId;
-                            prepMapNode.kind = RenderGraphNodeKind::RawDetailFusion;
-                            prepMapNode.rawDetailFusion.settings = prepSettings;
-                            const unsigned int preScenePrepTexture = result;
-                            unsigned int prepExposureMap = RenderRawDetailAutoMask(result, prepMapNode, 0, false);
-                            if (unsigned int preparedResult = prepExposureMap != 0
-                                ? RenderRawDetailFusion(result, prepExposureMap, prepSettings)
-                                : 0) {
-                                const QuickTextureStats inputStats =
-                                    ProbeTextureStats(preScenePrepTexture, m_Width, m_Height);
-                                const QuickTextureStats outputStats =
-                                    ProbeTextureStats(preparedResult, m_Width, m_Height);
-                                const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-                                const bool outputIsBlank =
-                                    outputStats.valid &&
-                                    outputStats.p99Luma <= 0.000001f &&
-                                    outputStats.maxRgb <= 0.00001f;
-                                if (inputHasSignal && outputIsBlank) {
-                                    glDeleteTextures(1, &preparedResult);
-                                    std::cerr << "[RenderPipeline] Develop scene prep produced a blank output for RawDevelop node "
-                                              << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                                              << ", output p99 luma " << outputStats.p99Luma
-                                              << "); passing RAW base texture through.\n";
-                                } else {
-                                    result = preparedResult;
-                                    resultOwned = true;
-                                }
-                            }
-                            if (prepExposureMap != 0) {
-                                glDeleteTextures(1, &prepExposureMap);
-                            }
-                        }
-                        imageCache[preFinishKey] = result;
-                    }
-
-                    if (wantsPreFinishSocket) {
-                        // The hidden pre-finish output intentionally exposes Develop after RAW conversion
-                        // and scene prep, but before integrated finish tone or finish-mask blending.
-                        if (result != 0) {
-                            const std::size_t preFinishFingerprint = fingerprintImage(node.nodeId, socketId);
-                            storeCacheEntry(m_GraphImageCache, key, result, preFinishFingerprint, resultOwned);
-                            storeRawDevelopStageCacheEntry(key, result, preFinishFingerprint);
-                        } else {
-                            releaseCacheEntry(m_GraphImageCache, key);
-                        }
-                        visitingImages.erase(key);
-                        return result;
-                    }
-                } else {
-                    const std::string error = !rawData.metadata.error.empty()
-                        ? rawData.metadata.error
-                        : "LibRaw did not produce a usable raw buffer.";
-                    std::cerr << "[RAW] Load failed for source node " << rawSource->nodeId
-                              << " (" << path << "): " << error << "\n";
-                }
-            }
-        } else if (node.kind == RenderGraphNodeKind::RawDetailFusion) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-            const unsigned int inputImage = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-            const unsigned int generatedMask = inputImage ? evalMask(node.nodeId, "maskOut") : 0;
-            if (inputImage) {
-                const Raw::RawDetailFusionSettings applySettings = resolveRawDetailFusionApplySettings(node);
-                m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
-                    inputImage,
-                    applySettings,
-                    maskLink != nullptr,
-                    !node.rawDetailFusion.settings.autoSafetyEnabled);
-                result = RenderRawDetailFusion(inputImage, generatedMask, applySettings);
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::HdrMerge) {
-            const RenderGraphLink* input1 = findInputLink(node.nodeId, "image1");
-            const RenderGraphLink* input2 = findInputLink(node.nodeId, "image2");
-            const RenderGraphLink* input3 = findInputLink(node.nodeId, "image3");
-            const unsigned int texture1 = input1 ? evalImage(input1->fromNodeId, input1->fromSocketId) : 0;
-            const unsigned int texture2 = input2 ? evalImage(input2->fromNodeId, input2->fromSocketId) : 0;
-            const unsigned int texture3 = input3 ? evalImage(input3->fromNodeId, input3->fromSocketId) : 0;
-            const bool hasGap = input3 != nullptr && input2 == nullptr;
-            const bool hasRequiredInputs = texture1 != 0 &&
-                texture2 != 0 &&
-                (input3 == nullptr || texture3 != 0);
-            if (!hasGap && hasRequiredInputs) {
-                std::array<bool, 3> activeInputs { input1 != nullptr, input2 != nullptr, input3 != nullptr };
-                std::array<HdrMergeInputContext, 3> inputContexts {};
-                if (input1) inputContexts[0] = resolveHdrMergeInputContext(input1->fromNodeId);
-                if (input2) inputContexts[1] = resolveHdrMergeInputContext(input2->fromNodeId);
-                if (input3) inputContexts[2] = resolveHdrMergeInputContext(input3->fromNodeId);
-                const HdrMergeResolvedSettings resolved = resolveHdrMergeSettings(node.hdrMerge.settings, inputContexts, activeInputs);
-                result = createTarget();
-                bool mergeRendered = false;
-                renderToTexture(result, [&](unsigned int fbo) {
-                    mergeRendered = RenderHdrMerge(
-                        texture1,
-                        texture2,
-                        texture3,
-                        input2 != nullptr,
-                        input3 != nullptr,
-                        node.hdrMerge.settings,
-                        resolved,
-                        fbo);
-                });
-                if (!mergeRendered && result != 0) {
-                    glDeleteTextures(1, &result);
-                    result = 0;
-                }
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::ImageGenerator) {
-            result = GenerateImageTexture(node);
-            resultOwned = result != 0;
-        } else if (node.kind == RenderGraphNodeKind::Layer) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            const unsigned int inputTexture = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-            if (inputTexture && node.layerJson.is_object()) {
-                const std::string type = node.layerJson.value("type", std::string());
-                std::shared_ptr<LayerBase> layer = LayerRegistry::CreateLayerFromTypeId(type);
-                if (layer) {
-                    layer->InitializeGL();
-                    layer->Deserialize(node.layerJson);
-                    if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get())) {
-                        toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
-                    }
-                    unsigned int processed = createTarget();
-                    const unsigned int sourceTexture = m_SourceTexture != 0 ? m_SourceTexture : inputTexture;
-                    const bool renderedLayer = renderToTexture(processed, [&](unsigned int) {
-                        layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
-                    });
-                    if (!renderedLayer || processed == 0) {
-                        if (processed != 0) {
-                            glDeleteTextures(1, &processed);
-                        }
-                        result = inputTexture;
-                        resultOwned = false;
-                        std::cerr << "[RenderPipeline] Layer target allocation failed for graph node "
-                                  << node.nodeId << "; passing input texture through.\n";
-                        imageCache[key] = result;
-                        storeCacheEntry(m_GraphImageCache, key, result, fingerprint, false);
-                        visitingImages.erase(key);
-                        return result;
-                    }
-                    if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get());
-                        toneCurve && toneCurve->HasPendingAutoRewriteFeedback()) {
-                        m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
-                    }
-                    result = processed;
-                    resultOwned = result != 0;
-                    if (type == "ToneCurve" && IsDefaultToneCurvePayload(node.layerJson)) {
-                        const QuickTextureStats inputStats = ProbeTextureStats(inputTexture, m_Width, m_Height);
-                        const QuickTextureStats outputStats = ProbeTextureStats(processed, m_Width, m_Height);
-                        const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-                        const bool outputIsBlank = outputStats.valid && outputStats.p99Luma <= 0.000001f && outputStats.maxRgb <= 0.00001f;
-                        if (inputHasSignal && outputIsBlank) {
-                            if (processed != 0) {
-                                glDeleteTextures(1, &processed);
-                            }
-                            result = inputTexture;
-                            resultOwned = false;
-                            std::cerr << "[RenderPipeline] Default Tone Curve produced a blank output for graph node "
-                                      << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                                      << ", output p99 luma " << outputStats.p99Luma
-                                      << "); passing input texture through.\n";
-                            imageCache[key] = result;
-                            storeCacheEntry(m_GraphImageCache, key, result, fingerprint, false);
-                            visitingImages.erase(key);
-                            return result;
-                        }
-                    }
-                    const RenderGraphLink* maskLink = findInputLink(node.nodeId, "maskIn");
-                    const unsigned int maskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
-                    if (maskTexture) {
-                        unsigned int blended = createTarget();
-                        renderToTexture(blended, [&](unsigned int fbo) {
-                            RenderMaskBlend(inputTexture, processed, maskTexture, fbo);
-                        });
-                        if (processed != 0) {
-                            glDeleteTextures(1, &processed);
-                        }
-                        result = blended;
-                        resultOwned = result != 0;
-                    }
-                }
-            }
-        } else if (node.kind == RenderGraphNodeKind::Mix) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            const unsigned int textureA = inputA ? evalImage(inputA->fromNodeId, inputA->fromSocketId) : 0;
-            const unsigned int textureB = inputB ? evalImage(inputB->fromNodeId, inputB->fromSocketId) : 0;
-            if (textureA && textureB) {
-                const RenderGraphLink* factorLink = findInputLink(node.nodeId, "factor");
-                const unsigned int factorTexture = factorLink ? evalMask(factorLink->fromNodeId, factorLink->fromSocketId) : 0;
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderMixBlend(textureA, textureB, factorTexture, node.mixFactor, node.mixBlendMode, fbo);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::DataMath) {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            const bool scalarA = inputA && isScalarRenderSocket(inputA->fromNodeId, inputA->fromSocketId);
-            const bool scalarB = inputB && isScalarRenderSocket(inputB->fromNodeId, inputB->fromSocketId);
-            const unsigned int textureA = inputA
-                ? (scalarA ? evalMask(inputA->fromNodeId, inputA->fromSocketId) : evalImage(inputA->fromNodeId, inputA->fromSocketId))
-                : 0;
-            const unsigned int textureB = inputB
-                ? (scalarB ? evalMask(inputB->fromNodeId, inputB->fromSocketId) : evalImage(inputB->fromNodeId, inputB->fromSocketId))
-                : 0;
-            if ((!inputA || textureA) && (!inputB || textureB)) {
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderDataMath(
-                        textureA,
-                        textureB,
-                        inputA != nullptr,
-                        inputB != nullptr,
-                        scalarA,
-                        scalarB,
-                        node.dataMathMode,
-                        node.dataMathSettings,
-                        isScalarRenderSocket(node.nodeId, socketId),
-                        fbo);
-                });
-                resultOwned = result != 0;
-            }
-        } else if (node.kind == RenderGraphNodeKind::ChannelCombine) {
-            const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
-            const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");
-            const RenderGraphLink* linkB = findInputLink(node.nodeId, "b");
-            const RenderGraphLink* linkA = findInputLink(node.nodeId, "a");
-
-            const unsigned int texR = linkR ? evalMask(linkR->fromNodeId, linkR->fromSocketId) : 0;
-            const unsigned int texG = linkG ? evalMask(linkG->fromNodeId, linkG->fromSocketId) : 0;
-            const unsigned int texB = linkB ? evalMask(linkB->fromNodeId, linkB->fromSocketId) : 0;
-            const unsigned int texA = linkA ? evalMask(linkA->fromNodeId, linkA->fromSocketId) : 0;
-
-            result = createTarget();
-            renderToTexture(result, [&](unsigned int fbo) {
-                RenderChannelCombine(texR, texG, texB, texA,
-                                     linkR != nullptr, linkG != nullptr, linkB != nullptr, linkA != nullptr,
-                                     fbo);
-            });
-            resultOwned = result != 0;
-        } else if (node.kind == RenderGraphNodeKind::Output) {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            if (input) {
-                result = evalImage(input->fromNodeId, input->fromSocketId);
-            } else {
-                const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
-                const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");
-                const RenderGraphLink* linkB = findInputLink(node.nodeId, "b");
-                const RenderGraphLink* linkA = findInputLink(node.nodeId, "a");
-
-                const unsigned int texR = linkR ? evalMask(linkR->fromNodeId, linkR->fromSocketId) : 0;
-                const unsigned int texG = linkG ? evalMask(linkG->fromNodeId, linkG->fromSocketId) : 0;
-                const unsigned int texB = linkB ? evalMask(linkB->fromNodeId, linkB->fromSocketId) : 0;
-                const unsigned int texA = linkA ? evalMask(linkA->fromNodeId, linkA->fromSocketId) : 0;
-
-                result = createTarget();
-                renderToTexture(result, [&](unsigned int fbo) {
-                    RenderChannelCombine(texR, texG, texB, texA,
-                                         linkR != nullptr, linkG != nullptr, linkB != nullptr, linkA != nullptr,
-                                         fbo);
-                });
-                resultOwned = result != 0;
-            }
-        }
-
-        if (result) {
-            imageCache[key] = result;
-            storeCacheEntry(m_GraphImageCache, key, result, fingerprint, resultOwned);
-        } else {
-            releaseCacheEntry(m_GraphImageCache, key);
-        }
-        visitingImages.erase(key);
-        return result;
-    };
-
-    unsigned int finalTexture = 0;
-    const auto outputIt = nodes.find(graph.outputNodeId);
-    if (outputIt != nodes.end() &&
-        (outputIt->second->kind == RenderGraphNodeKind::MaskGenerator ||
-         outputIt->second->kind == RenderGraphNodeKind::MaskUtility ||
-         outputIt->second->kind == RenderGraphNodeKind::ImageToMask ||
-         outputIt->second->kind == RenderGraphNodeKind::MaskCombine ||
-         outputIt->second->kind == RenderGraphNodeKind::CustomMask ||
-         outputIt->second->kind == RenderGraphNodeKind::ChannelSplit ||
-         (outputIt->second->kind == RenderGraphNodeKind::DataMath && isScalarRenderSocket(graph.outputNodeId, graph.outputSocketId)) ||
-         (outputIt->second->kind == RenderGraphNodeKind::RawDetailAutoMask && graph.outputSocketId == "maskOut") ||
-         (outputIt->second->kind == RenderGraphNodeKind::RawDetailFusion && graph.outputSocketId == "maskOut"))) {
-        finalTexture = evalMask(graph.outputNodeId, graph.outputSocketId);
-    } else {
-        finalTexture = evalImage(graph.outputNodeId, graph.outputSocketId);
-    }
-    m_OutputTexture = finalTexture ? finalTexture : 0;
-    m_GraphSourceTexture = 0;
-    const int referenceSourceNodeId = findReferenceSourceNode(graph.outputNodeId);
-    if (referenceSourceNodeId > 0) {
-        const auto referenceIt = nodes.find(referenceSourceNodeId);
-        if (referenceIt != nodes.end() &&
-            referenceIt->second &&
-            referenceIt->second->kind == RenderGraphNodeKind::RawSource) {
-            m_GraphSourceTexture = m_SourceTexture;
-        } else {
-            m_GraphSourceTexture = evalImage(referenceSourceNodeId, "imageOut");
-        }
-    }
-
-    for (auto it = m_GraphImageCache.begin(); it != m_GraphImageCache.end(); ) {
-        size_t colonPos = it->first.find(':');
-        int nodeId = (colonPos != std::string::npos) ? std::stoi(it->first.substr(0, colonPos)) : -1;
-        if (!activeNodeIds.count(nodeId)) {
-            if (it->second.owned && it->second.texture != 0 && it->second.texture != m_SourceTexture && it->second.texture != m_ExternalOutputTexture) {
-                glDeleteTextures(1, &it->second.texture);
-            }
-            it = m_GraphImageCache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = m_GraphMaskCache.begin(); it != m_GraphMaskCache.end(); ) {
-        size_t colonPos = it->first.find(':');
-        int nodeId = (colonPos != std::string::npos) ? std::stoi(it->first.substr(0, colonPos)) : -1;
-        if (!activeNodeIds.count(nodeId)) {
-            if (it->second.owned && it->second.texture != 0 && it->second.texture != m_SourceTexture && it->second.texture != m_ExternalOutputTexture) {
-                glDeleteTextures(1, &it->second.texture);
-            }
-            it = m_GraphMaskCache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = m_RawDevelopStageImageCache.begin(); it != m_RawDevelopStageImageCache.end(); ) {
-        size_t colonPos = it->first.find(':');
-        int nodeId = (colonPos != std::string::npos) ? std::stoi(it->first.substr(0, colonPos)) : -1;
-        if (!activeNodeIds.count(nodeId)) {
-            for (CachedGraphTexture& entry : it->second) {
-                if (entry.owned && entry.texture != 0 && entry.texture != m_SourceTexture && entry.texture != m_ExternalOutputTexture) {
-                    glDeleteTextures(1, &entry.texture);
-                }
-            }
-            it = m_RawDevelopStageImageCache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
-    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-    if (prevScissor) glEnable(GL_SCISSOR_TEST);
-    if (prevDepth) glEnable(GL_DEPTH_TEST);
-    if (prevStencil) glEnable(GL_STENCIL_TEST);
-    if (prevBlend) glEnable(GL_BLEND);
+    ExecuteGraphImpl(graph);
 }
 
 void RenderPipeline::ExecuteMasked(const std::vector<RenderLayerStep>& steps, const std::vector<RenderMaskSource>& masks) {

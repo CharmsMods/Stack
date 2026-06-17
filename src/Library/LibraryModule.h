@@ -45,19 +45,18 @@ public:
     const char* GetName() override { return "Library"; }
 
 private:
+    void RequestOpenEditorProject(const std::string& projectFileName);
     bool RenderProjectCard(const struct ProjectEntry& project, class EditorModule* editor);
     bool RenderAssetCard(const struct AssetEntry& asset, class EditorModule* editor);
     void RenderPreviewPopup(
         class EditorModule* editor,
         class CompositeModule* composite,
-        int* activeTab = nullptr,
-        const std::function<void(const std::string&)>& onLoadEditorProject = {});
+        int* activeTab = nullptr);
     void RenderAssetPreviewPopup(
         class EditorModule* editor,
         class CompositeModule* composite,
-        int* activeTab = nullptr,
-        const std::function<void(const std::string&)>& onLoadEditorProject = {});
-    void RenderConfirmLoadPopup(const std::function<void(const std::string&)>& onLoadEditorProject = {});
+        int* activeTab = nullptr);
+    void RenderConfirmLoadPopup();
     void RenderFolderImportPopup();
     void RenderImportConflictPopup();
     void RenderAssetConflictPopup();
@@ -141,4 +140,6 @@ private:
     unsigned int m_OptionsIconTex = 0;
     unsigned int m_AllProjectsIconTex = 0;
     unsigned int m_AssetsIconTex = 0;
+    float m_ScrollTargetY = -1.0f;
+    float m_ScrollCurrentY = -1.0f;
 };

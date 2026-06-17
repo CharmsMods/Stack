@@ -1,6 +1,7 @@
 #include "LibraryManager.h"
 #include "TagManager.h"
 
+#include "App/AppPaths.h"
 #include "Async/TaskSystem.h"
 #include "Composite/CompositeModule.h"
 #include "Editor/EditorModule.h"
@@ -80,12 +81,7 @@ bool HasMeaningfulPixels(const std::vector<unsigned char>& pixels) {
 bool LoadRgbaImageFromFile(const std::filesystem::path& path, std::vector<unsigned char>& outPixels, int& outW, int& outH);
 
 std::filesystem::path GetStartupTracePath() {
-    std::error_code ec;
-    const std::filesystem::path current = std::filesystem::current_path(ec);
-    if (ec) {
-        return std::filesystem::path("StackStartup.log");
-    }
-    return current / "StackStartup.log";
+    return AppPaths::GetStartupLogPath();
 }
 
 void TraceStartupStep(const std::string& message) {
@@ -172,15 +168,17 @@ bool ResolveProjectPreviewPixels(
         previewEditor.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, 4);
         previewEditor.DeserializePipeline(project.pipelineData);
 
-        bool hasRawDevelop = false;
+        bool hasGraphRawRenderNode = false;
         for (const auto& node : previewEditor.GetNodeGraph().GetNodes()) {
-            if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
-                hasRawDevelop = true;
+            if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+                node.kind == EditorNodeGraph::NodeKind::RawDecode ||
+                node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+                hasGraphRawRenderNode = true;
                 break;
             }
         }
 
-        if (hasRawDevelop) {
+        if (hasGraphRawRenderNode) {
             previewEditor.GetPipeline().ExecuteGraph(previewEditor.BuildGraphSnapshot());
         } else {
             previewEditor.GetPipeline().Execute(previewEditor.GetLayers());
@@ -607,7 +605,8 @@ std::vector<unsigned char> DecodeDataUrl(const std::string& dataUrl) {
 } // namespace
 
 LibraryManager::LibraryManager() {
-    m_LibraryPath = std::filesystem::current_path() / "Library";
+    AppPaths::EnsureRuntimeDirectories();
+    m_LibraryPath = AppPaths::GetLibraryDirectory();
     m_AssetsPath = m_LibraryPath / "Assets";
     if (!std::filesystem::exists(m_LibraryPath)) {
         std::filesystem::create_directories(m_LibraryPath);
@@ -1566,6 +1565,7 @@ bool LibraryManager::LoadProjectDocument(
     const std::filesystem::path path = m_LibraryPath / fileName;
     if (!std::filesystem::exists(path)) return false;
 
+    std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
     if (StackFormat::ReadProjectFile(path, outDocument, options)) {
         return true;
     }
@@ -1664,6 +1664,8 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
 
     const std::string trimmedName = TrimWhitespace(name).empty() ? "Untitled Project" : TrimWhitespace(name);
     const StackFormat::json pipeline = editor->SerializePipeline();
+    const std::vector<StackFormat::NodeBrowserThumbnailEntry> nodeBrowserThumbnailEntries =
+        editor->GetPersistedNodeBrowserThumbnails();
 
     int renderedW = 0;
     int renderedH = 0;
@@ -1754,6 +1756,7 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
                                      fileName,
                                      assetFileName,
                                      pipeline = std::move(pipeline),
+                                     nodeBrowserThumbnailEntries = std::move(nodeBrowserThumbnailEntries),
                                      renderedW,
                                      renderedH,
                                      renderedPixels = std::move(renderedPixels),
@@ -1781,8 +1784,12 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
             document.thumbnailBytes = GenerateThumbnailBytes(renderedPixels, renderedW, renderedH);
             document.sourceImageBytes = std::move(sourcePngBytes);
             document.pipelineData = pipeline;
+            document.nodeBrowserThumbnailEntries = nodeBrowserThumbnailEntries;
 
-            wroteProject = StackFormat::WriteProjectFile(m_LibraryPath / fileName, document);
+            {
+                std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
+                wroteProject = StackFormat::WriteProjectFile(m_LibraryPath / fileName, document);
+            }
             if (wroteProject) {
                 wroteAsset = stbi_write_png(
                     (m_AssetsPath / assetFileName).string().c_str(),
@@ -1845,6 +1852,49 @@ void LibraryManager::RequestSaveProject(const std::string& name, EditorModule* e
     });
 }
 
+void LibraryManager::RequestPersistNodeBrowserThumbnails(
+    const std::string& fileName,
+    std::vector<StackFormat::NodeBrowserThumbnailEntry> entries) {
+    if (fileName.empty()) {
+        return;
+    }
+
+    const std::filesystem::path projectPath = m_LibraryPath / fileName;
+    Async::TaskSystem::Get().Submit([this, projectPath, entries = std::move(entries)]() mutable {
+        bool success = false;
+        try {
+            std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
+            if (!std::filesystem::exists(projectPath)) {
+                return;
+            }
+
+            StackFormat::ProjectLoadOptions options;
+            options.includeThumbnail = true;
+            options.includeSourceImage = true;
+            options.includePipelineData = true;
+            options.includeNodeBrowserThumbnails = true;
+
+            StackFormat::ProjectDocument document;
+            success = StackFormat::ReadProjectFile(projectPath, document, options) ||
+                LoadLegacyProjectDocument(projectPath, document, options);
+            if (!success) {
+                return;
+            }
+
+            document.nodeBrowserThumbnailEntries = std::move(entries);
+            success = StackFormat::WriteProjectFile(projectPath, document);
+        } catch (...) {
+            success = false;
+        }
+
+        if (success) {
+            Async::TaskSystem::Get().PostToMain([this]() {
+                m_LastLibrarySignature = 0;
+            });
+        }
+    });
+}
+
 void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModule* editor, std::function<void(bool)> onComplete) {
     if (fileName.empty() || !editor) {
         QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected project.", "library-load-project");
@@ -1862,6 +1912,7 @@ void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModul
         options.includeThumbnail = false;
         options.includeSourceImage = true;
         options.includePipelineData = true;
+        options.includeNodeBrowserThumbnails = true;
 
         StackFormat::ProjectDocument document;
         EditorModule::LoadedProjectData loadedProject;
@@ -1884,6 +1935,7 @@ void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModul
                 loadedProject.pipelineData = document.pipelineData.is_null() ? StackFormat::json::array() : document.pipelineData;
                 loadedProject.projectName = document.metadata.projectName;
                 loadedProject.projectFileName = fileName;
+                loadedProject.nodeBrowserThumbnailEntries = std::move(document.nodeBrowserThumbnailEntries);
             }
         }
 
@@ -1927,11 +1979,10 @@ void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModul
 
 void LibraryManager::RequestLoadProjectDeferredApply(
     const std::string& fileName,
-    EditorModule* editor,
-    std::function<void(bool, std::function<bool()>)> onReady) {
-    if (fileName.empty() || !editor) {
+    std::function<void(bool, std::shared_ptr<EditorLoadedProjectData>)> onReady) {
+    if (fileName.empty()) {
         QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected project.", "library-load-project");
-        if (onReady) onReady(false, {});
+        if (onReady) onReady(false, nullptr);
         return;
     }
 
@@ -1940,14 +1991,15 @@ void LibraryManager::RequestLoadProjectDeferredApply(
     m_ProjectLoadTaskState = Async::TaskState::Queued;
     m_ProjectLoadStatusText = "Loading the project in the background...";
 
-    Async::TaskSystem::Get().Submit([this, generation, fileName, editor, onReady = std::move(onReady)]() mutable {
+    Async::TaskSystem::Get().Submit([this, generation, fileName, onReady = std::move(onReady)]() mutable {
         StackFormat::ProjectLoadOptions options;
         options.includeThumbnail = false;
         options.includeSourceImage = true;
         options.includePipelineData = true;
+        options.includeNodeBrowserThumbnails = true;
 
         StackFormat::ProjectDocument document;
-        auto loadedProject = std::make_shared<EditorModule::LoadedProjectData>();
+        auto loadedProject = std::make_shared<EditorLoadedProjectData>();
         bool success = LoadProjectDocument(fileName, document, options);
         if (success) {
             if (document.metadata.projectKind == StackFormat::kRenderProjectKind
@@ -1967,12 +2019,12 @@ void LibraryManager::RequestLoadProjectDeferredApply(
                 loadedProject->pipelineData = document.pipelineData.is_null() ? StackFormat::json::array() : document.pipelineData;
                 loadedProject->projectName = document.metadata.projectName;
                 loadedProject->projectFileName = fileName;
+                loadedProject->nodeBrowserThumbnailEntries = std::move(document.nodeBrowserThumbnailEntries);
             }
         }
 
         Async::TaskSystem::Get().PostToMain([this,
                                              generation,
-                                             editor,
                                              onReady = std::move(onReady),
                                              loadedProject,
                                              success]() mutable {
@@ -1984,39 +2036,36 @@ void LibraryManager::RequestLoadProjectDeferredApply(
                 m_ProjectLoadTaskState = Async::TaskState::Failed;
                 m_ProjectLoadStatusText = "Failed to load the selected project.";
                 QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected project.", "library-load-project");
-                if (onReady) onReady(false, {});
+                if (onReady) onReady(false, nullptr);
                 return;
             }
 
             m_ProjectLoadTaskState = Async::TaskState::Applying;
-            m_ProjectLoadStatusText = "Project ready to apply...";
-
-            std::function<bool()> applyDecodedProject = [this, generation, editor, loadedProject]() mutable {
-                if (generation != m_ProjectLoadGeneration || !editor || !loadedProject) {
-                    return false;
-                }
-
-                m_ProjectLoadTaskState = Async::TaskState::Applying;
-                m_ProjectLoadStatusText = "Applying project data to the editor...";
-
-                const bool applied = editor->ApplyLoadedProject(*loadedProject);
-                if (applied) {
-                    m_ProjectLoadTaskState = Async::TaskState::Idle;
-                    m_ProjectLoadStatusText = "Project loaded into the editor.";
-                    QueueUiNotification(UiNotificationSeverity::Success, "Project loaded into the editor.", "library-load-project");
-                } else {
-                    m_ProjectLoadTaskState = Async::TaskState::Failed;
-                    m_ProjectLoadStatusText = "Failed to apply the loaded project.";
-                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to apply the loaded project.", "library-load-project");
-                }
-                return applied;
-            };
+            m_ProjectLoadStatusText = "Project data decoded.";
 
             if (onReady) {
-                onReady(true, std::move(applyDecodedProject));
+                onReady(true, std::move(loadedProject));
             }
         });
     });
+}
+
+void LibraryManager::SetProjectLoadApplyingStatus(const std::string& statusText) {
+    m_ProjectLoadTaskState = Async::TaskState::Applying;
+    m_ProjectLoadStatusText = statusText;
+}
+
+void LibraryManager::FinishDeferredProjectLoad(bool success, const std::string& message) {
+    if (success) {
+        m_ProjectLoadTaskState = Async::TaskState::Idle;
+        m_ProjectLoadStatusText = message.empty() ? "Project loaded into the editor." : message;
+        QueueUiNotification(UiNotificationSeverity::Success, m_ProjectLoadStatusText, "library-load-project");
+        return;
+    }
+
+    m_ProjectLoadTaskState = Async::TaskState::Failed;
+    m_ProjectLoadStatusText = message.empty() ? "Failed to apply the loaded project." : message;
+    QueueUiNotification(UiNotificationSeverity::Error, m_ProjectLoadStatusText, "library-load-project");
 }
 
 
@@ -2140,6 +2189,7 @@ void LibraryManager::RequestLoadCompositeProject(
         options.includeThumbnail = false;
         options.includeSourceImage = true;
         options.includePipelineData = true;
+        options.includeNodeBrowserThumbnails = true;
 
         StackFormat::ProjectDocument document;
         bool success = LoadProjectDocument(fileName, document, options);
@@ -2405,15 +2455,17 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                     preview.channels);
                 previewEditor.DeserializePipeline(project->pipelineData);
 
-                bool hasRawDevelop = false;
+                bool hasGraphRawRenderNode = false;
                 for (const auto& node : previewEditor.GetNodeGraph().GetNodes()) {
-                    if (node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
-                        hasRawDevelop = true;
+                    if (node.kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
+                        node.kind == EditorNodeGraph::NodeKind::RawDecode ||
+                        node.kind == EditorNodeGraph::NodeKind::RawDevelop) {
+                        hasGraphRawRenderNode = true;
                         break;
                     }
                 }
 
-                if (hasRawDevelop) {
+                if (hasGraphRawRenderNode) {
                     previewEditor.GetPipeline().ExecuteGraph(previewEditor.BuildGraphSnapshot());
                     renderedPixels = previewEditor.GetPipeline().GetOutputPixels(renderedW, renderedH);
                     comparePixels = previewEditor.GetPipeline().GetCompareSourcePixels(compareW, compareH);
@@ -3001,6 +3053,7 @@ void LibraryManager::RequestLoadProjectFromPath(const std::filesystem::path& abs
 
         bool success = false;
         if (std::filesystem::exists(absolutePath)) {
+            std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
             if (StackFormat::ReadProjectFile(absolutePath, document, options)) {
                 success = true;
             } else {
@@ -3026,6 +3079,7 @@ void LibraryManager::RequestLoadProjectFromPath(const std::filesystem::path& abs
                 loadedProject.pipelineData = document.pipelineData.is_null() ? StackFormat::json::array() : document.pipelineData;
                 loadedProject.projectName = document.metadata.projectName;
                 loadedProject.projectFileName = absolutePath.filename().string();
+                loadedProject.nodeBrowserThumbnailEntries = std::move(document.nodeBrowserThumbnailEntries);
             }
         }
 

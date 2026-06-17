@@ -1,0 +1,240 @@
+Stack Source-Available Proprietary License
+Version 1.0
+Effective Date: June 17, 2026
+
+Copyright (c) 2024-2026 Darynn Ho. All rights reserved.
+
+IMPORTANT NOTICE
+
+Stack is source-available proprietary software. It is not open-source software.
+
+The public availability of this repository does not grant permission to use,
+copy, modify, redistribute, relicense, rebrand, sell, publish, host, or
+incorporate Stack or any substantial portion of Stack into another project
+except as expressly permitted by this License.
+
+1. Definitions
+
+"Licensor" means Darynn Ho.
+
+"Stack" or "Software" means the software project known as Stack, including its
+source code, object code, executables, build scripts, tools, documentation,
+user interface designs, graphics, icons, assets, website materials,
+configuration files, and related materials included in this repository or
+distributed by the Licensor, except for Third-Party Materials.
+
+"Third-Party Materials" means any third-party libraries, frameworks, tools,
+assets, fonts, code, models, documentation, or other materials included with,
+used by, referenced by, or distributed alongside Stack that are not owned by
+the Licensor.
+
+"You" means any person, organization, company, or other entity that accesses,
+views, downloads, forks, clones, copies, installs, uses, or otherwise
+interacts with Stack.
+
+2. Ownership and Reservation of Rights
+
+Stack is owned by the Licensor and is protected by copyright law and other
+applicable laws.
+
+Except for the limited permissions expressly granted in this License, no rights
+are granted to You. All rights not expressly granted are reserved by the
+Licensor.
+
+No patent license, trademark license, trade name license, branding license, or
+other license is granted unless expressly stated in a separate written
+agreement signed by the Licensor.
+
+This License is not an open-source license and is not intended to grant
+open-source rights.
+
+3. Limited Permission to View Source Code
+
+Subject to Your full compliance with this License, You may view, browse,
+search, inspect, and review the Stack source code and related repository
+materials for transparency, evaluation, security review, issue reporting,
+personal reference, and general understanding of the project.
+
+You may make temporary or technical copies that are reasonably necessary to
+view or inspect this repository through normal GitHub or code-hosting platform
+functionality, including browser viewing, cloning, or forking, provided that
+such access is used only for the limited purposes allowed by this Section.
+
+Any fork, clone, download, or platform-enabled copy of this repository does
+not grant You ownership of Stack and does not grant You any rights beyond the
+limited permissions expressly stated in this License.
+
+4. Prohibited Uses
+
+Except as expressly permitted by this License or by applicable law, You may
+not, without prior written permission from the Licensor:
+
+a. copy, reproduce, publish, distribute, redistribute, mirror, host, upload,
+   transmit, share, or make available Stack or any substantial portion of
+   Stack;
+
+b. modify, adapt, translate, transform, port, alter, remix, or create
+   derivative works based on Stack or any substantial portion of Stack;
+
+c. compile, build, run, execute, package, or distribute Stack from source
+   code, except where separately permitted by the Licensor in writing;
+
+d. incorporate Stack source code, assets, designs, documentation, or any
+   substantial portion of Stack into another project, product, service,
+   library, application, tool, website, or repository;
+
+e. sell, rent, lease, sublicense, commercialize, monetize, relicense, or
+   otherwise exploit Stack or any substantial portion of Stack;
+
+f. remove, alter, obscure, or misrepresent any copyright notice, license
+   notice, attribution, proprietary notice, or other legal notice included
+   with Stack;
+
+g. claim authorship or ownership of Stack or any substantial portion of Stack;
+
+h. rebrand Stack, represent Stack as Your own work, or distribute a modified
+   or unmodified version of Stack under a different name;
+
+i. use the name "Stack," any Stack logo, any Stack branding, or any
+   confusingly similar name or branding in a way that suggests endorsement,
+   ownership, affiliation, or authorization by the Licensor;
+
+j. use Stack source code or materials to train, fine-tune, evaluate, or
+   develop machine learning models, code generation systems, or similar
+   automated systems without prior written permission from the Licensor;
+
+k. use Stack in any way that violates applicable law or the rights of any
+   third party.
+
+5. Official Releases and End-User Use
+
+Official compiled releases, installers, binaries, or packaged versions of
+Stack may be governed by a separate End User License Agreement, installer
+license, terms of use, or other written agreement distributed with that
+release.
+
+If a separate license or agreement is provided with an official release, that
+separate agreement governs installation and end-user use of that official
+release. This repository License governs access to and use of the source code
+and repository materials unless a separate written agreement expressly states
+otherwise.
+
+This License does not restrict ownership of images, files, projects, or other
+creative output that You independently create using an official authorized copy
+of Stack, subject to any separate terms that apply to that official copy.
+
+6. Third-Party Materials
+
+Third-Party Materials are not licensed under this License.
+
+Third-Party Materials remain subject to their own licenses, notices, and
+terms. Those licenses may grant You rights that are different from the rights
+granted in this License.
+
+Nothing in this License is intended to restrict rights granted directly to You
+by the applicable license for any Third-Party Material. However, no third-party
+license grants You rights to Stack's proprietary source code, assets, designs,
+documentation, branding, or other materials owned by the Licensor.
+
+You are responsible for complying with all applicable third-party licenses.
+
+7. Contributions, Feedback, and Suggestions
+
+The Licensor is not required to accept contributions, pull requests, patches,
+bug reports, feature requests, ideas, suggestions, or other submissions.
+
+If You submit any contribution, pull request, patch, code, documentation,
+design, issue comment, feature request, idea, suggestion, feedback, or other
+material related to Stack, You grant the Licensor a perpetual, worldwide,
+non-exclusive, irrevocable, royalty-free, fully paid, transferable, and
+sublicensable license to use, reproduce, modify, adapt, distribute, publicly
+display, publicly perform, publish, sell, commercialize, incorporate, and
+otherwise exploit that submission in Stack or related projects, including
+proprietary and commercial versions, without compensation or obligation to You.
+
+You represent that You have the right to submit the material and that the
+submission does not knowingly violate the rights of any third party.
+
+Submissions are not confidential unless a separate written agreement signed by
+the Licensor states otherwise.
+
+8. Trademarks and Branding
+
+This License does not grant You any right to use the names, trademarks, service
+marks, logos, branding, trade dress, or other identifiers of Stack, the
+Licensor, or related projects, except for truthful descriptive references that
+do not imply endorsement, ownership, sponsorship, or affiliation.
+
+9. Termination
+
+Any permission granted under this License automatically terminates immediately
+if You violate this License.
+
+Upon termination, You must stop all use of Stack and delete or destroy any
+copies of Stack in Your possession or control, except where retention is
+required by law.
+
+Sections concerning ownership, prohibited uses, third-party materials,
+contributions, trademarks, warranty disclaimers, limitation of liability,
+governing law, and miscellaneous terms survive termination.
+
+10. Disclaimer of Warranties
+
+STACK IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OF ANY KIND,
+WHETHER EXPRESS, IMPLIED, STATUTORY, OR OTHERWISE.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR DISCLAIMS ALL WARRANTIES,
+INCLUDING WITHOUT LIMITATION WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY,
+AVAILABILITY, AND ERROR-FREE OPERATION.
+
+THE LICENSOR DOES NOT WARRANT THAT STACK WILL MEET YOUR REQUIREMENTS, OPERATE
+WITHOUT INTERRUPTION, BE FREE OF DEFECTS, OR BE COMPATIBLE WITH ANY PARTICULAR
+SYSTEM, FILE, WORKFLOW, OR THIRD-PARTY SOFTWARE.
+
+11. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE LICENSOR BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY,
+OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, GOODWILL,
+BUSINESS OPPORTUNITY, OR COMPUTER SYSTEM FUNCTIONALITY, ARISING OUT OF OR
+RELATED TO STACK OR THIS LICENSE, EVEN IF THE LICENSOR HAS BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGES.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR'S TOTAL LIABILITY ARISING
+OUT OF OR RELATED TO STACK OR THIS LICENSE SHALL NOT EXCEED THE AMOUNT, IF ANY,
+THAT YOU PAID DIRECTLY TO THE LICENSOR SPECIFICALLY FOR THE RIGHTS GRANTED
+UNDER THIS LICENSE.
+
+12. Governing Law
+
+This License is governed by the laws of the State of Washington, United States
+of America, without regard to conflict-of-law rules, unless applicable law
+requires otherwise.
+
+13. Severability
+
+If any provision of this License is found to be invalid, illegal, or
+unenforceable, the remaining provisions will remain in full force and effect.
+The invalid, illegal, or unenforceable provision will be interpreted or
+modified to the minimum extent necessary to make it valid and enforceable while
+preserving its original intent as closely as possible.
+
+14. No Waiver
+
+Failure by the Licensor to enforce any provision of this License does not
+constitute a waiver of the Licensor's right to enforce that provision or any
+other provision later.
+
+15. Entire Agreement
+
+This License is the entire agreement governing access to and use of the Stack
+source code and repository materials, except where a separate written agreement
+signed by the Licensor or a separate license included with an official Stack
+release expressly applies.
+
+16. Permission Requests
+
+For permission to use Stack in a way not allowed by this License, contact the
+Licensor through the official Stack repository owner or other official contact
+method published by the Licensor.

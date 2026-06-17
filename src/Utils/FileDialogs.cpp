@@ -37,6 +37,34 @@ std::string OpenImageFileDialog(const char* title) {
     return "";
 }
 
+std::string OpenLutFileDialog(const char* title) {
+#ifdef _WIN32
+    char filename[MAX_PATH] = "";
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFilter =
+        "LUT Files\0*.cube;*.3dl;*.spi1d;*.spi3d\0"
+        "Cube LUT\0*.cube\0"
+        "3DL LUT\0*.3dl\0"
+        "SPI1D LUT\0*.spi1d\0"
+        "SPI3D LUT\0*.spi3d\0"
+        "All Files\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = title;
+
+    if (GetOpenFileNameA(&ofn)) {
+        return std::string(filename);
+    }
+#else
+    (void)title;
+#endif
+    return "";
+}
+
 std::string SavePngFileDialog(const char* title, const char* defaultFileName) {
 #ifdef _WIN32
     char filename[MAX_PATH] = "";
@@ -308,58 +336,6 @@ std::string SaveThemePresetFileDialog(const char* title, const char* defaultFile
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     ofn.lpstrTitle = title;
     ofn.lpstrDefExt = "json";
-
-    if (GetSaveFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-#else
-    (void)title;
-    (void)defaultFileName;
-#endif
-    return "";
-}
-
-std::string OpenNoteFileDialog(const char* title) {
-#ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = nullptr;
-    ofn.lpstrFilter = "Stack Notes Document\0*.note;*.json\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = title;
-
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-#else
-    (void)title;
-#endif
-    return "";
-}
-
-std::string SaveNoteFileDialog(const char* title, const char* defaultFileName) {
-#ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    if (defaultFileName && defaultFileName[0]) {
-        strncpy_s(filename, defaultFileName, _TRUNCATE);
-    } else {
-        strncpy_s(filename, "notes.note", _TRUNCATE);
-    }
-
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = nullptr;
-    ofn.lpstrFilter = "Stack Notes Document\0*.note\0JSON File\0*.json\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = title;
-    ofn.lpstrDefExt = "note";
 
     if (GetSaveFileNameA(&ofn)) {
         return std::string(filename);

@@ -1,0 +1,17 @@
+#pragma once
+
+namespace AppVersion {
+
+inline constexpr int kMajor = @STACK_VERSION_MAJOR@;
+inline constexpr int kMinor = @STACK_VERSION_MINOR@;
+inline constexpr int kPatch = @STACK_VERSION_PATCH@;
+inline constexpr const char* kVersionString = "@STACK_VERSION@";
+inline constexpr const char* kVersionTag = "@STACK_VERSION_TAG@";
+inline constexpr const char* kPublisher = "@STACK_PUBLISHER@";
+inline constexpr const char* kGitHubOwner = "CharmsMods";
+inline constexpr const char* kGitHubRepo = "Stack";
+inline constexpr const char* kReleaseApiUrl = "https://api.github.com/repos/CharmsMods/Stack/releases/latest";
+inline constexpr const char* kReleasesPageUrl = "https://github.com/CharmsMods/Stack/releases";
+inline constexpr const char* kWebsiteDownloadPageUrl = "https://charmsmods.github.io/Stack/website/index.html";
+
+} // namespace AppVersion

@@ -1,12 +1,15 @@
 #pragma once
 
+#include "Color/LutData.h"
 #include "Editor/LayerRegistry.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
 #include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -42,10 +45,12 @@ enum class NodeKind {
     Image,
     RawSource,
     RawNeuralDenoise,
+    RawDecode,
     RawDevelop,
     RawDetailAutoMask,
     RawDetailFusion,
     HdrMerge,
+    Lut,
     Layer,
     Output,
     Composite,
@@ -185,13 +190,22 @@ struct ImagePayload {
     int height = 0;
     int channels = 4;
     int originalChannels = 4;
+    mutable std::shared_ptr<const std::vector<unsigned char>> sharedPixels;
+    mutable std::size_t pixelsFingerprint = 0;
 };
+
+inline void InvalidateImagePayloadRuntime(ImagePayload& payload) {
+    payload.sharedPixels.reset();
+    payload.pixelsFingerprint = 0;
+}
 
 struct RawSourcePayload {
     std::string label;
     std::string sourcePath;
     Raw::RawMetadata metadata;
 };
+
+using LutPayload = ColorLut::LutPayload;
 
 enum class RawDevelopUiMode {
     Auto = 0,
@@ -398,6 +412,10 @@ struct RawDevelopPayload {
     RawDevelopUiMode uiMode = RawDevelopUiMode::Auto;
 };
 
+struct RawDecodePayload {
+    Raw::RawDevelopSettings settings;
+};
+
 struct RawNeuralDenoisePayload {
     NeuralDenoise::NeuralDenoiseSettings settings;
 };
@@ -541,10 +559,12 @@ struct Node {
     ImagePayload image;
     RawSourcePayload rawSource;
     RawNeuralDenoisePayload rawNeuralDenoise;
+    RawDecodePayload rawDecode;
     RawDevelopPayload rawDevelop;
     RawDetailAutoMaskPayload rawDetailAutoMask;
     RawDetailFusionPayload rawDetailFusion;
     HdrMergePayload hdrMerge;
+    LutPayload lut;
     CustomMaskPayload customMask;
 };
 
@@ -589,10 +609,12 @@ public:
     Node* AddImageNode(ImagePayload payload, Vec2 position);
     Node* AddRawSourceNode(RawSourcePayload payload, Vec2 position);
     Node* AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 position);
+    Node* AddRawDecodeNode(RawDecodePayload payload, Vec2 position);
     Node* AddRawDevelopNode(RawDevelopPayload payload, Vec2 position);
     Node* AddRawDetailAutoMaskNode(RawDetailAutoMaskPayload payload, Vec2 position);
     Node* AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 position);
     Node* AddHdrMergeNode(HdrMergePayload payload, Vec2 position);
+    Node* AddLutNode(LutPayload payload, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
     Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
     Node* AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position);

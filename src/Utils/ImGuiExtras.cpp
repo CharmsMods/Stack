@@ -1,9 +1,15 @@
 #include "ImGuiExtras.h"
 #include <imgui_internal.h>
+#include <array>
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <unordered_map>
 
 namespace ImGuiExtras {
 
@@ -14,6 +20,39 @@ float g_RoutedMouseWheel = 0.0f;
 bool g_SliderWheelModifierActive = false;
 int g_GraphNodeControlScopeDepth = 0;
 GraphNodeControlScopeConfig g_GraphNodeControlScopeConfig;
+
+enum class GraphSliderValueKind {
+    Float,
+    Int
+};
+
+enum class GraphSliderInteractionMode {
+    Slider,
+    TextInput
+};
+
+struct GraphSliderScrubState {
+    bool active = false;
+    ImVec2 anchorScreenPos = ImVec2(0.0f, 0.0f);
+    ImVec2 restoreScreenPos = ImVec2(0.0f, 0.0f);
+    float dragStartFloat = 0.0f;
+    int dragStartInt = 0;
+};
+
+struct GraphSliderEditState {
+    GraphSliderInteractionMode mode = GraphSliderInteractionMode::Slider;
+    GraphSliderValueKind kind = GraphSliderValueKind::Float;
+    std::array<char, 96> buffer {};
+    bool focusRequested = false;
+    int lastTouchedFrame = 0;
+    float lastValidFloat = 0.0f;
+    int lastValidInt = 0;
+    GraphSliderScrubState scrub;
+};
+
+std::unordered_map<ImGuiID, GraphSliderEditState> g_GraphSliderEditStates;
+CursorCaptureRequest g_PendingCursorCaptureRequest;
+bool g_HasPendingCursorCaptureRequest = false;
 
 struct NodeControlLayout {
     float startX = 0.0f;
@@ -33,6 +72,116 @@ float GraphNodeControlScale() {
     return g_GraphNodeControlScopeDepth > 0
         ? std::max(0.01f, g_GraphNodeControlScopeConfig.scale)
         : 1.0f;
+}
+
+bool GraphNodeSliderTextEntryEnabled() {
+    return g_GraphNodeControlScopeDepth > 0 && g_GraphNodeControlScopeConfig.allowSliderTextEntry;
+}
+
+bool GraphNodeSliderUsesScrubHandles() {
+    return g_GraphNodeControlScopeDepth > 0 && g_GraphNodeControlScopeConfig.useScrubHandles;
+}
+
+GraphSliderRangePolicy CurrentGraphSliderRangePolicy() {
+    return g_GraphNodeControlScopeDepth > 0
+        ? g_GraphNodeControlScopeConfig.rangePolicy
+        : GraphSliderRangePolicy::Bounded;
+}
+
+float GraphNodeSliderScrubSensitivity() {
+    return g_GraphNodeControlScopeDepth > 0
+        ? std::max(0.0001f, g_GraphNodeControlScopeConfig.scrubSensitivity)
+        : 1.0f;
+}
+
+float GraphSliderInputWidth(const NodeControlLayout& layout) {
+    if (layout.stacked) {
+        return layout.widgetWidth;
+    }
+    return layout.widgetWidth + layout.spacing + layout.valueWidth;
+}
+
+void FormatSliderInputBuffer(GraphSliderEditState& state, float value) {
+    std::snprintf(state.buffer.data(), state.buffer.size(), "%.9g", value);
+}
+
+void FormatSliderInputBuffer(GraphSliderEditState& state, int value) {
+    std::snprintf(state.buffer.data(), state.buffer.size(), "%d", value);
+}
+
+GraphSliderEditState& TouchGraphSliderState(ImGuiID id, GraphSliderValueKind kind) {
+    GraphSliderEditState& state = g_GraphSliderEditStates[id];
+    state.lastTouchedFrame = ImGui::GetFrameCount();
+    if (state.kind != kind) {
+        state = GraphSliderEditState{};
+        state.kind = kind;
+        state.lastTouchedFrame = ImGui::GetFrameCount();
+    }
+    return state;
+}
+
+void PruneGraphSliderStates() {
+    const int frame = ImGui::GetFrameCount();
+    for (auto it = g_GraphSliderEditStates.begin(); it != g_GraphSliderEditStates.end(); ) {
+        if (frame - it->second.lastTouchedFrame > 1200) {
+            it = g_GraphSliderEditStates.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool ParseFiniteFloat(const char* text, float& outValue) {
+    if (!text) {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const float parsed = std::strtof(text, &end);
+    if (end == text) {
+        return false;
+    }
+    while (end && *end != '\0' && std::isspace(static_cast<unsigned char>(*end))) {
+        ++end;
+    }
+    if (errno == ERANGE || (end && *end != '\0') || !std::isfinite(parsed)) {
+        return false;
+    }
+    outValue = parsed;
+    return true;
+}
+
+bool ParseInt(const char* text, int& outValue) {
+    if (!text) {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long long parsed = std::strtoll(text, &end, 10);
+    if (end == text) {
+        return false;
+    }
+    while (end && *end != '\0' && std::isspace(static_cast<unsigned char>(*end))) {
+        ++end;
+    }
+    if (errno == ERANGE || (end && *end != '\0')) {
+        return false;
+    }
+    if (parsed < static_cast<long long>(std::numeric_limits<int>::min()) ||
+        parsed > static_cast<long long>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    outValue = static_cast<int>(parsed);
+    return true;
+}
+
+template <typename TValue>
+bool AssignIfChanged(TValue* value, TValue nextValue) {
+    if (!value || *value == nextValue) {
+        return false;
+    }
+    *value = nextValue;
+    return true;
 }
 
 NodeControlLayout BuildNodeControlLayout(float controlWidth, bool includeValueLane) {
@@ -91,16 +240,18 @@ void RenderNodeControlLabel(const char* label, const NodeControlLayout& layout) 
     ImGui::PopClipRect();
 }
 
-void CaptureNodeControlItem(bool popupOpen = false) {
+void CaptureNodeControlItem(bool popupOpen = false, bool rightClickConsumed = false) {
     g_NodeControlState.lastHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     g_NodeControlState.lastActive = ImGui::IsItemActive();
     g_NodeControlState.lastEdited = ImGui::IsItemEdited();
     g_NodeControlState.lastPopupOpen = popupOpen;
+    g_NodeControlState.lastRightClickConsumed = rightClickConsumed;
     g_NodeControlState.hovered |= g_NodeControlState.lastHovered;
     g_NodeControlState.active |= g_NodeControlState.lastActive;
     g_NodeControlState.edited |= g_NodeControlState.lastEdited;
     g_NodeControlState.popupOpen |= popupOpen;
-    if (g_NodeControlState.lastHovered || g_NodeControlState.lastActive || g_NodeControlState.lastEdited || popupOpen) {
+    g_NodeControlState.rightClickConsumed |= rightClickConsumed;
+    if (g_NodeControlState.lastHovered || g_NodeControlState.lastActive || g_NodeControlState.lastEdited || popupOpen || rightClickConsumed) {
         g_NodeControlState.id = ImGui::GetItemID();
     }
 }
@@ -120,15 +271,17 @@ void DrawGraphNodeSliderVisual(
     float normalizedValue,
     bool hovered,
     bool active) {
+    (void)normalizedValue;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const ImGuiStyle& style = ImGui::GetStyle();
     const float graphScale = GraphNodeControlScale();
     const float textHeight = ImGui::GetTextLineHeight();
     const ImU32 textColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
     const ImU32 valueColor = ImGui::GetColorU32(ImGuiCol_Text);
-    const ImU32 trackColor = ImGui::GetColorU32(active ? ImGuiCol_FrameBgActive : (hovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg));
-    const ImU32 grabColor = ImGui::GetColorU32(active ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab);
-    const ImU32 fillColor = ImGui::GetColorU32(ImGuiCol_CheckMark);
+    const ImU32 chipColor = ImGui::GetColorU32(active ? ImGuiCol_FrameBgActive : (hovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg));
+    const ImU32 chipBorder = ImGui::GetColorU32(active ? ImGuiCol_SliderGrabActive : ImGuiCol_Border);
+    const ImU32 gripColor = ImGui::GetColorU32(active ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab);
+    const ImU32 glowColor = ImGui::GetColorU32(ImGuiCol_CheckMark);
 
     const ImVec2 labelMin = layout.screenPos;
     const ImVec2 valueSize = ImGui::CalcTextSize(valueText ? valueText : "");
@@ -149,26 +302,55 @@ void DrawGraphNodeSliderVisual(
     drawList->PopClipRect();
 
     const float centerY = (trackRect.Min.y + trackRect.Max.y) * 0.5f;
-    const float trackHeight = std::clamp(
-        trackRect.GetHeight() * 0.28f,
-        std::max(0.35f, 3.0f * graphScale),
-        std::max(0.50f, 6.0f * graphScale));
-    const ImVec2 barMin(trackRect.Min.x, centerY - trackHeight * 0.5f);
-    const ImVec2 barMax(trackRect.Max.x, centerY + trackHeight * 0.5f);
-    const float rounding = trackHeight * 0.5f;
-    drawList->AddRectFilled(barMin, barMax, trackColor, rounding);
-    const float fillX = barMin.x + (barMax.x - barMin.x) * normalizedValue;
-    if (fillX > barMin.x + 0.5f) {
-        drawList->AddRectFilled(barMin, ImVec2(fillX, barMax.y), fillColor, rounding);
+    const float chipHeight = std::clamp(
+        trackRect.GetHeight() * 0.46f,
+        std::max(0.40f, 8.0f * graphScale),
+        std::max(0.70f, 14.0f * graphScale));
+    const float chipWidth = std::clamp(
+        trackRect.GetWidth() * 0.18f,
+        std::max(0.90f, 18.0f * graphScale),
+        std::max(1.10f, 34.0f * graphScale));
+    const float chipRounding = chipHeight * 0.5f;
+    const float chipCenterX = trackRect.Min.x + trackRect.GetWidth() * 0.5f;
+    const ImVec2 chipMin(chipCenterX - chipWidth * 0.5f, centerY - chipHeight * 0.5f);
+    const ImVec2 chipMax(chipCenterX + chipWidth * 0.5f, centerY + chipHeight * 0.5f);
+
+    if (active) {
+        const ImVec2 glowExpand(std::max(1.0f, 4.0f * graphScale), std::max(1.0f, 3.0f * graphScale));
+        const ImVec4 glow = ImGui::ColorConvertU32ToFloat4(glowColor);
+        drawList->AddRectFilled(
+            ImVec2(chipMin.x - glowExpand.x, chipMin.y - glowExpand.y),
+            ImVec2(chipMax.x + glowExpand.x, chipMax.y + glowExpand.y),
+            ImGui::GetColorU32(ImVec4(glow.x, glow.y, glow.z, 0.18f)),
+            chipRounding + glowExpand.y);
     }
-    const float knobRadius = std::clamp(
-        trackRect.GetHeight() * (active ? 0.30f : 0.25f),
-        std::max(0.45f, 4.0f * graphScale),
-        std::max(0.60f, 7.0f * graphScale));
-    drawList->AddCircleFilled(ImVec2(fillX, centerY), knobRadius, grabColor, 18);
+
+    drawList->AddRectFilled(chipMin, chipMax, chipColor, chipRounding);
+    drawList->AddRect(chipMin, chipMax, chipBorder, chipRounding, 0, std::max(1.0f, graphScale));
+
+    const float gripSpacing = std::max(1.0f, 4.0f * graphScale);
+    const float gripHalfHeight = std::max(1.0f, chipHeight * 0.24f);
+    const float gripHalfWidth = std::max(1.0f, 1.0f * graphScale);
+    for (int index = -1; index <= 1; ++index) {
+        const float x = chipCenterX + static_cast<float>(index) * gripSpacing;
+        drawList->AddRectFilled(
+            ImVec2(x - gripHalfWidth, centerY - gripHalfHeight),
+            ImVec2(x + gripHalfWidth, centerY + gripHalfHeight),
+            gripColor,
+            gripHalfWidth);
+    }
 }
 
-bool ApplyFloatSliderWheel(float* v, float vMin, float vMax, bool sliderHovered, bool sliderActive, ImGuiWindow* currentWindow, float scrollYBefore, float scrollXBefore) {
+bool ApplyFloatSliderWheel(
+    float* v,
+    float vMin,
+    float vMax,
+    GraphSliderRangePolicy rangePolicy,
+    bool sliderHovered,
+    bool sliderActive,
+    ImGuiWindow* currentWindow,
+    float scrollYBefore,
+    float scrollXBefore) {
     const float wheelDelta = GetSliderWheelDelta();
     if (!sliderHovered || sliderActive || ImGui::GetIO().WantTextInput || wheelDelta == 0.0f) {
         return false;
@@ -180,7 +362,10 @@ bool ApplyFloatSliderWheel(float* v, float vMin, float vMax, bool sliderHovered,
     } else if (ImGui::GetIO().KeyCtrl) {
         step *= 10.0f;
     }
-    const float next = std::clamp(*v + (wheelDelta * step), std::min(vMin, vMax), std::max(vMin, vMax));
+    float next = *v + (wheelDelta * step);
+    if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+        next = std::clamp(next, std::min(vMin, vMax), std::max(vMin, vMax));
+    }
     if (currentWindow) {
         currentWindow->Scroll.y = scrollYBefore;
         currentWindow->Scroll.x = scrollXBefore;
@@ -192,7 +377,16 @@ bool ApplyFloatSliderWheel(float* v, float vMin, float vMax, bool sliderHovered,
     return true;
 }
 
-bool ApplyIntSliderWheel(int* v, int vMin, int vMax, bool sliderHovered, bool sliderActive, ImGuiWindow* currentWindow, float scrollYBefore, float scrollXBefore) {
+bool ApplyIntSliderWheel(
+    int* v,
+    int vMin,
+    int vMax,
+    GraphSliderRangePolicy rangePolicy,
+    bool sliderHovered,
+    bool sliderActive,
+    ImGuiWindow* currentWindow,
+    float scrollYBefore,
+    float scrollXBefore) {
     const float wheelDelta = GetSliderWheelDelta();
     if (!sliderHovered || sliderActive || ImGui::GetIO().WantTextInput || wheelDelta == 0.0f) {
         return false;
@@ -204,7 +398,10 @@ bool ApplyIntSliderWheel(int* v, int vMin, int vMax, bool sliderHovered, bool sl
     } else if (ImGui::GetIO().KeyCtrl) {
         step = std::max(1, step * 5);
     }
-    const int next = std::clamp(*v + (wheelDelta > 0.0f ? step : -step), std::min(vMin, vMax), std::max(vMin, vMax));
+    int next = *v + (wheelDelta > 0.0f ? step : -step);
+    if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+        next = std::clamp(next, std::min(vMin, vMax), std::max(vMin, vMax));
+    }
     if (currentWindow) {
         currentWindow->Scroll.y = scrollYBefore;
         currentWindow->Scroll.x = scrollXBefore;
@@ -216,7 +413,51 @@ bool ApplyIntSliderWheel(int* v, int vMin, int vMax, bool sliderHovered, bool sl
     return true;
 }
 
-bool RenderGraphNodeSliderFloat(const char* label, float* v, float v_min, float v_max, const char* format, const NodeControlLayout& layout) {
+bool CommitGraphSliderFloatInput(
+    GraphSliderEditState& state,
+    float* value,
+    float minValue,
+    float maxValue,
+    GraphSliderRangePolicy rangePolicy) {
+    float parsedValue = 0.0f;
+    if (!value) {
+        return false;
+    }
+    if (ParseFiniteFloat(state.buffer.data(), parsedValue)) {
+        if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+            parsedValue = std::clamp(parsedValue, std::min(minValue, maxValue), std::max(minValue, maxValue));
+        }
+        state.lastValidFloat = parsedValue;
+        FormatSliderInputBuffer(state, parsedValue);
+        return AssignIfChanged(value, parsedValue);
+    }
+    FormatSliderInputBuffer(state, state.lastValidFloat);
+    return false;
+}
+
+bool CommitGraphSliderIntInput(
+    GraphSliderEditState& state,
+    int* value,
+    int minValue,
+    int maxValue,
+    GraphSliderRangePolicy rangePolicy) {
+    int parsedValue = 0;
+    if (!value) {
+        return false;
+    }
+    if (ParseInt(state.buffer.data(), parsedValue)) {
+        if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+            parsedValue = std::clamp(parsedValue, std::min(minValue, maxValue), std::max(minValue, maxValue));
+        }
+        state.lastValidInt = parsedValue;
+        FormatSliderInputBuffer(state, parsedValue);
+        return AssignIfChanged(value, parsedValue);
+    }
+    FormatSliderInputBuffer(state, state.lastValidInt);
+    return false;
+}
+
+bool RenderGraphNodeSliderFloatLegacy(const char* label, float* v, float v_min, float v_max, const char* format, const NodeControlLayout& layout) {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float trackY = layout.stacked
         ? layout.screenPos.y + ImGui::GetTextLineHeight() + style.ItemInnerSpacing.y * 0.45f
@@ -241,7 +482,7 @@ bool RenderGraphNodeSliderFloat(const char* label, float* v, float v_min, float 
     ImGui::PopStyleColor(6);
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyFloatSliderWheel(v, v_min, v_max, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
+    changed |= ApplyFloatSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
     char valBuf[64];
     std::snprintf(valBuf, sizeof(valBuf), format ? format : "%.2f", *v);
@@ -249,7 +490,7 @@ bool RenderGraphNodeSliderFloat(const char* label, float* v, float v_min, float 
     return changed;
 }
 
-bool RenderGraphNodeSliderInt(const char* label, int* v, int v_min, int v_max, const char* format, const NodeControlLayout& layout) {
+bool RenderGraphNodeSliderIntLegacy(const char* label, int* v, int v_min, int v_max, const char* format, const NodeControlLayout& layout) {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float trackY = layout.stacked
         ? layout.screenPos.y + ImGui::GetTextLineHeight() + style.ItemInnerSpacing.y * 0.45f
@@ -274,12 +515,273 @@ bool RenderGraphNodeSliderInt(const char* label, int* v, int v_min, int v_max, c
     ImGui::PopStyleColor(6);
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyIntSliderWheel(v, v_min, v_max, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
+    changed |= ApplyIntSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
     char valBuf[64];
     std::snprintf(valBuf, sizeof(valBuf), format ? format : "%d", *v);
     DrawGraphNodeSliderVisual(layout, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()), label, valBuf, NormalizedSliderValue(static_cast<float>(*v), static_cast<float>(v_min), static_cast<float>(v_max)), sliderHovered, sliderActive);
     return changed;
+}
+
+bool RenderGraphNodeSliderFloatTextEditable(const char* label, float* v, float v_min, float v_max, const char* format, const NodeControlLayout& layout) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float trackY = layout.stacked
+        ? layout.screenPos.y + ImGui::GetTextLineHeight() + style.ItemInnerSpacing.y * 0.45f
+        : layout.screenPos.y;
+    const float trackX = layout.stacked
+        ? layout.screenPos.x
+        : layout.screenPos.x + layout.labelWidth + layout.spacing;
+    const GraphSliderRangePolicy rangePolicy = CurrentGraphSliderRangePolicy();
+    ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
+    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
+    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
+    const ImGuiID sliderId = currentWindow ? currentWindow->GetID("##track") : 0;
+    GraphSliderEditState& state = TouchGraphSliderState(sliderId, GraphSliderValueKind::Float);
+    state.lastValidFloat = *v;
+
+    if (state.mode == GraphSliderInteractionMode::TextInput) {
+        if (state.buffer[0] == '\0') {
+            FormatSliderInputBuffer(state, *v);
+        }
+        RenderNodeControlLabel(label, layout);
+        ImGui::SetCursorScreenPos(ImVec2(trackX, trackY));
+        if (state.focusRequested) {
+            ImGui::SetKeyboardFocusHere();
+            state.focusRequested = false;
+        }
+        ImGui::SetNextItemWidth(GraphSliderInputWidth(layout));
+        const bool committedWithEnter = ImGui::InputText(
+            "##track_input",
+            state.buffer.data(),
+            state.buffer.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue |
+                ImGuiInputTextFlags_AutoSelectAll |
+                ImGuiInputTextFlags_CharsScientific);
+        const bool inputHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        const bool inputActive = ImGui::IsItemActive();
+        const bool deactivated = ImGui::IsItemDeactivated();
+        const bool escapePressed = inputActive && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool toggledBack = inputHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+        bool changed = false;
+        if (escapePressed) {
+            FormatSliderInputBuffer(state, state.lastValidFloat);
+            ImGui::ClearActiveID();
+        } else if (committedWithEnter || deactivated || toggledBack) {
+            changed |= CommitGraphSliderFloatInput(state, v, v_min, v_max, rangePolicy);
+        }
+        if (toggledBack) {
+            state.mode = GraphSliderInteractionMode::Slider;
+            state.focusRequested = false;
+            state.scrub.active = false;
+            if (ImGui::GetActiveID() == ImGui::GetItemID()) {
+                ImGui::ClearActiveID();
+            }
+        }
+        CaptureNodeControlItem(false, toggledBack);
+        return changed;
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(trackX, trackY));
+    const ImVec2 widgetSize(layout.widgetWidth, ImGui::GetFrameHeight());
+    ImGui::InvisibleButton("##track", widgetSize);
+    const ImRect itemRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+    const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    const bool sliderActive = ImGui::IsItemActive() || state.scrub.active;
+    const bool justActivated = ImGui::IsItemActivated();
+    bool changed = false;
+    bool rightClickConsumed = false;
+
+    if (sliderHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        state.mode = GraphSliderInteractionMode::TextInput;
+        state.focusRequested = true;
+        state.lastValidFloat = *v;
+        FormatSliderInputBuffer(state, *v);
+        state.scrub.active = false;
+        rightClickConsumed = true;
+    } else {
+        if (justActivated && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            state.scrub.active = true;
+            state.scrub.anchorScreenPos = ImGui::GetIO().MousePos;
+            state.scrub.restoreScreenPos = ImGui::GetIO().MousePos;
+            state.scrub.dragStartFloat = *v;
+        }
+        if (state.scrub.active) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                state.scrub.active = false;
+            } else {
+                const float rectWidth = std::max(1.0f, itemRect.GetWidth());
+                float stepPerPixel = (std::abs(v_max - v_min) / rectWidth) * GraphNodeSliderScrubSensitivity();
+                stepPerPixel = std::max(stepPerPixel, 0.000001f);
+                if (ImGui::GetIO().KeyShift) {
+                    stepPerPixel *= 0.1f;
+                } else if (ImGui::GetIO().KeyCtrl) {
+                    stepPerPixel *= 10.0f;
+                }
+                float nextValue = *v + ((ImGui::GetIO().MousePos.x - state.scrub.anchorScreenPos.x) * stepPerPixel);
+                if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+                    nextValue = std::clamp(nextValue, std::min(v_min, v_max), std::max(v_min, v_max));
+                }
+                changed |= AssignIfChanged(v, nextValue);
+                state.lastValidFloat = *v;
+                SubmitCursorCaptureRequest(CursorCaptureRequest{
+                    CursorCaptureMode::LockedScrub,
+                    state.scrub.anchorScreenPos,
+                    state.scrub.restoreScreenPos
+                });
+            }
+        }
+    }
+
+    changed |= ApplyFloatSliderWheel(v, v_min, v_max, rangePolicy, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
+    if (changed) {
+        state.lastValidFloat = *v;
+    }
+    if (sliderHovered || state.scrub.active) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    CaptureNodeControlItem(false, rightClickConsumed);
+    char valBuf[64];
+    std::snprintf(valBuf, sizeof(valBuf), format ? format : "%.2f", *v);
+    DrawGraphNodeSliderVisual(layout, itemRect, label, valBuf, NormalizedSliderValue(*v, v_min, v_max), sliderHovered, sliderActive);
+    return changed;
+}
+
+bool RenderGraphNodeSliderIntTextEditable(const char* label, int* v, int v_min, int v_max, const char* format, const NodeControlLayout& layout) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float trackY = layout.stacked
+        ? layout.screenPos.y + ImGui::GetTextLineHeight() + style.ItemInnerSpacing.y * 0.45f
+        : layout.screenPos.y;
+    const float trackX = layout.stacked
+        ? layout.screenPos.x
+        : layout.screenPos.x + layout.labelWidth + layout.spacing;
+    const GraphSliderRangePolicy rangePolicy = CurrentGraphSliderRangePolicy();
+    ImGuiWindow* currentWindow = ImGui::GetCurrentWindow();
+    const float scrollYBefore = currentWindow ? currentWindow->Scroll.y : 0.0f;
+    const float scrollXBefore = currentWindow ? currentWindow->Scroll.x : 0.0f;
+    const ImGuiID sliderId = currentWindow ? currentWindow->GetID("##track") : 0;
+    GraphSliderEditState& state = TouchGraphSliderState(sliderId, GraphSliderValueKind::Int);
+    state.lastValidInt = *v;
+
+    if (state.mode == GraphSliderInteractionMode::TextInput) {
+        if (state.buffer[0] == '\0') {
+            FormatSliderInputBuffer(state, *v);
+        }
+        RenderNodeControlLabel(label, layout);
+        ImGui::SetCursorScreenPos(ImVec2(trackX, trackY));
+        if (state.focusRequested) {
+            ImGui::SetKeyboardFocusHere();
+            state.focusRequested = false;
+        }
+        ImGui::SetNextItemWidth(GraphSliderInputWidth(layout));
+        const bool committedWithEnter = ImGui::InputText(
+            "##track_input",
+            state.buffer.data(),
+            state.buffer.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue |
+                ImGuiInputTextFlags_AutoSelectAll |
+                ImGuiInputTextFlags_CharsDecimal);
+        const bool inputHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        const bool inputActive = ImGui::IsItemActive();
+        const bool deactivated = ImGui::IsItemDeactivated();
+        const bool escapePressed = inputActive && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool toggledBack = inputHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+        bool changed = false;
+        if (escapePressed) {
+            FormatSliderInputBuffer(state, state.lastValidInt);
+            ImGui::ClearActiveID();
+        } else if (committedWithEnter || deactivated || toggledBack) {
+            changed |= CommitGraphSliderIntInput(state, v, v_min, v_max, rangePolicy);
+        }
+        if (toggledBack) {
+            state.mode = GraphSliderInteractionMode::Slider;
+            state.focusRequested = false;
+            state.scrub.active = false;
+            if (ImGui::GetActiveID() == ImGui::GetItemID()) {
+                ImGui::ClearActiveID();
+            }
+        }
+        CaptureNodeControlItem(false, toggledBack);
+        return changed;
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(trackX, trackY));
+    const ImVec2 widgetSize(layout.widgetWidth, ImGui::GetFrameHeight());
+    ImGui::InvisibleButton("##track", widgetSize);
+    const ImRect itemRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+    const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    const bool sliderActive = ImGui::IsItemActive() || state.scrub.active;
+    const bool justActivated = ImGui::IsItemActivated();
+    bool changed = false;
+    bool rightClickConsumed = false;
+
+    if (sliderHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        state.mode = GraphSliderInteractionMode::TextInput;
+        state.focusRequested = true;
+        state.lastValidInt = *v;
+        FormatSliderInputBuffer(state, *v);
+        state.scrub.active = false;
+        rightClickConsumed = true;
+    } else {
+        if (justActivated && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            state.scrub.active = true;
+            state.scrub.anchorScreenPos = ImGui::GetIO().MousePos;
+            state.scrub.restoreScreenPos = ImGui::GetIO().MousePos;
+            state.scrub.dragStartInt = *v;
+        }
+        if (state.scrub.active) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                state.scrub.active = false;
+            } else {
+                const float rectWidth = std::max(1.0f, itemRect.GetWidth());
+                float stepPerPixel = (static_cast<float>(std::abs(v_max - v_min)) / rectWidth) * GraphNodeSliderScrubSensitivity();
+                stepPerPixel = std::max(stepPerPixel, 1.0f / rectWidth);
+                if (ImGui::GetIO().KeyShift) {
+                    stepPerPixel *= 0.1f;
+                } else if (ImGui::GetIO().KeyCtrl) {
+                    stepPerPixel *= 10.0f;
+                }
+                float nextValue = static_cast<float>(*v) + ((ImGui::GetIO().MousePos.x - state.scrub.anchorScreenPos.x) * stepPerPixel);
+                int quantizedValue = static_cast<int>(std::lround(nextValue));
+                if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+                    quantizedValue = std::clamp(quantizedValue, std::min(v_min, v_max), std::max(v_min, v_max));
+                }
+                changed |= AssignIfChanged(v, quantizedValue);
+                state.lastValidInt = *v;
+                SubmitCursorCaptureRequest(CursorCaptureRequest{
+                    CursorCaptureMode::LockedScrub,
+                    state.scrub.anchorScreenPos,
+                    state.scrub.restoreScreenPos
+                });
+            }
+        }
+    }
+
+    changed |= ApplyIntSliderWheel(v, v_min, v_max, rangePolicy, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
+    if (changed) {
+        state.lastValidInt = *v;
+    }
+    if (sliderHovered || state.scrub.active) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    CaptureNodeControlItem(false, rightClickConsumed);
+    char valBuf[64];
+    std::snprintf(valBuf, sizeof(valBuf), format ? format : "%d", *v);
+    DrawGraphNodeSliderVisual(layout, itemRect, label, valBuf, NormalizedSliderValue(static_cast<float>(*v), static_cast<float>(v_min), static_cast<float>(v_max)), sliderHovered, sliderActive);
+    return changed;
+}
+
+bool RenderGraphNodeSliderFloat(const char* label, float* v, float v_min, float v_max, const char* format, const NodeControlLayout& layout) {
+    if (!GraphNodeSliderUsesScrubHandles() && !GraphNodeSliderTextEntryEnabled()) {
+        return RenderGraphNodeSliderFloatLegacy(label, v, v_min, v_max, format, layout);
+    }
+    return RenderGraphNodeSliderFloatTextEditable(label, v, v_min, v_max, format, layout);
+}
+
+bool RenderGraphNodeSliderInt(const char* label, int* v, int v_min, int v_max, const char* format, const NodeControlLayout& layout) {
+    if (!GraphNodeSliderUsesScrubHandles() && !GraphNodeSliderTextEntryEnabled()) {
+        return RenderGraphNodeSliderIntLegacy(label, v, v_min, v_max, format, layout);
+    }
+    return RenderGraphNodeSliderIntTextEditable(label, v, v_min, v_max, format, layout);
 }
 
 int ResizeStdStringInputCallback(ImGuiInputTextCallbackData* data) {
@@ -321,6 +823,9 @@ float EaseOutCubic(float value) {
 
 void BeginFrameInputRouting() {
     ImGuiIO& io = ImGui::GetIO();
+    PruneGraphSliderStates();
+    g_HasPendingCursorCaptureRequest = false;
+    g_PendingCursorCaptureRequest = {};
     g_SliderWheelModifierActive = ImGui::IsKeyDown(ImGuiKey_W) && !io.WantTextInput;
     g_RoutedMouseWheel = io.MouseWheel;
     if (g_SliderWheelModifierActive) {
@@ -509,6 +1014,23 @@ bool IsGraphNodeControlScopeActive() {
     return g_GraphNodeControlScopeDepth > 0;
 }
 
+void SubmitCursorCaptureRequest(const CursorCaptureRequest& request) {
+    g_PendingCursorCaptureRequest = request;
+    g_HasPendingCursorCaptureRequest = request.mode != CursorCaptureMode::None;
+}
+
+bool ConsumeCursorCaptureRequest(CursorCaptureRequest* outRequest) {
+    if (!g_HasPendingCursorCaptureRequest) {
+        return false;
+    }
+    if (outRequest) {
+        *outRequest = g_PendingCursorCaptureRequest;
+    }
+    g_HasPendingCursorCaptureRequest = false;
+    g_PendingCursorCaptureRequest = {};
+    return true;
+}
+
 void RichSectionLabel(const char* label, float spacingAfter) {
     ImGui::TextDisabled("%s", label);
     if (spacingAfter > 0.0f) {
@@ -577,7 +1099,7 @@ bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, f
     bool changed = ImGui::SliderFloat("##track", v, v_min, v_max, "");
     const bool sliderHovered = ImGui::IsItemHovered();
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyFloatSliderWheel(v, v_min, v_max, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
+    changed |= ApplyFloatSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
 
     ImGui::SameLine(0.0f, 0.0f);
@@ -610,7 +1132,7 @@ bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_m
     bool changed = ImGui::SliderInt("##track", v, v_min, v_max, "");
     const bool sliderHovered = ImGui::IsItemHovered();
     const bool sliderActive = ImGui::IsItemActive();
-    changed |= ApplyIntSliderWheel(v, v_min, v_max, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
+    changed |= ApplyIntSliderWheel(v, v_min, v_max, GraphSliderRangePolicy::Bounded, sliderHovered, sliderActive, currentWindow, scrollYBefore, scrollXBefore);
     CaptureNodeControlItem();
 
     ImGui::SameLine(0.0f, 0.0f);
@@ -626,7 +1148,9 @@ bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_m
 
 bool NodeCheckbox(const char* label, const char* id, bool* v, float controlWidth) {
     ImGui::PushID(id);
-    const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, true);
+    const NodeControlLayout layout = BuildNodeControlLayout(
+        controlWidth,
+        IsGraphNodeControlScopeActive() ? false : true);
 
     RenderNodeControlLabel(label, layout);
     ImGui::SameLine(0.0f, 0.0f);
@@ -634,10 +1158,12 @@ bool NodeCheckbox(const char* label, const char* id, bool* v, float controlWidth
     const bool changed = ImGui::Checkbox("##check", v);
     CaptureNodeControlItem();
 
-    ImGui::SameLine(0.0f, 0.0f);
-    ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing + layout.widgetWidth + layout.spacing);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(*v ? "On" : "Off");
+    if (!IsGraphNodeControlScopeActive()) {
+        ImGui::SameLine(0.0f, 0.0f);
+        ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing + layout.widgetWidth + layout.spacing);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(*v ? "On" : "Off");
+    }
     
     ImGui::PopID();
     return changed;
