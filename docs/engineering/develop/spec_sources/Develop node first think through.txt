@@ -1,0 +1,1991 @@
+STACK DEVELOP NODE - AUTHORITATIVE RAW DEVELOPMENT PLAN
+Quality-first automatic and manual RAW development specification
+Date: 2026-06-09
+Document version: 1.0
+Source context: DEVELOP_NODE_CONTEXT.txt uploaded in the current conversation
+
+======================================================================
+0. PURPOSE
+======================================================================
+
+The Develop node exists to take raw capture data, turn it into usable image data, and then make that image look realistic automatically while still allowing full manual control. It is the RAW-to-image boundary in Stack, but it is not merely a decoder. In the intended design, it is a complete RAW development system made of three connected responsibilities:
+
+1. RAW conversion: convert supported RAW data into high-quality scene-linear RGB.
+2. Scene preparation: perform global and local exposure shaping while preserving the integrity of the data.
+3. Finish shaping: create a realistic, controllable result that remains suitable for downstream View Transform / Output nodes.
+
+Quality is the highest priority. The implementation must not blindly copy the behavior of Lightroom, darktable, RawTherapee, dcraw, phone JPEG engines, online advice, or any other single external convention. Those systems may contain useful ideas, but Stack should make decisions from first principles: what data exists, what math is valid for that data, what artifacts are being introduced, and what image state is required by the next stage.
+
+The Develop node should therefore be treated as a self-analyzing, self-solving RAW pipeline. It should understand the image at multiple stages, make a principled first solve, render, measure the result, and revise only the stages that need revision. The automatic mode should converge toward a high-quality result without becoming timid. Safeguards should be local, confidence-driven, and mathematically explicit, not broad global caps that make every image weak.
+
+Current supported source families named for this work:
+
+- Motion Cam Pro DNG files.
+- Sony ARW files.
+
+The broader architecture should remain format-extensible. DNG and ARW should be normalized into a common internal RawImageData representation, with source-specific metadata adapters feeding the same downstream RAW development stages.
+
+======================================================================
+1. CURRENT STATE SUMMARY TO RESPECT
+======================================================================
+
+The current Develop node is implemented as NodeKind::RawDevelop. It accepts RAW-domain input and produces image-domain output. The normal graph is:
+
+RAW Source -> Develop -> View Transform -> Output
+
+The current render implementation has three important output states:
+
+- RAW base: internal '__rawDevelopBase' texture created by RawGpuPipeline::Render.
+- Pre-Finish: hidden output after RAW base and scene prep, before integrated finish tone.
+- Final Image: visible image output after integrated ToneCurve and optional Finish Mask blend.
+
+The current node already contains these major systems:
+
+- RAW conversion through RawGpuPipeline.
+- Scene Prep / Pre-Local Exposure using RawDetailFusionSettings.
+- Integrated ToneCurve finish stored inside the Develop payload as JSON.
+- Auto mode that writes RAW exposure, scene prep, and finish tone state.
+- Manual mode that exposes the auto-authored settings for direct editing.
+
+Important current caveats that must be addressed or explicitly designed around:
+
+- Demosaic is effectively bilinear only in the current public path.
+- Develop output is described as unclamped scene-linear float RGB; downstream View Transform remains necessary.
+- Scene prep does not recover clipped detail. It only reshapes existing scene-linear data.
+- Integrated scene prep and integrated tone are currently forced on in normal usage.
+- Finish Mask affects only the integrated finish tone, not RAW conversion or scene prep.
+- Linear RGB RAW/DNG skips many mosaic-specific controls.
+- Current camera transform fallback is approximate and should not be treated as final color management.
+- The UI metadata lookup does not fully walk through RawNeuralDenoise even though render helpers can.
+- Lateral CA UI allows +/-8 px but serialization clamps to +/-3 px.
+- Debug views bypass scene prep and integrated tone.
+
+This document defines the target behavior. It should be used as an implementation plan, not as a claim that the current node already does all of these things.
+
+======================================================================
+2. NON-NEGOTIABLE DESIGN PRINCIPLES
+======================================================================
+
+2.1 Preserve data until a stage has a real reason to modify it
+
+RAW data contains linear sensor measurements, not display pixels. The pipeline should preserve as much physical information as possible and avoid early clipping, display conversion, destructive contrast, or arbitrary saturation limiting. Numerical clamping is allowed only to prevent invalid math or shader instability, and such clamping must not be confused with photographic clipping.
+
+2.2 Separate physical correction from creative shaping
+
+The following are different classes of work and must remain conceptually separate:
+
+- Sensor normalization: black level, white level, gain map, defect correction.
+- RAW reconstruction: demosaic, highlight reconstruction, chromatic aberration correction, false-color cleanup.
+- Camera color interpretation: white balance, camera-to-working transform, profile/gamut handling.
+- Exposure placement: global exposure and local pre-exposure.
+- Realistic look shaping: tonal curve, shoulder/toe, contrast, color density.
+- Display/output conversion: downstream View Transform / Output.
+
+Some stages may be fused for performance, but the implementation must preserve logical stage boundaries for caching, debugging, auto analysis, manual controls, and future quality upgrades.
+
+2.3 Global exposure comes before local exposure
+
+RAW files can contain huge dynamic range. A local adjustment system cannot solve the entire image correctly if the global exposure is badly placed. Automatic mode must first decide where the whole image should sit, then use scene prep to redistribute local regions. Local exposure should not be used as a substitute for a global baseline exposure solve.
+
+2.4 Strong adjustments are allowed when the data supports them
+
+Safeguards should not simply reduce every adjustment. They should measure confidence per region and per operation. A +2 EV shadow lift may be valid in clean, well-sampled shadows and terrible in read-noise-limited shadows. A strong highlight shoulder may be valid in bright clouds and destructive on clipped neon. The auto system should apply strong math where confidence is high and taper only where the actual data says to taper.
+
+2.5 The pipeline must know what cannot be done
+
+Develop can plausibly reconstruct or reshape, but it cannot create true missing sensor detail. If all channels are clipped in a region, the pipeline can only create a plausible rolloff or texture-preserving blend from nearby data; it cannot recover actual detail. If shadow data has too little signal-to-noise ratio, heavy lift will reveal noise. These are not failures of taste; they are limits of the data.
+
+2.6 Manual mode must expose the actual authored result
+
+Manual mode should not switch to a different algorithm. It should freeze the current auto-authored values and expose them directly. A user must be able to see exactly what auto chose, adjust those values, and know which edits trigger which re-render stages.
+
+======================================================================
+3. CANONICAL IMAGE STATES
+======================================================================
+
+The implementation should name and cache these states explicitly. Even if some are fused in the GPU path, the render graph and auto system should reason about them separately.
+
+STATE A - Source RAW package
+
+Input file and metadata:
+
+- Source path and file identity.
+- Format family: Motion Cam Pro DNG, Sony ARW, or future adapter.
+- Pixel layout: mosaiced Bayer or linear RGB.
+- Visible crop / active area.
+- Bit depth and storage type.
+- CFA pattern when mosaiced.
+- Black level: scalar, per-channel, per-row/column if available.
+- White/saturation level: scalar or channel-specific if available.
+- Camera white balance / as-shot neutral.
+- Daylight/reference white balance.
+- DNG BaselineExposure if present.
+- Camera matrices, ForwardMatrix, ColorMatrix, calibration illuminants, analog balance.
+- LibRaw rgb_cam / camera-to-sRGB fallback when needed.
+- DNG gain maps or lens shading maps if present.
+- EXIF orientation and manual orientation overrides.
+- Lens metadata if available.
+
+STATE B - Normalized sensor mosaic / normalized linear source
+
+Mosaiced RAW values after black subtraction and normalization, still in sensor/CFA layout:
+
+For a raw sample r at channel c:
+
+    normalized = (r - black_c) / max(epsilon, white_c - black_c)
+
+The normalized value is linear with respect to sensor exposure. It should carry side masks:
+
+- clipped_c = r >= white_c - clip_margin_c
+- near_black_c = r <= black_c + black_margin_c
+- invalid / missing / hot pixel masks
+- gain-map confidence
+- channel identity / CFA coordinate
+
+Do not treat normalized > 1.0 as display white. It may indicate sensor saturation, metadata mismatch, gain-map expansion, or numerical headroom. Preserve flags so later stages can distinguish actual clipped data from merely bright data.
+
+STATE C - Corrected / cleaned sensor mosaic
+
+Normalized mosaic after raw-domain corrections:
+
+- DNG gain map / lens shading correction.
+- Hot pixel suppression.
+- Optional same-CFA mosaic denoise.
+- Optional row/column correction if implemented.
+- Defect mask propagation.
+
+This state is still linear and sensor-domain.
+
+STATE D - Demosaiced camera RGB
+
+Camera-space RGB after demosaic. This state is not yet white-balanced into a final viewing color relationship and not yet transformed to the working RGB space. It should retain:
+
+- clipping confidence by channel.
+- reconstruction confidence.
+- local noise estimates.
+- demosaic confidence / edge orientation if available.
+
+STATE E - Reconstructed camera RGB
+
+Camera RGB after RAW-stage highlight reconstruction and RAW cleanup:
+
+- Highlight reconstruction uses clipped-channel masks from the sensor stage.
+- False-color suppression and defringe cleanup are applied where confidence supports them.
+- Lateral chromatic aberration correction may be applied before or after demosaic depending on implementation, but should be logically part of RAW reconstruction, not finish tone.
+
+STATE F - White-balanced camera RGB
+
+Camera RGB multiplied by the chosen white-balance multipliers:
+
+    rgb_wb = rgb_camera * wb_rgb
+
+White balance multipliers should normally be normalized relative to green = 1. Manual white balance must allow wide ranges but should warn or mark low-confidence results when multipliers become extreme.
+
+STATE G - Scene-linear working RGB
+
+White-balanced camera RGB transformed into Stack's working RGB space:
+
+    rgb_working = M_camera_to_working * rgb_wb
+
+This state is still scene-linear. Negative components should not be aggressively clipped; they may be meaningful after matrix transforms. Gamut handling should be a separate controlled stage.
+
+STATE H - Globally exposed scene-linear base
+
+Working RGB after a single global exposure placement:
+
+    rgb_base = rgb_working * 2^EV_global
+
+This is the proper input for scene prep. It is the point where the auto system should decide, “Where should the whole RAW file sit before local work starts?”
+
+STATE I - Pre-Finish / scene-prepped image
+
+Scene-linear image after local exposure shaping:
+
+    rgb_prefinish = rgb_base * 2^EV_local(x, y)
+
+The local EV map must be smooth, confidence-limited, and halo-guarded. The output remains scene-linear float RGB. Scene prep is not a display transform and not true clipped-detail recovery.
+
+STATE J - Finished Develop image
+
+The integrated finish stage shapes the pre-finish image into a realistic distribution while remaining suitable for downstream View Transform. It may apply a tone curve, contrast, shoulder/toe shaping, color density, and scoped finish masking.
+
+If a Finish Mask is connected, the blend is:
+
+    rgb_final = mix(rgb_prefinish, rgb_toned, mask)
+
+The mask affects only the finish tone. It must not retroactively mask RAW conversion or scene prep.
+
+======================================================================
+4. TARGET ORDER OF OPERATIONS - AUTOMATIC MODE
+======================================================================
+
+The automatic mode should use the following order from beginning to end.
+
+----------------------------------------------------------------------
+4.1 Input decode and metadata validation
+----------------------------------------------------------------------
+
+Purpose:
+Load the file, normalize metadata, and decide which source adapter path is active.
+
+Operations:
+
+1. Resolve upstream RAW source, walking through RAW-domain nodes such as RawNeuralDenoise when present.
+2. Load RawImageData or reuse embedded/cached data.
+3. Validate pixel layout:
+   - Mosaic Bayer requires a known CFA pattern.
+   - Linear RGB requires a valid linear buffer.
+4. Normalize dimensions, visible crop, active area, orientation metadata, and effective output size.
+5. Resolve black/white levels.
+6. Resolve white balance candidates:
+   - As-shot / camera WB.
+   - Daylight/reference WB.
+   - Neutral.
+   - Manual if user-authored.
+7. Resolve camera transform candidates:
+   - DNG ForwardMatrix / ColorMatrix paths when reliable.
+   - LibRaw rgb_cam / camera-to-sRGB fallback for Sony ARW and under-specified DNG cases.
+8. Load DNG gain maps if present.
+9. Build a source capability record:
+   - supports mosaic denoise?
+   - supports demosaic?
+   - supports raw highlight reconstruction?
+   - supports DNG gain map correction?
+   - supports camera matrices?
+   - color transform confidence?
+
+Auto outputs:
+
+- SourceFormatProfile.
+- MetadataQualityReport.
+- Initial RawDevelopSettings defaults.
+- A list of warnings that affect auto confidence.
+
+Re-render boundary:
+Changing the source path, source file, visible crop, orientation source, pixel layout, black/white metadata, or camera metadata invalidates the entire pipeline.
+
+----------------------------------------------------------------------
+4.2 Sensor normalization
+----------------------------------------------------------------------
+
+Purpose:
+Convert stored sample values into linear sensor measurements with consistent black/white references.
+
+Operations for mosaiced RAW:
+
+1. For every CFA sample:
+
+       raw_norm = (raw_u16 - black_c) / max(epsilon, white_c - black_c)
+
+2. Build clip and near-black masks before any smoothing:
+
+       clip_c = raw_u16 >= white_c - clip_margin_c
+       black_c = raw_u16 <= black_c + black_margin_c
+
+3. Keep a linear value and side masks. Do not destroy clipping information by simply clamping the image to [0, 1].
+4. Apply DNG gain map correction after black subtraction and normalization:
+
+       raw_corrected = raw_norm * gain_map(x, y, c)
+
+5. Clamp only for numerical protection, and store whether clamping occurred.
+
+Operations for linear RGB DNG:
+
+1. Normalize integer buffers to linear float using the correct black/white references if needed.
+2. Preserve linear float buffers as float when already available.
+3. Build highlight / saturation masks from channel values and metadata if possible.
+
+Auto analysis at this stage:
+
+- Raw percentiles by CFA channel.
+- Clipped sample ratio by CFA channel.
+- Near-black ratio by CFA channel.
+- Black-level sanity check.
+- White-level sanity check.
+- Dynamic range estimate:
+
+      DR_est = percentile_log2(high_signal) - percentile_log2(noise_floor)
+
+- Channel imbalance estimate before white balance.
+
+Safeguards:
+
+- If black level appears wrong, auto should avoid aggressive shadow lift and flag low confidence.
+- If white level appears wrong, auto should avoid pretending highlight data is recoverable.
+- If one channel clips much earlier than others, highlight reconstruction should be enabled cautiously, not scene prep.
+
+Re-render boundary:
+Changing black/white overrides, gain-map handling, source crop, or raw normalization settings invalidates this state and everything after it.
+
+----------------------------------------------------------------------
+4.3 Raw-domain defect correction and mosaic denoise
+----------------------------------------------------------------------
+
+Purpose:
+Remove defects before demosaic spreads them into RGB artifacts.
+
+Operations:
+
+1. Hot pixel detection using same-CFA neighborhoods.
+2. Hot pixel correction by weighted median or edge-aware replacement from same-CFA samples.
+3. Optional same-CFA denoise based on a noise model:
+
+       sigma^2(signal) = read_noise^2 + shot_coeff * max(signal, 0)
+
+   If camera-specific noise calibration is unavailable, estimate noise from dark regions and local high-frequency residuals.
+4. Edge-protected filtering:
+
+       weight = spatial_weight * tonal_weight * edge_confidence
+
+5. Preserve sharp edges by reducing smoothing when local gradients are coherent.
+6. Preserve texture by using low strength when local variance looks structured rather than random.
+
+Auto analysis:
+
+- Hot pixel density.
+- Shadow noise estimate.
+- Chromatic noise estimate.
+- Edge confidence.
+- Texture confidence.
+
+Safeguards:
+
+- Never let denoise erase the only real low-light detail.
+- Hot pixel suppression can be strong because it targets isolated defects.
+- Luma/chroma denoise should be conservative unless noise confidence is high.
+
+Re-render boundary:
+Changing mosaic denoise, hot pixel, raw defect, or source normalization settings invalidates the clean mosaic and downstream states. It should not require re-decoding the file.
+
+----------------------------------------------------------------------
+4.4 Demosaic / RAW reconstruction
+----------------------------------------------------------------------
+
+Purpose:
+Convert mosaiced sensor data into camera RGB with maximum detail and minimum artifacts.
+
+Required current behavior:
+The current public path is effectively bilinear. Bilinear is acceptable for fast preview and smoke validation, but it should not be the final quality target.
+
+Target quality behavior:
+
+1. Keep bilinear as a draft/preview method.
+2. Add a final-quality demosaic path. The exact algorithm can be Stack-owned, but it should include:
+   - gradient-directed green reconstruction.
+   - edge-aware red/blue reconstruction.
+   - zipper suppression along high-contrast edges.
+   - false-color detection.
+   - detail preservation in repeated texture.
+   - predictable GPU behavior.
+3. Use the same RawImageData input and produce the same camera RGB state so the rest of the pipeline is unchanged.
+4. Store demosaic confidence / artifact masks where possible.
+
+Lateral chromatic aberration:
+
+- Best quality path: apply calibrated channel warps before or during demosaic when lens/profile information exists.
+- Current-compatible path: sample red and blue offsets after demosaic.
+- Manual controls may remain red/cyan and blue/yellow offsets, but serialization range must match UI range.
+
+Highlight reconstruction:
+
+1. Use clipped-channel masks generated from sensor data.
+2. Detect partial clipping:
+   - one channel clipped.
+   - two channels clipped.
+   - all channels clipped.
+3. Reconstruct only where some useful information remains.
+4. Estimate plausible hue/luminance from local unclipped neighborhoods and lower-exposure channel ratios.
+5. Blend reconstruction by confidence:
+
+       rgb_recon = mix(rgb_original, rgb_estimated, recon_confidence)
+
+6. If all channels are clipped, do not claim recovery. Use graceful rolloff and local continuity only.
+
+Suggested highlight modes:
+
+- Off: no reconstruction, only clipping masks.
+- Neutral Clip: reduce colored clipping by neutralizing clipped pixels.
+- Luminance: preserve luminance structure from unclipped channels.
+- Color Reconstruction: reconstruct hue from neighbor/channel ratios with confidence limits.
+
+Safeguards:
+
+- Reconstruction confidence must fall when all channels are clipped.
+- Reconstruction must not create neon hue shifts or gray plastic highlights.
+- Highlight recovery must happen before global exposure and finish tone make clipped regions visually dominant.
+
+Re-render boundary:
+Changing demosaic method, CA correction, highlight reconstruction, cleanup, or raw denoise invalidates camera RGB and all downstream stages.
+
+----------------------------------------------------------------------
+4.5 White balance
+----------------------------------------------------------------------
+
+Purpose:
+Place camera RGB into a coherent neutral relationship before color transform.
+
+Operations:
+
+1. Choose WB mode:
+   - As Shot: use camera metadata.
+   - Auto: solve from image statistics with confidence.
+   - Neutral: 1 / 1 / 1.
+   - Manual: use user multipliers.
+2. Normalize multipliers to green = 1 when appropriate.
+3. Apply:
+
+       rgb_wb = rgb_camera * wb_rgb
+
+Auto WB solve:
+
+Auto white balance should not be a blind gray-world operation. It should use confidence-weighted candidate regions:
+
+- Exclude clipped pixels.
+- Exclude near-black / low-SNR pixels.
+- Exclude heavily saturated colors.
+- Prefer midtone neutral candidates.
+- Prefer stable regions with low chroma and enough luma.
+- Compare against metadata WB and daylight WB.
+
+Auto WB should output:
+
+- wb_rgb.
+- confidence.
+- reason: metadata, neutral-region solve, daylight fallback, or manual.
+
+Safeguards:
+
+- Low-confidence auto WB should stay close to As Shot.
+- Extreme WB multipliers should reduce shadow-lift confidence because channel amplification raises noise.
+- WB should be re-solvable without re-decoding or re-demosaicing.
+
+Re-render boundary:
+Changing WB invalidates white-balanced RGB and everything after it. It should not invalidate raw normalization, denoise, or demosaic.
+
+----------------------------------------------------------------------
+4.6 Camera-to-working color transform
+----------------------------------------------------------------------
+
+Purpose:
+Convert white-balanced camera RGB into Stack's working RGB space.
+
+Operations:
+
+1. Select matrix/profile based on source confidence:
+   - DNG ForwardMatrix path when well specified.
+   - DNG ColorMatrix inverse path when appropriate.
+   - LibRaw rgb_cam fallback for Sony ARW and under-specified files.
+   - Identity only as a marked fallback.
+2. Apply:
+
+       rgb_working = M_camera_to_working * rgb_wb
+
+3. Preserve negative and >1.0 scene-linear values unless a later gamut stage intentionally compresses them.
+4. Store transform confidence.
+
+Target improvement:
+A future full color-management module should replace approximate camera-to-sRGB fallback with a clear working-space definition, chromatic adaptation, profile handling, and controlled gamut mapping.
+
+Safeguards:
+
+- Do not use matrix fallback silently. Store and display confidence.
+- Do not let finish tone hide severe color-transform failure.
+- Do not clip negative components before tone/gamut handling.
+
+Re-render boundary:
+Changing camera transform settings invalidates working RGB and downstream stages, but not demosaic.
+
+----------------------------------------------------------------------
+4.7 Global exposure solve
+----------------------------------------------------------------------
+
+Purpose:
+Place the entire image into a workable scene-linear range before local scene prep.
+
+This is critical. RAW files may be extremely dark, extremely bright, flat, backlit, or high dynamic range. The automatic mode must decide the global exposure before asking local adjustments to solve the image.
+
+Analysis input:
+Use scene-linear working RGB before global exposure. Compute luminance:
+
+    L = max(epsilon, dot(rgb_working, luminance_weights))
+    logL = log2(L)
+
+Use robust percentiles:
+
+- P01, P05, P10: shadow distribution.
+- P50 or weighted key percentile: image key.
+- P75 / P90: bright mid/high distribution.
+- P95 / P99 / P99.9: highlight distribution.
+- clipped_ratio from raw clip masks, not final RGB only.
+- subject/key region estimate if a subject detector exists later.
+
+Basic global EV solve:
+
+    EV_key = log2(target_key_luma / P_key_luma)
+    EV_high_limit = log2(target_high_luma / P_high_luma)
+    EV_solved = min(EV_key, EV_high_limit + highlight_character_allowance)
+    EV_solved += user_exposure_bias
+
+Where:
+
+- target_key_luma is the desired mid/key placement in scene-linear pre-view-transform terms.
+- target_high_luma is the maximum desired placement for protected highlights before finish tone.
+- highlight_character_allowance is controlled by Highlight Character and Highlight Guard.
+
+Dynamic range handling:
+
+- If image dynamic range is low, global exposure can be closer to key placement and finish tone can add contrast.
+- If image dynamic range is high, global exposure should protect important highlights and let scene prep lift safe local shadows.
+- If image is globally underexposed but highlights are not meaningful, exposure should rise decisively.
+- If image is backlit with small bright highlights, the solver should decide whether those highlights are important using area, saturation, local structure, and clipping confidence.
+
+Auto output:
+
+- EV_global.
+- highlight priority score.
+- shadow recoverability score.
+- exposure confidence.
+- reason code: key placement, highlight limited, shadow limited, metadata baseline, or user bias.
+
+Safeguards:
+
+- Never let a tiny specular highlight force the entire image too dark unless Highlight Guard is high.
+- Never let the midtone target blow meaningful highlight structure.
+- Prefer global exposure for global brightness and local exposure for local imbalance.
+- Use damping and hysteresis between auto passes:
+
+      EV_next = EV_current + damping * clamp(EV_solved - EV_current, -max_step, max_step)
+
+Recommended max_step:
+
+- First solve: up to 4 EV if metadata indicates extreme under/overexposure.
+- Revision solve: 0.25 to 0.75 EV to avoid oscillation.
+
+Re-render boundary:
+In the current implementation, exposureStops is inside RawGpuPipeline::Render, so changing EV invalidates the RAW base texture. Target architecture should split global exposure into a post-color scalar stage so exposure changes invalidate only globally exposed base and downstream stages, not decode/demosaic.
+
+----------------------------------------------------------------------
+4.8 Scene prep local exposure solve
+----------------------------------------------------------------------
+
+Purpose:
+Make the globally exposed scene-linear image locally usable before finish tone. Scene prep should redistribute exposure, not fake missing detail.
+
+Input:
+Globally exposed scene-linear RGB.
+
+Build a low/mid-resolution analysis pyramid:
+
+- Local log-luminance median.
+- Local bright percentile.
+- Local dark percentile.
+- Local contrast.
+- Texture confidence.
+- Edge confidence.
+- Smooth-gradient confidence.
+- Noise/SNR estimate.
+- Raw clipping confidence projected into image space.
+
+Desired local EV:
+
+    EV_desired(x, y) = log2(target_local_luma / local_luma(x, y))
+
+Bound the desired EV:
+
+    EV_bounded = clamp(EV_desired, min_local_EV, max_local_EV)
+
+Apply confidence gates:
+
+    C_data = min(C_noise, C_clip, C_edge, C_gradient, C_texture_policy)
+    EV_local = strength * EV_bounded * C_data
+
+But use asymmetric confidence:
+
+- Positive EV in shadows must be strongly limited by noise/SNR.
+- Negative EV in highlights should be allowed when it protects bright detail.
+- Highlight compression must not gray out speculars or make skies muddy.
+- Shadow lift must not flatten the entire image.
+
+Noise guard example:
+
+    C_noise = smoothstep(SNR_low, SNR_high, SNR_est)
+
+Highlight guard example:
+
+    C_highlight_lift = 1 - smoothstep(H_start, H_end, local_high_percentile)
+
+Edge/halo guard:
+
+1. Solve EV at low/mid resolution.
+2. Smooth with guided/bilateral filtering using luminance as guide.
+3. Reduce map gradients crossing strong image edges unless the edge itself is broad exposure transition.
+4. Apply halo clamp:
+
+       abs(grad(EV_local)) <= halo_limit(edge_strength, radius)
+
+5. Deband/dither the map if quantization appears.
+
+Apply local exposure:
+
+    rgb_prefinish = rgb_base * 2^EV_local(x, y)
+
+Auto output:
+
+- EV map.
+- confidence map.
+- noise-limited map.
+- highlight-limited map.
+- clipping-limited map.
+- gradient-protected map.
+- summary stats: mean EV, min/max EV, percent of image limited by each guard.
+
+Safeguards that are strong but not weak:
+
+- Do not lower global scene prep strength just because one region is unsafe.
+- Instead reduce only unsafe regions in the EV map.
+- Allow strong shadow lift where SNR is good.
+- Allow strong highlight compression where texture exists and clipping is not total.
+- Leave specular highlights alone when they are small, clipped, and not structurally important.
+
+Re-render boundary:
+Changing scene prep amount, shadow lift, highlight compression, noise guard, highlight guard, shadow guard, halo guard, spatial model, smoothing, or auto-safety settings invalidates the scene prep map and pre-finish image. It should not invalidate RAW decode/demosaic/color stages.
+
+----------------------------------------------------------------------
+4.9 Pre-finish analysis
+----------------------------------------------------------------------
+
+Purpose:
+Measure what scene prep produced before final tone. This prevents finish tone from fighting the RAW/global/local stages.
+
+Analyze:
+
+- Luminance distribution.
+- RGB channel distribution.
+- Clipped / over-range ratio.
+- Near-black ratio.
+- Local contrast.
+- Saturation vs luminance.
+- Skin/neutral/sky-like region stability if later detectors exist.
+- Whether scene prep over-flattened the image.
+- Whether local exposure produced halos or unnatural transitions.
+
+Auto output:
+
+- tone_input_stats.
+- scene_prep_quality_flags.
+- revised local EV budget if needed.
+- finish tone target parameters.
+
+Safeguards:
+
+- If pre-finish is still too dark globally, adjust global EV first, not just finish curve brightness.
+- If only local regions are too dark, revise local EV map.
+- If highlights are harsh but data exists, revise scene prep / highlight compression.
+- If highlights are clipped, use finish shoulder/rolloff, not fake recovery.
+
+Re-render boundary:
+Stats-only analysis should not invalidate render textures. It should update solve state and mark only dependent auto stages dirty when thresholds are exceeded.
+
+----------------------------------------------------------------------
+4.10 Integrated finish tone solve
+----------------------------------------------------------------------
+
+Purpose:
+Make the image look realistic and finished while keeping it compatible with downstream View Transform.
+
+Finish tone should not be a display transform. It should shape the scene-linear image into a sane, realistic distribution. View Transform remains responsible for final display-referred mapping.
+
+Recommended finish tone components:
+
+1. Foundation exposure trim:
+   - small correction only.
+   - large brightness errors should go back to global exposure or scene prep.
+2. Contrast curve:
+   - monotonic.
+   - smooth.
+   - avoids crushing shadows or flattening midtones.
+3. Highlight shoulder:
+   - controlled by Highlight Guard and Highlight Character.
+   - protects important highlights.
+   - allows tasteful specular rolloff.
+4. Shadow toe:
+   - controlled by Shadow Lift and Dynamic Range.
+   - avoids black crush unless intentionally requested.
+5. Chroma management:
+   - reduce saturation in clipped/highlight regions if needed.
+   - avoid hue shifts from channel clipping.
+   - preserve real color in safe midtones.
+6. Local/scoped finish if Finish Mask or scoped tone controls are used.
+
+Auto solve should derive:
+
+- curve anchor points.
+- toe strength.
+- shoulder strength.
+- midtone contrast.
+- saturation/chroma density response.
+- highlight color preservation.
+- black/white output intent for downstream view transform.
+
+Curve safety:
+
+- The tone curve must remain monotonic unless a specific creative effect intentionally allows otherwise.
+- First derivative should be bounded to avoid posterization and harsh contrast.
+- Second derivative should be bounded to avoid kinked shoulders/toes.
+- Chroma changes should be luminance-aware and hue-preserving.
+
+Re-render boundary:
+Changing finish tone controls invalidates only finish tone and final output. It should not invalidate scene prep, RAW base, or upstream analysis unless the control explicitly requests recalibration.
+
+----------------------------------------------------------------------
+4.11 Finish mask blend
+----------------------------------------------------------------------
+
+Purpose:
+Allow the integrated finish tone to apply selectively.
+
+Operation:
+
+    rgb_final = rgb_prefinish * (1 - mask) + rgb_toned * mask
+
+Mask rules:
+
+- Mask must be normalized to 0..1 for blending.
+- Mask gamma/black/white controls belong to mask processing, not RAW development.
+- Finish Mask affects only finish tone.
+- Finish Mask must not affect RAW conversion, WB, exposure solve, demosaic, denoise, or scene prep.
+
+Re-render boundary:
+Changing Finish Mask invalidates only mask processing and final blend, unless the mask source itself depends on Develop pre-finish output. In that case, graph cycle logic must continue to treat hidden preFinishImageOut as a valid pre-finish dependency, not a true feedback cycle.
+
+----------------------------------------------------------------------
+4.12 Final validation pass
+----------------------------------------------------------------------
+
+Purpose:
+Check the resulting image and either accept convergence or revise the minimum necessary stages.
+
+Validation metrics:
+
+- Final luminance distribution within expected target range.
+- Important highlight clipping not excessive.
+- Shadows not crushed unless intended.
+- Shadow lift not dominated by noise.
+- Scene prep map not haloing.
+- Tone curve not over-flattening.
+- Chroma not exploding in highlights or shadows.
+- White balance within sane limits.
+- No NaN/Inf/negative explosion.
+
+Convergence rule:
+
+The auto system is converged when:
+
+- global EV residual is below threshold.
+- pre-finish local imbalance is below threshold or guard-limited.
+- final tone target residual is below threshold.
+- no hard safety metric fails.
+- no revision would change a major parameter by more than the hysteresis threshold.
+
+Revision priority:
+
+1. Fix invalid source/metadata assumptions.
+2. Fix global EV.
+3. Fix WB if obvious and high-confidence.
+4. Fix scene prep EV budget/map.
+5. Fix finish tone curve.
+6. Apply final protective chroma/shoulder adjustments.
+
+Do not let finish tone hide an upstream mistake that should be solved earlier.
+
+======================================================================
+5. AUTOMATIC MODE RENDER LOOP
+======================================================================
+
+Automatic mode should be implemented as a staged solver, not a single blind function call. The render loop should be deterministic, bounded, and cache-aware.
+
+----------------------------------------------------------------------
+5.1 Auto state machine
+----------------------------------------------------------------------
+
+Recommended states:
+
+1. NEED_SOURCE
+   - No RAW input, invalid input, or missing source data.
+
+2. METADATA_BOOTSTRAP
+   - Use metadata only to create a safe first preview.
+   - Set black/white levels, WB, camera transform, baseline exposure from DNG/ARW metadata.
+   - Do not wait for full analysis before showing an image.
+
+3. RENDER_RAW_BASE
+   - Render normalized, reconstructed, WB/color-transformed, globally exposed base.
+
+4. ANALYZE_RAW_BASE
+   - Compute robust scene-linear stats.
+   - Measure dynamic range, clipping, key percentile, noise, WB sanity.
+
+5. SOLVE_GLOBAL
+   - Decide EV_global, WB fallback if needed, highlight reconstruction mode, and base exposure intent.
+
+6. RENDER_GLOBAL_BASE
+   - Re-render only the stages affected by global solve.
+
+7. SOLVE_SCENE_PREP
+   - Create local exposure map and guard maps.
+
+8. RENDER_PREFINISH
+   - Apply scene prep.
+
+9. ANALYZE_PREFINISH
+   - Measure whether scene prep solved local/global distribution.
+
+10. SOLVE_FINISH_TONE
+   - Build integrated ToneCurve / finish settings.
+
+11. RENDER_FINAL
+   - Render finish tone and optional finish mask blend.
+
+12. VALIDATE_FINAL
+   - Check quality metrics.
+   - If residuals are small, mark CONVERGED.
+   - If residuals are large, revise the earliest necessary stage.
+
+13. CONVERGED
+   - Store auto-authored settings and stats.
+   - No further auto changes until source/guidance/settings trigger a recalibration.
+
+----------------------------------------------------------------------
+5.2 Maximum pass budget
+----------------------------------------------------------------------
+
+Suggested pass budget:
+
+- Pass 0: metadata bootstrap / quick preview.
+- Pass 1: first stats-informed solve.
+- Pass 2: refinement pass if residuals are above threshold.
+- Pass 3: emergency stabilization only.
+
+After the budget is exhausted, the auto system should stop and present the best valid result with diagnostics. It should not keep rewriting itself indefinitely.
+
+----------------------------------------------------------------------
+5.3 Avoiding oscillation
+----------------------------------------------------------------------
+
+The current code intentionally avoids hashing live tone-analysis stats into the auto solve trigger hash because doing so can create a closed loop. Keep that principle.
+
+Rules:
+
+1. Source metadata, user guidance, mode changes, and explicit recalibration can trigger auto solve.
+2. Render feedback can update internal solve candidates, but it must be bounded by pass budget.
+3. Parameter updates must use damping:
+
+       p_next = p_current + damping * (p_solved - p_current)
+
+4. Use hysteresis so tiny stats changes do not cause rewrites:
+
+       if abs(p_solved - p_current) < threshold:
+           keep current
+
+5. Quantize or debounce UI slider drafts so active dragging does not trigger full reanalysis every frame.
+6. Do not let finish tone stats rewrite global RAW exposure repeatedly unless final validation proves the global stage is truly wrong.
+
+----------------------------------------------------------------------
+5.4 Self-solving behavior
+----------------------------------------------------------------------
+
+The automatic mode should feel like a self-solving model because each stage answers a specific question:
+
+- Metadata bootstrap: What do we know before seeing the rendered image?
+- RAW base analysis: What data exists and where is it located in exposure/color space?
+- Global exposure solve: Where should the whole image sit?
+- Scene prep solve: Which regions need local exposure redistribution, and where is that safe?
+- Finish tone solve: What curve/look makes this prepared image realistic?
+- Final validation: Did the result actually land where the solver intended?
+
+The solver should not make all decisions from final RGB only. It must preserve and reuse raw-stage masks and scene-stage stats. Clipping, noise, and highlight recoverability are properties of the data, not merely properties of the final image.
+
+======================================================================
+6. AUTO GUIDANCE SEMANTICS
+======================================================================
+
+The existing auto guidance controls are good high-level user handles. They should remain semantic, not low-level mystery sliders.
+
+----------------------------------------------------------------------
+6.1 Auto Strength
+----------------------------------------------------------------------
+
+Meaning:
+How strongly auto is allowed to intervene across global exposure, scene prep, and finish tone.
+
+Implementation:
+
+- Does not simply multiply every setting.
+- Scales stage budgets:
+  - local EV map max/min.
+  - tone curve contrast/shoulder/toe amount.
+  - degree of WB override when Auto WB is active.
+- Should not reduce safety guards.
+
+Re-render:
+Usually scene prep + finish tone. If Auto Strength changes the global exposure solve materially, re-render global exposure onward.
+
+----------------------------------------------------------------------
+6.2 Exposure Bias
+----------------------------------------------------------------------
+
+Meaning:
+User-requested global exposure preference in EV.
+
+Implementation:
+
+    EV_global = EV_auto + exposure_bias
+
+Exposure Bias should happen before local exposure. It should not be emulated by lifting the final tone curve.
+
+Re-render:
+Global exposure onward. In the current implementation, this may invalidate RawGpuPipeline base because exposureStops is inside the raw render. Target architecture should make it cheaper.
+
+----------------------------------------------------------------------
+6.3 Dynamic Range
+----------------------------------------------------------------------
+
+Meaning:
+How much scene dynamic range auto should preserve or compress.
+
+Implementation:
+
+- Higher Dynamic Range:
+  - more highlight protection.
+  - more local redistribution.
+  - softer tone shoulder.
+  - less midtone contrast if needed.
+- Lower Dynamic Range:
+  - stronger contrast.
+  - less local flattening.
+  - tighter black/white placement.
+
+Re-render:
+Scene prep + finish tone. May revise global exposure if highlight priority changes.
+
+----------------------------------------------------------------------
+6.4 Shadow Lift
+----------------------------------------------------------------------
+
+Meaning:
+Preference for revealing shadow detail.
+
+Implementation:
+
+- Increase positive EV budget in shadow regions.
+- Increase toe lift in finish tone.
+- Do not lift low-SNR shadows blindly.
+- Use SNR confidence to apply lift only where recoverable.
+
+Re-render:
+Scene prep + finish tone.
+
+----------------------------------------------------------------------
+6.5 Highlight Guard
+----------------------------------------------------------------------
+
+Meaning:
+Preference for protecting highlight structure and avoiding harsh clipping.
+
+Implementation:
+
+- Lower global exposure if meaningful highlights require it.
+- Increase negative local EV budget for bright regions.
+- Strengthen highlight shoulder.
+- Increase clipped-color protection.
+- May choose a stronger RAW highlight reconstruction mode if raw data supports it.
+
+Re-render:
+Potentially RAW reconstruction if highlight mode changes; otherwise global exposure / scene prep / finish tone.
+
+----------------------------------------------------------------------
+6.6 Highlight Character
+----------------------------------------------------------------------
+
+Meaning:
+The look of highlights: crisp/specular vs soft/rolled/preserved.
+
+Implementation:
+
+- Controls shoulder shape more than exposure.
+- Allows speculars to remain bright when appropriate.
+- Controls how much clipped or near-clipped color is neutralized.
+
+Re-render:
+Mostly finish tone; sometimes scene prep highlight map.
+
+----------------------------------------------------------------------
+6.7 Contrast Bias
+----------------------------------------------------------------------
+
+Meaning:
+User preference for final contrast.
+
+Implementation:
+
+- Finish tone midtone curve and local contrast behavior.
+- Should not alter RAW baseline exposure.
+- Should not cause scene prep to fight the curve.
+
+Re-render:
+Finish tone only in most cases.
+
+======================================================================
+7. SAFEGUARDS THAT DO NOT MAKE AUTO WEAK
+======================================================================
+
+The central quality problem is not whether safeguards exist. The problem is whether they are too blunt. Stack should use confidence maps and operation-specific limits so safe regions still receive strong corrections.
+
+----------------------------------------------------------------------
+7.1 Per-operation confidence
+----------------------------------------------------------------------
+
+Every major operation should have a confidence value:
+
+- Highlight reconstruction confidence.
+- Shadow lift confidence.
+- WB confidence.
+- Camera transform confidence.
+- Demosaic confidence.
+- Local exposure confidence.
+- Tone curve confidence.
+
+Confidence must be used locally whenever possible.
+
+Bad behavior:
+
+- “Image has noisy shadows, so reduce all scene prep strength.”
+
+Good behavior:
+
+- “This 12% of the image is noise-limited; reduce positive lift there, but allow strong lift in clean shadow regions.”
+
+----------------------------------------------------------------------
+7.2 Highlight safeguard
+----------------------------------------------------------------------
+
+Inputs:
+
+- Raw clipped-channel masks.
+- Highlight percentile distribution.
+- Local highlight structure.
+- Saturation/chroma in highlights.
+- Area and importance of highlight regions.
+
+Behavior:
+
+- Protect large textured highlights more than tiny speculars.
+- Preserve specular energy when it looks natural.
+- Reconstruct partial clipping only with confidence.
+- Use shoulder rolloff for unrecoverable clipping.
+- Avoid global underexposure caused by insignificant highlight specks.
+
+----------------------------------------------------------------------
+7.3 Shadow safeguard
+----------------------------------------------------------------------
+
+Inputs:
+
+- Near-black mask.
+- Estimated SNR.
+- WB multiplier amplification.
+- Local texture/noise classification.
+- User Shadow Lift preference.
+
+Behavior:
+
+- Allow aggressive lift where SNR is high.
+- Taper lift where read noise dominates.
+- Add denoise/chroma restraint before lifting if needed.
+- Do not hide noise by crushing all shadows unless the user asks for contrast.
+
+----------------------------------------------------------------------
+7.4 Halo safeguard
+----------------------------------------------------------------------
+
+Inputs:
+
+- Local EV map gradient.
+- Image luminance edges.
+- Smooth-gradient regions.
+- Texture regions.
+
+Behavior:
+
+- Smooth EV maps with guided filtering.
+- Reduce EV changes that create bright/dark outlines around edges.
+- Protect skies and smooth gradients from banding.
+- Preserve texture by avoiding over-smoothed masks in detailed regions.
+
+----------------------------------------------------------------------
+7.5 Color safeguard
+----------------------------------------------------------------------
+
+Inputs:
+
+- WB multipliers.
+- Camera transform confidence.
+- Chroma vs luminance distribution.
+- Highlight clipping masks.
+- Negative/out-of-gamut components.
+
+Behavior:
+
+- Avoid hue shifts in clipped channels.
+- Reduce saturation in unsafe highlights/shadows.
+- Preserve midtone color where data is reliable.
+- Do not clamp negative RGB too early.
+- Store confidence diagnostics when camera profile is approximate.
+
+======================================================================
+8. CACHE AND RE-RENDER PLAN
+======================================================================
+
+Reprocessing everything on every interaction is unnecessary and will make the node feel slow. However, skipping required invalidation will create incorrect results. The solution is an explicit staged cache model.
+
+----------------------------------------------------------------------
+8.1 Recommended cache levels
+----------------------------------------------------------------------
+
+CACHE 0 - Source decode cache
+
+Contains:
+
+- RawImageData.
+- Metadata.
+- Source file fingerprint.
+
+Invalidated by:
+
+- source file/path change.
+- embedded raw data change.
+- loader version change.
+
+CACHE 1 - Normalized sensor cache
+
+Contains:
+
+- normalized mosaic or linear RGB.
+- clip masks.
+- near-black masks.
+- gain-map-corrected values if enabled.
+
+Invalidated by:
+
+- black/white level changes.
+- gain map settings.
+- visible crop/active area changes.
+- source decode changes.
+
+CACHE 2 - Clean mosaic cache
+
+Contains:
+
+- hot-pixel-corrected mosaic.
+- denoised mosaic.
+- defect masks.
+
+Invalidated by:
+
+- mosaic denoise settings.
+- hot pixel settings.
+- normalized sensor changes.
+
+CACHE 3 - Demosaiced camera RGB cache
+
+Contains:
+
+- camera RGB.
+- demosaic confidence.
+- raw clipping projection.
+
+Invalidated by:
+
+- demosaic method.
+- CA correction if applied during demosaic.
+- clean mosaic changes.
+
+CACHE 4 - Reconstructed camera RGB cache
+
+Contains:
+
+- highlight-reconstructed camera RGB.
+- cleanup result.
+- reconstruction masks.
+
+Invalidated by:
+
+- highlight reconstruction mode/strength/threshold.
+- false-color suppression.
+- defringe.
+- highlight edge cleanup.
+- CA correction if applied after demosaic.
+- demosaiced RGB changes.
+
+CACHE 5 - White-balanced / working RGB cache
+
+Contains:
+
+- WB camera RGB.
+- working RGB.
+- color transform confidence.
+
+Invalidated by:
+
+- WB mode/multipliers.
+- camera transform settings/source.
+- reconstructed camera RGB changes.
+
+CACHE 6 - Global exposure base cache
+
+Contains:
+
+- globally exposed scene-linear base.
+- base luminance stats.
+
+Invalidated by:
+
+- EV_global / exposureStops.
+- working RGB changes.
+
+CACHE 7 - Scene prep map cache
+
+Contains:
+
+- local EV map.
+- confidence/protection maps.
+- pre-local exposure summary.
+
+Invalidated by:
+
+- scene prep controls.
+- auto guidance that affects scene prep.
+- global exposure base changes.
+
+CACHE 8 - Pre-Finish cache
+
+Contains:
+
+- scene-prepped image.
+
+Invalidated by:
+
+- local EV map changes.
+- scene prep strength/blend changes.
+- global exposure base changes.
+
+CACHE 9 - Finish tone cache
+
+Contains:
+
+- integrated tone result before finish mask blend.
+
+Invalidated by:
+
+- integrated ToneCurve JSON.
+- finish tone controls.
+- pre-finish image changes.
+
+CACHE 10 - Final blend cache
+
+Contains:
+
+- visible Develop image output.
+
+Invalidated by:
+
+- finish mask changes.
+- finish tone result changes.
+- pre-finish image changes.
+
+----------------------------------------------------------------------
+8.2 Current compatibility
+----------------------------------------------------------------------
+
+The current implementation already has:
+
+- internal '__rawDevelopBase' cache.
+- hidden preFinishImageOut fingerprint separation.
+- final image fingerprint including integrated tone and finish mask.
+
+The recommended refactor is to split the monolithic RawGpuPipeline base into more cacheable sub-stages. This is especially important because exposure, white balance, and camera transform are currently part of the raw render path. For better interaction, these should become separate lightweight stages after demosaic/reconstruction where possible.
+
+----------------------------------------------------------------------
+8.3 Interaction invalidation table
+----------------------------------------------------------------------
+
+Source file changed:
+Invalidate everything.
+
+Black/white override changed:
+Invalidate normalized sensor and downstream.
+
+DNG gain map enabled/changed:
+Invalidate normalized sensor and downstream.
+
+Hot pixel / mosaic denoise changed:
+Invalidate clean mosaic and downstream.
+
+Demosaic method changed:
+Invalidate demosaiced camera RGB and downstream.
+
+Lateral CA changed:
+Invalidate demosaic/reconstruction and downstream, depending on where CA is implemented.
+
+Highlight reconstruction changed:
+Invalidate reconstructed camera RGB and downstream.
+
+False color / defringe / highlight edge cleanup changed:
+Invalidate reconstructed camera RGB and downstream.
+
+White balance changed:
+Invalidate WB/working RGB and downstream.
+
+Camera transform changed:
+Invalidate working RGB and downstream.
+
+Exposure Bias / baseline exposure changed:
+Invalidate global exposure and downstream. Target architecture should not re-run demosaic for this.
+
+Dynamic Range changed:
+Usually invalidate scene prep and finish tone. If it changes the global EV solve, invalidate global exposure and downstream.
+
+Shadow Lift changed:
+Invalidate scene prep map, pre-finish, and finish tone.
+
+Highlight Guard changed:
+May invalidate highlight reconstruction if auto changes RAW recovery mode; otherwise global exposure / scene prep / finish tone.
+
+Highlight Character changed:
+Mostly invalidate finish tone and possibly scene prep highlight behavior.
+
+Contrast Bias changed:
+Invalidate finish tone only.
+
+Scene prep manual controls changed:
+Invalidate scene prep map and downstream.
+
+Finish tone manual controls changed:
+Invalidate finish tone and final blend only.
+
+Finish Mask changed:
+Invalidate final blend only, plus mask-source dependencies.
+
+Debug view changed:
+Render diagnostic path. Scene prep and integrated tone should be bypassed for non-final debug views.
+
+Orientation changed:
+Invalidate coordinate-dependent caches. If orientation is applied only at final sampling, earlier sensor caches may remain valid, but all image-space analysis and maps must be invalidated.
+
+======================================================================
+9. MANUAL MODE SPECIFICATION
+======================================================================
+
+Manual mode is a freeze-and-edit workflow. It should not be a second render path.
+
+----------------------------------------------------------------------
+9.1 Entering manual mode
+----------------------------------------------------------------------
+
+When the user switches from Auto to Manual:
+
+1. Stop auto rewrites.
+2. Preserve all current auto-authored settings.
+3. Store a manual baseline snapshot:
+   - raw settings.
+   - scene prep settings.
+   - integrated tone JSON.
+   - auto guidance values that produced them.
+   - analysis summaries and diagnostics.
+4. Reveal direct controls.
+5. Mark the node as manually authored.
+
+No image appearance should change merely because the user switched modes.
+
+----------------------------------------------------------------------
+9.2 Manual controls should be grouped by actual stage
+----------------------------------------------------------------------
+
+RAW INPUT / NORMALIZATION
+
+- Black level override.
+- White level override.
+- Effective black/white readout.
+- DNG gain map status.
+- Source crop/orientation.
+
+RAW RECONSTRUCTION
+
+- Mosaic denoise.
+- Hot pixel suppression.
+- Demosaic method.
+- Highlight reconstruction mode/strength/threshold.
+- False color suppression.
+- Defringe.
+- Highlight edge cleanup.
+- Lateral chromatic aberration.
+
+RAW COLOR
+
+- WB mode.
+- Manual WB multipliers.
+- Effective WB readout.
+- Camera transform enable/source.
+- Transform confidence.
+
+GLOBAL EXPOSURE
+
+- RAW/global exposure EV.
+- Baseline exposure metadata readout.
+- Highlight/key placement diagnostics.
+
+SCENE PREP
+
+- Amount.
+- Shadow lift.
+- Highlight compression.
+- Noise guard.
+- Highlight guard.
+- Shadow guard.
+- Spatial model.
+- Smoothing.
+- Halo guard.
+- Gradient protection.
+- Expert EV min/max/base controls.
+
+FINISH TONE
+
+- Foundation exposure trim.
+- Curve anchors.
+- Toe.
+- Shoulder.
+- Contrast.
+- Chroma response.
+- Highlight color handling.
+- Scoped mask / Finish Mask tools.
+
+DIAGNOSTICS
+
+- Raw clipping mask.
+- Noise/SNR map.
+- Scene prep EV map.
+- Scene prep confidence map.
+- Highlight safety map.
+- Shadow/noise protection map.
+- Tone curve graph.
+- Before/after toggles: RAW base, pre-finish, final.
+
+----------------------------------------------------------------------
+9.3 Manual edit behavior
+----------------------------------------------------------------------
+
+Manual edits should re-render only the necessary stages using the cache table above.
+
+Interactive slider behavior:
+
+- While dragging, render from the cheapest valid upstream cache.
+- Use draft resolution or draft quality only if the UI makes that clear.
+- On release, render final quality and update diagnostics.
+- Do not auto-rewrite unrelated settings in Manual mode.
+
+Recalibrate Auto in Manual:
+
+- Should run auto solve from the current manual settings as the starting point if the user asks for recalibration.
+- It should not silently reset everything unless the user chooses Reset Auto.
+
+Return to Auto:
+
+- Should resume auto solving using current guidance.
+- The implementation must decide whether to start from current manual values or clean metadata defaults. Recommended behavior:
+  - Return To Auto: use current image as starting point and allow auto to revise.
+  - Reset Auto: discard manual edits and solve from metadata/defaults.
+
+----------------------------------------------------------------------
+9.4 Manual transparency
+----------------------------------------------------------------------
+
+The user must be able to answer:
+
+- What did Auto do?
+- Which stage does this slider affect?
+- Why did this adjustment stop getting stronger?
+- Is the limit caused by clipping, noise, highlight guard, shadow guard, halo guard, or color transform confidence?
+- What will be re-rendered if I move this?
+
+This requires visible diagnostics and plain-language badges:
+
+- Highlight Limited.
+- Noise Limited.
+- Shadow Limited.
+- Gradient Protected.
+- Low WB Confidence.
+- Approximate Camera Transform.
+- Demosaic Draft Quality.
+- Linear RGB Path: Mosaic Controls Disabled.
+
+======================================================================
+10. FORMAT-SPECIFIC NOTES
+======================================================================
+
+----------------------------------------------------------------------
+10.1 Motion Cam Pro DNG
+----------------------------------------------------------------------
+
+Expected considerations:
+
+- DNG metadata may contain useful black/white, baseline exposure, color matrices, forward matrices, camera neutral, and gain maps.
+- Some DNG files may be mosaiced; others may appear as linear RGB depending on export path.
+- DNG dual-illuminant handling must be confidence-rated. If calibration metadata is insufficient, fallback may be better than a bad blended matrix.
+- DNG gain maps should be applied after black subtraction and normalization.
+- DNG BaselineExposure is a metadata hint, not an unquestionable final exposure. Auto should use it as bootstrap input, then verify with actual image statistics.
+
+Required behavior:
+
+- Detect pixel layout and capability.
+- Prefer reliable DNG color data when complete.
+- Use fallback transform when DNG data is under-specified.
+- Report transform confidence.
+- Do not run mosaic-specific controls on linear RGB input unless they have a valid equivalent.
+
+----------------------------------------------------------------------
+10.2 Sony ARW
+----------------------------------------------------------------------
+
+Expected considerations:
+
+- Usually mosaiced Bayer RAW.
+- Metadata and LibRaw-derived camera transform/WB are important.
+- Camera transform may currently use LibRaw rgb_cam / camera-to-sRGB fallback.
+- Compressed ARW artifacts, channel clipping, and model-specific black levels should be handled carefully.
+
+Required behavior:
+
+- Resolve CFA pattern reliably.
+- Use as-shot WB as bootstrap.
+- Use LibRaw transform fallback with explicit confidence until full color management exists.
+- Preserve raw clip masks for highlight reconstruction.
+- Keep Sony-specific handling inside source adapter / metadata normalization, not scattered through later stages.
+
+======================================================================
+11. DEBUG AND INSPECTION OUTPUTS
+======================================================================
+
+Debug views are not optional luxuries. They are required to make the auto system trustworthy.
+
+Existing debug views should remain and be expanded around the canonical states:
+
+RAW DEBUG
+
+- Normalized Mosaic.
+- Pre-Denoise Mosaic.
+- Post-Denoise Mosaic.
+- Hot Pixel Mask.
+- Denoise Difference.
+- Clipped RAW Channels.
+
+RECONSTRUCTION DEBUG
+
+- Demosaiced Camera RGB.
+- Highlight Reconstruction Mask.
+- Reconstruction Confidence.
+- False Color Mask.
+- Defringe Mask.
+- Highlight Edge Mask.
+
+COLOR DEBUG
+
+- White Balanced RGB.
+- Camera Transformed RGB.
+- Out-of-gamut / negative RGB map.
+- Transform confidence.
+
+AUTO DEBUG
+
+- Global exposure histogram.
+- Key percentile target.
+- Highlight priority map.
+- Shadow recoverability map.
+
+SCENE PREP DEBUG
+
+- EV Adjustment Map.
+- Effective EV Map.
+- Confidence Map.
+- Clipping Limited.
+- Noise/SNR Limited.
+- Highlight Safety.
+- Shadow Protection.
+- Smooth Gradient Protection.
+- True Edge Map.
+- Texture Detail Map.
+
+FINISH DEBUG
+
+- Tone curve graph.
+- Prepared graph preview.
+- Final graph preview.
+- Finish mask.
+- Chroma protection map.
+
+When debugView is not FinalOutput, scene prep and integrated tone should remain bypassed unless the debug view explicitly requests them. Diagnostic output should not be confused with the visible final Develop output.
+
+======================================================================
+12. QUALITY TARGETS
+======================================================================
+
+A quality-first Develop node should be evaluated against real image behavior, not just successful rendering.
+
+----------------------------------------------------------------------
+12.1 Required visual qualities
+----------------------------------------------------------------------
+
+- Natural global brightness from very dark to very bright RAW files.
+- No premature clipping of scene-linear data.
+- Good highlight rolloff with honest recovery limits.
+- Clean but detailed shadows.
+- Minimal false color and zipper artifacts.
+- No obvious halos from local exposure.
+- Realistic color under normal lighting.
+- Predictable behavior under difficult lighting.
+- Manual controls that feel direct and stable.
+- Fast enough preview without sacrificing final quality.
+
+----------------------------------------------------------------------
+12.2 Validation image set
+----------------------------------------------------------------------
+
+Build a real and synthetic test suite containing:
+
+- Low-light high-ISO shadows.
+- Backlit subjects.
+- Bright sky with dark foreground.
+- Specular highlights.
+- Clipped neon/signage.
+- Skin tones under daylight, tungsten, mixed light.
+- Dense foliage / repeated texture.
+- Fine fabric and hair.
+- Smooth skies and gradients.
+- Color checker / neutral charts.
+- Overexposed and underexposed captures.
+- Motion Cam Pro DNG samples.
+- Sony ARW samples from multiple camera bodies if available.
+- Linear RGB DNG samples.
+- DNG files with and without gain maps.
+- DNG files with complete and incomplete color metadata.
+
+----------------------------------------------------------------------
+12.3 Metrics
+----------------------------------------------------------------------
+
+Render smoke tests should remain, but they are not enough. Add metrics for:
+
+- Nonblank output.
+- NaN/Inf detection.
+- Clipping ratio by stage.
+- Luminance percentile targets.
+- Shadow SNR after lift.
+- Local EV map gradient/halo risk.
+- Hue stability in highlights.
+- Neutral patch WB error when charts are present.
+- Delta from golden output where known.
+- Performance per cache stage.
+- Cache invalidation correctness.
+
+----------------------------------------------------------------------
+12.4 Human review
+----------------------------------------------------------------------
+
+Quality cannot be fully reduced to metrics. Maintain curated before/after review scenes and compare:
+
+- Auto result.
+- Manual-tuned result.
+- Current bilinear result.
+- Future high-quality demosaic result.
+- Other reference processors only as reference, not as authority.
+
+The question is not “does Stack match another app?” The question is “does Stack make the best possible use of the data?”
+
+======================================================================
+13. IMPLEMENTATION PRIORITIES
+======================================================================
+
+----------------------------------------------------------------------
+13.1 Immediate fixes
+----------------------------------------------------------------------
+
+1. Fix metadata lookup in Develop UI so it walks upstream through RawNeuralDenoise like render helpers do.
+2. Resolve lateral CA UI/serialization mismatch. Either clamp UI to +/-3 px or serialize the full +/-8 px range.
+3. Make scenePrepEnabled and integratedToneEnabled behavior explicit. If they are always on, remove user-facing ambiguity. If they are real toggles, stop forcing them true everywhere.
+4. Split exposure from the heavy RawGpuPipeline base when possible so Exposure Bias does not require unnecessary demosaic/reconstruction work.
+5. Make Linear RGB path behavior explicit in UI and diagnostics. Disable or reinterpret mosaic-specific controls clearly.
+6. Add more visible auto diagnostics: why exposure was chosen, why scene prep was limited, what tone solve did.
+
+----------------------------------------------------------------------
+13.2 Short-term quality work
+----------------------------------------------------------------------
+
+1. Build a formal stage cache/fingerprint model.
+2. Add robust raw/base/pre-finish/final stats collection.
+3. Implement the staged auto state machine with bounded convergence.
+4. Improve highlight reconstruction confidence and masks.
+5. Add high-quality demosaic path while keeping bilinear as fast preview.
+6. Improve shadow noise estimation and local shadow-lift confidence.
+7. Improve halo guard and local EV map smoothing.
+8. Add monotonic finish curve safety and tone diagnostics.
+
+----------------------------------------------------------------------
+13.3 Medium-term architecture work
+----------------------------------------------------------------------
+
+1. Create a proper color-management module:
+   - defined working color space.
+   - chromatic adaptation.
+   - reliable camera profile handling.
+   - controlled gamut compression.
+2. Add format-specific metadata quality reports for DNG and ARW.
+3. Support better lens/profile correction before demosaic when data exists.
+4. Add final-quality render mode distinct from interactive preview mode.
+5. Add a sidecar stats bus so auto stages can share masks/metrics without hidden JSON coupling.
+6. Expand validation corpus and golden-image testing.
+
+----------------------------------------------------------------------
+13.4 Long-term quality work
+----------------------------------------------------------------------
+
+1. Camera-model-specific noise profiles.
+2. Camera-model-specific color profiles.
+3. Learned or hybrid demosaic/denoise only if it can beat classical methods without hallucinating detail.
+4. Subject-aware auto exposure only after the core data-aware solver is robust.
+5. Optional local semantic masks for finish tone, never as a replacement for raw-stage math.
+
+======================================================================
+14. PROPOSED INTERNAL DATA STRUCTURES
+======================================================================
+
+These structures can be implemented exactly or adapted to existing C++ style.
+
+----------------------------------------------------------------------
+14.1 DevelopStageStats
+----------------------------------------------------------------------
+
+Fields:
+
+- bool valid.
+- uint64 sourceFingerprint.
+- int width, height.
+- float luminancePercentiles[...].
+- float logLuminancePercentiles[...].
+- float clippedRatioRaw.
+- float clippedRatioRgb.
+- float nearBlackRatio.
+- float estimatedDynamicRangeEv.
+- float shadowSnrP10.
+- float shadowSnrP25.
+- float highlightStructureScore.
+- float textureScore.
+- float smoothGradientScore.
+- float wbConfidence.
+- float colorTransformConfidence.
+- float globalExposureResidualEv.
+- float localExposureResidualEv.
+- float toneResidual.
+- vector<string> badges.
+
+----------------------------------------------------------------------
+14.2 DevelopAutoSolveState
+----------------------------------------------------------------------
+
+Fields:
+
+- enum State.
+- int passIndex.
+- int maxPasses.
+- uint64 sourceTriggerHash.
+- uint64 guidanceTriggerHash.
+- uint64 manualBaselineHash.
+- bool forceFullReanalysis.
+- RawDevelopSettings rawCandidate.
+- RawDetailFusionSettings scenePrepCandidate.
+- json toneCandidate.
+- DevelopStageStats rawBaseStats.
+- DevelopStageStats preFinishStats.
+- DevelopStageStats finalStats.
+- vector<string> solveReasons.
+- vector<string> solveWarnings.
+
+----------------------------------------------------------------------
+14.3 DevelopProtectionMaps
+----------------------------------------------------------------------
+
+Textures / attachments:
+
+- rawClipMask.
+- nearBlackMask.
+- noiseSnrMap.
+- highlightImportanceMap.
+- shadowRecoverabilityMap.
+- localEvDesiredMap.
+- localEvFinalMap.
+- localEvConfidenceMap.
+- haloRiskMap.
+- chromaProtectionMap.
+
+These maps should be optional at full resolution. Low-resolution maps are sufficient for many auto and UI diagnostics.
+
+======================================================================
+15. RECOMMENDED AUTOMATIC SOLVE PSEUDOCODE
+======================================================================
+
+function AutoDevelop(rawSource, guidance, previousState):
+
+    metadata = DecodeOrGetMetadata(rawSource)
+    defaults = BuildDefaultsFromMetadata(metadata)
+
+    if no previous valid preview:
+        settings = MetadataBootstrap(defaults, guidance)
+        RenderPreview(settings)
+
+    baseInput = RenderToWorkingRgb(rawSource, settings.raw_reconstruction, settings.wb, settings.color)
+    baseStats = AnalyzeWorkingRgb(baseInput, rawMasks)
+
+    evSolved = SolveGlobalExposure(baseStats, guidance)
+    settings.exposure = Damp(previous.exposure, evSolved)
+
+    base = ApplyGlobalExposure(baseInput, settings.exposure)
+    baseStats2 = AnalyzeGlobalBase(base, rawMasks)
+
+    scenePrepSolved = SolveScenePrep(baseStats2, rawMasks, guidance)
+    settings.scenePrep = DampScenePrep(previous.scenePrep, scenePrepSolved)
+
+    prefinish = RenderScenePrep(base, settings.scenePrep)
+    prefinishStats = AnalyzePreFinish(prefinish, rawMasks, scenePrepMaps)
+
+    if PreFinishShowsGlobalExposureProblem(prefinishStats):
+        settings.exposure = ReviseExposure(settings.exposure, prefinishStats)
+        base = ApplyGlobalExposure(baseInput, settings.exposure)
+        settings.scenePrep = ReviseScenePrepForNewExposure(base)
+        prefinish = RenderScenePrep(base, settings.scenePrep)
+        prefinishStats = AnalyzePreFinish(prefinish, rawMasks, scenePrepMaps)
+
+    toneSolved = SolveFinishTone(prefinishStats, guidance)
+    settings.tone = DampTone(previous.tone, toneSolved)
+
+    final = RenderFinishTone(prefinish, settings.tone)
+    final = ApplyFinishMaskIfConnected(prefinish, final, finishMask)
+    finalStats = ValidateFinal(final, rawMasks, scenePrepMaps)
+
+    if finalStats.hardFailure and passIndex < maxPasses:
+        ReviseEarliestResponsibleStage(finalStats)
+        repeat from that stage
+
+    return settings, final, diagnostics
+
+Key rule:
+Revisions must target the earliest responsible stage. Do not solve a global exposure error by abusing final contrast. Do not solve clipped data by pretending scene prep recovered it. Do not solve low-SNR shadows by simply pushing them brighter.
+
+======================================================================
+16. AUTHORITATIVE STAGE RESPONSIBILITY TABLE
+======================================================================
+
+Problem: Whole image too dark or too bright.
+Responsible stage: Global exposure solve.
+Not responsible: Finish tone brightness hacks, local exposure everywhere.
+
+Problem: Foreground too dark but sky is good.
+Responsible stage: Scene prep local exposure if foreground SNR is sufficient.
+Not responsible: Raising global exposure until sky breaks.
+
+Problem: Sky clipped in all channels.
+Responsible stage: Finish shoulder / graceful rolloff.
+Not responsible: Claiming true highlight recovery.
+
+Problem: One RAW channel clipped, structure remains in others.
+Responsible stage: RAW highlight reconstruction.
+Not responsible: Scene prep alone.
+
+Problem: White balance wrong.
+Responsible stage: WB solve / metadata/manual WB.
+Not responsible: Tone curve color tweaks.
+
+Problem: False color on fine detail.
+Responsible stage: Demosaic and false-color cleanup.
+Not responsible: Desaturating the whole image.
+
+Problem: Purple/green fringe on edges.
+Responsible stage: Defringe / CA correction.
+Not responsible: Global saturation reduction.
+
+Problem: Noisy lifted shadows.
+Responsible stage: Shadow SNR guard, raw denoise, local shadow-lift confidence.
+Not responsible: Weakening all local exposure.
+
+Problem: Halos around objects.
+Responsible stage: Scene prep EV map smoothing / halo guard.
+Not responsible: Disabling scene prep entirely.
+
+Problem: Image looks flat after auto.
+Responsible stage: Balance between scene prep and finish contrast.
+Not responsible: Randomly increasing global exposure.
+
+Problem: Colors look generally wrong across image.
+Responsible stage: Camera transform / color management / WB.
+Not responsible: Finish tone hiding it.
+
+======================================================================
+17. FINAL TARGET BEHAVIOR
+======================================================================
+
+When working correctly, automatic Develop should behave like this:
+
+1. The user connects a Motion Cam Pro DNG or Sony ARW file.
+2. Develop instantly creates a safe metadata-based preview.
+3. Develop analyzes the RAW/base image and understands:
+   - how bright the data is.
+   - where clipping exists.
+   - how much dynamic range exists.
+   - whether shadows are recoverable.
+   - whether highlights are meaningful or specular.
+   - whether WB/color metadata is trustworthy.
+4. Develop sets global exposure first.
+5. Develop uses scene prep to locally redistribute exposure only where useful and safe.
+6. Develop builds a realistic finish tone that complements, rather than fights, the earlier stages.
+7. Develop validates the result and revises only the responsible stages.
+8. Develop stops once convergence is reached.
+9. The user can switch to Manual and see the actual settings Auto used.
+10. Manual edits re-render only the necessary stages.
+11. The final visible output is high-quality scene-linear float RGB ready for downstream View Transform / Output.
+
+The end goal is not a weak automatic correction. The end goal is an intelligent RAW developer that can make decisive, high-quality adjustments because it knows exactly where the data is strong, where the data is fragile, and which stage is responsible for each kind of problem.
+
+======================================================================
+18. COMPLETION CHECKLIST
+======================================================================
+
+A Develop implementation should not be considered complete until these are true:
+
+- RAW source metadata is resolved consistently through RawSource and RawNeuralDenoise paths.
+- Motion Cam Pro DNG and Sony ARW are handled through explicit source capability profiles.
+- Black/white normalization produces correct clip and near-black masks.
+- DNG gain maps are applied in the correct normalized sensor stage.
+- Hot pixel and mosaic denoise operate before demosaic.
+- Final-quality demosaic exists separately from bilinear preview.
+- Highlight reconstruction uses raw clipping masks and confidence.
+- WB solve is confidence-based and does not blindly override metadata.
+- Camera transform confidence is exposed.
+- Global exposure is solved before local scene prep.
+- Scene prep uses local EV maps with noise, highlight, shadow, gradient, and halo safeguards.
+- Finish tone is monotonic/safe and does not hide upstream errors.
+- Finish Mask only affects integrated finish tone.
+- Auto solve is bounded, damped, and convergence-aware.
+- Manual mode freezes auto-authored settings and exposes them honestly.
+- Cache invalidation is stage-specific and correct.
+- Debug views exist for raw, reconstruction, color, auto, scene prep, and finish stages.
+- Validation includes real RAW image quality tests, not just nonblank render smoke tests.
+- The node never pretends clipped or noise-dominated data contains detail that does not exist.
+
+END OF DOCUMENT

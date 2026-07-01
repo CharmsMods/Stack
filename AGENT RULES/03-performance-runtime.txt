@@ -1,0 +1,45 @@
+PERFORMANCE AND RUNTIME
+
+Performance target
+
+Push for extremely optimized quality.
+
+Optimize aggressively until further optimization would reduce output quality, correctness, stability, usability, visual fidelity, or maintainability.
+
+Do not accept avoidable slowness, wasteful memory behavior, unnecessary pipeline stalls, or UI hitching as normal.
+
+Performance mindset
+
+Think about memory management, data flow, pipeline structure, resource lifetime, caching, synchronization, and expensive hot paths as part of normal implementation work.
+
+Do not wait until a project feels bad before thinking about performance.
+
+Do not chase micro-optimizations that complicate the code without meaningful benefit.
+
+Background work
+
+Assume expensive operations belong off the main UI thread unless they are clearly trivial.
+
+Prefer background execution that keeps the UI responsive, smooth, and visually stable even when the underlying work is expensive.
+
+Integrate background work so it feels connected to the UI instead of detached from it.
+
+When visible background work is part of the design, show what is being processed in a clear and useful way.
+
+Invisible background work is allowed when it is safe, seamless, and does not create confusing side effects.
+
+Responsiveness
+
+Protect startup time, interaction smoothness, and idle behavior.
+
+Do not allow background activity, rendering work, asset processing, or data churn to create avoidable lag, stalling, or freezing.
+
+Do not let the interface become unresponsive while waiting on work that could have been structured differently.
+
+Runtime data layout
+
+Once a project reaches moderate complexity, separate runtime data into clear categories such as settings, logs, cache, presets, project data, updates, and temporary files.
+
+Do not blur durable user data with disposable runtime data.
+
+Do not make runtime data placement accidental.

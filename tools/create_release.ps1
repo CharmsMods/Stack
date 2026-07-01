@@ -35,7 +35,14 @@ if ($usingCanonicalOutput) {
 }
 else {
     Ensure-StackDirectory -Path $OutputDir
+}
 
+if (-not (Test-Path -LiteralPath $OutputDir)) {
+    throw "Release output directory was not created: $OutputDir"
+}
+$OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
+
+if (-not $usingCanonicalOutput) {
     $customArchiveRoot = Join-Path $OutputDir "_archive"
     $pathsToArchive = @(
         (Join-Path $OutputDir "StackInstallerLicensePage.txt"),
@@ -83,6 +90,13 @@ if (Test-Path -LiteralPath $projectLicensePath) {
 $libRawPath = Join-Path $BuildDir "libraw.dll"
 if (Test-Path -LiteralPath $libRawPath) {
     Copy-ReleaseFile -SourcePath $libRawPath -DestinationPath (Join-Path $stageDir "libraw.dll")
+}
+
+$windowsAppRuntimeBootstrapPath = Join-Path $BuildDir "Microsoft.WindowsAppRuntime.Bootstrap.dll"
+if (Test-Path -LiteralPath $windowsAppRuntimeBootstrapPath) {
+    Copy-ReleaseFile `
+        -SourcePath $windowsAppRuntimeBootstrapPath `
+        -DestinationPath (Join-Path $stageDir "Microsoft.WindowsAppRuntime.Bootstrap.dll")
 }
 
 New-LicensePageFile -RootDir $Root -DestinationPath $licensePagePath

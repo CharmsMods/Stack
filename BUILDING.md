@@ -56,6 +56,7 @@ The build script:
 - closes a running `Stack.exe` so linking can succeed
 - repairs common local `PATH` issues before invoking tools
 - configures `build` if needed
+- enables the Windows App SDK titlebar bridge on Windows when the local package is available
 - builds the Release target in `build`
 
 Expected output:
@@ -72,6 +73,14 @@ From a healthy developer shell where `cmake` and `python` are on `PATH`:
 cmake -S . -B build
 cmake --build build --config Release
 ```
+
+On Windows, `STACK_ENABLE_APPWINDOW_TITLEBAR` defaults to `ON`. CMake searches
+for the local Microsoft.WindowsAppSDK package under `_workspace\deps`, the
+`STACK_WINDOWS_APP_SDK_ROOT` cache/env value, and the user's NuGet cache. If the
+package is not available, Stack builds with the safe native titlebar fallback.
+
+The window chrome decision and failure history are documented in
+[docs/engineering/WINDOW_CHROME_POSTMORTEM.md](/D:/Program%20Development/Stack/docs/engineering/WINDOW_CHROME_POSTMORTEM.md).
 
 ## Release Packaging
 

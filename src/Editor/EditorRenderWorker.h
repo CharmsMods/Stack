@@ -1,9 +1,12 @@
 #pragma once
 
 #include "ThirdParty/json.hpp"
+#include "Raw/RawAutoBase.h"
+#include "Raw/RawImageAnalysis.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Renderer/RenderPipeline.h"
+#include "Renderer/RenderTiling.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -23,6 +26,28 @@ public:
         unsigned int texture = 0;
         int width = 0;
         int height = 0;
+        GLsync readyFence = nullptr;
+    };
+
+    struct SharedTextureTile {
+        unsigned int texture = 0;
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+        int haloX = 0;
+        int haloY = 0;
+        int haloWidth = 0;
+        int haloHeight = 0;
+    };
+
+    struct SharedTextureTileSet {
+        std::vector<SharedTextureTile> tiles;
+        int fullWidth = 0;
+        int fullHeight = 0;
+        bool tiled = false;
+        bool complete = false;
+        bool debugOverlay = false;
         GLsync readyFence = nullptr;
     };
 
@@ -271,14 +296,52 @@ public:
         std::string error;
     };
 
+    struct RawWorkspaceSnapshot {
+        std::string sourceKey;
+        std::string localRangeOverlayMode;
+        bool hasRecipe = false;
+        Stack::RawRecipe::RawDevelopmentRecipe recipe;
+        bool localRangeTargetSampleRequested = false;
+        float localRangeTargetSampleU = 0.0f;
+        float localRangeTargetSampleV = 0.0f;
+        bool analysisRequested = true;
+    };
+
+    struct RawWorkspaceTargetSampleResult {
+        bool valid = false;
+        float sceneEv = 0.0f;
+        float sceneLuma = 0.0f;
+        float sceneR = 0.0f;
+        float sceneG = 0.0f;
+        float sceneB = 0.0f;
+        float u = 0.0f;
+        float v = 0.0f;
+    };
+
+    struct RawWorkspaceResult {
+        std::string sourceKey;
+        std::string localRangeOverlayMode;
+        std::vector<unsigned char> localRangeOverlayPixels;
+        int localRangeOverlayWidth = 0;
+        int localRangeOverlayHeight = 0;
+        RenderTextureStats viewTransformInputStats;
+        Stack::RawAnalysis::RawImageAnalysis analysis;
+        Stack::RawAutoBase::AutoBaseRecommendations recommendations;
+        RawWorkspaceTargetSampleResult localRangeTargetSample;
+
+        bool HasSource() const { return !sourceKey.empty(); }
+    };
+
     struct Snapshot {
         std::uint64_t generation = 0;
         bool outputConnected = false;
         int previewMaxDimension = 0;
+        RawWorkspaceSnapshot rawWorkspace;
         SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
         int channels = 4;
+        ViewportTilingSettings viewportTiling;
         std::vector<nlohmann::json> layers;
         std::vector<nlohmann::json> layerSteps;
         std::vector<RenderMaskSource> masks;
@@ -290,11 +353,14 @@ public:
 
     struct Result {
         std::uint64_t generation = 0;
+        int previewMaxDimension = 0;
+        RawWorkspaceResult rawWorkspace;
         bool success = false;
         std::vector<unsigned char> pixels;
         int width = 0;
         int height = 0;
         SharedTextureResult outputTexture;
+        SharedTextureTileSet outputTiles;
         std::string error;
         std::vector<CompositeOutputResult> compositeOutputs;
         std::vector<PreviewResult> previews;
@@ -319,10 +385,13 @@ public:
     ~EditorRenderWorker();
 
     bool Initialize(GLFWwindow* sharedWindow);
+    void RequestStopForShutdown();
     void Shutdown();
+    void InvalidateSnapshotsBefore(std::uint64_t generation);
     void Submit(Snapshot snapshot);
     bool TryConsumeCompleted(Result& result);
     bool IsBusy() const { return m_Busy.load(); }
+    bool HasPendingOrBusyForShutdown() const;
     RenderProgress GetProgress() const;
     static DevelopCandidateRenderMetrics AnalyzeDevelopCandidatePixelsForValidation(
         const std::vector<unsigned char>& pixels,
@@ -372,6 +441,7 @@ private:
     Snapshot m_Pending;
     std::queue<Result> m_Completed;
     std::atomic<bool> m_Busy = false;
+    std::uint64_t m_InvalidBeforeGeneration = 0;
     int m_ProgressCompletedSteps = 0;
     int m_ProgressTotalSteps = 0;
     std::string m_ProgressLabel;

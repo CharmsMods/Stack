@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <title>STACK — Manual, Node-Based Image Editor</title>
+  <meta name="description" content="Stack is a professional, passion-driven C++/OpenGL Windows image editor focused on manual, node-based workflows, RAW development, compositing, and neural denoising.">
+  <meta name="theme-color" content="#dcd8c0">
+
+  <!-- OpenGraph Metadata -->
+  <meta property="og:title" content="STACK — Manual Node-Based Image Editor">
+  <meta property="og:description" content="Professional C++/OpenGL image editor focused on manual editing, RAW development, compositing, and neural denoising.">
+  <meta property="og:type" content="website">
+
+  <!-- Premium Typography Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700;900&family=Newsreader:ital,opsz,wght@1,6..72,300;1,6..72,400;1,6..72,600&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+  <!-- Style link -->
+  <link rel="stylesheet" href="./index3_files/style.css">
+</head>
+<body>
+
+  <!-- Real-time per-pixel noise canvas -->
+  <canvas id="noiseCanvas" class="noise-canvas"></canvas>
+
+  <!-- SVG definition for filters removed -->
+
+  <!-- ================== HERO SECTION ================== -->
+  <section id="heroSection" class="hero">
+
+    <div class="hero-content">
+      <h1 class="stack-title">STACK</h1>
+      <p class="hero-subtitle">C++ / OpenGL Image Editor</p>
+    </div>
+
+    <!-- Scroll Indicator -->
+    <div class="scroll-indicator">
+      <span>Scroll to explore</span>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M12 5v14M19 12l-7 7-7-7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ================== INTRODUCTION SECTION ================== -->
+  <section id="intro" class="intro">
+    <div class="container">
+      <div class="intro-grid">
+        <div>
+          <p class="section-eyebrow">// 01 Vision</p>
+          <h2 class="section-title">An Honest,<br>Manual Editor</h2>
+        </div>
+        <div>
+          <p class="intro-paragraph">
+            Stack rejects presets in favor of complete mathematical control. It is built as a lightweight, node-based compositor and raw developer.
+          </p>
+          <p class="intro-desc">
+            Designed from the ground up for Windows in C++ with OpenGL hardware acceleration. It is packaged with clean, portable release files—free of bloated installers, hidden background services, or subscription checks. Just launch the executable and start compositing.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================== FEATURES LIST SECTION ================== -->
+  <section id="features" class="features">
+    <div class="container">
+      <p class="section-eyebrow">// 02 Architecture</p>
+      <h2 class="section-title">Core Features</h2>
+
+      <div class="features-list">
+        <a href="#gallery" class="feature-row">
+          <span class="feature-num">01 //</span>
+          <span class="feature-title" data-scramble>Node-based compositing</span>
+          <span class="feature-desc">Connect adjustments and masks dynamically in a visual, non-destructive node network.</span>
+        </a>
+
+        <a href="#gallery" class="feature-row">
+          <span class="feature-num">02 //</span>
+          <span class="feature-title" data-scramble>RAW development</span>
+          <span class="feature-desc">Dedicated raw development pipeline for capturing full camera dynamic range and colors.</span>
+        </a>
+
+        <a href="#gallery" class="feature-row">
+          <span class="feature-num">03 //</span>
+          <span class="feature-title" data-scramble>OpenGL acceleration</span>
+          <span class="feature-desc">Ultra-fast GPU rendering for smooth node updates, panning, and zooming at sub-pixel scale.</span>
+        </a>
+
+        <a href="#gallery" class="feature-row">
+          <span class="feature-num">04 //</span>
+          <span class="feature-title" data-scramble>Neural denoising</span>
+          <span class="feature-desc">Future integration for advanced AI-driven noise reduction and texture restoration.</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================== GALLERY SHOWCASE SECTION ================== -->
+  <section id="gallery" class="gallery">
+    <div class="container">
+      <p class="section-eyebrow">// 03 Interface</p>
+      <h2 class="section-title">Visual Layout</h2>
+
+      <div class="showcase-container">
+        <!-- Card 1: Node Compositing Screen -->
+        <div class="showcase-card">
+          <div class="showcase-img-container">
+            <img src="../composite.png" alt="Stack Node Compositor Layout" class="showcase-img">
+          </div>
+          <div class="showcase-caption">
+            <span class="showcase-label">Node Network</span>
+            <span class="showcase-meta">COMPOSITE.PNG // NODE PIPELINE</span>
+          </div>
+        </div>
+
+        <!-- Card 2: Image Editing Screen -->
+        <div class="showcase-card">
+          <div class="showcase-img-container">
+            <img src="../edit.png" alt="Stack Editing Workspace Interface" class="showcase-img">
+          </div>
+          <div class="showcase-caption">
+            <span class="showcase-label">Editor UI</span>
+            <span class="showcase-meta">EDIT.PNG // MAIN WORKSPACE</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================== DOWNLOAD SECTION ================== -->
+  <section id="download" class="download">
+    <div class="container">
+      <div class="download-box">
+        <p class="section-eyebrow">// 04 Access</p>
+        <h2 class="download-title">Obtain Stack</h2>
+        <p class="download-desc">
+          Honest portable packaging. No telemetry. No installers. Just portable power.
+        </p>
+
+        <!-- Primary Action Download Button -->
+        <a href="https://github.com/CharmsMods/Stack/releases/latest" id="downloadLink" class="btn-download" rel="noopener">
+          <span>Download for Windows</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12l7 7 7-7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </a>
+
+        <!-- Metadata updated dynamically via Github API -->
+        <p id="releaseMeta" class="download-meta">
+          LATEST RELEASE: FETCHING VERSION...
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================== FOOTER ================== -->
+  <footer>
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-logo">STACK // IMAGE EDITOR</div>
+        <div class="footer-copy">&copy; 2026 CHARMSMODS. ALL RIGHTS RESERVED.</div>
+        <div class="footer-links">
+          <a href="https://github.com/CharmsMods/Stack" target="_blank" rel="noopener">GITHUB</a>
+          <a href="https://discord.gg/xF7e6EzwQT" target="_blank" rel="noopener">DISCORD</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Script link -->
+  <script src="./index3_files/script.js"></script>
+</body>
+</html>

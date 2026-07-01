@@ -1,0 +1,372 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+03 - Iterative Auto Solve, Candidate Rendering, Convergence, and Learning
+=========================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide defines Auto as an iterative solver. It covers render loops, candidate generation, convergence, rejecting damaged outputs, user selection, merging, and learning toggles.
+
+The key idea is that Auto should not create one render from one static formula. It should explore, compare, eliminate, converge, and expose the authored settings.
+
+Why iterative Auto matters
+==========================
+RAW development is not one problem. It is a chain of coupled decisions:
+
+- RAW exposure affects highlight clipping and shadow lift needs.
+- Local exposure affects noise visibility and tone behavior.
+- Denoise affects texture, detail, and whether shadows can be opened.
+- White balance affects highlight color and skin/memory colors.
+- Tone affects perceived brightness, contrast, and whether the image feels realistic.
+- Mode intent changes which tradeoffs are acceptable.
+
+A single-pass Auto can make a reasonable guess, but it cannot know whether its guess actually rendered well until it sees the result. Stack should therefore support a solve loop:
+
+1. Analyze RAW metadata and image data.
+2. Build first candidate settings.
+3. Render candidate(s).
+4. Analyze rendered states.
+5. Detect damage or mismatch against intent.
+6. Adjust candidate families.
+7. Re-render only necessary stages when possible.
+8. Stop when candidates converge or no meaningful improvement remains.
+9. Present one default result plus meaningful alternatives if useful.
+
+This is not overengineering. It reflects how a human edits: move exposure, look, recover highlights, look, lift shadows, notice noise, back off, add tone, compare, choose.
+
+The solver should not chase a single universal score
+====================================================
+A common mistake would be to define one quality score and maximize it. That would make Stack brittle. Good RAW rendering is multi-objective.
+
+The solver should score candidates across several dimensions:
+
+- Midtone/subject placement.
+- Highlight integrity and brightness feeling.
+- Shadow cleanliness and meaningful detail.
+- Dynamic range compression versus preserved contrast.
+- Color plausibility and mood preservation.
+- Skin/memory color risk.
+- Noise and texture quality.
+- Halo/local exposure artifact risk.
+- Final mode intent match.
+- User manual-bias preservation.
+- Candidate uniqueness compared with other survivors.
+
+The correct output may not have the highest value in every dimension. Natural Finished may score lower on maximum visible detail than Maximum Range, but higher on realism. Dark Natural may score lower on shadow readability but higher on mood preservation.
+
+Candidate families
+==================
+The solver should not decide in advance that candidates always differ by the same sliders. Candidate differences should be image-driven.
+
+Possible candidate families include:
+
+1. Exposure placement candidates
+--------------------------------
+Different RAW/global exposure baselines, such as subject-priority, highlight-protected, and brighter-midtones.
+
+2. Dynamic range candidates
+---------------------------
+Different amounts of local exposure, highlight compression, and shadow lift.
+
+3. Tone candidates
+------------------
+Different finish curves: natural, softer, punchier, flatter, brighter, darker.
+
+4. Noise/detail candidates
+--------------------------
+Different denoise/detail balances, especially for high ISO or phone DNGs.
+
+5. White-balance/color candidates
+---------------------------------
+Neutral, As Shot/mood-preserved, and moderated correction when the WB solve is uncertain.
+
+6. Subject-priority candidates
+------------------------------
+Different treatment of marked or detected important areas.
+
+7. Mode-neighbor candidates
+---------------------------
+If the image is difficult, Natural Finished may generate nearby alternatives: Natural, Natural More Range, Natural Brighter Subject, Natural More Contrast.
+
+The solver may test many candidates internally. The UI should show only meaningful survivors.
+
+Candidate elimination
+=====================
+Bad candidates should be removed automatically. Similar candidates should be clustered so the user is not shown five nearly identical renders.
+
+Damage-based elimination should remove candidates with:
+
+- Obvious halos or edge glow.
+- Washed-out gray HDR flattening.
+- New large highlight clipping unless intended/acceptable.
+- Noisy lifted shadows beyond the selected texture/cleanliness intent.
+- Skin or memory-color distortion.
+- Unnatural white balance shifts.
+- Plastic denoise or smeared important texture.
+- Loss of subject readability in subject-priority modes.
+- Loss of overall brightness hierarchy.
+- Overly weak results that fail the selected mode intent.
+
+Similarity-based elimination should compare:
+
+- Histogram/luminance distribution.
+- Perceptual brightness and contrast.
+- Local EV map differences.
+- Color temperature/tint differences.
+- Subject-region exposure differences.
+- User-visible thumbnails.
+
+The point is not to reduce the system to one answer too early. It is to avoid wasting the user's attention.
+
+Candidate gallery behavior
+==========================
+The user wants a gallery-like UI where candidates appear while processing. The gallery may temporarily replace the canvas viewport. Candidates can pop in as renders complete, duplicates can be removed, and the last few can remain for selection.
+
+Recommended gallery behavior:
+
+- Show the currently preferred candidate as larger or marked "Auto Pick."
+- Show other survivors as thumbnails/cards.
+- Allow quick hover or click preview.
+- Allow side-by-side comparison.
+- Label differences in human terms: "More Range," "Cleaner Shadows," "Brighter Subject," "More Contrast," "Mood WB," etc.
+- Avoid showing technical parameter names as the first label.
+- Let the user select a candidate.
+- Allow optional merge between two candidates when feasible.
+
+Merging candidates
+==================
+Candidate merging is powerful but dangerous. It should not become a naive opacity blend between final images, because that may mix incompatible tone/color states.
+
+Possible merge meanings:
+
+1. Settings interpolation
+-------------------------
+Interpolate authored solver settings between two candidates. This is clean if the settings are compatible, but may behave strangely across different local maps or reconstruction modes.
+
+2. Intent interpolation
+-----------------------
+Treat the two candidates as points in intent space and solve a new candidate between them. This is likely the best long-term option.
+
+3. Final image blend
+--------------------
+Blend rendered outputs. This is simple but can be mathematically dishonest and can break scene-linear/rendering logic. It may be acceptable only as a preview or for final display-referred looks, not as the main authored state.
+
+Recommended direction: merging should ideally create a new solve informed by both candidates, not merely blend pixels.
+
+Convergence definition
+======================
+Convergence should not mean "the histogram matches a target." It should mean additional solve passes are no longer making meaningful improvements under the selected mode and user intent.
+
+A solve can stop when:
+
+- Important midtones/subject regions are stable.
+- Highlight and shadow risk metrics are stable.
+- Local exposure map changes fall below a threshold.
+- Tone curve changes stop improving mode score.
+- Noise/detail balance is within the selected intent.
+- Candidate ranking stops changing.
+- New candidate attempts are either similar to existing survivors or damaged.
+- The per-pass adjustment delta is small.
+
+A solve should also stop if it is not improving, even if metrics are not perfect. There is no perfect answer for many RAW files.
+
+Avoiding oscillation
+====================
+A render-feedback Auto system can chase itself. For example, it may lift shadows, see more noise, reduce lift, see less detail, increase lift again, and loop.
+
+Safeguards:
+
+- Keep a bounded pass count.
+- Limit per-pass setting movement except at high confidence.
+- Use damped updates rather than full jumps.
+- Keep source metadata and user intent separate from render-feedback stats.
+- Avoid putting live tone-analysis stats into the trigger hash in a way that constantly retriggers full Auto.
+- Compare against previous passes and reject changes that undo recent accepted improvements.
+- Store why a candidate was rejected so the solver does not regenerate it.
+- Define monotonic constraints where appropriate, such as "if shadow lift increased noise beyond tolerance, do not increase the same lift again unless denoise/black-point strategy also changes."
+
+The current implementation already avoids one closed-loop failure by not hashing live tone-analysis stats into the Auto solve trigger hash. Future iterative solving can still use render feedback, but it needs explicit pass control and candidate memory.
+
+Render stages and reprocessing
+==============================
+The solver should avoid reprocessing everything when unnecessary, but it must not skip stages that need new analysis.
+
+Conceptual cache boundaries:
+
+1. RAW base
+-----------
+Affected by RAW input, black/white levels, mosaic denoise, demosaic, raw highlight reconstruction, WB, camera transform, orientation, RAW exposure if exposure stays in this stage.
+
+2. Pre-finish / scene-prepped image
+-----------------------------------
+Affected by RAW base and local exposure scene prep, range compression, subject maps, noise/highlight guards.
+
+3. Finish tone
+--------------
+Affected by tone curve, contrast, shoulder/toe, finish mask, mode finish intent, final brightness.
+
+4. Display/view transform
+-------------------------
+Affected by downstream View Transform and display/output settings.
+
+Changes that should likely re-solve broad stages:
+
+- Mode change.
+- Auto Strength change.
+- Subject importance brush change.
+- Major brightness/dynamic range graph movement.
+- White-balance intent movement if it changes color analysis significantly.
+- Manual-to-Auto return with unlocked edits.
+
+Changes that may update only downstream stages:
+
+- Small final contrast bias.
+- Finish tone graph tweak.
+- Display/view transform change.
+- Some color density/tint finishing changes.
+
+Changes that need special handling:
+
+- RAW exposure changes can affect highlight clipping and local exposure, so they may need RAW + scene prep + tone refresh.
+- Denoise changes can affect local exposure/noise decisions, so they may need scene-prep analysis if shadows are being lifted.
+- WB changes can affect clipping/hue/skintone analysis, so they may need color and highlight re-evaluation.
+
+Learning from user choices
+==========================
+The user wants learning to always be recorded but not always applied. This should be a settings-menu behavior.
+
+Recommended learning controls:
+
+- Learn from candidate selections: On/Off.
+- Apply learning to current image: On/Off.
+- Apply learning to future images: On/Off.
+- Reset current-image learning.
+- Reset global preference learning.
+- Show learned bias summary.
+
+Learning should be scoped:
+
+1. Current-image learning
+-------------------------
+If the user rejects a flat candidate and picks a punchier candidate, the solver should lean away from flat alternatives for this image if current-image learning is applied.
+
+2. Future-image learning
+------------------------
+If enabled, future solves can gently bias toward the user's repeated choices. This should be subtle and reversible.
+
+3. Manual edit learning
+-----------------------
+If the user often warms Natural Finished results, Auto can preserve more warmth when returning from Manual.
+
+Learning should not silently hard-code a style. It should be visible and resettable.
+
+Graph controls inside the solve loop
+====================================
+Graph controls are ideal for solver steering because they define multidimensional intent.
+
+Possible solver graphs:
+
+1. Auto Intent Map
+------------------
+Technical Base <-> Finished Rendering, Preserve Range <-> Preserve Contrast.
+
+2. Exposure / Range Map
+-----------------------
+Protect Highlights <-> Brighten Important Mids, Preserve Natural Contrast <-> Reveal More Range.
+
+3. Color Mood Map
+-----------------
+Neutral Correction <-> Mood Preservation, Cool/Analytical <-> Warm/Emotional, with tint as a second/orthogonal dimension when needed.
+
+4. Texture / Cleanliness Map
+----------------------------
+Clean <-> Textured, Hide Noise in Tone <-> Reveal Detail with Denoise.
+
+5. Subject / Scene Map
+----------------------
+Global Scene Integrity <-> Marked Subject Priority, Preserve Mood <-> Improve Readability.
+
+The solver can read these graph positions as bias vectors. Manual can reveal the resulting exact settings.
+
+Candidate diagnostics
+=====================
+Each candidate should carry a compact explanation:
+
+- Why it was generated.
+- What it changed compared with the base candidate.
+- What risks were detected.
+- Why it survived.
+- What mode/graph position it represents.
+
+Examples:
+
+"Brighter Subject: lowered base exposure slightly to preserve sky, lifted marked subject region locally, increased shadow denoise, used warm-preserved WB."
+
+"More Range: compressed highlights and lifted clean shadows; rejected stronger version because halo risk increased around tree/sky edges."
+
+This makes Auto feel intelligent instead of mysterious.
+
+A better way than one Auto button
+=================================
+A normal Auto button makes one decision and hides it. Stack should be better.
+
+Better path:
+
+- Auto begins with Natural Finished default.
+- It shows a good primary result quickly.
+- It continues generating alternatives if enabled or if the image is difficult.
+- It displays meaningful candidate options.
+- It explains the differences.
+- It lets the user select, merge, or guide with a brush/graph.
+- It preserves the selected authored settings for Manual.
+
+This turns Auto into a collaborative solving process.
+
+Research anchors for this guide
+===============================
+- Stack current Develop context: Auto already writes RAW baseline exposure, scene prep, and integrated tone state, and current code avoids hashing live tone-analysis stats into the auto-solve trigger hash to avoid closed-loop oscillation.
+- RawPedia local adjustments: shows that shadows/highlights, tone equalizers, log encoding, local color/light, denoise, and tone mapping are related but separate local operations.
+- Local Laplacian Filters: supports the idea that edge-aware local tone/detail processing should be designed around halo prevention.
+- darktable process documentation: local contrast and sharpening can exaggerate noise, so Auto must evaluate downstream consequences.
+
+Recommended document-level decisions
+====================================
+- Auto is an iterative render-feedback solver.
+- Candidate generation is image-driven, not fixed preset categories.
+- The UI should show meaningful survivors, not every internal test.
+- Candidate selection becomes the authored state.
+- Candidate merging should preferably create a new solve, not a naive pixel blend.
+- Learning should be recorded separately from whether it is applied.
+- User choice/rejection learning should be toggleable for current image and future images.
+- Convergence must be defined by visual/data stability under intent, not one histogram score.
+
+Open experience-test questions
+==============================
+- How animated should the gallery feel before it becomes distracting?
+- Should candidate generation always continue after a primary render, or only when the user opens alternatives?
+- How many survivors feel useful on screen?
+- What labels best communicate candidate differences without technical clutter?
+- How should merging two candidates be represented in UI?

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <iostream>
 
 namespace Async {
 
@@ -34,11 +35,7 @@ void TaskSystem::Shutdown() {
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_WorkMutex);
-        m_StopRequested = true;
-    }
-    m_WorkCv.notify_all();
+    RequestStopDiscardQueued();
 
     for (auto& worker : m_Workers) {
         if (worker.joinable()) {
@@ -63,6 +60,27 @@ void TaskSystem::Shutdown() {
     m_Initialized = false;
 }
 
+void TaskSystem::RequestStopDiscardQueued() {
+    if (!m_Initialized) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_WorkMutex);
+        m_StopRequested = true;
+        std::queue<Task> empty;
+        m_WorkQueue.swap(empty);
+    }
+    m_WorkCv.notify_all();
+}
+
+bool TaskSystem::IsDrainedForShutdown() const {
+    if (!m_Initialized) {
+        return true;
+    }
+    return m_ActiveWorkers.load() == 0;
+}
+
 void TaskSystem::Submit(Task task) {
     if (!task) {
         return;
@@ -74,6 +92,9 @@ void TaskSystem::Submit(Task task) {
 
     {
         std::lock_guard<std::mutex> lock(m_WorkMutex);
+        if (m_StopRequested) {
+            return;
+        }
         m_WorkQueue.push(std::move(task));
     }
     m_WorkCv.notify_one();
@@ -104,7 +125,13 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks) {
         }
 
         if (task) {
-            task();
+            try {
+                task();
+            } catch (const std::exception& e) {
+                std::cerr << "[TaskSystem] Main-thread task failed: " << e.what() << "\n";
+            } catch (...) {
+                std::cerr << "[TaskSystem] Main-thread task failed: unknown exception\n";
+            }
         }
 
         ++processed;
@@ -123,7 +150,7 @@ void TaskSystem::WorkerLoop() {
                 return m_StopRequested || !m_WorkQueue.empty();
             });
 
-            if (m_StopRequested && m_WorkQueue.empty()) {
+            if (m_StopRequested) {
                 return;
             }
 
@@ -136,12 +163,14 @@ void TaskSystem::WorkerLoop() {
         }
 
         try {
+            m_ActiveWorkers.fetch_add(1);
             task();
-        } catch (const std::exception&) {
-            // Keep the worker alive; failures are reported by callers.
+        } catch (const std::exception& e) {
+            std::cerr << "[TaskSystem] Worker task failed: " << e.what() << "\n";
         } catch (...) {
-            // Keep the worker alive; failures are reported by callers.
+            std::cerr << "[TaskSystem] Worker task failed: unknown exception\n";
         }
+        m_ActiveWorkers.fetch_sub(1);
     }
 }
 

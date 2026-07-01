@@ -26,6 +26,8 @@ private:
     unsigned int m_LinearTexture = 0;
     unsigned int m_OutputTexture = 0;
     unsigned int m_OutputFbo = 0;
+    unsigned int m_QuadVao = 0;
+    unsigned int m_QuadVbo = 0;
     int m_RawWidth = 0;
     int m_RawHeight = 0;
     int m_OutputWidth = 0;
@@ -41,6 +43,7 @@ private:
     bool UploadCorrectedRawTexture(const RawImageData& raw, const RawDevelopSettings& settings, bool& outHasCorrectedRaw);
     bool UploadLinearTexture(const RawImageData& raw, const RawDevelopSettings& settings);
     bool EnsureOutput(int width, int height);
+    bool EnsureFullscreenQuad();
 };
 
 } // namespace Raw

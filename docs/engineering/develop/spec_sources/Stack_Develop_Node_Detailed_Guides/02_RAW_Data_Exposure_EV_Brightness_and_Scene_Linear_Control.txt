@@ -1,0 +1,313 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+02 - RAW Data, Exposure, EV, Brightness, and Scene-Linear Control
+=================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide explains the data foundation of RAW development: black level, white level, scene-linear values, EV multiplication, global exposure, visible brightness, and why those ideas must not be blended into one vague brightness slider.
+
+This document is especially important because the user's original thinking about Stack came from asking what "brightness" actually means. The answer is that brightness can mean several different things, and Stack should be honest about which one is happening.
+
+Current raw foundation
+======================
+The current Develop node supports mosaiced Bayer RAW and linear RGB RAW/DNG paths. For mosaiced Bayer input, the shader order currently includes orientation, RAW sampling, black/white normalization, optional DNG gain map correction, optional mosaic denoise, demosaic, lateral chromatic-aberration correction, clipped-channel mask building, RAW highlight reconstruction, white balance, cleanup, optional camera transform, exposure scaling, and float RGB output.
+
+The current implementation applies exposure scale as pow(2, exposureStops). That is the key mathematical truth: in scene-linear data, +1 EV means multiply by 2, -1 EV means multiply by 0.5, +2 EV means multiply by 4, and so on.
+
+The current code also treats Develop output as unclamped scene-linear float RGB, with a View Transform downstream. That separation matters. Scene-linear data is not display-ready just because it looks like RGB.
+
+What RAW values are
+===================
+A RAW file does not begin as a normal image. A mosaiced Bayer RAW contains one color-filtered sensor value per photosite. It has not yet been fully converted to RGB. It also usually includes metadata or inferred values needed to interpret the sensor numbers: dimensions, CFA pattern, black level, white level, white balance, color transforms, orientation, and sometimes gain maps or camera-profile data.
+
+External references reinforce this shape. LibRaw describes its role as extracting RAW pixel values and metadata such as geometry, CFA/Bayer pattern, black level, and white balance. Adobe describes DNG as a public RAW format/specification intended to store camera raw data in a documented way.
+
+Stack should use external RAW loaders and metadata as input clues, not as an excuse to accept every default rendering decision. LibRaw itself states that its basic conversion methods are retained for compatibility/testing and are not intended as production-quality rendering. That is directly aligned with Stack's philosophy: use RAW extraction and metadata, then own the high-quality rendering decisions.
+
+Black level and white level
+===========================
+Before an exposure solve can be meaningful, RAW values need a defined numeric range.
+
+Black level is the sensor/code value that represents no meaningful light signal. Depending on camera/file behavior, it may be stored, calculated, hardcoded, already subtracted, or represented per channel/pattern. White level is the value at or near saturation for the sensor data.
+
+A simplified normalization is:
+
+normalized = (raw_value - black_level) / (white_level - black_level)
+
+But real implementation must handle:
+
+- Per-channel black levels.
+- Per-pattern black correction.
+- DNG black/white tags.
+- LibRaw-provided black/cblack/maximum/linear_max fields.
+- Files where black has already been subtracted.
+- Highlight channel saturation and channel-specific clipping.
+- DNG gain maps.
+- Linear RGB DNG paths that are not mosaiced Bayer and skip mosaic-specific behavior.
+
+The quality principle is simple: do not solve exposure or color on untrusted numeric foundations. If black/white normalization is wrong, every later stage receives distorted data.
+
+Scene-linear values
+===================
+Scene-linear means values are proportional to scene light after the pipeline has normalized and interpreted the sensor data. It does not mean the image looks correct on a display. It means multiplication has physical meaning.
+
+In scene-linear data:
+
+- Multiplying by 2 is +1 EV.
+- Multiplying by 0.5 is -1 EV.
+- Adding a constant is usually not a physically honest exposure change.
+- Tone curves and display transforms are separate from exposure multiplication.
+
+This is why Stack should separate RAW/data exposure from visible brightness. A user may say "make it brighter," but the solver must decide whether the right operation is RAW EV multiplication, midtone tone lift, local exposure, shadow opening, highlight rolloff, or a combination.
+
+Exposure is not visible brightness
+==================================
+RAW/data exposure changes the scale of scene-linear values. Visible brightness is what the user perceives after local exposure, tone mapping, contrast, display transform, and the current viewing environment.
+
+A +1 EV RAW exposure move doubles the scene-linear values. But if highlights are already near saturation, a later tone stage may compress them. If shadows are noisy, Auto may not lift them much. If the user is in Dark Natural mode, the final image may remain dark even if some data was scaled.
+
+Therefore Stack should use at least two concepts:
+
+1. RAW Exposure / Data Exposure
+-------------------------------
+Literal scene-linear EV multiplication. This is the honest mathematical control. In Manual mode this should be exposed clearly, with tooltips such as:
+
+"+1 EV multiplies scene-linear values by 2 before later tone/rendering decisions."
+
+2. Rendered Brightness / Brightness Intent
+------------------------------------------
+A solver-facing or final-render-facing control that means "make the image feel brighter or darker." This may use multiple operations. In Auto mode, this is usually what a non-technical user means.
+
+The mistake to avoid is naming one slider "Exposure" and letting it secretly sometimes mean RAW multiplication and sometimes mean tone brightness. That makes the software feel unpredictable and prevents the user from learning what is actually happening.
+
+Recommended naming
+==================
+Auto mode should use human intent names:
+
+- Brightness Intent
+- Exposure Preference
+- Midtone Brightness
+- Highlight Protection
+- Dynamic Range Intent
+
+Manual mode should use precise names:
+
+- RAW Exposure / EV
+- Scene-Linear Scale
+- Midtone Render Bias
+- Tone Brightness
+- Local Exposure Map Strength
+
+A hover/advanced explanation should connect them:
+
+"Auto Brightness Intent may change RAW EV, local exposure, and tone together. Manual RAW Exposure is literal EV multiplication."
+
+The order problem
+=================
+The order of exposure operations matters. A strong RAW exposure increase before highlight handling can create downstream clipping. A strong local shadow lift after denoise decisions can reveal noise. A tone-curve brightness lift after display mapping may make an image look brighter but cannot recover lost scene-linear information.
+
+Stack should conceptually separate these stages:
+
+1. Sensor normalization.
+2. RAW defect/cleanup and reconstruction.
+3. Camera color/white-balance interpretation.
+4. RAW/data exposure placement.
+5. Scene-linear global/local range preparation.
+6. Finish tone and contrast.
+7. View/display transform.
+
+Some operations may be fused for performance, but the solver and diagnostics should keep the conceptual order.
+
+Global exposure and local exposure should cooperate
+===================================================
+The earlier plan said global exposure comes before local exposure. The user's refined direction is more nuanced: global and local should be solved together, especially for extreme dynamic-range scenes, because local image understanding may be needed to decide where the global exposure should land.
+
+The best design is a coupled solve with an ordered application:
+
+- Analysis may consider global and local information together.
+- The solver may test candidate global placements while estimating local exposure needs.
+- The actual render should still maintain a clear authored baseline exposure followed by local scene prep, so the pipeline remains explainable and cacheable.
+
+In plain terms: Stack can think globally and locally at the same time, but it should not produce an unexplainable soup of brightness changes.
+
+Global exposure should usually protect the important middle
+===========================================================
+The user's priority is not "save every highlight" or "open every shadow." The global exposure solve should prioritize important midtones, subject-like regions, and areas that plausibly carry image meaning.
+
+Highlights that are extremely bright may be naturally clipped light sources or unrecoverable sensor saturation. Deep shadows may be intended darkness, empty background, or mostly noise. The solver should not let those extremes dominate every image.
+
+This leads to a better global exposure target:
+
+- Place important midtones in a believable range.
+- Avoid unnecessary clipping of large important highlights.
+- Avoid crushing meaningful shadows, but do not lift empty/noisy dark regions blindly.
+- Allow mode-specific intent to bias the placement.
+- Generate candidates when the correct priority is ambiguous.
+
+Dynamic range means several things
+==================================
+RAW files can have a large spread of values. Dynamic range can refer to:
+
+- The sensor/captured range.
+- The normalized scene-linear range after black/white handling.
+- The visible display range after tone/rendering.
+- The subjective feeling of contrast in the final image.
+
+Stack should avoid using "dynamic range" as a single magical slider. In Auto, Dynamic Range Intent can mean how much of the recoverable range the solver should attempt to show. In Manual, there should be clearer controls: highlight compression, shadow lift, local exposure range, tone shoulder/toe, black/white endpoint behavior.
+
+Flat mode exposure behavior
+===========================
+Flat Editing Base should bring useful mids and image information into visibility. It should not simply reduce contrast at the end. A better Flat solve should:
+
+- Identify the useful midtone mass.
+- Bring midtones up enough to be easy to edit.
+- Restrain hard black/white endpoints.
+- Use local exposure where needed to reduce editing difficulty.
+- Preserve the ability to later add contrast without revealing damage.
+- Avoid washing out color or gray-ing highlights.
+
+This means Flat mode is still an active solve. It is not "turn down contrast."
+
+Extreme dynamic range behavior
+==============================
+For extreme DR scenes, Auto should test multiple exposure placements and local maps. A possible candidate strategy:
+
+- Candidate A: midtone/subject priority with natural highlight rolloff.
+- Candidate B: highlight-preserving global lower exposure with local midtone lift.
+- Candidate C: maximum range compression with careful local exposure and tone.
+- Candidate D: darker/mood-preserved result if the scene appears intentionally dramatic.
+
+The solver should eliminate candidates that produce:
+
+- Gray highlights that no longer feel bright.
+- Lifted shadow noise.
+- Halos around high-contrast edges.
+- Washed-out color.
+- Over-flattened lighting hierarchy.
+- Loss of subject readability when subject priority is high.
+
+Graph controls for exposure and range
+=====================================
+This is a strong place for a graph control.
+
+A useful Exposure / Range Intent graph could use:
+
+Horizontal axis:
+Protect Highlights  <---------------------->  Brighten Important Mids
+
+Vertical axis:
+Preserve Natural Contrast  <--------------->  Reveal More Range
+
+Examples:
+
+- Natural Finished: slightly toward Brighten Important Mids, balanced vertical.
+- Flat Editing Base: Brighten Important Mids + Reveal More Range.
+- Maximum Range: Protect Highlights + Reveal More Range.
+- Dark Natural: Preserve Natural Contrast, lower brightness bias.
+- Punchy: Preserve Natural Contrast with stronger endpoints.
+
+The point on the graph should not directly equal one exposure value. It should influence:
+
+- RAW EV candidate placement.
+- Local exposure range.
+- Highlight guard strength.
+- Shadow-lift limits.
+- Tone curve shoulder/toe.
+- Candidate scoring.
+
+Manual should still show literal EV and authored values.
+
+Safeguards for exposure math
+============================
+Safeguards should be local and data-aware.
+
+For highlights:
+
+- Detect channel clipping before and after exposure changes.
+- Distinguish small specular clipping from large important clipping.
+- Preserve highlight brightness where possible; do not make protected highlights dull gray.
+- Separate recovery from reconstruction from rolloff.
+
+For shadows:
+
+- Estimate noise risk before lift.
+- Prefer tone-hidden darkness where lift reveals mostly noise.
+- Couple shadow lift with denoise decisions.
+- Do not treat every dark region as content.
+
+For midtones:
+
+- Prevent over-brightened midtones from destroying mood.
+- Protect skin/subject-like areas from clipping and weird color.
+- Keep midtone contrast believable.
+
+For convergence:
+
+- Do not let feedback stats cause oscillation.
+- Limit per-pass movement unless confidence is high.
+- Compare rendered candidates against visual damage metrics, not just histogram targets.
+
+What not to copy blindly
+========================
+Do not copy a traditional RAW order just because it is common. Some pipelines apply exposure early, some tone later, some white balance before or after demosaic, some work in log domains for local tone, and some put display transforms at different points.
+
+Stack should ask:
+
+- Does this operation need scene-linear data?
+- Does it need mosaiced sensor data?
+- Does it need color-transformed RGB?
+- Does it change the data or only the rendering?
+- Does it reduce future editing headroom?
+- Does it introduce artifacts?
+- Does it make the solve more or less stable?
+
+The best order is the one that preserves quality, explains itself, and gives the solver enough information to make strong but safe decisions.
+
+Research anchors for this guide
+===============================
+- LibRaw About and Data Structures: RAW loaders expose pixel data and metadata such as black level, per-channel black correction, and maximum values.
+- Adobe DNG resource page: DNG is a public RAW archival/specification path and includes SDK/specification resources.
+- ACES and OpenColorIO docs: scene-referred values and display/view transforms should be conceptually separated.
+- Stack current context: current RAW base applies exposure scale using pow(2, exposureStops) and Develop is described as unclamped scene-linear float RGB.
+
+Recommended document-level decisions
+====================================
+- Manual mode must expose true RAW EV separately from visible/rendered brightness controls.
+- Auto mode may use intent controls that adjust RAW EV, local exposure, and tone together.
+- Global and local exposure should be solved together but applied in explainable authored stages.
+- Global exposure priority should usually be important midtones/subject regions, not absolute highlight preservation or shadow opening.
+- Flat mode should actively place mids and range into a workable visible state.
+- Dynamic Range Intent should be graph-driven where possible, not just a single slider.
+- Exposure diagnostics should show RAW EV, local EV map, clipping risk, noise-limited shadow regions, and final tone placement.
+
+Open experience-test questions
+==============================
+- How bright should Flat mode mids be before the image stops feeling editable and starts feeling washed out?
+- How much RAW exposure movement can Auto make before users feel confused?
+- Should Auto show when it lowered RAW exposure to protect highlights and then lifted locally?
+- Which exposure graph axes feel intuitive in practice?
+- How much highlight clipping is acceptable by mode?

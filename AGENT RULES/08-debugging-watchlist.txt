@@ -1,0 +1,121 @@
+DEBUGGING WATCHLIST
+
+Purpose
+
+Use this file as a living list of concrete bugs, failure patterns, and debugging lessons that should be checked before repeating deep investigation work.
+
+Keep entries specific. Record the symptom, the real cause, the fix, and what to check next time.
+
+Use this file when debugging crashes, freezes, rendering glitches, loading stalls, data corruption, and issues that keep reappearing across implementation passes.
+
+How to add entries
+
+Add a new entry when a bug was confusing, costly, easy to misdiagnose, or likely to recur.
+
+Do not turn entries into broad advice. Tie each entry to an actual failure that happened.
+
+Include file paths, functions, dump signatures, validation commands, and project-specific context when they would save time later.
+
+Prefer short entries that can be scanned quickly during a stressful debugging pass.
+
+RAW Workspace startup crash: placeholder pixels used as full image
+
+Date found: 2026-06-28
+
+Symptom:
+
+Opening the RAW tab with a previous workspace and selected RAW image restored caused the app to freeze briefly and then crash after about two seconds. Earlier rendering bugs made this look like another RAW/OpenGL render crash, but this specific crash happened before the user could adjust anything.
+
+Crash evidence:
+
+- Executable tested: `D:\Program Development\Stack\build\Stack.exe`
+- Dump inspected: `C:\Users\djhbi\AppData\Local\CrashDumps\Stack.exe.19476.dmp`
+- Exception: `0xc0000005`
+- Fault was in `Stack.exe`, not the NVIDIA OpenGL driver.
+- Symbolized stack pointed to `memcpy` inside anonymous `ResizePixelsNearest` in `src\Editor\Internal\EditorModuleNodeBrowserThumbnails.cpp`, called from `EditorModule::ResolveNodeBrowserPreviewSeed`, then `EnsureNodeBrowserThumbnailCatalog`, then deferred project apply while rendering the RAW tab.
+
+Actual problem:
+
+Deferred RAW project load intentionally used a tiny transparent placeholder source-pixel buffer instead of loading the full stored source image:
+
+- `sourcePixels.assign(4, 0)`
+- width/height could later come from the active pipeline/project state
+
+Node-browser thumbnail seed generation trusted the canvas width/height and assumed the source-pixel vector contained full-size RGBA data. It resized the placeholder as if it were a complete image and read past the end of the vector during `memcpy`.
+
+This was not a RAW exposure, tone curve, shader, or full-resolution preview bug. It was a metadata/pixel-buffer mismatch in thumbnail preview generation.
+
+Fix:
+
+- Hardened `src\Editor\Internal\EditorModuleNodeBrowserThumbnails.cpp`.
+- Added byte-count validation before resize, row flip, transparent allocation, and PNG encode.
+- Made `ResizePixelsNearest` accept source channel count and normalize 1/2/3/4+ channel inputs to RGBA.
+- Made invalid or incomplete active-image and pipeline-source preview seeds fall back to a stable blank seed.
+- Made successful worker preview results with invalid/incomplete pixels fall back to normal fallback cards instead of creating invalid thumbnail entries.
+
+Things to check next time:
+
+- If a crash happens during RAW tab startup, restored selection, deferred project apply, or first seconds after opening a workspace, inspect node-browser thumbnail generation before assuming RAW rendering is at fault.
+- Check whether dimensions and pixel buffers come from different lifetimes or sources.
+- Treat tiny placeholder pixel buffers with real image dimensions as suspicious.
+- Never trust width/height/channel metadata unless the pixel vector contains at least `width * height * channels` bytes.
+- If a dump points at `memcpy`, `memmove`, PNG encode, row flipping, resizing, or texture upload, verify byte counts before chasing rendering architecture.
+
+Validation used after fix:
+
+- `cmake --build build --config Debug --target Stack --parallel 1`
+- `build\Stack.exe --validate-layer-registry`
+- `build\Stack.exe --validate-develop-node-smoke`
+- `build\Stack.exe --validate-raw-workspace-loading-smoke "C:\Users\djhbi\Downloads\all in extract\all copied images" --expect-min-sources 100`
+- `build\Stack.exe --validate-develop-real-raw-smoke "C:\Users\djhbi\Downloads\all in extract\all copied images\DSC00122.ARW"`
+- `cmake --build build --config Debug --target StackGraphBehaviorTests --parallel 1`
+- `build\StackGraphBehaviorTests.exe`
+
+General lesson:
+
+When a system has been optimized to avoid loading full data, every downstream consumer must know whether it has real data, placeholder data, or no data. Placeholder data must not be shaped like real data unless every consumer validates it.
+
+RAW render cache identity too thin
+
+Date found: 2026-06-28
+
+Symptom:
+
+During the final RAW render/pipeline audit, several cache paths could reuse RAW render outputs even when render-affecting metadata changed. This was not the active crash the user had just fixed, but it was a likely future source of stale previews, wrong crop/orientation/gain behavior, or inconsistent editor/RAW tab output.
+
+Actual problem:
+
+Some cache identities were based mostly on pixel buffers, source path, file size, or modified time while the renderer also consumed metadata and settings outside those keys:
+
+- `RawGpuPipeline::UploadCorrectedRawTexture` used raw buffer plus partial gain-map/settings identity, but the corrected texture also depends on crop origin, CFA pattern, black/white levels, per-channel black, layout, and full DNG gain-map opcode fields.
+- `RawGpuPipeline::UploadLinearTexture` normalized UInt16 linear RGB using black/white settings, but the cache key did not include those normalization inputs.
+- Render-graph `RawSource` fingerprints included basic dimensions and levels, but missed crop origin, layout/sample metadata, DNG/color/WB metadata, and full gain-map identity.
+- The capped preview proxy stripped DNG gain maps, so gain-map DNG previews could differ from full-res renders for reasons beyond resolution.
+- Stricter metadata identity exposed the small pre-finish stage-cache cap: a DNG metadata variant stopped aliasing the balanced RAW entry and evicted a validation-needed pre-finish cache entry.
+
+Fix:
+
+- Hardened RAW GPU corrected/linear texture fingerprints in `src/Raw/RawGpuPipeline.cpp`.
+- Hardened graph RAW source fingerprinting in `src/Renderer/Internal/RenderPipelineGraphExecution.cpp`.
+- Made DNG gain-map RAWs bypass downsampled preview proxies in `src/Renderer/RawPreviewProxy.cpp`.
+- Raised the small RAW develop stage-cache cap from 6 to 8 entries in `src/Renderer/Internal/RenderPipelineGraphExecutionHelpers.h`, leaving medium/large caps unchanged.
+- Added tests in `tools/graph_behavior_tests.cpp` for gain-map proxy bypass and managed RAW source drift rejection.
+
+Things to check next time:
+
+- When a RAW preview is stale, wrong orientation, wrong crop, wrong color transform, or differs between RAW and Editor tabs, inspect cache identity before chasing UI state.
+- For RAW cache keys, list every value consumed by the shader/CPU preprocessing path and verify each one participates in the fingerprint.
+- Do not remove metadata from fingerprints just to regain cache reuse. If stricter identity hurts reuse, adjust cache capacity or targeted reuse policy instead.
+- If a cache validation starts failing after adding metadata identity, count how many distinct entries are now legitimately separate before weakening the key.
+
+Validation used after fix:
+
+- `cmake --build build --config Debug --target StackGraphBehaviorTests --parallel 1`
+- `build\StackGraphBehaviorTests.exe`
+- `cmake --build build --config Debug --target Stack --parallel 1`
+- `build\Stack.exe --validate-layer-registry`
+- `build\Stack.exe --validate-develop-node-smoke`
+- `build\Stack.exe --validate-develop-auto-solve`
+- `build\Stack.exe --validate-tone-curve-auto`
+- `build\Stack.exe --validate-raw-workspace-loading-smoke "C:\Users\djhbi\Downloads\all in extract\all copied images" --expect-min-sources 100`
+- `build\Stack.exe --validate-develop-real-raw-smoke "C:\Users\djhbi\Downloads\all in extract\all copied images\DSC00122.ARW"`

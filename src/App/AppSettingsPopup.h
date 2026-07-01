@@ -9,9 +9,11 @@ namespace AppSettingsPopup {
 
 enum class Category {
     Appearance = 0,
-    Graph = 1,
-    CanvasComposition = 2,
-    Updates = 3
+    Background = 1,
+    Graph = 2,
+    Viewport = 3,
+    CanvasComposition = 4,
+    Updates = 5
 };
 
 struct State {

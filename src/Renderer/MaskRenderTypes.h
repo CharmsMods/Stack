@@ -2,7 +2,9 @@
 
 #include "Color/LutData.h"
 #include "Editor/Layers/LayerBase.h"
+#include "MFSR/MFSRTypes.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
+#include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
 #include "Utils/SharedPixelBuffer.h"
@@ -112,6 +114,9 @@ struct RenderImageGeneratorSettings {
     float offset = 0.0f;
     std::string text = "Text";
     float fontSize = 96.0f;
+    float textBackdropBlur = 0.0f;
+    float textBackdropOpacity = 0.0f;
+    float textBackdropPadding = 12.0f;
 };
 
 struct RenderCustomMaskPoint {
@@ -155,12 +160,14 @@ struct RenderLayerStep {
 enum class RenderGraphNodeKind {
     Image,
     RawSource,
+    RawDevelopment,
     RawNeuralDenoise,
     RawDecode,
     RawDevelop,
     RawDetailAutoMask,
     RawDetailFusion,
     HdrMerge,
+    Mfsr,
     Lut,
     Layer,
     Output,
@@ -195,7 +202,8 @@ enum class RenderDataMathMode {
     Min,
     Max,
     Difference,
-    Remap
+    Remap,
+    ImageAverage
 };
 
 struct RenderDataMathSettings {
@@ -218,6 +226,10 @@ struct RenderGraphRawSourcePayload {
     std::string sourcePath;
     Raw::RawMetadata metadata;
     Raw::RawImageData embeddedRawData;
+};
+
+struct RenderGraphRawDevelopmentPayload {
+    Stack::RawRecipe::RawDevelopmentRecipe recipe;
 };
 
 struct RenderGraphRawDevelopPayload {
@@ -246,6 +258,15 @@ struct RenderGraphRawDetailAutoMaskPayload {
 
 struct RenderGraphHdrMergePayload {
     Raw::HdrMergeSettings settings;
+};
+
+struct RenderGraphMfsrPayload {
+    Stack::Mfsr::MfsrSettings settings;
+    Stack::Mfsr::MfsrDiagnosticsSummary diagnostics;
+    Stack::Mfsr::MfsrCacheKey cacheKey;
+    bool hasPlaceholderCachedOutput = false;
+    std::string placeholderStatus;
+    std::string errorMessage;
 };
 
 using RenderGraphLutPayload = ColorLut::LutPayload;
@@ -279,12 +300,14 @@ struct RenderGraphNode {
     RenderGraphNodeKind kind = RenderGraphNodeKind::Image;
     RenderGraphImagePayload image;
     RenderGraphRawSourcePayload rawSource;
+    RenderGraphRawDevelopmentPayload rawDevelopment;
     RenderGraphRawNeuralDenoisePayload rawNeuralDenoise;
     RenderGraphRawDecodePayload rawDecode;
     RenderGraphRawDevelopPayload rawDevelop;
     RenderGraphRawDetailAutoMaskPayload rawDetailAutoMask;
     RenderGraphRawDetailFusionPayload rawDetailFusion;
     RenderGraphHdrMergePayload hdrMerge;
+    RenderGraphMfsrPayload mfsr;
     RenderGraphLutPayload lut;
     nlohmann::json layerJson;
     RenderMaskGeneratorKind maskKind = RenderMaskGeneratorKind::Solid;
@@ -314,6 +337,10 @@ struct RenderGraphSnapshot {
     int outputNodeId = -1;
     std::string outputSocketId;
     bool autoGainMaskPreview = false;
+    std::string rawWorkspaceLocalRangeOverlayMode;
+    bool rawWorkspaceLocalRangeTargetSampleRequested = false;
+    float rawWorkspaceLocalRangeTargetSampleU = 0.0f;
+    float rawWorkspaceLocalRangeTargetSampleV = 0.0f;
     std::vector<RenderGraphNode> nodes;
     std::vector<RenderGraphLink> links;
 };

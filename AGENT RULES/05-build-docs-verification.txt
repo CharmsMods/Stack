@@ -1,0 +1,49 @@
+BUILD, DOCS, AND VERIFICATION
+
+Build workflow
+
+Use CMake by default for native desktop projects unless the user says otherwise.
+
+Make the build workflow as automated and intuitive as practical.
+
+Do not assume the person building the project understands the repository deeply.
+
+Every repository should expose one obvious root build entrypoint in addition to direct build instructions.
+
+The build path should be easy for both humans and AI to discover, run, and repeat after updates.
+
+Shipping direction
+
+Only invest early in installers, portable builds, updater flows, runtime asset placement, and release packaging when the project is clearly headed in that direction.
+
+Do not let premature shipping work distort early project structure when the project is not intended for that path.
+
+When the project is clearly moving toward shipping, start reasoning about those concerns before late-stage cleanup becomes expensive.
+
+Documentation
+
+Every repository should have a short root guide that explains what it is, how to build it, where the main systems live, and which project-specific preferences or constraints matter.
+
+Before making meaningful changes, verify whether the project documentation should also change.
+
+Do not leave project documentation stale when the repository structure, build path, or important behavior has changed.
+
+Comments
+
+Keep comments direct, factual, and accurate.
+
+Do not comment obvious code.
+
+Use comments for intent, constraints, edge cases, non-obvious reasoning, and behavior that would otherwise be easy to misread.
+
+Update comments when the code changes so they remain accurate.
+
+Verification
+
+Verify meaningful implementation changes.
+
+Choose verification depth based on the risk and scope of the change.
+
+At minimum, prefer an appropriate build or targeted validation path over unverified edits when the project makes that possible.
+
+Do not present guessed correctness as verified correctness.

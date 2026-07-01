@@ -5,6 +5,7 @@ namespace StackAppearance {
 }
 
 #include "Async/TaskState.h"
+#include "Editor/EditorModuleTypes.h"
 #include "Editor/LoadedProjectData.h"
 #include "Layers/LayerBase.h"
 #include "LayerRegistry.h"
@@ -12,18 +13,26 @@ namespace StackAppearance {
 #include "NodeGraph/EditorNodeGraph.h"
 #include "UI/EditorSidebar.h"
 #include "UI/EditorViewport.h"
+#include "Raw/RawImageAnalysis.h"
+#include "Raw/RawWorkspace.h"
+#include "Raw/RawWorkspaceManagedGraph.h"
 #include "Renderer/RenderPipeline.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "Utils/UiNotifications.h"
 #include <imgui.h>
+#include <atomic>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <cstddef>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -39,225 +48,52 @@ class ToneCurveLayer;
 // The main coordinator for the Editor context.
 class EditorModule {
 public:
-    enum class DevelopCandidateFeedbackGateDecision {
-        Apply,
-        DeferRecentInteraction,
-        DropStaleInteraction
-    };
-
-    enum class ViewportMode {
-        SingleOutputPreview,
-        CompositeCanvas
-    };
-
-    enum class CanvasToolKind {
-        None,
-        PickColor,
-        ToneCurveTarget,
-        AdjustAberrationCenter
-    };
-
-    enum class CompositeExportBoundsMode {
-        Auto,
-        Custom
-    };
-
-    enum class CompositeExportBackgroundMode {
-        Transparent,
-        Solid
-    };
-
-    enum class CompositeExportAspectPreset {
-        Ratio1x1,
-        Ratio4x3,
-        Ratio3x2,
-        Ratio16x9,
-        Ratio9x16,
-        Ratio2x3,
-        Ratio5x4,
-        Ratio21x9,
-        Custom
-    };
-
-    enum class CompositeSnapModePreset {
-        Off,
-        ObjectOnly,
-        Full,
-        Custom
-    };
-
-    enum class CompositeResizeMode {
-        Stretch,
-        Scale
-    };
-
-    enum class CompositeScaleOriginMode {
-        Opposite,
-        Center
-    };
-
-    struct CompositeFloatRect {
-        float x = 0.0f;
-        float y = 0.0f;
-        float width = 0.0f;
-        float height = 0.0f;
-    };
-
-    struct CompositeExportSettings {
-        CompositeExportBoundsMode boundsMode = CompositeExportBoundsMode::Auto;
-        CompositeExportBackgroundMode backgroundMode = CompositeExportBackgroundMode::Transparent;
-        std::array<float, 4> backgroundColor { 0.08f, 0.08f, 0.08f, 1.0f };
-        float customX = -512.0f;
-        float customY = -512.0f;
-        float customWidth = 1024.0f;
-        float customHeight = 1024.0f;
-        CompositeExportAspectPreset aspectPreset = CompositeExportAspectPreset::Ratio1x1;
-        float customAspectRatio = 1.0f;
-        int outputWidth = 1024;
-        int outputHeight = 1024;
-    };
-
-    struct CompositeSnapSettings {
-        bool enabled = false;
-        bool snapToObjects = true;
-        bool snapToCenters = true;
-        bool snapToCanvasCenter = true;
-        bool snapToExportBounds = false;
-        float rotateSnapStep = 15.0f;
-        float scaleSnapStep = 0.1f;
-        float lastNonZeroRotateSnapStep = 15.0f;
-        float lastNonZeroScaleSnapStep = 0.1f;
-    };
-
-    struct CompositeSceneItem {
-        int outputNodeId = -1;
-        ImVec2 position = ImVec2(0.0f, 0.0f);
-        ImVec2 scale = ImVec2(1.0f, 1.0f);
-        float rotation = 0.0f;
-        bool visible = true;
-        bool locked = false;
-        bool placementInitialized = false;
-        bool isScalable = false;
-        std::string label;
-        unsigned int texture = 0;
-        int textureWidth = 0;
-        int textureHeight = 0;
-        std::vector<unsigned char> rgbaPixels;
-        std::uint64_t cachedRenderRevision = 0;
-        std::size_t cachedChainFingerprint = 0;
-        std::uint64_t requestedRenderRevision = 0;
-        std::size_t requestedChainFingerprint = 0;
-        int requestedRasterWidth = 0;
-        int requestedRasterHeight = 0;
-    };
-
-    struct GraphPreviewPixels {
-        std::vector<unsigned char> pixels;
-        int width = 0;
-        int height = 0;
-        std::uint64_t revision = 0;
-    };
-
-    struct GraphPerformanceStats {
-        bool lastInvalidationWasFull = true;
-        bool lastSubmissionIncludedMainOutput = false;
-        int lastTouchedNodeId = -1;
-        int lastDirtyNodeCount = 0;
-        int lastDirtyOutputCount = 0;
-        int lastSubmittedPreviewCount = 0;
-        int lastSubmittedCompositeCount = 0;
-        int lastRenderedPreviewCount = 0;
-        int lastRenderedCompositeCount = 0;
-        std::uint64_t lastSubmittedGeneration = 0;
-        double lastSnapshotBuildMs = 0.0;
-        double lastPreviewRequestBuildMs = 0.0;
-        double lastCompositeRequestBuildMs = 0.0;
-        double lastMainRenderMs = 0.0;
-        double lastPreviewRenderMs = 0.0;
-        double lastCompositeRenderMs = 0.0;
-        GraphExecutionStats lastMainGraphStats;
-    };
-
-    enum class HdrMergeRenderState {
-        Idle,
-        Ready,
-        Queued,
-        Rendering,
-        Rendered,
-        BlockedMissingInput,
-        IncompatibleInput,
-        Failed
-    };
-
-    struct HdrMergeInputSummary {
-        std::string socketId;
-        std::string label;
-        std::string sourceLabel;
-        std::string metadataSummary;
-        std::string normalizationSummary;
-        bool active = false;
-        bool connected = false;
-        bool compatible = true;
-        bool hasRawMetadata = false;
-        bool hasCaptureExposure = false;
-        int sourceNodeId = -1;
-        int width = 0;
-        int height = 0;
-    };
-
-    struct HdrMergeNodeStatus {
-        HdrMergeRenderState state = HdrMergeRenderState::Idle;
-        std::string message;
-        std::array<HdrMergeInputSummary, 3> inputs {};
-        Raw::HdrMergeDebugView debugView = Raw::HdrMergeDebugView::FinalImage;
-        bool feedsActiveOutput = false;
-        bool hasRenderedResult = false;
-        bool stale = false;
-        bool metadataNormalizationReady = false;
-        bool automaticReliabilityReady = false;
-        std::string normalizationMessage;
-        std::string reliabilityMessage;
-        std::string warningMessage;
-    };
-
-    struct HdrMergeConnectionTopology {
-        bool hasInput1 = false;
-        bool hasInput2 = false;
-        bool hasInput3 = false;
-        bool usesInput3 = false;
-        bool hasGap = false;
-        int activeInputCount = 0;
-    };
-
-    struct PersistedCompositeSceneEntry {
-        int outputNodeId = -1;
-        ImVec2 position = ImVec2(0.0f, 0.0f);
-        ImVec2 scale = ImVec2(1.0f, 1.0f);
-        float rotation = 0.0f;
-        bool visible = true;
-        bool locked = false;
-    };
-
+    using DevelopCandidateFeedbackGateDecision =
+        Stack::EditorModuleTypes::DevelopCandidateFeedbackGateDecision;
+    using ViewportMode = Stack::EditorModuleTypes::ViewportMode;
+    using CanvasToolKind = Stack::EditorModuleTypes::CanvasToolKind;
+    using CompositeExportBoundsMode = Stack::EditorModuleTypes::CompositeExportBoundsMode;
+    using CompositeExportBackgroundMode = Stack::EditorModuleTypes::CompositeExportBackgroundMode;
+    using CompositeExportAspectPreset = Stack::EditorModuleTypes::CompositeExportAspectPreset;
+    using CompositeSnapModePreset = Stack::EditorModuleTypes::CompositeSnapModePreset;
+    using CompositeResizeMode = Stack::EditorModuleTypes::CompositeResizeMode;
+    using CompositeScaleOriginMode = Stack::EditorModuleTypes::CompositeScaleOriginMode;
+    using CompositeFloatRect = Stack::EditorModuleTypes::CompositeFloatRect;
+    using CompositeExportSettings = Stack::EditorModuleTypes::CompositeExportSettings;
+    using CompositeSnapSettings = Stack::EditorModuleTypes::CompositeSnapSettings;
+    using CompositeSceneItem = Stack::EditorModuleTypes::CompositeSceneItem;
+    using GraphPreviewPixels = Stack::EditorModuleTypes::GraphPreviewPixels;
+    using GraphPerformanceStats = Stack::EditorModuleTypes::GraphPerformanceStats;
+    using HdrMergeRenderState = Stack::EditorModuleTypes::HdrMergeRenderState;
+    using HdrMergeInputSummary = Stack::EditorModuleTypes::HdrMergeInputSummary;
+    using HdrMergeNodeStatus = Stack::EditorModuleTypes::HdrMergeNodeStatus;
+    using HdrMergeConnectionTopology = Stack::EditorModuleTypes::HdrMergeConnectionTopology;
+    using PersistedCompositeSceneEntry = Stack::EditorModuleTypes::PersistedCompositeSceneEntry;
     using LoadedProjectData = EditorLoadedProjectData;
-
-    struct NodeBrowserThumbnailView {
-        const std::vector<unsigned char>* pngBytes = nullptr;
-        const std::vector<unsigned char>* decodedPixels = nullptr;
-        int width = 0;
-        int height = 0;
-        int channels = 4;
-        std::uint64_t revision = 0;
-        bool pending = false;
-        bool fallback = false;
+    using NodeBrowserThumbnailView = Stack::EditorModuleTypes::NodeBrowserThumbnailView;
+    using RawAutoValueOwner = Stack::EditorModuleTypes::RawAutoValueOwner;
+    using RawWorkspaceAutoBaseUiState = Stack::EditorModuleTypes::RawWorkspaceAutoBaseUiState;
+    using RawWorkspaceLayoutUiState = Stack::EditorModuleTypes::RawWorkspaceLayoutUiState;
+    enum class RawWorkspacePreviewOutputKind {
+        None,
+        SingleTexture,
+        Tiled
     };
 
     EditorModule();
     ~EditorModule();
 
     void Initialize(GLFWwindow* sharedWindow = nullptr, StackAppearance::AppearanceManager* appearance = nullptr);
-    
+    void RequestWorkerShutdownForAppClose();
+    bool IsWorkerShutdownReadyForAppClose() const;
+    void Shutdown();
+
     // Called every frame by the AppShell
     void RenderUI();
+    void RenderRawWorkspaceUI();
+    void ReleaseRawWorkspacePreviewForTabChange();
+    bool FocusRawWorkspace();
+    bool FlushActiveRawWorkspaceProjectIfDirty();
     void RenderDetachedPreviewWindow();
     void BeginLibraryLoadReveal();
     void PumpNonRenderingWork(double projectApplyBudgetMs = 2.5);
@@ -271,9 +107,35 @@ public:
     const char* GetDeferredLoadedProjectPhaseLabel() const;
     std::size_t GetPendingNodeBrowserThumbnailWarmCount() const;
     std::size_t GetPendingNodeBrowserThumbnailGenerationCount() const;
+    void RequestToggleDetachedPreviewFullscreen();
     void ToggleDetachedPreviewFullscreen();
     void CloseDetachedPreviewFullscreen();
     bool IsDetachedPreviewActive() const { return m_DetachedPreviewActive; }
+    bool IsDetachedPreviewLayoutDetached() const { return m_DetachedPreviewLayoutDetached; }
+    struct DetachedPreviewNativeWindowRequest {
+        GLFWwindow* window = nullptr;
+        ImGuiID viewportId = 0;
+        ImVec4 surfaceColor = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+        ImU32 surfaceColorU32 = 0;
+        ImU32 textColorU32 = 0;
+        bool hasPlatformWindow = false;
+        bool applyTheme = false;
+        bool requestFocus = false;
+        bool nativeShown = false;
+        bool firstPresented = false;
+        bool layoutDetached = false;
+        int focusAttempt = 0;
+        int waitFrames = 0;
+    };
+    bool QueryDetachedPreviewNativeWindow(DetachedPreviewNativeWindowRequest& request) const;
+    void CompleteDetachedPreviewNativeWindowRequest(
+        const DetachedPreviewNativeWindowRequest& request,
+        bool themeApplied,
+        bool focused);
+    void MarkDetachedPreviewNativeWindowShown(
+        const DetachedPreviewNativeWindowRequest& request,
+        bool focused);
+    void MarkDetachedPreviewPlatformPresented(GLFWwindow* window);
 
     RenderPipeline& GetPipeline() { return m_Pipeline; }
     std::vector<std::shared_ptr<LayerBase>>& GetLayers() { return m_Layers; }
@@ -289,7 +151,8 @@ public:
     void SelectGraphNode(int nodeId);
     bool SelectAdjacentMainChainNode(int direction);
     bool LayerUsesRichNodeSurface(int layerIndex) const;
-    bool NodeUsesRichNodeSurface(int nodeId) const;
+    bool NodeUsesSidebarOnlyComplexEditor(int nodeId) const;
+    bool NodeHasDedicatedComplexEditor(int nodeId) const;
     NodeSurfaceSpec GetLayerNodeSurfaceSpec(int layerIndex) const;
     NodeSurfaceSpec GetNodeSurfaceSpec(int nodeId) const;
 
@@ -297,6 +160,7 @@ public:
     const EditorNodeGraph::Graph& GetNodeGraph() const;
     bool IsGraphOutputConnected() const;
     void PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void RequestPromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool LoadLutNodeFromFile(int nodeId, const std::string& path, bool notifyOnFailure = true);
@@ -309,73 +173,11 @@ public:
     static void NormalizeDevelopAutoGuidance(EditorNodeGraph::DevelopAutoGuidance& guidance);
     static void NormalizeDevelopSubjectImportance(EditorNodeGraph::DevelopSubjectImportanceMap& importance);
 
-    struct DevelopSubjectViewportRegion {
-        int id = 0;
-        EditorNodeGraph::DevelopSubjectImportanceMode mode = EditorNodeGraph::DevelopSubjectImportanceMode::Important;
-        bool enabled = true;
-        float centerX = 0.5f;
-        float centerY = 0.5f;
-        float radiusX = 0.18f;
-        float radiusY = 0.18f;
-        float feather = 0.35f;
-        float strength = 0.75f;
-    };
-
-    struct DevelopSubjectViewportStrokePoint {
-        float x = 0.5f;
-        float y = 0.5f;
-    };
-
-    struct DevelopSubjectViewportStroke {
-        int id = 0;
-        EditorNodeGraph::DevelopSubjectImportanceMode mode = EditorNodeGraph::DevelopSubjectImportanceMode::Important;
-        bool enabled = true;
-        bool subtract = false;
-        float radius = 0.045f;
-        float feather = 0.35f;
-        float strength = 0.75f;
-        std::vector<DevelopSubjectViewportStrokePoint> points;
-    };
-
-    struct DevelopSubjectViewportMapCell {
-        float importance = 0.0f;
-        float reveal = 0.0f;
-        float protect = 0.0f;
-        float preserveMood = 0.0f;
-        float lowPriority = 0.0f;
-        float confidence = 0.0f;
-        float boundaryHint = 0.0f;
-    };
-
-    struct DevelopSubjectViewportState {
-        int nodeId = 0;
-        bool enabled = false;
-        bool showOverlay = false;
-        float overlayOpacity = 0.45f;
-        bool showInterpretedMapOverlay = false;
-        bool interpretedMapActive = false;
-        float interpretedMapOpacity = 0.32f;
-        int interpretedMapGridWidth = 0;
-        int interpretedMapGridHeight = 0;
-        bool showRefinedMapOverlay = false;
-        bool refinedMapActive = false;
-        float refinedMapOpacity = 0.36f;
-        int refinedMapGridWidth = 0;
-        int refinedMapGridHeight = 0;
-        bool brushEnabled = false;
-        bool brushSubtract = false;
-        EditorNodeGraph::DevelopSubjectImportanceMode brushMode =
-            EditorNodeGraph::DevelopSubjectImportanceMode::Important;
-        float brushRadius = 0.045f;
-        float brushFeather = 0.35f;
-        float brushStrength = 0.75f;
-        int activeRegionId = 0;
-        int activeStrokeId = 0;
-        std::vector<DevelopSubjectViewportMapCell> interpretedMapCells;
-        std::vector<DevelopSubjectViewportMapCell> refinedMapCells;
-        std::vector<DevelopSubjectViewportRegion> regions;
-        std::vector<DevelopSubjectViewportStroke> strokes;
-    };
+    using DevelopSubjectViewportRegion = Stack::EditorModuleTypes::DevelopSubjectViewportRegion;
+    using DevelopSubjectViewportStrokePoint = Stack::EditorModuleTypes::DevelopSubjectViewportStrokePoint;
+    using DevelopSubjectViewportStroke = Stack::EditorModuleTypes::DevelopSubjectViewportStroke;
+    using DevelopSubjectViewportMapCell = Stack::EditorModuleTypes::DevelopSubjectViewportMapCell;
+    using DevelopSubjectViewportState = Stack::EditorModuleTypes::DevelopSubjectViewportState;
 
     bool GetDevelopSubjectImportanceViewportState(DevelopSubjectViewportState& outState) const;
     bool SetDevelopSubjectImportanceActiveRegion(int nodeId, int regionId);
@@ -492,6 +294,7 @@ public:
         EditorNodeGraph::DevelopAutoIntent intent);
     bool ConvertRawDetailFusionToHybrid(int fusionNodeId);
     bool SplitLayerNodeIntoChannels(int layerNodeId);
+    bool SplitImageAverageNodeIntoChannelAverages(int dataMathNodeId);
     bool ToggleOutputNodeEnabled(int outputNodeId);
     bool ConnectGraphImageNode(int nodeId);
     bool ConnectGraphNodes(int fromNodeId, int toNodeId, std::string* errorMessage = nullptr);
@@ -522,12 +325,14 @@ public:
     void AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelSplitNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddRawDevelopmentNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDecodeNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddMfsrNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddOutputNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool CreateToneCurveSelectionMask(
@@ -592,9 +397,14 @@ public:
     void MarkSelectedLayerRenderDirty();
     void RenderGraphScopeNode(EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId);
     void MarkRenderDirty(int touchedNodeId = -1);
+    void MarkRenderRefreshDirty();
     RenderGraphSnapshot BuildGraphSnapshot() const;
     bool IsEditorRenderBusy() const { return m_RenderWorker.IsBusy() || m_RenderPending; }
     std::uint64_t GetRenderRevision() const { return m_RenderRevision; }
+    const EditorRenderWorker::SharedTextureTileSet& GetViewportOutputTiles() const { return m_ViewportOutputTiles; }
+    bool HasViewportOutputTiles() const {
+        return m_ViewportOutputTiles.tiled && m_ViewportOutputTiles.complete && !m_ViewportOutputTiles.tiles.empty();
+    }
     std::uint64_t GetPreviewNodeRevision(int previewNodeId) const;
     std::uint64_t GetScopeNodeRevision(int sourceNodeId) const;
     const GraphPreviewPixels* GetCachedPreviewPixelsForNode(int previewNodeId) const;
@@ -606,7 +416,7 @@ public:
     // Persistence & Serialization
     nlohmann::json SerializePipeline();
     void DeserializePipeline(const nlohmann::json& j);
-    void LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch);
+    void LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch, bool loadCompositePreview = true);
     bool ApplyLoadedProject(const LoadedProjectData& projectData);
     void RequestLoadSourceImage(const std::string& path);
     bool ExportImage(const std::string& path);
@@ -618,6 +428,22 @@ public:
     void EnsureNodeBrowserThumbnailCatalog();
     bool GetNodeBrowserThumbnailView(const std::string& previewKey, NodeBrowserThumbnailView& outView) const;
     std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry> GetPersistedNodeBrowserThumbnails() const;
+    bool RequestSaveCurrentProject(
+        const std::string& fallbackName = "",
+        std::function<void(bool)> onComplete = {});
+    bool EnsureRawWorkspaceProjectForSelectedRecipeEdit(
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
+    bool ApplyRawWorkspaceRecipeEditForSelectedSource(
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+        bool interactionActive = false);
+    bool SaveActiveRawWorkspaceProject(bool explicitSave = true);
+    bool DecomposeActiveRawWorkspaceProjectToManagedGraph();
+    bool ValidateActiveRawWorkspaceManagedGraph(bool transitionOnFailure = true);
+    bool ApplyActiveRawWorkspaceRecipeToManagedGraph();
+    bool ReadoptActiveRawWorkspaceGraphAsRecipe();
+    bool RepairActiveRawWorkspaceManagedGraph();
+    bool DetachActiveRawWorkspaceGraphFromRawTab();
+    bool AdoptActiveRawWorkspaceGraphAsManagedRaw();
 
     const std::string& GetCurrentProjectName() const { return m_CurrentProjectName; }
     void SetCurrentProjectName(const std::string& name) { m_CurrentProjectName = name; }
@@ -627,13 +453,28 @@ public:
 
     bool IsDirty() const { return m_Dirty; }
     void ClearDirty() { m_Dirty = false; }
-    void MarkDirty() { m_Dirty = true; }
+    void MarkDirty();
+    bool IsRawWorkspaceProjectActive() const {
+        return !m_ActiveRawWorkspaceSourceKey.empty() && !m_ActiveRawWorkspaceProjectPath.empty();
+    }
 
     int GetSelectedLayerIndex() const { return m_SelectedLayerIndex; }
     void SetSelectedLayerIndex(int idx) { SelectLayer(idx); }
     bool ConsumeSelectedTabFocusRequest() {
         const bool requested = m_FocusSelectedTabNextRender;
         m_FocusSelectedTabNextRender = false;
+        return requested;
+    }
+    void RequestOpenRawWorkspaceTab() { m_OpenRawWorkspaceTabRequested = true; }
+    bool ConsumeOpenRawWorkspaceTabRequest() {
+        const bool requested = m_OpenRawWorkspaceTabRequested;
+        m_OpenRawWorkspaceTabRequested = false;
+        return requested;
+    }
+    void RequestOpenEditorTab() { m_OpenEditorTabRequested = true; }
+    bool ConsumeOpenEditorTabRequest() {
+        const bool requested = m_OpenEditorTabRequested;
+        m_OpenEditorTabRequested = false;
         return requested;
     }
 
@@ -656,6 +497,48 @@ public:
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
     bool IsExportBusy() const { return Async::IsBusy(m_ExportTaskState); }
     bool ConsumeUiNotification(UiNotificationEvent& outEvent);
+    const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceState() const { return m_RawWorkspace; }
+    const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceStateForValidation() const { return m_RawWorkspace; }
+    const Stack::RawWorkspace::GalleryPresentation& GetRawWorkspaceGalleryPresentation();
+    void EnsureRawWorkspaceLoaded();
+    void OpenRawWorkspaceFolderDialog();
+    void RescanRawWorkspace();
+    void ClearRawWorkspaceForUser();
+    void SelectRawWorkspaceSourceForPreview(const std::string& sourceKey);
+    bool IsRawWorkspaceScanBusy() const;
+    bool IsRawWorkspaceThumbnailBusy() const;
+    bool IsRawWorkspaceProjectLoadBusy() const {
+        return m_RawWorkspacePreviewStageQueued ||
+            Async::IsBusy(m_RawWorkspaceProjectLoadTaskState) ||
+            (m_PendingRawWorkspaceDeferredProjectFinalize && IsDeferredLoadedProjectApplyActive());
+    }
+    bool IsRawWorkspaceProjectSaveBusy() const {
+        return Async::IsBusy(m_RawWorkspaceProjectSaveTaskState) ||
+            m_RawWorkspaceProjectSaveInFlightCount > 0;
+    }
+    std::string GetRawWorkspaceScanStatusText() const;
+    std::string GetRawWorkspaceThumbnailStatusText() const;
+    std::string GetRawWorkspaceProgramBarStatus() const;
+    std::string GetRawWorkspaceProjectLoadStatusText() const {
+        const std::string& deferredStatus = GetDeferredLoadedProjectStatusText();
+        if (!deferredStatus.empty() && IsDeferredLoadedProjectApplyActive()) {
+            return deferredStatus;
+        }
+        if (m_RawWorkspacePreviewStageQueued && m_RawWorkspaceProjectLoadStatusText.empty()) {
+            return "Preparing RAW preview...";
+        }
+        return m_RawWorkspaceProjectLoadStatusText;
+    }
+    std::string GetRawWorkspaceProjectSaveStatusText() const {
+        return m_RawWorkspaceProjectSaveStatusText;
+    }
+    Stack::RawWorkspace::ScanProgress GetRawWorkspaceScanProgress() const;
+    Stack::RawWorkspace::ThumbnailProgress GetRawWorkspaceThumbnailProgress() const;
+    void PumpRawWorkspaceThumbnailTextureUploads();
+    unsigned int GetRawWorkspaceThumbnailTexture(
+        const Stack::RawWorkspace::SourceRecord& source,
+        int* outWidth = nullptr,
+        int* outHeight = nullptr);
 
     CanvasToolKind GetCanvasToolKind() const { return m_CanvasToolKind; }
     int GetCanvasToolOwnerNodeId() const { return m_CanvasToolOwnerNodeId; }
@@ -684,7 +567,8 @@ public:
     enum class EditorSubWindow {
         NodeGraph = 0,
         ExportSettings = 1,
-        ComplexNode = 2
+        ComplexNode = 2,
+        Presets = 3
     };
     EditorSubWindow GetActiveSubWindow() const { return m_ActiveSubWindow; }
     int GetActiveComplexNodeId() const { return m_ActiveComplexNodeId; }
@@ -692,6 +576,7 @@ public:
     float GetSubWindowTransitionAlpha() const { return m_SubWindowTransitionAlpha; }
     void SwitchToSubWindow(EditorSubWindow target);
     void SwitchToComplexNodeSubWindow(int nodeId);
+    void TogglePresetsSubWindow();
     void MoveCompositeOutputZOrder(int draggedOutputNodeId, int targetOutputNodeId);
     float GetLeftPanelWidthAnim() const { return m_LeftPanelWidthAnim; }
     ViewportMode GetViewportMode() const;
@@ -766,78 +651,98 @@ public:
     void ClampCompositeViewPanToContent(const ImVec2& canvasSize);
     void RefreshGraphLayerMetadata();
     float GetNodesPanelWidthAnim() const { return m_NodesPanelWidthAnim; }
+    bool AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload payload);
 
 private:
-    struct PendingGraphDropImportRequest {
-        std::vector<std::string> paths;
-        EditorNodeGraph::Vec2 sourcePosition;
+    using PendingGraphDropImportRequest = Stack::EditorModuleTypes::PendingGraphDropImportRequest;
+    using CachedCompositeChainState = Stack::EditorModuleTypes::CachedCompositeChainState;
+    using ToneCurveViewportInteractionCache = Stack::EditorModuleTypes::ToneCurveViewportInteractionCache;
+    using DevelopAutoGuidanceDraftState = Stack::EditorModuleTypes::DevelopAutoGuidanceDraftState;
+    using RawDevelopExposureDraftState = Stack::EditorModuleTypes::RawDevelopExposureDraftState;
+    using NodeBrowserThumbnailRuntimeEntry = Stack::EditorModuleTypes::NodeBrowserThumbnailRuntimeEntry;
+    using NodeBrowserPreviewRequestMeta = Stack::EditorModuleTypes::NodeBrowserPreviewRequestMeta;
+    using NodeBrowserPreviewSeed = Stack::EditorModuleTypes::NodeBrowserPreviewSeed;
+
+    enum class ManagedRawGraphMutationConfirmAction {
+        None,
+        Connect,
+        RemoveLink,
+        RemoveNode,
+        RemoveNodes
     };
 
-    struct CachedCompositeChainState {
-        EditorNodeGraph::CompletedChainInfo info;
-        std::size_t fingerprint = 0;
-        std::string label;
+    struct ManagedRawGraphMutationConfirmState {
+        ManagedRawGraphMutationConfirmAction action = ManagedRawGraphMutationConfirmAction::None;
+        bool openPopup = false;
+        int fromNodeId = 0;
+        std::string fromSocketId;
+        int toNodeId = 0;
+        std::string toSocketId;
+        int nodeId = 0;
+        std::vector<int> nodeIds;
+        Stack::RawWorkspace::ManagedRawGraphMutationWarning warning;
     };
 
-    struct ToneCurveViewportInteractionCache {
-        bool probeValid = false;
-        int probeSamplingBasis = 0;
-        float probeU = 0.0f;
-        float probeV = 0.0f;
-        std::array<float, 4> probeRgba { 0.0f, 0.0f, 0.0f, 1.0f };
-        bool selectionSeedValid = false;
-        float selectionSeedU = 0.0f;
-        float selectionSeedV = 0.0f;
-        float selectionSeedInputX = 0.0f;
-        float selectionSeedSceneValue = 0.0f;
-        std::array<float, 4> selectionSeedRgba { 0.0f, 0.0f, 0.0f, 1.0f };
-        int onImageDragPointIndex = -1;
-        float onImageDragAnchorInputX = 0.0f;
-        float onImageDragAnchorOutputY = 0.0f;
+    struct RawWorkspaceScanSnapshot {
+        Async::TaskState state = Async::TaskState::Idle;
+        std::uint64_t generation = 0;
+        Stack::RawWorkspace::ScanProgress progress;
+        std::string statusText;
+        std::string errorMessage;
     };
 
-    struct DevelopAutoGuidanceDraftState {
-        bool editing = false;
-        EditorNodeGraph::DevelopAutoGuidance guidance;
+    struct RawWorkspaceThumbnailSnapshot {
+        Async::TaskState state = Async::TaskState::Idle;
+        std::uint64_t generation = 0;
+        Stack::RawWorkspace::ThumbnailProgress progress;
+        std::string statusText;
+        std::string errorMessage;
     };
 
-    struct RawDevelopExposureDraftState {
-        bool editing = false;
-        float exposureStops = 0.0f;
-    };
-
-    struct NodeBrowserThumbnailRuntimeEntry {
-        std::string previewSeedHash;
-        std::uint32_t previewRecipeVersion = 0;
-        std::vector<unsigned char> pngBytes;
+    struct RawWorkspaceThumbnailTexture {
+        unsigned int texture = 0;
+        std::filesystem::path absolutePath;
+        Stack::RawWorkspace::ThumbnailStatus status = Stack::RawWorkspace::ThumbnailStatus::Unknown;
+        int width = 0;
+        int height = 0;
+        Async::TaskState decodeState = Async::TaskState::Idle;
+        std::uint64_t requestGeneration = 0;
+        bool uploadPending = false;
+        bool uploadQueued = false;
         std::vector<unsigned char> decodedPixels;
-        int width = 0;
-        int height = 0;
-        int channels = 4;
-        std::uint64_t revision = 0;
-        bool pending = false;
-        bool fallback = false;
+        int decodedWidth = 0;
+        int decodedHeight = 0;
     };
 
-    struct NodeBrowserPreviewRequestMeta {
-        std::string previewKey;
-        std::uint32_t previewRecipeVersion = 0;
+    struct RawWorkspaceRecipePreviewCacheEntry {
+        std::filesystem::path projectPath;
+        std::int64_t projectModifiedTimeTicks = 0;
+        Stack::RawRecipe::RawDevelopmentRecipe recipe;
+        Stack::RawWorkspace::RawProjectMode mode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+        bool success = false;
+        std::string errorMessage;
     };
 
-    struct NodeBrowserPreviewSeed {
-        enum class Kind {
-            None,
-            Image,
-            Raw
-        };
-
-        Kind kind = Kind::None;
-        std::string seedHash;
-        std::vector<unsigned char> pixels;
-        int width = 0;
-        int height = 0;
-        int channels = 4;
-        EditorNodeGraph::RawSourcePayload rawSource;
+    struct RawWorkspaceProjectSaveJob {
+        std::filesystem::path workspaceRoot;
+        std::filesystem::path projectPath;
+        std::filesystem::path projectRelativePath;
+        std::string sourceKey;
+        std::string projectName;
+        std::uint64_t sourceRevision = 0;
+        Stack::RawWorkspace::RawProjectMode mode =
+            Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+        Stack::RawWorkspace::ProjectStatus projectStatus =
+            Stack::RawWorkspace::ProjectStatus::Existing;
+        std::filesystem::path previousAbsolutePath;
+        std::filesystem::path previousRelativePath;
+        Stack::RawWorkspace::ProjectStatus previousProjectStatus =
+            Stack::RawWorkspace::ProjectStatus::Unknown;
+        Stack::RawWorkspace::RawProjectMode previousMode =
+            Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+        bool previousAutosaved = false;
+        bool previousDirty = false;
+        StackBinaryFormat::ProjectDocument document;
     };
 
     EditorSidebar m_Sidebar;
@@ -860,6 +765,7 @@ private:
     float m_LibraryLoadGraphRevealAlpha = 1.0f;
     float m_LibraryLoadToolbarRevealAlpha = 1.0f;
     unsigned int m_NodeGraphIconTexture = 0;
+    unsigned int m_PresetsIconTexture = 0;
     unsigned int m_ExportIconTexture = 0;
     unsigned int m_SettingsIconTexture = 0;
     unsigned int m_BackgroundRemoverIconTexture = 0;
@@ -880,6 +786,8 @@ private:
     std::vector<std::shared_ptr<LayerBase>> m_Layers;
     int m_SelectedLayerIndex = -1;
     bool m_FocusSelectedTabNextRender = false;
+    bool m_OpenRawWorkspaceTabRequested = false;
+    bool m_OpenEditorTabRequested = false;
     float m_HoverFade = 0.0f;
     bool m_RenderOnlyUpToActive = false;
     std::string m_CurrentProjectName = "";
@@ -896,22 +804,7 @@ private:
     float m_GraphViewPanX = 0.0f;
     float m_GraphViewPanY = 0.0f;
     float m_GraphViewZoom = 1.0f;
-    struct GraphAutoFocusState {
-        bool trackingActive = false;
-        bool animationActive = false;
-        int nodeId = -1;
-        EditorNodeGraph::Vec2 nodePosition {};
-        EditorNodeGraph::Vec2 nodeSize {};
-        float startPanX = 0.0f;
-        float startPanY = 0.0f;
-        float startZoom = 1.0f;
-        float targetPanX = 0.0f;
-        float targetPanY = 0.0f;
-        float targetZoom = 1.0f;
-        float lastCanvasWidth = 0.0f;
-        float lastCanvasHeight = 0.0f;
-        double animationStartTime = 0.0;
-    };
+    using GraphAutoFocusState = Stack::EditorModuleTypes::GraphAutoFocusState;
     GraphAutoFocusState m_GraphAutoFocus;
 
     std::uint64_t m_SourceLoadGeneration = 0;
@@ -922,12 +815,119 @@ private:
     std::string m_GraphDropImportStatusText;
     std::deque<UiNotificationEvent> m_UiNotifications;
     std::vector<PendingGraphDropImportRequest> m_PendingGraphDropImports;
+    std::deque<EditorRenderWorker::SharedTextureResult> m_DeferredViewportOutputTextureReleases;
+    std::deque<EditorRenderWorker::SharedTextureTileSet> m_DeferredViewportOutputTileReleases;
+    Stack::RawWorkspace::WorkspaceState m_RawWorkspace;
+    std::uint64_t m_RawWorkspaceScanGeneration = 0;
+    mutable std::mutex m_RawWorkspaceScanMutex;
+    RawWorkspaceScanSnapshot m_RawWorkspaceScanSnapshot;
+    std::uint64_t m_RawWorkspaceThumbnailGeneration = 0;
+    mutable std::mutex m_RawWorkspaceThumbnailMutex;
+    RawWorkspaceThumbnailSnapshot m_RawWorkspaceThumbnailSnapshot;
+    std::atomic<std::uint64_t> m_RawWorkspaceCatalogPersistGeneration { 0 };
+    Async::TaskState m_RawWorkspaceCatalogPersistTaskState = Async::TaskState::Idle;
+    bool m_RawWorkspaceCatalogPersistDirty = false;
+    bool m_RawWorkspaceCatalogPersistInFlight = false;
+    std::uint64_t m_RawWorkspaceCatalogPersistInFlightGeneration = 0;
+    double m_RawWorkspaceCatalogPersistDirtyTime = -1.0;
+    std::string m_RawWorkspaceCatalogPersistStatusText;
+    std::size_t m_RawWorkspaceProjectSaveInFlightCount = 0;
+    Async::TaskState m_RawWorkspaceProjectSaveTaskState = Async::TaskState::Idle;
+    std::string m_RawWorkspaceProjectSaveStatusText;
+    mutable std::mutex m_RawWorkspaceProjectSaveMutex;
+    mutable std::mutex m_RawWorkspaceProjectFileWriteMutex;
+    mutable std::mutex m_RawWorkspaceProjectSaveRevisionMutex;
+    std::unordered_map<std::string, std::uint64_t> m_RawWorkspaceProjectSaveRevisions;
+    std::condition_variable m_RawWorkspaceProjectSaveCv;
+    std::deque<RawWorkspaceProjectSaveJob> m_RawWorkspaceProjectSaveQueue;
+    std::thread m_RawWorkspaceProjectSaveWorker;
+    bool m_RawWorkspaceProjectSaveWorkerStopRequested = false;
+    bool m_RawWorkspaceProjectSaveWorkerBusy = false;
+    std::atomic<std::uint64_t> m_RawWorkspaceAppStatePersistGeneration { 0 };
+    Async::TaskState m_RawWorkspaceAppStatePersistTaskState = Async::TaskState::Idle;
+    bool m_RawWorkspaceAppStatePersistDirty = false;
+    bool m_RawWorkspaceAppStatePersistInFlight = false;
+    std::uint64_t m_RawWorkspaceAppStatePersistInFlightGeneration = 0;
+    double m_RawWorkspaceAppStatePersistDirtyTime = -1.0;
+    std::string m_RawWorkspaceAppStatePersistStatusText;
+    std::atomic<std::uint64_t> m_RawWorkspaceProjectLoadGeneration { 0 };
+    Async::TaskState m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Idle;
+    std::string m_RawWorkspaceProjectLoadSourceKey;
+    std::string m_RawWorkspaceProjectLoadStatusText;
+    bool m_PendingRawWorkspaceDeferredProjectFinalize = false;
+    std::string m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey;
+    bool m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
+    std::string m_PendingRawWorkspaceOpenGraphSourceKey;
+    bool m_RawWorkspaceAppStateLoaded = false;
+    Stack::RawWorkspace::GalleryDisplayMode m_RawWorkspaceGalleryDisplayMode =
+        Stack::RawWorkspace::GalleryDisplayMode::Grid;
+    bool m_RawWorkspaceGalleryWindowOpen = false;
+    RawWorkspaceLayoutUiState m_RawWorkspaceLayoutUi;
+    std::uint64_t m_RawWorkspaceGalleryRevision = 1;
+    std::uint64_t m_RawWorkspaceGalleryPresentationRevision = 0;
+    Stack::RawWorkspace::GalleryPresentation m_RawWorkspaceGalleryPresentationCache;
+    std::unordered_map<std::string, RawWorkspaceThumbnailTexture> m_RawWorkspaceThumbnailTextures;
+    std::deque<std::string> m_RawWorkspaceThumbnailTextureUploadQueue;
+    std::deque<unsigned int> m_RawWorkspaceThumbnailTextureDeleteQueue;
+    std::atomic<std::uint64_t> m_RawWorkspaceThumbnailTextureResetGeneration { 0 };
+    std::uint64_t m_RawWorkspaceThumbnailTextureRequestGeneration = 0;
+    int m_RawWorkspaceThumbnailTextureRequestFrame = -1;
+    std::size_t m_RawWorkspaceThumbnailTextureRequestsThisFrame = 0;
+    int m_RawWorkspaceThumbnailTextureUploadFrame = -1;
+    std::size_t m_RawWorkspaceThumbnailTextureUploadsThisFrame = 0;
+    int m_RawWorkspaceThumbnailTextureDeleteFrame = -1;
+    std::size_t m_RawWorkspaceThumbnailTextureDeletesThisFrame = 0;
+    mutable std::unordered_map<std::string, RawWorkspaceRecipePreviewCacheEntry> m_RawWorkspaceRecipePreviewCache;
+    std::string m_ActiveRawWorkspaceSourceKey;
+    std::filesystem::path m_ActiveRawWorkspaceProjectPath;
+    Stack::RawRecipe::RawDevelopmentRecipe m_ActiveRawWorkspaceRecipe;
+    Stack::RawWorkspace::RawProjectMode m_ActiveRawWorkspaceMode =
+        Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+    bool m_ShowRawWorkspaceRelinkPopup = false;
+    bool m_ShowRawWorkspaceEmbedPopup = false;
+    Stack::RawWorkspace::ManagedRawSection m_ActiveManagedRawSection;
+    std::string m_RawWorkspacePreviewStageFailureSourceKey;
+    bool m_RawWorkspacePreviewStageQueued = false;
+    std::string m_RawWorkspacePreviewStageSourceKey;
+    int m_RawWorkspacePreviewStageQueuedFrame = -1;
+    std::string m_RawWorkspacePreviewSourceKey;
+    double m_RawWorkspaceFastPreviewUntilTime = -1.0;
+    bool m_RawWorkspaceFullResolutionPreviewPending = false;
+    bool m_RawWorkspaceFullResolutionPreviewRequested = false;
+    std::string m_RawWorkspaceLocalRangeOverlayMode = "none";
+    unsigned int m_RawWorkspaceLocalRangeOverlayTexture = 0;
+    int m_RawWorkspaceLocalRangeOverlayWidth = 0;
+    int m_RawWorkspaceLocalRangeOverlayHeight = 0;
+    std::string m_RawWorkspaceLocalRangeOverlaySourceKey;
+    std::string m_RawWorkspaceLocalRangeOverlayAcceptedMode;
+    std::uint64_t m_RawWorkspaceLocalRangeOverlayGeneration = 0;
+    RenderTextureStats m_RawWorkspaceViewTransformInputStats;
+    Stack::RawAnalysis::RawImageAnalysis m_RawWorkspaceAnalysis;
+    RawWorkspaceAutoBaseUiState m_RawWorkspaceAutoBaseUi;
+    bool m_RawWorkspaceLocalRangeTargetMode = false;
+    bool m_RawWorkspaceLocalRangeTargetDragging = false;
+    bool m_RawWorkspaceLocalRangeTargetSamplePending = false;
+    bool m_RawWorkspaceLocalRangeTargetSampleValid = false;
+    bool m_RawWorkspaceLocalRangeTargetApplyWhenSampled = false;
+    std::string m_RawWorkspaceLocalRangeTargetSourceKey;
+    float m_RawWorkspaceLocalRangeTargetU = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetV = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetSceneEv = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetSceneLuma = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetSceneR = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetSceneG = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetSceneB = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetStartMouseY = 0.0f;
+    float m_RawWorkspaceLocalRangeTargetDeltaEv = 0.0f;
+    int m_RawWorkspaceLocalRangeTargetPointIndex = -1;
 
     std::uint64_t m_ExportGeneration = 0;
     Async::TaskState m_ExportTaskState = Async::TaskState::Idle;
     std::string m_ExportStatusText;
     bool m_ShowNewProjectPrompt = false;
     bool m_ShowNewProjectDiscardConfirm = false;
+    ManagedRawGraphMutationConfirmState m_ManagedRawGraphMutationConfirm;
+    bool m_ExecutingManagedRawGraphMutationConfirmation = false;
 
     CanvasToolKind m_CanvasToolKind = CanvasToolKind::None;
     int m_CanvasToolOwnerNodeId = -1;
@@ -937,12 +937,20 @@ private:
     int m_LastToneCurveProbeNodeId = -1;
     bool m_RenderWorkerAvailable = false;
     bool m_NodeBrowserRenderWorkerAvailable = false;
+    bool m_ShutdownComplete = false;
     bool m_RenderDirty = true;
     bool m_RenderPending = false;
+    EditorRenderWorker::SharedTextureTileSet m_ViewportOutputTiles;
+    RawWorkspacePreviewOutputKind m_RawWorkspacePreviewOutputKind =
+        RawWorkspacePreviewOutputKind::None;
+    std::string m_ViewportOutputRawWorkspaceSourceKey;
+    int m_ViewportOutputPreviewMaxDimension = 0;
+    std::uint64_t m_ViewportOutputRenderGeneration = 0;
     std::uint64_t m_RenderGeneration = 0;
     std::uint64_t m_LastCompletedRenderGeneration = 0;
     std::uint64_t m_RenderRevision = 1;
     std::uint64_t m_LastSubmittedRenderRevision = 0;
+    int m_LastNonRenderingPumpFrame = -1;
     int m_AutoGainMaskPreviewNodeId = -1;
     double m_LastRenderDirtyTime = 0.0;
     bool m_ShowGraphPerformancePopup = false;
@@ -956,15 +964,7 @@ private:
     std::unordered_map<int, std::deque<EditorNodeGraph::CustomMaskPayload>> m_CustomMaskUndoStacks;
     std::unordered_map<int, std::deque<EditorNodeGraph::CustomMaskPayload>> m_CustomMaskRedoStacks;
     std::unordered_set<int> m_CustomMaskPaintingNodes;
-    struct CustomMaskBrushAdjustDrag {
-        int nodeId = -1;
-        ImVec2 startMouse { 0.0f, 0.0f };
-        ImVec2 currentMouse { 0.0f, 0.0f };
-        float startSize = 48.0f;
-        float startSoftness = 0.45f;
-        float startOpacity = 1.0f;
-        bool adjusting = false;
-    };
+    using CustomMaskBrushAdjustDrag = Stack::EditorModuleTypes::CustomMaskBrushAdjustDrag;
     CustomMaskBrushAdjustDrag m_CustomMaskBrushAdjustDrag;
     mutable std::unordered_map<int, std::size_t> m_DevelopAutoRawSolveTriggerHashes;
     mutable std::unordered_map<int, std::size_t> m_DevelopAutoRawCalibrationHashes;
@@ -986,16 +986,23 @@ private:
     float m_SplitAutoAnimTo = 0.0f;
     double m_SplitAutoAnimStartTime = 0.0;
     ViewportMode m_LastViewportMode = ViewportMode::SingleOutputPreview;
-    enum class CompositeEdgeSnapMode {
-        None,
-        GraphOnly,
-        ViewportOnly
-    };
+    using CompositeEdgeSnapMode = Stack::EditorModuleTypes::CompositeEdgeSnapMode;
     CompositeEdgeSnapMode m_CompositeEdgeSnapMode = CompositeEdgeSnapMode::None;
     CompositeEdgeSnapMode m_SplitAutoAnimSnapMode = CompositeEdgeSnapMode::None;
     bool m_DetachedPreviewActive = false;
+    bool m_DetachedPreviewTogglePending = false;
     bool m_DetachedPreviewRequestFocus = false;
     bool m_DetachedPreviewPlacementInitialized = false;
+    bool m_DetachedPreviewNativeShown = false;
+    bool m_DetachedPreviewFirstPresented = false;
+    bool m_DetachedPreviewLayoutDetached = false;
+    int m_DetachedPreviewPlatformWaitFrames = 0;
+    int m_DetachedPreviewFocusAttempts = 0;
+    ImGuiID m_DetachedPreviewViewportId = 0;
+    GLFWwindow* m_DetachedPreviewStyledWindow = nullptr;
+    ImU32 m_DetachedPreviewStyledSurfaceColor = 0;
+    ImU32 m_DetachedPreviewStyledTextColor = 0;
+    ImVec4 m_DetachedPreviewSurfaceColor = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
     float m_DetachedPreviewRestoreLeftPaneWidth = 0.0f;
     ImVec2 m_DetachedPreviewMonitorPos = ImVec2(0.0f, 0.0f);
     ImVec2 m_DetachedPreviewMonitorSize = ImVec2(0.0f, 0.0f);
@@ -1031,6 +1038,8 @@ private:
     float m_CompositePanStartX = 0.0f;
     float m_CompositePanStartY = 0.0f;
     ImVec2 m_LastCompositeCanvasSize = ImVec2(0.0f, 0.0f);
+    bool m_PendingAddImageNodePrompt = false;
+    EditorNodeGraph::Vec2 m_PendingAddImageNodeGraphPosition {};
     CompositeExportSettings m_CompositeExportSettings;
     CompositeSnapSettings m_CompositeSnapSettings;
     CompositeResizeMode m_CompositeResizeMode = CompositeResizeMode::Scale;
@@ -1059,34 +1068,7 @@ private:
     std::string m_NodeBrowserThumbnailSeedHash;
     std::uint64_t m_NodeBrowserThumbnailSeedSerial = 0;
 
-    struct DeferredLoadedProjectApplyState {
-        enum class Step {
-            None,
-            ResetRuntime,
-            InstallSource,
-            DeserializeLayers,
-            FinalizePipeline,
-            RestorePersistedThumbnails,
-            FinalizeBookkeeping,
-            PrepareNodeBrowserThumbnails,
-            WaitForFirstRender,
-            WaitForNodeBrowserThumbnails,
-            Complete,
-            Failed
-        };
-
-        bool active = false;
-        bool failed = false;
-        bool allowRenderSubmission = false;
-        Step step = Step::None;
-        std::shared_ptr<LoadedProjectData> project;
-        nlohmann::json layerArray = nlohmann::json::array();
-        std::size_t nextLayerIndex = 0;
-        std::size_t nextThumbnailIndex = 0;
-        std::uint64_t targetRenderRevision = 0;
-        std::string statusText;
-    };
-
+    using DeferredLoadedProjectApplyState = Stack::EditorModuleTypes::DeferredLoadedProjectApplyState;
     DeferredLoadedProjectApplyState m_DeferredLoadedProjectApply;
 
     void ResetForPipelineDeserialization();
@@ -1112,6 +1094,11 @@ private:
         int sourceWidth,
         int sourceHeight);
     void ConsumeRenderWorkerResults();
+    void ClearViewportOutputTiles();
+    void QueueViewportOutputTextureRelease(EditorRenderWorker::SharedTextureResult& texture);
+    void QueueViewportOutputTileSetRelease(EditorRenderWorker::SharedTextureTileSet& tileSet);
+    void PumpViewportOutputTextureDeletes(bool drainAll = false);
+    void PumpViewportOutputTileTextureDeletes(bool drainAll = false);
     void ApplyToneCurveAutoRewriteFeedback(const std::vector<ToneCurveAutoRewriteFeedback>& feedbacks);
     void ApplyDevelopCandidateRenderFeedback(
         const std::vector<EditorRenderWorker::DevelopCandidateRenderResult>& results);
@@ -1163,18 +1150,164 @@ private:
         bool forceFullReanalysis);
     bool AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddRawDevelopmentNodeFromPayload(EditorNodeGraph::RawDevelopmentPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDecodeNodeFromPayload(EditorNodeGraph::RawDecodePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool AddMfsrNodeFromPayload(EditorNodeGraph::MfsrPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddLutNodeFromPayload(EditorNodeGraph::LutPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
     bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
     bool AddGraphImageChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool AddGraphImageChainFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 sourcePosition);
+    std::filesystem::path GetRawWorkspaceAppStatePath() const;
+    RawWorkspaceScanSnapshot GetRawWorkspaceScanSnapshot() const;
+    RawWorkspaceThumbnailSnapshot GetRawWorkspaceThumbnailSnapshot() const;
+    void LoadRawWorkspaceAppState();
+    void SaveRawWorkspaceAppState();
+    void RequestOpenRawWorkspace(const std::filesystem::path& workspaceRoot);
+    void RequestRawWorkspaceScan();
+    void RequestRawWorkspaceThumbnailGeneration();
+    void ClearRawWorkspace();
+    void SelectRawWorkspaceSource(const std::string& sourceKey);
+    void InvalidateRawWorkspaceGalleryPresentation();
+    void QueueSelectedRawWorkspaceSourcePreviewStaging();
+    void TickRawWorkspacePreviewStaging();
+    bool EnsureSelectedRawWorkspaceSourcePreviewStaged();
+    void PersistRawWorkspaceCatalog();
+    void StartRawWorkspaceCatalogPersistIfNeeded();
+    void ResetRawWorkspaceCatalogPersistState();
+    void StartRawWorkspaceAppStatePersistIfNeeded();
+    void ResetRawWorkspaceAppStatePersistState();
+    void TickRawWorkspacePersistence();
+    void FlushRawWorkspacePersistenceForShutdown();
+    void NoteRawWorkspaceRecipePreviewEdit(bool interactionActive);
+    bool IsRawWorkspaceFastPreviewRenderActive(double now) const;
+    void UpdateRawWorkspaceSettledPreviewRender(double now);
+    bool HasRawWorkspaceLivePreviewForSource(const std::string& sourceKey) const;
+    bool HasRawWorkspaceFullResolutionPreviewForSource(const std::string& sourceKey) const;
+    void ClearRawWorkspaceLivePreviewState();
+    void ClearRawWorkspaceLocalRangeOverlayState();
+    void AdoptRawWorkspaceLocalRangeOverlayFromResult(const EditorRenderWorker::Result& result);
+    bool HasRawWorkspaceLocalRangeOverlayForSource(const std::string& sourceKey) const;
+    void ClearRawWorkspaceLocalRangeTargetState(bool keepMode = true);
+    void AdoptRawWorkspaceLocalRangeTargetSampleFromResult(const EditorRenderWorker::Result& result);
+    bool HasRawWorkspaceLocalRangeTargetSampleForSource(const std::string& sourceKey) const;
+    bool ApplyRawWorkspaceLocalRangeTargetDelta(bool interactionActive);
+    void HandleRawWorkspaceLocalRangeTargetInteraction(
+        const Stack::RawWorkspace::SourceRecord& selectedSource,
+        const ImVec2& imageMin,
+        const ImVec2& imageMax,
+        bool selectedProjectActive,
+        bool currentRawPreview);
+    const Stack::RawWorkspace::SourceRecord* FindRawWorkspaceSourceByKey(const std::string& sourceKey) const;
+    Stack::RawWorkspace::SourceRecord* FindRawWorkspaceSourceByKey(const std::string& sourceKey);
+    Stack::RawRecipe::RawDevelopmentRecipe BuildRawWorkspaceDefaultRecipe(
+        const Stack::RawWorkspace::SourceRecord& source) const;
+    bool BuildRawWorkspaceProjectGraph(
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+        bool markEdited = true,
+        std::string* outError = nullptr);
+    bool RequestLoadRawWorkspaceProjectForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        bool includeNodeBrowserThumbnails = false);
+    void FinalizeDeferredRawWorkspaceProjectLoadIfNeeded();
+    bool StageRawWorkspaceProjectForSourcePreview(const Stack::RawWorkspace::SourceRecord& source);
+    bool ApplyActiveRawWorkspaceModeDataToDocument(StackBinaryFormat::ProjectDocument& document) const;
+    void MarkActiveRawWorkspaceProjectAsCustomGraph(std::string reason);
+    bool QueueManagedRawGraphMutationConfirmation(
+        ManagedRawGraphMutationConfirmAction action,
+        Stack::RawWorkspace::ManagedRawGraphMutationWarning warning,
+        int nodeId = 0,
+        int fromNodeId = 0,
+        const std::string& fromSocketId = {},
+        int toNodeId = 0,
+        const std::string& toSocketId = {},
+        std::vector<int> nodeIds = {});
+    void RenderManagedRawGraphMutationConfirmPopup();
+    void ExecuteManagedRawGraphMutationConfirmation();
+    bool ResolveRawWorkspaceRecipeForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        Stack::RawRecipe::RawDevelopmentRecipe& outRecipe,
+        Stack::RawWorkspace::RawProjectMode* outMode = nullptr,
+        std::string* outError = nullptr) const;
+    bool FocusRawWorkspaceDevelopmentNode();
+    bool OpenRawWorkspaceProjectInGraph(const Stack::RawWorkspace::SourceRecord& source);
+    bool SaveActiveRawWorkspaceProjectIfDirty();
+    std::uint64_t BumpRawWorkspaceProjectSaveRevision(
+        const std::filesystem::path& workspaceRoot,
+        const std::string& sourceKey);
+    std::uint64_t GetRawWorkspaceProjectSaveRevision(
+        const std::filesystem::path& workspaceRoot,
+        const std::string& sourceKey) const;
+    bool IsRawWorkspaceProjectSaveJobCurrent(const RawWorkspaceProjectSaveJob& job) const;
+    void EnqueueRawWorkspaceProjectSave(RawWorkspaceProjectSaveJob job);
+    void EnsureRawWorkspaceProjectSaveWorker();
+    void RequestRawWorkspaceProjectSaveWorkerDrain();
+    bool IsRawWorkspaceProjectSaveWorkerIdle() const;
+    void ShutdownRawWorkspaceProjectSaveWorker();
+    void RawWorkspaceProjectSaveWorkerLoop();
+    bool WriteRawWorkspaceProjectSaveJob(RawWorkspaceProjectSaveJob& job, std::string& error) const;
+    void CompleteRawWorkspaceProjectSave(
+        RawWorkspaceProjectSaveJob job,
+        bool success,
+        bool skippedStale,
+        std::string errorMessage);
+    bool RelinkActiveRawWorkspaceProjectToSelectedSource();
+    bool EmbedActiveRawWorkspaceProject();
+    void RenderRawWorkspaceLifecyclePopups();
+    void QueueRawWorkspaceThumbnailTextureDelete(unsigned int texture);
+    void PumpRawWorkspaceThumbnailTextureDeletes(bool drainAll = false);
+    void ClearRawWorkspaceThumbnailTextures(bool immediate = false);
+    void RenderRawWorkspaceEmptyState(const RawWorkspaceScanSnapshot& scanSnapshot);
+    void RenderRawWorkspaceBrowser(
+        const RawWorkspaceScanSnapshot& scanSnapshot,
+        const RawWorkspaceThumbnailSnapshot& thumbnailSnapshot);
+    void RenderRawWorkspaceControlsPanel(
+        const Stack::RawWorkspace::SourceRecord* selectedSource,
+        const Stack::RawWorkspace::RawPanelState& panelState);
+    bool RenderRawWorkspaceAutoBasePanel(
+        const Stack::RawWorkspace::SourceRecord* selectedSource,
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe,
+        float controlWidth);
+    bool RenderRawWorkspaceLocalRangeControls(
+        const Stack::RawWorkspace::SourceRecord* selectedSource,
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe,
+        float controlWidth);
+    void RenderRawWorkspaceAnalysisPanel(float controlWidth);
+    void RenderRawWorkspacePreviewPanel(
+        const Stack::RawWorkspace::SourceRecord* selectedSource,
+        const Stack::RawWorkspace::RawPanelState& panelState);
+    void TryApplyRawWorkspaceAutoBaseOnAnalysis();
+    void RefreshRawWorkspaceAutoBaseRecommendations(
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
+    bool ApplyRawWorkspaceAutoBaseViewFitForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+        bool explicitApply);
+    bool ApplyRawWorkspaceAutoBaseExposureSuggestion(
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    bool ApplyRawWorkspaceAutoBaseWhiteBalanceSuggestion(
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    bool ApplyRawWorkspaceAutoBaseHighlightProtection(
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    bool ApplyRawWorkspaceAutoBaseLocalSuggestion(
+        std::size_t suggestionIndex,
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    bool RevertRawWorkspaceAutoBaseForSelectedSource();
+    void MarkRawWorkspaceViewTransformUserEdited();
+    bool RawWorkspaceViewTransformAutoOwnedForSource(const std::string& sourceKey) const;
+    void ResetRawWorkspaceAutoBaseState();
+    Stack::RawAnalysis::RawMetadataSummary ResolveRawWorkspaceMetadataSummaryForAutoBase() const;
+    std::uint64_t BuildRawWorkspaceAutoBaseSourceHash(
+        const Stack::RawWorkspace::SourceRecord& source) const;
+    bool RawWorkspaceRecipeLooksDefaultForAutoBase(
+        const Stack::RawWorkspace::SourceRecord& source,
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe) const;
     void MoveCompositeOutputToFront(int outputNodeId);
     std::pair<EditorNodeGraph::Vec2, EditorNodeGraph::Vec2> BuildCompositeChainPlacement() const;
     std::size_t BuildCompositeChainFingerprint(const EditorNodeGraph::CompletedChainInfo& chain) const;

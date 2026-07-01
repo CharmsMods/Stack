@@ -116,6 +116,8 @@ void EditorSidebar::Render(EditorModule* editor) {
 
     if (isNodeGraph) {
         m_NodeGraphUI.Render(editor);
+    } else if (editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::Presets) {
+        RenderPresets(editor);
     } else if (editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ExportSettings) {
         RenderExportSettings(editor);
     } else if (editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode) {
@@ -126,6 +128,18 @@ void EditorSidebar::Render(EditorModule* editor) {
         ImGui::PopItemWidth();
         ImGui::Unindent(18.0f);
     }
+}
+
+void EditorSidebar::RenderPresets(EditorModule* editor) {
+    const float fullWidth = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGuiExtras::RichSectionLabel("PRESETS", 6.0f);
+    ImGui::TextDisabled("Ctrl+Tab toggles this panel.");
+    ImGui::TextDisabled("Hover a preset name to preview it on the right.");
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::BeginChild("PresetsScrollRegion", ImVec2(0.0f, 0.0f), false);
+    m_NodeGraphUI.RenderPresetsPanel(editor, std::max(220.0f, fullWidth));
+    ImGui::EndChild();
 }
 
 void EditorSidebar::RenderExportSettings(EditorModule* editor) {
@@ -325,6 +339,19 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
     }
     if (node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
         editor->RenderHdrMergeControls(*node, controlWidth, true);
+        ImGui::EndChild();
+        return;
+    }
+    if (node->kind == EditorNodeGraph::NodeKind::Mfsr) {
+        ImGui::TextDisabled("Status");
+        if (!node->mfsr.errorMessage.empty()) {
+            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f), "%s", node->mfsr.errorMessage.c_str());
+        } else {
+            ImGui::TextWrapped("%s", node->mfsr.placeholderStatus.c_str());
+        }
+        ImGui::TextDisabled("%s", node->mfsr.hasPlaceholderCachedOutput
+            ? "Placeholder cache marked"
+            : "No MFSR render cache");
         ImGui::EndChild();
         return;
     }

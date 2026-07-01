@@ -1,0 +1,854 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+10 - Graph Controls, Solver Controls, Diagnostics, and User Education
+=====================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose
+=======
+
+This guide defines graph controls, solver controls, diagnostics, and user education for Stack Develop.
+
+The user strongly wants Stack to lean into graph-style controls instead of becoming a long list of sliders. This is not a cosmetic preference. It is a core product direction.
+
+Graph controls should let the user steer image-processing intent in meaningful tradeoff spaces:
+
+- neutral versus mood,
+- clean versus textured,
+- preserve range versus preserve contrast,
+- subject priority versus scene integrity,
+- editable base versus finished rendering,
+- bright mids versus highlight protection.
+
+Develop Auto should remain a solver. Graph controls should not become fake sliders in disguise. They should produce solver intent vectors that guide multiple processing stages at once.
+
+Why graph controls matter
+=========================
+
+Many image-editing choices are not one-dimensional.
+
+A simple slider can be useful when the operation is literal:
+
+- RAW Exposure: +1 EV.
+- Denoise Radius: 2 px.
+- Highlight Threshold: 0.98.
+- Manual WB red multiplier: 2.1.
+
+But many important choices are not that simple.
+
+Example: "Make it brighter."
+
+This could mean:
+
+- multiply RAW values,
+- raise only midtones,
+- lift shadows,
+- compress highlights,
+- change tone curve,
+- open the shadow toe,
+- increase local exposure,
+- use denoise to support lifted shadows,
+- change the final display mapping.
+
+A one-dimensional Brightness slider hides the decision. A graph can expose the tradeoff.
+
+Example: "Make it cleaner."
+
+This could mean:
+
+- stronger pre-demosaic denoise,
+- stronger post-demosaic denoise,
+- less shadow lift,
+- deeper shadow tone,
+- lower texture enhancement,
+- chroma cleanup,
+- lower sharpening,
+- selective denoise only in flat regions.
+
+Again, a graph can express the tradeoff better than one slider.
+
+Graph controls should help Stack ask:
+
+"What direction do you want the solver to move, and what should it protect while moving there?"
+
+Graph controls are not just XY sliders
+======================================
+
+A good graph control needs more than a movable point.
+
+It should include:
+
+- clear axis labels,
+- plain-language endpoint descriptions,
+- current point,
+- selected Auto mode anchor,
+- candidate points/cards when available,
+- hover explanations,
+- optional technical readout,
+- reset button,
+- lock/bias state,
+- visual relationship to current result,
+- warnings if the requested intent could not be fully achieved.
+
+A graph should not be mysterious.
+
+If the user moves toward "Reveal More Range," Stack should be able to explain:
+
+- lowered global exposure slightly,
+- increased local shadow lift,
+- increased highlight compression,
+- strengthened noise guard,
+- softened shadow toe,
+- kept sky highlights bright with shoulder adjustment.
+
+That is the difference between a graph as decoration and a graph as a real solver control.
+
+Core graph set
+==============
+
+The following graph controls should be considered first-class design objects.
+
+1. Auto Intent Map
+------------------
+
+Purpose:
+Controls the broad purpose of the Develop solve.
+
+Horizontal axis:
+- Technical Base
+- Finished Rendering
+
+Vertical axis:
+- Preserve Range / Flat
+- Preserve Contrast / Punch
+
+Meanings:
+
+Technical Base + Preserve Range:
+- flat editing base,
+- maximum preserved possibility,
+- less committed tone.
+
+Technical Base + Preserve Contrast:
+- clean but structured base,
+- more endpoint shape without full finish.
+
+Finished Rendering + Preserve Range:
+- natural but open,
+- good for high dynamic range images.
+
+Finished Rendering + Preserve Contrast:
+- punchy, finished, stronger visual endpoint.
+
+This map should interact strongly with Auto modes. The human mode buttons can set starting positions on this graph:
+
+- Clean Base: more technical, balanced contrast.
+- Flat Editing Base: technical + preserve range.
+- Natural Finished: finished + balanced contrast.
+- Bright Natural: finished + bright/open bias.
+- Dark Natural: finished + contrast/mood bias.
+- Punchy: finished + preserve contrast.
+- Maximum Range: preserve range, possibly between technical and finished depending on user.
+
+The graph should not replace mode buttons. It should refine them.
+
+2. Exposure / Range Map
+-----------------------
+
+Purpose:
+Controls how Stack balances global exposure, local exposure, highlights, shadows, and visible midtones.
+
+Horizontal axis:
+- Protect Highlights
+- Brighten Important Mids
+
+Vertical axis:
+- Preserve Natural Contrast
+- Reveal More Range
+
+Meanings:
+
+Protect Highlights + Preserve Natural Contrast:
+- lower exposure if needed,
+- preserve highlight detail,
+- shadows may remain deeper.
+
+Brighten Important Mids + Preserve Natural Contrast:
+- expose/shape for subject and midtones,
+- allow small highlights to clip if natural.
+
+Protect Highlights + Reveal More Range:
+- high dynamic range compression,
+- stronger local exposure,
+- more careful highlight shoulder.
+
+Brighten Important Mids + Reveal More Range:
+- bright/open rendering,
+- likely requires denoise and strong safeguards.
+
+This graph is where the user can express the important idea: "I want the image more visible, but not flat," or "protect the sky, but don't make the subject dead."
+
+3. Subject / Scene Intent Map
+-----------------------------
+
+Purpose:
+Controls how much marked or detected important regions influence the solve.
+
+Horizontal axis:
+- Global Scene Integrity
+- Marked Subject Priority
+
+Vertical axis:
+- Preserve Mood
+- Improve Readability
+
+Meanings:
+
+Global Scene Integrity + Preserve Mood:
+- preserve overall lighting and atmosphere,
+- do not overcorrect subject darkness.
+
+Marked Subject Priority + Preserve Mood:
+- protect subject but keep scene mood,
+- subtle subject-aware shaping.
+
+Global Scene Integrity + Improve Readability:
+- make overall image more readable,
+- avoid over-favoring one region.
+
+Marked Subject Priority + Improve Readability:
+- expose/lift/shape for subject,
+- useful for backlit subjects, products, portraits.
+
+This graph should work with the importance brush. The brush marks "this matters." The graph says "how much should that matter and in what way?"
+
+4. White Balance / Mood Map
+---------------------------
+
+Purpose:
+Controls neutral correction versus scene mood preservation.
+
+Horizontal axis:
+- Neutral Correction
+- Mood Preservation
+
+Vertical axis:
+- Cooler / Cleaner
+- Warmer / Atmospheric
+
+Meanings:
+
+Neutral Correction + Cooler/Cleaner:
+- remove warmth/casts strongly,
+- clean product/interior look.
+
+Neutral Correction + Warmer/Atmospheric:
+- neutralize obvious errors but allow warmth.
+
+Mood Preservation + Cooler/Cleaner:
+- preserve cool night/shade/blue atmosphere.
+
+Mood Preservation + Warmer/Atmospheric:
+- preserve golden hour, tungsten, sunset, warm lamps.
+
+This is better than only Temperature/Tint because the user is not always asking for a color direction. Sometimes they are asking Stack to decide whether the scene's color cast is a problem or part of the image.
+
+5. Color Realism Map
+--------------------
+
+Purpose:
+Controls technical accuracy versus perceptual/pleasing color rendering.
+
+Horizontal axis:
+- Accurate / Neutral
+- Pleasing / Memory-Color Rendered
+
+Vertical axis:
+- Restrained Color
+- Rich Color Density
+
+Meanings:
+
+Accurate/Neutral + Restrained:
+- clean base, profile-trust, less saturation.
+
+Accurate/Neutral + Rich:
+- accurate-ish color but more density.
+
+Pleasing/Memory + Restrained:
+- protects skin/sky/foliage but avoids strong color.
+
+Pleasing/Memory + Rich:
+- more finished, richer photographic color.
+
+This graph should influence:
+
+- saturation/colorfulness behavior,
+- memory color protection,
+- skin protection,
+- sky/foliage handling,
+- mood preservation,
+- tone/color density interaction.
+
+6. Texture / Cleanliness Map
+----------------------------
+
+Purpose:
+Controls denoise, texture preservation, sharpening/detail, and tone-based noise hiding.
+
+Horizontal axis:
+- Clean / Smooth
+- Natural Texture / Detail
+
+Vertical axis:
+- Hide Noise in Tone
+- Reveal Detail with Denoise Support
+
+Meanings:
+
+Clean/Smooth + Hide Noise in Tone:
+- darker weak shadows,
+- more smoothing in flat areas,
+- less detail aggression.
+
+Natural Texture + Hide Noise in Tone:
+- preserve real texture,
+- keep noisy weak areas darker.
+
+Clean/Smooth + Reveal Detail:
+- strong denoise to support opened shadows,
+- risk of plastic if too far.
+
+Natural Texture + Reveal Detail:
+- preserve detail while opening useful areas,
+- requires good adaptive denoise.
+
+This graph captures the user's exact direction: a little natural noise is better than plastic smoothing, and noise can be hidden by tone decisions instead of always denoised away.
+
+7. Tone / Finish Feel Map
+-------------------------
+
+Purpose:
+Controls final image feel.
+
+Horizontal axis:
+- Editable / Reserved
+- Finished / Committed
+
+Vertical axis:
+- Soft / Range-Preserving
+- Punchy / Endpoint-Driven
+
+Meanings:
+
+Editable + Soft:
+- flat/clean base,
+- most future flexibility.
+
+Editable + Punchy:
+- structured base,
+- stronger endpoints but still editable.
+
+Finished + Soft:
+- natural finished,
+- pleasing but not aggressive.
+
+Finished + Punchy:
+- high contrast/poppy,
+- strongest visual commitment.
+
+This graph should influence:
+
+- final contrast,
+- midtone curve,
+- highlight shoulder,
+- shadow toe,
+- black/white endpoint behavior,
+- local contrast allowance,
+- color density.
+
+Graph controls and sliders should cooperate
+===========================================
+
+Graphs should not eliminate sliders.
+
+The correct model is:
+
+- Graphs express direction and tradeoff.
+- Sliders express direct numeric adjustment.
+- Toggles choose actual modes.
+- Buttons trigger solve actions.
+- Maps explain what happened.
+
+Example:
+
+A user moves the Exposure / Range graph toward "Brighten Important Mids + Reveal More Range."
+
+The solver may change:
+
+- RAW exposure,
+- local exposure,
+- highlight compression,
+- shadow lift,
+- tone midpoints,
+- denoise,
+- subject weighting,
+- highlight shoulder.
+
+Manual mode can then show sliders for the actual values that changed.
+
+This lets the graph remain intuitive while Manual remains truthful.
+
+Graph positions as solver state
+===============================
+
+Graph positions should be saved as part of Develop state.
+
+They should not be temporary UI-only values.
+
+A graph point should become an intent vector:
+
+- mode intent,
+- brightness/range intent,
+- subject/readability intent,
+- WB/mood intent,
+- color realism intent,
+- texture/cleanliness intent,
+- tone/finish intent.
+
+Auto uses this vector to solve. Manual reveals the values produced by the solve. Returning to Auto preserves graph intent unless reset.
+
+This is especially important because the user wants manual edits to become mathematical biases. Graph positions are a natural place to store those biases.
+
+Candidate gallery and graph controls
+====================================
+
+Candidate solving should visually connect to graph controls.
+
+The user described a UI where candidate renders appear in a gallery-like layout that temporarily replaces the current canvas viewport while renders pop up, converge, get eliminated, and leave the final few for selection or merging.
+
+Graph controls can make that experience understandable.
+
+Candidate behavior:
+
+- Each candidate can appear as a card.
+- Each candidate can also appear as a point on one or more graphs.
+- Rejected/duplicate candidates can fade or collapse.
+- Selected candidates become the authored state.
+- Candidate points can show what direction they represent: more range, more punch, brighter mids, cleaner shadows, etc.
+- The user can move a graph point and request new candidates near that intent.
+- The user can select two candidates and ask for a merge/re-solve between their intent vectors.
+
+This avoids the false idea that Auto produced random looks. The candidates are different solved answers to different tradeoffs.
+
+Do not show useless duplicate candidates
+========================================
+
+The user does not want a screen full of extremely similar candidates.
+
+The solver should generate many candidates internally if needed, but display only meaningful differences.
+
+Candidate elimination should consider:
+
+- visual similarity,
+- exposure placement difference,
+- dynamic range difference,
+- subject readability difference,
+- tone difference,
+- color/WB difference,
+- denoise/detail difference,
+- artifact risk,
+- confidence,
+- user mode,
+- graph intent.
+
+The UI should show the last few valuable candidates, not every internal test.
+
+Candidate merging
+=================
+
+Candidate merging should mean merging intent/state, not averaging pixels.
+
+Recommended behavior:
+
+1. User selects candidate A and candidate B.
+2. Stack identifies their solve vectors/settings differences.
+3. Stack creates a merged intent vector.
+4. Stack re-runs a targeted solve around that merged intent.
+5. The result becomes a new candidate.
+6. Manual mode can reveal the resulting authored values.
+
+Example:
+
+Candidate A:
+- more range, flatter, protects highlights.
+
+Candidate B:
+- punchy, richer blacks, stronger contrast.
+
+Merged candidate:
+- tries to preserve more range while restoring some contrast and endpoint strength.
+
+This is much better than visually crossfading the two renders.
+
+Diagnostics philosophy
+======================
+
+Diagnostics should exist at three levels:
+
+1. Plain-language solve summary.
+2. Visual stage previews and maps.
+3. Technical/debug readouts.
+
+The user should not need code knowledge to understand what happened. But the user should also be able to go deep.
+
+Level 1: Plain-language solve summary
+-------------------------------------
+
+Examples:
+
+- "Natural Finished selected. Stack lowered base exposure to protect large bright sky regions, lifted important midtones locally, and used a soft highlight shoulder to keep the sky bright without hard clipping."
+- "Flat Editing Base selected. Stack opened midtones and compressed extremes to make the file easier to manually adjust."
+- "Shadow lift was limited because the darkest marked regions had high noise risk."
+- "White balance preserved warm scene mood instead of fully neutralizing the image."
+- "Denoise was stronger in lifted flat shadows and weaker over textured subject detail."
+
+These statements should be truthful and short.
+
+Level 2: Visual maps and stage previews
+---------------------------------------
+
+Useful user-facing maps:
+
+- clipping map,
+- highlight risk map,
+- shadow/noise risk map,
+- EV adjustment map,
+- local exposure map,
+- subject/importance map,
+- confidence/protection map,
+- denoise strength map,
+- color cast/mood map,
+- before/after tone preview.
+
+Useful stage previews:
+
+- RAW base,
+- after RAW reconstruction/cleanup,
+- after global exposure/WB,
+- after scene prep,
+- pre-finish,
+- final tone,
+- final with Finish Mask.
+
+These previews teach the user what the pipeline is doing.
+
+Level 3: Technical/debug readouts
+---------------------------------
+
+Useful expert/developer readouts:
+
+- actual EV values,
+- black/white levels,
+- clipped RAW channel masks,
+- demosaic debug views,
+- pre/post mosaic denoise,
+- false color mask,
+- defringe mask,
+- highlight edge mask,
+- camera transform source,
+- matrix debug,
+- solve confidence,
+- candidate score components,
+- convergence iterations,
+- safeguards triggered.
+
+The current Develop node already has many debug views and scene-prep diagnostic labels. Future docs should build on that instead of inventing a totally separate diagnostic model.
+
+Educational hover descriptions
+==============================
+
+Hover descriptions should be plain but mathematically honest.
+
+Examples:
+
+Auto Strength:
+"Controls how strongly Auto is allowed to reshape the image. Higher values allow more exposure balancing, local range compression, tone shaping, denoise, and color correction."
+
+RAW Exposure:
+"True scene-linear exposure. +1 EV multiplies values by 2. This changes the data scale and can affect highlight clipping risk."
+
+Visible Brightness:
+"Changes how bright the final image feels. Stack may use exposure, local exposure, and tone together."
+
+Dynamic Range:
+"Controls how much highlight and shadow range Stack tries to fit into the visible image. More range can reveal detail but can look flatter if pushed too far."
+
+Highlight Recovery:
+"Uses available RAW/channel data when it exists. It cannot truly recover detail that the sensor did not capture."
+
+Highlight Rolloff:
+"Controls how bright values transition into white. This can make highlights look smoother, but it is not data recovery."
+
+Shadow Lift:
+"Makes dark information more visible. If the signal is weak, this can reveal noise."
+
+Noise Guard:
+"Limits shadow/local exposure changes when Stack detects that lifting would mostly reveal noise."
+
+Texture / Cleanliness:
+"Chooses how Stack balances denoise against real texture. A clean result may be smoother; a textured result may keep more natural grain and detail."
+
+Mood Preservation:
+"Controls whether Stack keeps the scene's warm/cool atmosphere instead of forcing neutral white balance."
+
+These descriptions should avoid lies and avoid vague marketing language.
+
+Requested versus achieved result
+================================
+
+Graph controls introduce an important issue: the user can request something the image cannot cleanly support.
+
+For example:
+
+- user asks for bright mids + reveal more range,
+- but highlights are already clipped and shadows are noisy.
+
+Stack should not fake success.
+
+The UI should be able to say:
+
+"Requested: bright, open rendering.
+Achieved: moderate brightening. Shadow lift was limited by noise risk and highlight compression was limited to avoid gray highlights."
+
+This is a powerful trust-builder. It tells the user why a graph move did not go as far as expected.
+
+Learning controls
+=================
+
+The user wants candidate rejection/selection learning to exist, but application should be controllable through the settings menu accessible by pressing 3 in the current program.
+
+Learning should separate:
+
+Learning record:
+- Stack remembers that the user selected/rejected certain candidates.
+
+Apply to current image:
+- current solve adapts immediately.
+
+Apply to future images:
+- future solves use this preference.
+
+Do not apply:
+- learning is stored or available for analysis, but not active.
+
+The settings menu should include toggles such as:
+
+- Learn from candidate selection.
+- Apply learning to current image.
+- Apply learning to future images.
+- Learn tone preference.
+- Learn WB/mood preference.
+- Learn denoise/detail preference.
+- Learn range/contrast preference.
+- Reset learned preferences.
+- Show learning influence in diagnostics.
+
+This keeps learning powerful but not spooky.
+
+Graph safety and constraints
+============================
+
+Graphs should have safeguards too.
+
+If a graph point moves into an extreme corner, Stack should not blindly push every related setting to maximum.
+
+Instead:
+
+- graph position creates intent,
+- solver tests candidates,
+- safeguards evaluate damage,
+- output moves as far as it can while preserving quality,
+- UI explains limitations if needed.
+
+Examples:
+
+Extreme "Reveal More Range":
+- use local exposure and tone compression,
+- but stop before halos/noisy shadows/gray highlights.
+
+Extreme "Clean/Smooth":
+- denoise more,
+- but protect important texture if real detail exists.
+
+Extreme "Punchy":
+- increase contrast,
+- but avoid skin clipping and fake HDR.
+
+Extreme "Mood Preservation":
+- preserve color mood,
+- but correct obvious ugly casts if the image looks wrong.
+
+Graphs should allow strong requests. Safeguards should make those requests intelligent.
+
+Graph control display ideas
+===========================
+
+Possible UI behavior:
+
+- The current mode sets a base point.
+- Moving the point shows a live preview/candidate.
+- Candidate dots appear around the graph.
+- A selected candidate dot becomes the current point.
+- A "show affected settings" disclosure reveals what changed.
+- Lock icons show which groups cannot be altered.
+- Bias icons show where manual edits are influencing Auto.
+- Warning badges show when requested direction is partially limited.
+- Hovering an endpoint shows a plain-language description.
+- Advanced mode shows numeric vector values and score breakdown.
+
+The graph should feel like a control surface, not an abstract chart.
+
+Graph controls in Auto versus Manual
+====================================
+
+Auto:
+- graph controls steer the solver,
+- changes can trigger candidate rendering,
+- output is allowed to change multiple internal settings,
+- UI focuses on intent and result.
+
+Manual:
+- graph controls edit grouped authored values,
+- show affected settings,
+- can be used as macro controls,
+- can be locked/bypassed,
+- exact sliders remain available.
+
+This distinction must be preserved.
+
+If Manual graph controls secretly re-run Auto without telling the user, Manual will feel unstable. If Auto graph controls only change one fixed slider, Auto will feel weak. Each mode has a different responsibility.
+
+Diagnostics and current Stack debug views
+=========================================
+
+The current Develop node already has useful diagnostics:
+
+- normalized mosaic,
+- CFA false color,
+- demosaiced camera RGB,
+- white balanced RGB,
+- camera transformed RGB,
+- clipped RAW channels,
+- pre/post denoise mosaic,
+- hot pixel mask,
+- denoise difference,
+- false color mask,
+- defringe mask,
+- highlight edge mask,
+- scene prep EV/confidence/protection diagnostics,
+- pre-finish output internally.
+
+Future diagnostic design should unify these into user-facing and expert-facing layers.
+
+A normal user may only need:
+
+- clipping,
+- noise risk,
+- local exposure map,
+- stage before/after.
+
+An expert/developer may need the full raw debug set.
+
+Do not remove power. Organize it.
+
+Diagnostics should not become a second editor
+=============================================
+
+Diagnostics are for understanding, not for adding unrelated controls everywhere.
+
+A diagnostic map can have a click/inspect mode. It can show why something happened. It can let the user mark an important area or reveal a problem. But it should not become a pile of hidden editing systems.
+
+Keep the main control model clean:
+
+- Mode.
+- Graph intent.
+- Candidate selection.
+- Manual grouped controls.
+- Diagnostics explaining the result.
+
+Better than a pile of sliders
+=============================
+
+The graph-control direction is one of the strongest differentiators for Stack.
+
+Many editors expose dozens of one-dimensional controls. Users then move sliders until the image looks less wrong, often without understanding which stage is actually changing data.
+
+Stack should be different:
+
+- ask what the user wants,
+- represent real tradeoffs,
+- solve across stages,
+- show candidate outcomes,
+- explain what happened,
+- allow manual inspection,
+- preserve user intent.
+
+This is the opposite of preset thinking.
+
+Decisions locked from user direction
+====================================
+
+- Graph controls should be leaned into strongly.
+- Graphs should guide processing, not merely decorate the UI.
+- Auto controls should be solver controls, not just normal edit sliders.
+- Sliders still exist where exact values are appropriate.
+- Candidate solving should be visual and gallery-like.
+- Rejected/selected candidates should be learnable, with settings toggles for current/future application.
+- Diagnostics should teach what is actually happening without requiring code knowledge.
+- Explanations should be truthful and not lie about recovery, reconstruction, tone, or data changes.
+
+Experience-test questions
+=========================
+
+These need real UI testing:
+
+- Which graphs are essential in the first build?
+- Should Auto show one main graph at a time or a multi-graph panel?
+- Should graph points move continuously during drag or generate candidates after release?
+- How many candidate cards can the user handle before it becomes clutter?
+- Should rejected candidates disappear, fade, or move to a collapsed history?
+- Should graph controls appear on-canvas, in the node panel, or both?
+- What is the best visual way to show "requested versus achieved"?
+- Should graph controls show technical axes by default or human endpoints only?
+- How should graph-control state serialize into project files?
+
+Research anchors
+================
+
+- DEVELOP_NODE_CONTEXT.txt, current Develop UI, Auto guidance, Manual controls, diagnostics, and integrated tone structure.
+- DaVinci Resolve and Adobe color-grading documentation as examples of multidimensional color/tone controls that are more expressive than isolated sliders.
+- ACES and OpenColorIO documentation for clear distinctions between scene-referred working states and display/view transforms.
+- MIT Local Laplacian Filters research as an example of local tone/detail manipulation where avoiding halos and preserving natural appearance are central concerns.

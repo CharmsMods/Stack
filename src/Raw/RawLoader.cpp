@@ -43,9 +43,16 @@ bool RawLoader::LoadMetadata(const std::string& path, RawMetadata& outMetadata) 
     return outMetadata.error.empty();
 }
 
-bool RawLoader::LoadFile(const std::string& path, RawImageData& outData) {
+bool RawLoader::LoadFile(
+    const std::string& path,
+    RawImageData& outData,
+    const std::function<bool()>& shouldCancel) {
     outData = {};
     outData.metadata.sourcePath = path;
+    if (shouldCancel && shouldCancel()) {
+        outData.metadata.error = "RAW load canceled.";
+        return false;
+    }
     if (path.empty()) {
         outData.metadata.error = "No RAW source path.";
         return false;
@@ -56,8 +63,12 @@ bool RawLoader::LoadFile(const std::string& path, RawImageData& outData) {
         outData.metadata.error = runtimeStatus.message;
         return false;
     }
+    if (shouldCancel && shouldCancel()) {
+        outData.metadata.error = "RAW load canceled.";
+        return false;
+    }
 
-    return DecodeWithLibRaw(path, outData);
+    return DecodeWithLibRaw(path, outData, shouldCancel);
 }
 
 } // namespace Raw

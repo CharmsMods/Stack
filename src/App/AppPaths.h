@@ -19,6 +19,7 @@ struct RuntimeLayout {
     std::filesystem::path settingsFilePath;
     std::filesystem::path settingsDirectory;
     std::filesystem::path libraryDirectory;
+    std::filesystem::path presetsDirectory;
     std::filesystem::path cacheDirectory;
     std::filesystem::path updateCacheDirectory;
     std::filesystem::path logsDirectory;
@@ -33,6 +34,7 @@ const std::filesystem::path& GetExecutableDirectory();
 const std::filesystem::path& GetSettingsDirectory();
 const std::filesystem::path& GetSettingsFilePath();
 const std::filesystem::path& GetLibraryDirectory();
+const std::filesystem::path& GetPresetsDirectory();
 const std::filesystem::path& GetCacheDirectory();
 const std::filesystem::path& GetUpdateCacheDirectory();
 const std::filesystem::path& GetLogsDirectory();

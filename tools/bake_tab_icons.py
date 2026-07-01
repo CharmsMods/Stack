@@ -45,14 +45,23 @@ if __name__ == "__main__":
     input_specs = [
         ("Editor", os.path.join(root_dir, "Icons", "Editor.png")),
         ("Library", os.path.join(root_dir, "Icons", "Library.png")),
+        ("Tools", os.path.join(root_dir, "Icons", "tools tab.png")),
         ("Render", os.path.join(root_dir, "Icons", "Render, Cube with points.png")),
         ("CharmLogo", os.path.join(root_dir, "Icons", "Charm logo icon.png")),
         ("NodeGraph", os.path.join(root_dir, "Icons", "node graph.png")),
+        ("NodePresets", os.path.join(root_dir, "Icons", "node presets.png")),
         ("Export", os.path.join(root_dir, "Icons", "export.png")),
         ("Style", os.path.join(root_dir, "Icons", "paint brush.png")),
         ("Settings", os.path.join(root_dir, "Icons", "settings.png")),
         ("BackgroundRemover", os.path.join(root_dir, "Icons", "nodes", "background remover.png")),
         ("ColorGrade", os.path.join(root_dir, "Icons", "nodes", "3 color wheels.png")),
+        ("ToneCurve", os.path.join(root_dir, "Icons", "tone curve.png")),
+        ("ViewTransform", os.path.join(root_dir, "Icons", "view transform.png")),
+        ("HdrMerge", os.path.join(root_dir, "Icons", "hdr merge.png")),
+        ("CustomMask", os.path.join(root_dir, "Icons", "custom mask.png")),
+        ("Lut", os.path.join(root_dir, "Icons", "LUT.png")),
+        ("Denoise", os.path.join(root_dir, "Icons", "denoise.png")),
+        ("PopoutCanvasWindow", os.path.join(root_dir, "Icons", "popout canvas window.png")),
         ("ProgramIcon", os.path.join(root_dir, "website", "program icon.png")),
     ]
     output_file = os.path.join(root_dir, "src", "App", "Resources", "EmbeddedTabIcons.h")

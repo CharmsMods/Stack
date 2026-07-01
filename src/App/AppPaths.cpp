@@ -120,6 +120,7 @@ RuntimeLayout BuildRuntimeLayout() {
         layout.settingsDirectory = layout.roamingDataDirectory;
         layout.settingsFilePath = layout.settingsDirectory / kSettingsFileName;
         layout.libraryDirectory = layout.roamingDataDirectory / "Library";
+        layout.presetsDirectory = layout.roamingDataDirectory / "Presets";
         layout.cacheDirectory = layout.localDataDirectory / "Cache";
         layout.updateCacheDirectory = layout.localDataDirectory / "Updates";
         layout.logsDirectory = layout.localDataDirectory / "Logs";
@@ -130,6 +131,7 @@ RuntimeLayout BuildRuntimeLayout() {
         layout.settingsDirectory = layout.executableDirectory;
         layout.settingsFilePath = layout.executableDirectory / kSettingsFileName;
         layout.libraryDirectory = layout.executableDirectory / "Library";
+        layout.presetsDirectory = layout.executableDirectory / "Presets";
         layout.cacheDirectory = layout.executableDirectory / "Cache";
         layout.updateCacheDirectory = layout.executableDirectory / "UpdateCache";
         layout.logsDirectory = layout.executableDirectory / "Logs";
@@ -264,6 +266,10 @@ const std::filesystem::path& GetLibraryDirectory() {
     return GetRuntimeLayout().libraryDirectory;
 }
 
+const std::filesystem::path& GetPresetsDirectory() {
+    return GetRuntimeLayout().presetsDirectory;
+}
+
 const std::filesystem::path& GetCacheDirectory() {
     return GetRuntimeLayout().cacheDirectory;
 }
@@ -284,6 +290,7 @@ void EnsureRuntimeDirectories() {
     const RuntimeLayout& layout = GetRuntimeLayout();
     EnsureDirectory(layout.settingsDirectory);
     EnsureDirectory(layout.libraryDirectory);
+    EnsureDirectory(layout.presetsDirectory);
     EnsureDirectory(layout.cacheDirectory);
     EnsureDirectory(layout.updateCacheDirectory);
     EnsureDirectory(layout.logsDirectory);

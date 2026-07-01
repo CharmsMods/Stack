@@ -1,8 +1,10 @@
 #pragma once
 #include "App/IAppModule.h"
+#include "LibraryManager.h"
 
 namespace StackAppearance {
     class AppearanceManager;
+    struct RuntimeSurfacePalette;
 }
 #include <memory>
 #include <string>
@@ -15,6 +17,9 @@ struct LibraryCardMotionState {
     float hover = 0.0f;
     float selected = 0.0f;
     float reveal = 1.0f;
+    float entrance = 1.0f;
+    double entranceStartTime = 0.0;
+    bool entranceInitialized = false;
     int lastSeenFrame = 0;
 };
 
@@ -24,6 +29,25 @@ struct LibraryPreviewLaunchRect {
     float maxX = 0.0f;
     float maxY = 0.0f;
     bool valid = false;
+};
+
+struct LibraryRenderStats {
+    double autoRefreshMs = 0.0;
+    double layoutMs = 0.0;
+    double cardRenderMs = 0.0;
+    int totalCards = 0;
+    int packedCards = 0;
+    int visibleCards = 0;
+    bool layoutCacheHit = false;
+    LibraryAutoRefreshStats autoRefresh;
+};
+
+struct LibraryCachedPackedCard {
+    std::size_t index = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
 };
 
 class LibraryModule : public IAppModule {
@@ -38,8 +62,10 @@ public:
         class CompositeModule* composite,
         StackAppearance::AppearanceManager* appearance,
         int* activeTab = nullptr,
+        int rawWorkspaceTabId = -1,
         std::function<void(const std::string&)> onLoadEditorProject = {});
     void RenderGlobalPopups();
+    const LibraryRenderStats& GetLastRenderStats() const { return m_LastRenderStats; }
     void DismissPreviewsForProjectLoad();
     void OpenProjectPreviewByFileName(const std::string& fileName);
     const char* GetName() override { return "Library"; }
@@ -61,13 +87,33 @@ private:
     void RenderImportConflictPopup();
     void RenderAssetConflictPopup();
     void RenderLibraryMenuOptions(bool importBusy, bool exportBusy);
+    void RenderTagsDrawer(
+        StackAppearance::AppearanceManager* appearance,
+        bool wallpaperSurfaces,
+        const StackAppearance::RuntimeSurfacePalette& surfacePalette,
+        float dt);
+    void RenderLibraryGrid(
+        class EditorModule* editor,
+        StackAppearance::AppearanceManager* appearance,
+        bool wallpaperSurfaces,
+        const StackAppearance::RuntimeSurfacePalette& surfacePalette,
+        const LibraryRefreshSnapshot& refreshSnapshot,
+        bool refreshBusy,
+        bool importBusy,
+        bool exportBusy,
+        float dt);
+    void RenderRawWorkspaceView(
+        class EditorModule* editor,
+        int* activeTab = nullptr,
+        int rawWorkspaceTabId = -1);
     void RenderDeleteConfirmPopup();
     void SyncRenameBuffer();
     void OpenAssetPreviewByFileName(const std::string& fileName);
-    
+
     std::shared_ptr<struct ProjectEntry> m_PreviewProject = nullptr;
     std::shared_ptr<struct AssetEntry> m_PreviewAsset = nullptr;
     bool m_ShowAssets = false;
+    bool m_ShowRawWorkspace = false;
     bool m_BlockLibraryGridContextMenuThisFrame = false;
     char m_SearchFilter[128] = "";
     char m_RenameBuffer[256] = "";
@@ -101,10 +147,11 @@ private:
     bool m_ImportExtJpg = true;
     bool m_ImportExtBmp = false;
     bool m_ImportExtTga = false;
-    
+
     class EditorModule* m_CachedEditor = nullptr;
     class CompositeModule* m_CachedComposite = nullptr;
     int* m_CachedActiveTab = nullptr;
+    int m_CachedRawWorkspaceTabId = -1;
     std::function<void(const std::string&)> m_OnLoadEditorProject;
 
     float m_ImportStatusAlpha = 0.0f;
@@ -112,6 +159,7 @@ private:
     float m_SaveStatusAlpha = 0.0f;
     float m_LoadStatusAlpha = 0.0f;
     float m_EmptyStateAlpha = 0.0f;
+    float m_LibraryLoadingStateAlpha = 0.0f;
     float m_FilterSplitterHover = 0.0f;
     float m_ProjectPreviewMenuHover = 0.0f;
     LibraryPreviewLaunchRect m_ProjectPreviewLaunchRect;
@@ -136,6 +184,12 @@ private:
 
     std::unordered_map<std::string, LibraryCardMotionState> m_ProjectCardMotion;
     std::unordered_map<std::string, LibraryCardMotionState> m_AssetCardMotion;
+    std::unordered_set<std::string> m_IntroducedProjectCards;
+    std::unordered_set<std::string> m_IntroducedAssetCards;
+    LibraryRenderStats m_LastRenderStats;
+    std::vector<LibraryCachedPackedCard> m_CachedPackedCards;
+    std::string m_CachedLayoutKey;
+    float m_CachedPackedHeight = 0.0f;
 
     unsigned int m_OptionsIconTex = 0;
     unsigned int m_AllProjectsIconTex = 0;

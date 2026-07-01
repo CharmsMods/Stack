@@ -186,6 +186,7 @@ void EditorModule::ResetForPipelineDeserialization() {
     ResetRenderSubmissionState();
     ClearAutoGainMaskPreview();
     m_CompositeSelectedOutputNodeId = -1;
+    ClearRawWorkspaceLivePreviewState();
     m_Pipeline.Clear();
     m_Pipeline.ClearOutput();
     m_CompositePreviewPipeline.Clear();
@@ -270,6 +271,7 @@ bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized
     if (activeImageNodeId > 0) {
         ApplyGraphLayerOrder();
     } else {
+        ClearViewportOutputTiles();
         m_Pipeline.ClearOutput();
     }
     MarkRenderDirty();
@@ -287,9 +289,11 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
     FinalizeDeserializedPipeline(serialized, true);
 }
 
-void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch) {
+void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch, bool loadCompositePreview) {
     m_Pipeline.LoadSourceFromPixels(data, w, h, ch);
-    m_CompositePreviewPipeline.LoadSourceFromPixels(data, w, h, ch);
+    if (loadCompositePreview) {
+        m_CompositePreviewPipeline.LoadSourceFromPixels(data, w, h, ch);
+    }
     ClearCompositeSceneTextures();
     MarkRenderDirty();
 }
@@ -490,7 +494,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
         case DeferredLoadedProjectApplyState::Step::InstallSource: {
             const auto& project = *m_DeferredLoadedProjectApply.project;
             m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
-            LoadSourceFromPixels(project.sourcePixels.data(), project.width, project.height, project.channels);
+            LoadSourceFromPixels(project.sourcePixels.data(), project.width, project.height, project.channels, false);
             m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::DeserializeLayers;
             processedWorkThisFrame = true;
             break;
@@ -612,6 +616,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
             m_DeferredLoadedProjectApply.project.reset();
             m_DeferredLoadedProjectApply.layerArray = nlohmann::json::array();
             m_DeferredLoadedProjectApply.statusText = "Project ready.";
+            FinalizeDeferredRawWorkspaceProjectLoadIfNeeded();
             processedWorkThisFrame = true;
             return;
 
@@ -624,14 +629,32 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
 }
 
 void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs) {
-    ConsumeRenderWorkerResults();
-    ConsumeNodeBrowserThumbnailWorkerResults();
+    if (ImGui::GetCurrentContext()) {
+        const int frame = ImGui::GetFrameCount();
+        if (m_LastNonRenderingPumpFrame == frame) {
+            return;
+        }
+        m_LastNonRenderingPumpFrame = frame;
+    }
+
+    const bool deferGraphPanWork =
+        m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
+        m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive();
+    if (!deferGraphPanWork) {
+        ConsumeRenderWorkerResults();
+        ConsumeNodeBrowserThumbnailWorkerResults();
+    }
+    TickRawWorkspacePersistence();
+    TickRawWorkspacePreviewStaging();
     TickDeferredLoadedProjectApply(projectApplyBudgetMs);
-    if (!m_DeferredLoadedProjectApply.active || m_DeferredLoadedProjectApply.allowRenderSubmission) {
+    if (!deferGraphPanWork &&
+        (!m_DeferredLoadedProjectApply.active || m_DeferredLoadedProjectApply.allowRenderSubmission)) {
         SubmitRenderIfReady();
     }
-    ConsumeRenderWorkerResults();
-    ConsumeNodeBrowserThumbnailWorkerResults();
+    if (!deferGraphPanWork) {
+        ConsumeRenderWorkerResults();
+        ConsumeNodeBrowserThumbnailWorkerResults();
+    }
 }
 
 void EditorModule::RequestLoadSourceImage(const std::string& path) {
@@ -650,15 +673,15 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
 
         if (AddGraphRawChainFromFile(path, EditorNodeGraph::Vec2{ 20.0f, 120.0f })) {
             m_SourceLoadTaskState = Async::TaskState::Idle;
-            m_SourceLoadStatusText = "RAW source node loaded.";
+            m_SourceLoadStatusText = "RAW manual chain loaded.";
             SetCurrentProjectName("");
             SetCurrentProjectFileName("");
             MarkNodeBrowserThumbnailSourceChanged();
-            QueueUiNotification(UiNotificationSeverity::Success, "RAW source node loaded.", "editor-source-load");
+            QueueUiNotification(UiNotificationSeverity::Success, "RAW manual chain loaded.", "editor-source-load");
         } else {
             m_SourceLoadTaskState = Async::TaskState::Failed;
-            m_SourceLoadStatusText = "Failed to load RAW source node.";
-            QueueUiNotification(UiNotificationSeverity::Error, "Failed to load RAW source node.", "editor-source-load");
+            m_SourceLoadStatusText = "Failed to load RAW manual chain.";
+            QueueUiNotification(UiNotificationSeverity::Error, "Failed to load RAW manual chain.", "editor-source-load");
         }
         return;
     }
@@ -760,7 +783,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     }
 
     if (pixels.empty()) {
-        std::cerr << "[EditorModule] RequestExportImage: Failed to capture pixels (empty output). Width=" 
+        std::cerr << "[EditorModule] RequestExportImage: Failed to capture pixels (empty output). Width="
                   << width << ", Height=" << height << std::endl;
         m_ExportTaskState = Async::TaskState::Failed;
         m_ExportStatusText = "Failed to capture the rendered image.";
@@ -769,7 +792,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     }
 
     if (!m_CurrentProjectName.empty()) {
-        LibraryManager::Get().RequestSaveProject(m_CurrentProjectName, this, m_CurrentProjectFileName);
+        RequestSaveCurrentProject(m_CurrentProjectName);
     }
 
     ++m_ExportGeneration;
@@ -794,9 +817,9 @@ bool EditorModule::RequestExportImage(const std::string& path) {
                 4,
                 pixels.data(),
                 width * 4);
-                
+
             success = (stbiResult != 0);
-            
+
             if (success) {
                 // Verify the file was actually written
                 if (!std::filesystem::exists(destination) || std::filesystem::file_size(destination) == 0) {
@@ -804,7 +827,7 @@ bool EditorModule::RequestExportImage(const std::string& path) {
                     errorMsg = "File does not exist or is empty after stbi_write_png returned success.";
                 }
             }
-            
+
             if (!success) {
                 errorMsg = "stbi_write_png or verification failed.";
                 // Try fallback path with sanitized name
@@ -913,6 +936,19 @@ bool EditorModule::BuildProjectDocumentForSave(
         : EncodePngBytes(sourcePixels, sourceW, sourceH, 4);
     outDocument.pipelineData = pipeline;
     outDocument.nodeBrowserThumbnailEntries = GetPersistedNodeBrowserThumbnails();
+    if (IsRawWorkspaceProjectActive()) {
+        if (const Stack::RawWorkspace::SourceRecord* source =
+                FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey)) {
+            Stack::RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
+                *source,
+                m_ActiveRawWorkspaceRecipe,
+                pipeline,
+                outDocument,
+                m_ActiveRawWorkspaceMode,
+                source->project.status != Stack::RawWorkspace::ProjectStatus::Embedded);
+            ApplyActiveRawWorkspaceModeDataToDocument(outDocument);
+        }
+    }
     return !outDocument.sourceImageBytes.empty();
 }
 

@@ -24,6 +24,11 @@ struct ProjectEntry {
     unsigned int thumbnailTex = 0;
     unsigned int sourcePreviewTex = 0;
     unsigned int fullPreviewTex = 0;
+    Async::TaskState thumbnailDecodeState = Async::TaskState::Idle;
+    bool thumbnailDecodeAttempted = false;
+    std::vector<unsigned char> thumbnailPixels;
+    int thumbnailPixelWidth = 0;
+    int thumbnailPixelHeight = 0;
 
     // Deferred fullscreen preview generation state
     Async::TaskState previewTaskState = Async::TaskState::Idle;
@@ -45,6 +50,10 @@ struct AssetEntry {
     unsigned int thumbnailTex = 0;
     unsigned int fullPreviewTex = 0;
     bool thumbnailLoadAttempted = false;
+    Async::TaskState thumbnailDecodeState = Async::TaskState::Idle;
+    std::vector<unsigned char> thumbnailPixels;
+    int thumbnailPixelWidth = 0;
+    int thumbnailPixelHeight = 0;
 
     Async::TaskState previewTaskState = Async::TaskState::Idle;
     std::uint64_t previewRequestGeneration = 0;

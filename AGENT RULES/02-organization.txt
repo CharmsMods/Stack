@@ -1,0 +1,47 @@
+ORGANIZATION
+
+Repository structure
+
+Keep the repository extremely organized.
+
+Every project should have a short root guide that explains what the repository is, how to build it, where the core systems live, and any project-specific preferences that are not covered by this preset.
+
+When beginning a project or making meaningful changes, check whether project documentation should be added or updated.
+
+Code organization
+
+Do not compile unrelated behavior into a small number of oversized files.
+
+Do not spread one cohesive subsystem across random locations without a clear reason.
+
+Before making any implementation change, reason through whether the project would stay cleaner if the work were placed in a new file, new folder, or narrower ownership boundary.
+
+Keep files cohesive. Longer files are acceptable when they own a simple and tightly related set of work or a specific part of a pipeline that belongs together.
+
+Do not split code into tiny fragments just to look organized.
+
+Do not create helper files with vague ownership just to hide complexity.
+
+Ownership
+
+Each file should have a clear reason to exist and a clear owner in the architecture.
+
+UI, rendering, persistence, runtime orchestration, and pure data or logic should not be mixed carelessly.
+
+If one file starts owning multiple different responsibilities, split it along real ownership lines before the structure hardens.
+
+Names
+
+Do not apply arbitrary naming patterns just for consistency theater.
+
+Name files and folders clearly, definitively, and in a way that makes the repository easier to understand at a glance.
+
+A good name should reduce the need to open the file just to learn what it owns.
+
+Future-proofing
+
+Keep the organization ready for realistic future work.
+
+Make room for growth without building a maze of premature layers.
+
+If a change increases structural complexity, verify that the new boundary is cleaner than the previous one and not just more abstract.

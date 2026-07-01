@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "Renderer/RenderTiling.h"
 
 namespace StackAppearance {
 
@@ -17,7 +18,7 @@ inline constexpr const char* kSolarizedPresetId = "solarized";
 inline constexpr const char* kSolarizedLightPresetId = "solarized-light";
 inline constexpr const char* kYellowDarkPresetId = "yellow-dark";
 inline constexpr const char* kYellowLightPresetId = "yellow-light";
-inline constexpr std::uint32_t kAppearanceSettingsVersion = 3;
+inline constexpr std::uint32_t kAppearanceSettingsVersion = 7;
 inline constexpr std::uint32_t kThemePresetFileVersion = 2;
 
 enum class GraphVisualMode {
@@ -68,15 +69,24 @@ struct ThemeDefinition {
     float textScale = 1.0f;
 };
 
+struct BackgroundImageEntry {
+    std::string id;
+    std::string displayName;
+    std::string path;
+};
+
 struct AppearanceLibrary {
-    std::string activePresetId = kFactoryPresetId;
-    GraphVisualMode graphVisualMode = GraphVisualMode::BlackNodes;
+    std::string activePresetId = kSolarizedPresetId;
+    GraphVisualMode graphVisualMode = GraphVisualMode::Classic;
     bool graphSpotlightHaloOutlines = false;
-    bool graphDottedMaskLinks = true;
+    bool graphDottedMaskLinks = false;
+    float graphLineOpacity = 1.0f;
+    ViewportTilingSettings viewportTiling;
     bool backgroundImageEnabled = false;
     std::string backgroundImagePath;
     float backgroundImageStrength = 0.58f;
     float uiSurfaceTransparency = 0.18f;
+    std::vector<BackgroundImageEntry> backgroundImages;
     std::vector<ThemeDefinition> customPresets;
 };
 
@@ -107,6 +117,8 @@ bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary);
 bool SaveAppearanceLibrary(const AppearanceLibrary& library);
 bool LoadThemePresetFile(const std::filesystem::path& path, ThemeDefinition& outTheme, std::string* errorMessage = nullptr);
 bool SaveThemePresetFile(const std::filesystem::path& path, const ThemeDefinition& theme, std::string* errorMessage = nullptr);
+bool UseDarkIconsForCurrentTheme(const class AppearanceManager* appearance);
+ImU32 ResolveThemedMonochromeIconTint(const class AppearanceManager* appearance, bool emphasized, bool hovered);
 
 class AppearanceManager {
 public:
@@ -128,12 +140,17 @@ public:
     GraphVisualMode GetGraphVisualMode() const;
     bool GetGraphSpotlightHaloOutlines() const;
     bool GetGraphDottedMaskLinks() const;
+    float GetGraphLineOpacity() const;
+    const ViewportTilingSettings& GetViewportTilingSettings() const;
     bool GetBackgroundImageEnabled() const;
+    bool GetSeamlessSurfaceStylingEnabled() const;
     const std::string& GetBackgroundImagePath() const;
+    const std::vector<BackgroundImageEntry>& GetBackgroundImages() const;
     float GetBackgroundImageStrength() const;
     float GetUiSurfaceTransparency() const;
     float GetUiSurfaceAlphaMultiplier() const;
     RuntimeSurfacePalette GetRuntimeSurfacePalette() const;
+    std::uint64_t GetRevision() const;
     std::uint64_t GetBackgroundImageRevision() const;
     const std::string& GetBackgroundImageRuntimeStatus() const;
     std::filesystem::path GetResolvedBackgroundImagePath() const;
@@ -147,12 +164,18 @@ public:
     bool SetGraphVisualMode(GraphVisualMode mode);
     bool SetGraphSpotlightHaloOutlines(bool enabled);
     bool SetGraphDottedMaskLinks(bool enabled);
+    bool SetGraphLineOpacity(float opacity);
+    bool SetViewportTilingSettings(const ViewportTilingSettings& settings);
     bool SetBackgroundImageEnabled(bool enabled);
     bool SetBackgroundImageStrength(float strength);
     bool SetUiSurfaceTransparency(float transparency);
     bool ImportBackgroundImageFromPath(const std::filesystem::path& sourcePath, std::string* errorMessage = nullptr);
+    bool SelectBackgroundImageById(const std::string& imageId);
+    bool RemoveBackgroundImageById(const std::string& imageId, std::string* errorMessage = nullptr);
     bool ClearBackgroundImage(std::string* errorMessage = nullptr);
     void SetBackgroundImageRuntimeStatus(std::string statusMessage);
+    bool UpdateThemeTransition(double nowSeconds);
+    bool IsThemeTransitionActive() const;
     bool ResetWorkingTheme();
     bool SaveWorkingTheme();
     bool SaveWorkingThemeAsNew(std::string displayName);
@@ -165,12 +188,22 @@ public:
     ImVec4 GetClearColor() const;
 
 private:
+    void TouchRevision();
+    void StartThemeTransition(const ThemeDefinition& targetTheme, double nowSeconds);
+    void FinishThemeTransition();
+
     ThemeDefinition m_FactoryTheme;
     std::vector<ThemeDefinition> m_FactoryThemes;
     ThemeDefinition m_WorkingTheme;
     AppearanceLibrary m_Library;
+    std::uint64_t m_Revision = 1;
     std::uint64_t m_BackgroundImageRevision = 0;
     std::string m_BackgroundImageRuntimeStatus;
+    bool m_ThemeTransitionActive = false;
+    double m_ThemeTransitionStartTime = 0.0;
+    double m_ThemeTransitionDuration = 0.32;
+    ThemeDefinition m_ThemeTransitionFrom;
+    ThemeDefinition m_ThemeTransitionTo;
 };
 
 } // namespace StackAppearance

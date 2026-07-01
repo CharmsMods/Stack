@@ -266,6 +266,9 @@ unsigned int EditorNodeGraphUI::GetGraphPreviewTexture(EditorModule* editor, con
         revisionIt->second == previewRevision) {
         return textureIt->second;
     }
+    if (m_MiddlePanCaptureActive) {
+        return textureIt != m_GraphPreviewTextures.end() ? textureIt->second : 0;
+    }
 
     if (const EditorModule::GraphPreviewPixels* cached = editor->GetCachedPreviewPixelsForNode(node.id)) {
         if (cached->revision >= previewRevision && !cached->pixels.empty() && cached->width > 0 && cached->height > 0) {
@@ -344,13 +347,17 @@ unsigned int EditorNodeGraphUI::GetNodeBrowserThumbnailTexture(
         return textureIt->second;
     }
 
-    if (textureIt != m_NodeBrowserThumbnailTextures.end() && textureIt->second != 0) {
-        unsigned int oldTexture = textureIt->second;
-        glDeleteTextures(1, &oldTexture);
+    const int frameCount = ImGui::GetFrameCount();
+    if (m_NodeBrowserTextureUploadBudgetFrame != frameCount) {
+        m_NodeBrowserTextureUploadBudgetFrame = frameCount;
+        m_NodeBrowserTextureUploadsThisFrame = 0;
     }
-    m_NodeBrowserThumbnailTextures.erase(previewKey);
-    m_NodeBrowserThumbnailRevisions.erase(previewKey);
-    m_NodeBrowserThumbnailSizes.erase(previewKey);
+    constexpr int kMaxTextureUploadsPerFrame = 4;
+    const unsigned int existingTexture =
+        (textureIt != m_NodeBrowserThumbnailTextures.end()) ? textureIt->second : 0u;
+    if (m_NodeBrowserTextureUploadsThisFrame >= kMaxTextureUploadsPerFrame) {
+        return existingTexture;
+    }
 
     const std::vector<unsigned char>* pixels = view.decodedPixels;
     std::vector<unsigned char> decodedPixels;
@@ -358,8 +365,11 @@ unsigned int EditorNodeGraphUI::GetNodeBrowserThumbnailTexture(
     int decodedHeight = view.height;
     int decodedChannels = view.channels;
     if (!pixels || pixels->empty() || decodedWidth <= 0 || decodedHeight <= 0) {
+        if (editor->GetPendingNodeBrowserThumbnailWarmCount() > 0) {
+            return existingTexture;
+        }
         if (!DecodeImagePreviewPixelsFromPng(*view.pngBytes, decodedPixels, decodedWidth, decodedHeight, decodedChannels)) {
-            return 0;
+            return existingTexture;
         }
         pixels = &decodedPixels;
     }
@@ -370,7 +380,14 @@ unsigned int EditorNodeGraphUI::GetNodeBrowserThumbnailTexture(
         decodedHeight,
         decodedChannels);
     if (texture == 0) {
-        return 0;
+        return existingTexture;
+    }
+
+    ++m_NodeBrowserTextureUploadsThisFrame;
+
+    if (existingTexture != 0 && existingTexture != texture) {
+        unsigned int oldTexture = existingTexture;
+        glDeleteTextures(1, &oldTexture);
     }
 
     m_NodeBrowserThumbnailTextures[previewKey] = texture;

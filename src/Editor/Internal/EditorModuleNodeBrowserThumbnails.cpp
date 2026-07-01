@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 
 namespace {
@@ -48,8 +49,36 @@ std::string HexString64(std::uint64_t value) {
     return text;
 }
 
+bool TryComputePixelByteCount(int width, int height, int channels, std::size_t& outByteCount) {
+    outByteCount = 0;
+    if (width <= 0 || height <= 0 || channels <= 0) {
+        return false;
+    }
+
+    const std::size_t w = static_cast<std::size_t>(width);
+    const std::size_t h = static_cast<std::size_t>(height);
+    const std::size_t c = static_cast<std::size_t>(channels);
+    if (w > std::numeric_limits<std::size_t>::max() / h) {
+        return false;
+    }
+    const std::size_t pixelCount = w * h;
+    if (pixelCount > std::numeric_limits<std::size_t>::max() / c) {
+        return false;
+    }
+
+    outByteCount = pixelCount * c;
+    return true;
+}
+
+bool HasCompletePixelBuffer(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
+    std::size_t requiredBytes = 0;
+    return TryComputePixelByteCount(width, height, channels, requiredBytes) &&
+        pixels.size() >= requiredBytes;
+}
+
 void FlipRowsInPlace(std::vector<unsigned char>& pixels, int width, int height, int channels = 4) {
-    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
+    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0 ||
+        !HasCompletePixelBuffer(pixels, width, height, channels)) {
         return;
     }
 
@@ -66,7 +95,12 @@ void FlipRowsInPlace(std::vector<unsigned char>& pixels, int width, int height, 
 
 std::vector<unsigned char> EncodePngBytesTopLeft(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
     std::vector<unsigned char> encoded;
-    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
+    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0 ||
+        !HasCompletePixelBuffer(pixels, width, height, channels)) {
+        return encoded;
+    }
+    const std::size_t rowStride = static_cast<std::size_t>(width) * static_cast<std::size_t>(channels);
+    if (rowStride > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return encoded;
     }
 
@@ -76,7 +110,7 @@ std::vector<unsigned char> EncodePngBytesTopLeft(const std::vector<unsigned char
         bytes->insert(bytes->end(), src, src + size);
     };
 
-    stbi_write_png_to_func(writeCallback, &encoded, width, height, channels, pixels.data(), width * channels);
+    stbi_write_png_to_func(writeCallback, &encoded, width, height, channels, pixels.data(), static_cast<int>(rowStride));
     return encoded;
 }
 
@@ -93,12 +127,16 @@ std::vector<unsigned char> ResizePixelsNearest(
     const std::vector<unsigned char>& sourcePixels,
     int sourceWidth,
     int sourceHeight,
+    int sourceChannels,
     int maxDimension,
     int& outWidth,
     int& outHeight) {
     outWidth = sourceWidth;
     outHeight = sourceHeight;
-    if (sourcePixels.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
+    if (sourcePixels.empty() || sourceWidth <= 0 || sourceHeight <= 0 || sourceChannels <= 0 ||
+        !HasCompletePixelBuffer(sourcePixels, sourceWidth, sourceHeight, sourceChannels)) {
+        outWidth = 0;
+        outHeight = 0;
         return {};
     }
 
@@ -109,30 +147,62 @@ std::vector<unsigned char> ResizePixelsNearest(
         outHeight = std::max(1, static_cast<int>(std::round(sourceHeight * scale)));
     }
 
-    if (outWidth == sourceWidth && outHeight == sourceHeight) {
-        return sourcePixels;
+    std::size_t resizedByteCount = 0;
+    if (!TryComputePixelByteCount(outWidth, outHeight, 4, resizedByteCount)) {
+        outWidth = 0;
+        outHeight = 0;
+        return {};
     }
 
-    std::vector<unsigned char> resized(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight) * 4ull, 0u);
+    std::size_t sourceByteCount = 0;
+    if (sourceChannels == 4 &&
+        outWidth == sourceWidth &&
+        outHeight == sourceHeight &&
+        TryComputePixelByteCount(sourceWidth, sourceHeight, sourceChannels, sourceByteCount)) {
+        return std::vector<unsigned char>(sourcePixels.begin(), sourcePixels.begin() + static_cast<std::ptrdiff_t>(sourceByteCount));
+    }
+
+    std::vector<unsigned char> resized(resizedByteCount, 0u);
     for (int y = 0; y < outHeight; ++y) {
         for (int x = 0; x < outWidth; ++x) {
             const int srcX = std::clamp((x * sourceWidth) / std::max(1, outWidth), 0, sourceWidth - 1);
             const int srcY = std::clamp((y * sourceHeight) / std::max(1, outHeight), 0, sourceHeight - 1);
             const std::size_t srcIndex =
-                (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth) + static_cast<std::size_t>(srcX)) * 4ull;
+                (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth) + static_cast<std::size_t>(srcX)) *
+                static_cast<std::size_t>(sourceChannels);
             const std::size_t dstIndex =
                 (static_cast<std::size_t>(y) * static_cast<std::size_t>(outWidth) + static_cast<std::size_t>(x)) * 4ull;
-            std::memcpy(resized.data() + dstIndex, sourcePixels.data() + srcIndex, 4u);
+            const unsigned char* src = sourcePixels.data() + srcIndex;
+            unsigned char* dst = resized.data() + dstIndex;
+            if (sourceChannels == 1) {
+                dst[0] = src[0];
+                dst[1] = src[0];
+                dst[2] = src[0];
+                dst[3] = 255u;
+            } else if (sourceChannels == 2) {
+                dst[0] = src[0];
+                dst[1] = src[0];
+                dst[2] = src[0];
+                dst[3] = src[1];
+            } else if (sourceChannels == 3) {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = 255u;
+            } else {
+                std::memcpy(dst, src, 4u);
+            }
         }
     }
     return resized;
 }
 
 std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    if (width <= 0 || height <= 0) {
+    std::size_t byteCount = 0;
+    if (!TryComputePixelByteCount(width, height, 4, byteCount)) {
         return {};
     }
-    return std::vector<unsigned char>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4ull, 0u);
+    return std::vector<unsigned char>(byteCount, 0u);
 }
 
 Raw::RawDevelopSettings BuildRawPreviewDevelopSettings(const Raw::RawMetadata& metadata) {
@@ -344,6 +414,15 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
             renderNode.kind = RenderGraphNodeKind::HdrMerge;
             renderNode.hdrMerge.settings = node.hdrMerge.settings;
             break;
+        case EditorNodeGraph::NodeKind::Mfsr:
+            renderNode.kind = RenderGraphNodeKind::Mfsr;
+            renderNode.mfsr.settings = node.mfsr.settings;
+            renderNode.mfsr.diagnostics = node.mfsr.diagnostics;
+            renderNode.mfsr.cacheKey = node.mfsr.cacheKey;
+            renderNode.mfsr.hasPlaceholderCachedOutput = node.mfsr.hasPlaceholderCachedOutput;
+            renderNode.mfsr.placeholderStatus = node.mfsr.placeholderStatus;
+            renderNode.mfsr.errorMessage = node.mfsr.errorMessage;
+            break;
         case EditorNodeGraph::NodeKind::Lut:
             renderNode.kind = RenderGraphNodeKind::Lut;
             renderNode.lut = node.lut;
@@ -429,6 +508,9 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
             renderNode.imageGeneratorSettings.offset = node.imageGeneratorSettings.offset;
             renderNode.imageGeneratorSettings.text = node.imageGeneratorSettings.text;
             renderNode.imageGeneratorSettings.fontSize = node.imageGeneratorSettings.fontSize;
+            renderNode.imageGeneratorSettings.textBackdropBlur = node.imageGeneratorSettings.textBackdropBlur;
+            renderNode.imageGeneratorSettings.textBackdropOpacity = node.imageGeneratorSettings.textBackdropOpacity;
+            renderNode.imageGeneratorSettings.textBackdropPadding = node.imageGeneratorSettings.textBackdropPadding;
             std::memcpy(renderNode.imageGeneratorSettings.colorA, node.imageGeneratorSettings.colorA, sizeof(node.imageGeneratorSettings.colorA));
             std::memcpy(renderNode.imageGeneratorSettings.colorB, node.imageGeneratorSettings.colorB, sizeof(node.imageGeneratorSettings.colorB));
             break;
@@ -585,6 +667,17 @@ void EditorModule::WarmNodeBrowserThumbnailPixelsAsync() {
 }
 
 EditorModule::NodeBrowserPreviewSeed EditorModule::ResolveNodeBrowserPreviewSeed() const {
+    auto makeBlankSeed = []() {
+        NodeBrowserPreviewSeed blank;
+        blank.kind = NodeBrowserPreviewSeed::Kind::None;
+        blank.width = 768;
+        blank.height = 512;
+        blank.channels = 4;
+        blank.pixels = BuildTransparentPixels(blank.width, blank.height);
+        blank.seedHash = "blank";
+        return blank;
+    };
+
     NodeBrowserPreviewSeed seed;
     const EditorNodeGraph::Node* activeNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
 
@@ -599,16 +692,18 @@ EditorModule::NodeBrowserPreviewSeed EditorModule::ResolveNodeBrowserPreviewSeed
         if (!pixels.empty() && width > 0 && height > 0) {
             int resizedW = width;
             int resizedH = height;
-            seed.pixels = ResizePixelsNearest(pixels, width, height, 1024, resizedW, resizedH);
-            seed.kind = NodeBrowserPreviewSeed::Kind::Image;
-            seed.width = resizedW;
-            seed.height = resizedH;
-            seed.channels = 4;
-            const std::uint64_t hash = !activeNode->image.pngBytes.empty()
-                ? HashBytes64(activeNode->image.pngBytes.data(), activeNode->image.pngBytes.size())
-                : HashBytes64(seed.pixels.data(), seed.pixels.size());
-            seed.seedHash = "image:" + HexString64(hash);
-            return seed;
+            seed.pixels = ResizePixelsNearest(pixels, width, height, channels, 1024, resizedW, resizedH);
+            if (!seed.pixels.empty() && resizedW > 0 && resizedH > 0) {
+                seed.kind = NodeBrowserPreviewSeed::Kind::Image;
+                seed.width = resizedW;
+                seed.height = resizedH;
+                seed.channels = 4;
+                const std::uint64_t hash = !activeNode->image.pngBytes.empty()
+                    ? HashBytes64(activeNode->image.pngBytes.data(), activeNode->image.pngBytes.size())
+                    : HashBytes64(seed.pixels.data(), seed.pixels.size());
+                seed.seedHash = "image:" + HexString64(hash);
+                return seed;
+            }
         }
     }
 
@@ -646,22 +741,18 @@ EditorModule::NodeBrowserPreviewSeed EditorModule::ResolveNodeBrowserPreviewSeed
     if (!pipelineSource.empty() && sourceW > 0 && sourceH > 0) {
         int resizedW = sourceW;
         int resizedH = sourceH;
-        seed.pixels = ResizePixelsNearest(pipelineSource, sourceW, sourceH, 1024, resizedW, resizedH);
-        seed.kind = NodeBrowserPreviewSeed::Kind::Image;
-        seed.width = resizedW;
-        seed.height = resizedH;
-        seed.channels = 4;
-        seed.seedHash = "pipeline:" + HexString64(HashBytes64(seed.pixels.data(), seed.pixels.size()));
-        return seed;
+        seed.pixels = ResizePixelsNearest(pipelineSource, sourceW, sourceH, 4, 1024, resizedW, resizedH);
+        if (!seed.pixels.empty() && resizedW > 0 && resizedH > 0) {
+            seed.kind = NodeBrowserPreviewSeed::Kind::Image;
+            seed.width = resizedW;
+            seed.height = resizedH;
+            seed.channels = 4;
+            seed.seedHash = "pipeline:" + HexString64(HashBytes64(seed.pixels.data(), seed.pixels.size()));
+            return seed;
+        }
     }
 
-    seed.kind = NodeBrowserPreviewSeed::Kind::None;
-    seed.width = 768;
-    seed.height = 512;
-    seed.channels = 4;
-    seed.pixels = BuildTransparentPixels(seed.width, seed.height);
-    seed.seedHash = "blank";
-    return seed;
+    return makeBlankSeed();
 }
 
 void EditorModule::EnsureNodeBrowserThumbnailCatalog() {
@@ -1085,6 +1176,7 @@ void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
                     case EditorNodeGraph::DataMathMode::Multiply: prototype.dataMathSettings.constantB = 1.35f; break;
                     case EditorNodeGraph::DataMathMode::Divide: prototype.dataMathSettings.constantB = 0.80f; break;
                     case EditorNodeGraph::DataMathMode::Average: prototype.dataMathSettings.constantB = 0.64f; break;
+                    case EditorNodeGraph::DataMathMode::ImageAverage: prototype.dataMathSettings.constantB = 0.64f; break;
                     case EditorNodeGraph::DataMathMode::Min: prototype.dataMathSettings.constantB = 0.72f; break;
                     case EditorNodeGraph::DataMathMode::Max: prototype.dataMathSettings.constantB = 0.36f; break;
                     case EditorNodeGraph::DataMathMode::Difference: prototype.dataMathSettings.constantB = 0.32f; break;
@@ -1334,7 +1426,9 @@ void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
         });
     }
 
-    if (!snapshot.previews.empty() && m_NodeBrowserRenderWorkerAvailable) {
+    if (!snapshot.previews.empty() &&
+        m_NodeBrowserRenderWorkerAvailable &&
+        !IsRawWorkspaceProjectActive()) {
         m_NodeBrowserRenderWorker.Submit(std::move(snapshot));
     } else if (!snapshot.previews.empty()) {
         Async::TaskSystem::Get().Submit([this, generation, seedHash = seed.seedHash, pendingEntries]() {
@@ -1427,19 +1521,27 @@ void EditorModule::ConsumeNodeBrowserThumbnailWorkerResults() {
                     previewResult.pixels,
                     previewResult.width,
                     previewResult.height,
+                    4,
                     kNodeBrowserThumbnailMaxDimension,
                     job.width,
                     job.height);
-                job.channels = 4;
-                job.pngBytes = EncodePngBytesFromBottomLeft(job.decodedPixels, job.width, job.height, 4);
-                job.fallback = false;
+                if (!job.decodedPixels.empty() && job.width > 0 && job.height > 0) {
+                    job.channels = 4;
+                    job.pngBytes = EncodePngBytesFromBottomLeft(job.decodedPixels, job.width, job.height, 4);
+                    job.fallback = !HasCompletePixelBuffer(job.decodedPixels, job.width, job.height, 4) ||
+                        job.pngBytes.empty();
+                } else {
+                    job.fallback = true;
+                }
             } else {
+                job.fallback = true;
+            }
+            if (job.fallback) {
                 job.decodedPixels = BuildFallbackCardPixels(job.previewKey);
                 job.width = kFallbackCardWidth;
                 job.height = kFallbackCardHeight;
                 job.channels = 4;
                 job.pngBytes = EncodePngBytesTopLeft(job.decodedPixels, job.width, job.height, 4);
-                job.fallback = true;
             }
             jobs.push_back(std::move(job));
         }

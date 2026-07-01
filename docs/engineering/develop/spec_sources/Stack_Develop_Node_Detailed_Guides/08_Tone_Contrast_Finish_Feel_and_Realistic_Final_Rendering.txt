@@ -1,0 +1,590 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+08 - Tone, Contrast, Finish Feel, and Realistic Final Rendering
+===============================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose
+=======
+
+This guide defines how Stack Develop should think about tone, contrast, finish feel, and realistic final rendering.
+
+The important distinction is that tone is not the same thing as exposure. Exposure changes the scale of image data. Tone decides how scene-linear image data becomes a believable visible photograph. If Stack collapses those ideas into one vague "brightness" behavior, Develop will become confusing, hard to control, and hard to make reliable.
+
+This guide is about the finishing side of Develop: how the prepared scene-linear image should be shaped so it can look good immediately in Natural Finished mode, remain flexible in Clean Base and Flat Editing Base modes, and support stronger contrast or range modes without becoming fake HDR, gray, muddy, clipped, or plastic.
+
+Current Stack anchor
+====================
+
+The current Develop node already contains an integrated finish tone stage. Develop is the RAW-to-image boundary, but it also embeds Scene Prep and an integrated ToneCurve finish stored as JSON inside the Develop payload. The current implementation has important internal separation points:
+
+- RAW base: the internal base output from the RAW GPU pipeline.
+- Pre-Finish: a hidden image output after RAW base and scene prep, before integrated tone and finish mask.
+- Final Image: the visible output after integrated ToneCurve and optional Finish Mask blending.
+
+The current context document says Develop outputs unclamped scene-linear float RGB and is normally followed by a View Transform downstream. It also says the integrated ToneCurve finish is executed inside the Develop node and that the Finish Mask affects only the integrated finish tone stage, not RAW conversion or scene prep.
+
+That current behavior should be treated as a useful architectural clue, not as a perfect final answer. The future design should preserve the conceptual separation between:
+
+1. data preparation,
+2. scene/range preparation,
+3. photographic tone rendering,
+4. downstream display/view transform.
+
+Tone should be more intelligent than a preset curve, but it should not pretend to be RAW recovery.
+
+Tone is not exposure
+====================
+
+Exposure, in a RAW/scene-linear sense, is multiplication. +1 EV means multiplying scene-linear values by 2. -1 EV means multiplying them by 0.5. This happens before final display rendering and changes the position of data in the working range.
+
+Tone is different. Tone decides how the data is mapped visually. It can make highlights roll smoothly into white, keep shadows rich instead of blocked, add midtone contrast, preserve openness, or make an image feel finished.
+
+A visible image can become brighter because:
+
+- RAW exposure increased.
+- Midtone tone placement increased.
+- Local exposure lifted important regions.
+- Highlight compression allowed midtones to come up without clipping.
+- Shadow toe was opened.
+- View/display transform mapped the image differently.
+
+These are not the same operation. Stack should not hide that difference in Manual mode. In Auto mode, the solver can use all of these tools, but it should understand what each one actually changes.
+
+A better question than "make it brighter" is:
+
+"What should become brighter, how should it become brighter, and what should be protected while it happens?"
+
+Tone's job inside Develop
+=========================
+
+Develop tone should create a high-quality photographic rendering from prepared scene-linear data.
+
+It should not be arbitrary creative grading. It should not apply trendy color presets. It should not crush, clip, flatten, or over-sharpen just because a contrasty preview looks dramatic.
+
+Its core jobs are:
+
+- Place important midtones well.
+- Keep highlights bright without harsh clipping.
+- Preserve useful highlight detail when it exists.
+- Let true light sources and speculars clip naturally when appropriate.
+- Give shadows shape and depth without turning them into noisy gray.
+- Add believable contrast for the selected mode.
+- Maintain color density through tone changes.
+- Make Natural Finished look good enough to use as-is.
+- Make Flat Editing Base easier to manually edit, not dull and broken.
+- Support Punchy / High Contrast without producing fake HDR.
+- Support Maximum Range / Detail without making the image lifeless.
+
+Tone should not be a single curve applied blindly. It should be a stage that responds to the image, the selected mode, the candidate solve, the graph controls, subject importance, noise risk, and highlight/shadow confidence.
+
+View Transform boundary
+=======================
+
+Develop currently outputs scene-linear RGB, and the normal full RAW tree continues through View Transform before Output. This distinction matters.
+
+The View Transform is the final display-facing conversion. Develop can prepare and finish the image, but it should not confuse its internal tone rendering with the final output/display encoding. The future docs and code should keep this boundary clear:
+
+- Develop RAW/base stages: interpret sensor data.
+- Develop scene prep: arrange usable scene-linear image values.
+- Develop finish tone: create a photographic image feel inside the Develop node.
+- View Transform: convert to final display/output appearance.
+
+This does not mean Develop cannot make a finished-looking image. It means Develop should remain honest about which stage is responsible for which visual change.
+
+External color-management systems such as ACES and OpenColorIO make similar conceptual distinctions between scene-linear/reference image states and display/view transforms. Stack does not need to copy those systems blindly, but it should learn from the separation: scene data and displayed appearance are related, but not identical.
+
+Natural Finished mode
+=====================
+
+Natural Finished should be the default Auto mode.
+
+The goal is not maximum neutrality. It is a good, realistic photograph.
+
+Natural Finished should usually have:
+
+- healthy midtone brightness,
+- believable highlight rolloff,
+- visually bright highlights where the scene calls for them,
+- shadows that feel anchored but not crushed,
+- enough contrast to avoid flatness,
+- enough color density to avoid a washed-out RAW look,
+- restrained local exposure,
+- restrained sharpening/detail treatment,
+- denoise that avoids plastic textures,
+- no preset-like stylization.
+
+A normal daylight photo in Natural Finished should not look like a log image. It should not need five more nodes to feel usable. The user should be able to stop there and export/share if they like the result.
+
+But Natural Finished should also be editable. It should not bake in a wild look. It should create a strong base that can go further.
+
+Clean Base mode
+===============
+
+Clean Base should produce a trustworthy, technically solid starting point.
+
+Compared with Natural Finished:
+
+- less aggressive contrast,
+- slightly less committed shadow toe,
+- slightly more highlight caution,
+- less color density,
+- less local exposure drama,
+- stronger protection against artifacts,
+- clearer manual handoff.
+
+Clean Base is not meant to be ugly. It should still look competent and usable. It just should not try as hard to finish the photograph.
+
+This is the mode for users who want the data corrected and prepared before they make stronger subjective choices.
+
+Flat Editing Base mode
+======================
+
+Flat Editing Base is not a gray dump and not a broken log-like output.
+
+The user's definition is specific: Flat Editing Base should bring the brightness of the mids up a lot and flatten the whole image into a visible range closer to what a human eye could comfortably inspect. It should make manual adjustments easier.
+
+That means:
+
+- important midtones become visible and workable,
+- shadows may open more than in Natural Finished,
+- highlights may compress more,
+- overall contrast is reduced,
+- local exposure can be more assertive,
+- extreme dynamic range can be pulled into a more editable range,
+- endpoint contrast is restrained,
+- the image should remain clean enough to edit.
+
+Flat mode should preserve possibility. It should not become flat because Stack gave up on contrast. It should become flat because the user wants a broad, visible working canvas.
+
+A good Flat Editing Base should feel like "everything important is available to work with," not "the image looks washed out."
+
+Bright Natural mode
+===================
+
+Bright Natural should bias the solver toward a brighter final image while remaining realistic.
+
+This mode should not just multiply exposure. It may need to:
+
+- raise important midtones,
+- open soft shadows,
+- protect highlights with compression,
+- keep whites bright but not harsh,
+- avoid skin clipping,
+- avoid washed-out color,
+- use denoise if shadows are opened,
+- keep contrast gentle but present.
+
+Bright Natural is useful for portraits, interiors, lifestyle images, daylight scenes, clean product images, and soft high-key looks.
+
+The failure mode is washed-out weakness. The mode should stay bright and alive.
+
+Dark Natural mode
+=================
+
+Dark Natural should preserve low-key mood.
+
+This mode should not force every image into a generic midtone target. Night scenes, stage lighting, silhouettes, dark interiors, moody portraits, and black-background images should be allowed to remain dark.
+
+Dark Natural should:
+
+- keep important darks dark,
+- avoid lifting meaningless noise,
+- preserve bright accents,
+- allow contrast and shadow depth,
+- protect subject readability only when the subject appears intended to be readable,
+- possibly generate a candidate that reveals more subject detail if the solve is uncertain.
+
+The failure mode is underdeveloped mud. Dark does not mean invisible. It means the image keeps its intended darkness while meaningful structure remains believable.
+
+Punchy / High Contrast mode
+===========================
+
+Punchy / High Contrast should produce more pop, stronger separation, richer blacks, brighter highlights, and stronger perceived crispness.
+
+This mode can commit harder than Natural Finished, but it must still avoid:
+
+- halos,
+- crunchy HDR texture,
+- harsh clipped skin,
+- fake microcontrast everywhere,
+- muddy oversaturation,
+- blocked important detail unless the user/mode accepts it,
+- plastic denoise.
+
+Punch can come from many places:
+
+- deeper shadow toe,
+- brighter highlight placement,
+- steeper midtone contrast,
+- selective local contrast,
+- increased color density,
+- subject-weighted contrast,
+- cleaner shadow anchoring.
+
+Punch should not simply be "more contrast slider." The solver should decide what kind of contrast creates a better image.
+
+Maximum Range / Detail mode
+===========================
+
+Maximum Range / Detail should try to fit more visible highlight and shadow information into the image.
+
+This mode can be more aggressive with local exposure and highlight/shadow compression, but it must avoid the classic HDR failure:
+
+- gray highlights,
+- lifted noisy shadows,
+- flattened lighting,
+- halos,
+- edge glow,
+- fake detail,
+- no black or white anchor.
+
+The goal is not to make every pixel equally visible. The goal is to make more useful range visible while preserving a believable brightness hierarchy.
+
+Maximum Range should often generate candidates because there are multiple valid tradeoffs:
+
+- detail-preserving but flatter,
+- contrast-preserving but less open,
+- subject-priority,
+- highlight-priority.
+
+Highlight shoulder
+==================
+
+A highlight shoulder controls how bright scene values roll into displayable highlights.
+
+A good shoulder should:
+
+- make highlights feel bright,
+- avoid ugly hard clipping when detail exists,
+- avoid gray, dull highlight compression,
+- preserve color when reliable,
+- neutralize or smooth clipped/reconstructed areas when needed,
+- handle skin highlights differently from bare bulbs or sun glints when possible.
+
+Stack must separate three ideas:
+
+1. highlight recovery: real data exists and can be used,
+2. highlight reconstruction: missing/partial data is estimated,
+3. highlight rolloff: brightness is rendered smoothly.
+
+Do not call reconstruction "recovery" in internal docs. Do not call rolloff "recovery" either. Rolloff can make clipped highlights look better, but it does not bring back missing sensor data.
+
+Shadow toe
+==========
+
+A shadow toe controls how low scene values move into dark display values.
+
+A good shadow toe should:
+
+- create depth,
+- hide noise where appropriate,
+- preserve important dark detail,
+- avoid crushing meaningful subject information unless the mode/user wants it,
+- avoid lifting empty black regions into gray noise,
+- keep dark scenes dark when that is emotionally correct.
+
+Tone can hide noise. This is not a cheat. If an area is supposed to be dark and lifting it would only reveal weak signal, the better quality decision may be to keep it dark and shape the toe beautifully.
+
+Shadow handling should coordinate with denoise and local exposure. If Auto opens shadows, it should evaluate denoise, color cleanup, and local contrast. If shadows are too weak/noisy, it may choose tone darkness instead.
+
+Midtone placement
+=================
+
+Midtones are often the most important tonal region.
+
+Global exposure can move the whole image, but final tone decides where faces, walls, products, foliage, roads, interiors, and general scene material land visually.
+
+Natural Finished should prioritize useful midtone placement. This does not mean every image's midtones should hit the same value. Snow, night, sunset, studio, fog, and black-background images have different intended placements.
+
+The solver should ask:
+
+- What appears to be meaningful midtone material?
+- Is there a subject or marked important region?
+- Does the scene want to be bright or dark?
+- Are highlights preventing midtones from coming up?
+- Are shadows/noise preventing local lift?
+- Which candidate places midtones best without damaging the image?
+
+Global contrast and local contrast
+==================================
+
+Contrast is not one operation.
+
+Global contrast changes broad relationships across the whole image. Local contrast changes separation inside neighborhoods/regions. Both can improve an image; both can damage it.
+
+Develop should treat them separately:
+
+- Global contrast sets the overall photographic feel.
+- Midtone contrast creates shape in important material.
+- Local contrast creates texture and separation.
+- Shadow toe creates depth.
+- Highlight shoulder creates light behavior.
+- Color density creates perceived richness.
+
+Too much global contrast can clip or crush. Too much local contrast can create halos, texture crunch, and fake HDR. Too little of either can make the image dull.
+
+The solver should choose contrast sources based on mode and image content.
+
+Tone and color density
+======================
+
+Tone changes perceived color. Increasing contrast can make colors feel richer. Compressing highlights can make them look dull. Lifting shadows can reveal chroma noise or color casts.
+
+Develop tone should coordinate with color rendering:
+
+- preserve believable skin color through tone changes,
+- avoid cyan/gray highlight rolloff unless intended,
+- avoid oversaturated shadow color,
+- maintain natural color density in Natural Finished,
+- keep Flat Editing Base color usable without overcommitting,
+- allow Punchy mode to use richer color without turning preset-like.
+
+Saturation should not be a single blunt post-step. Colorfulness before tone and display-referred saturation after tone are different. The final design may need separate color-density behaviors for scene-linear preparation and visible finish.
+
+Tone and denoise
+================
+
+Tone can make noise more or less visible.
+
+If shadows are lifted and then given high local contrast, noise becomes more obvious. If shadows are kept dark with a good toe, noise may be hidden naturally. If the image is brightened globally, post-demosaic denoise may need to increase in shadow/midtone areas.
+
+Develop should coordinate:
+
+- shadow lift,
+- shadow toe,
+- local exposure,
+- denoise,
+- texture protection,
+- color noise suppression,
+- final contrast.
+
+A clean image should not mean plastic. A detailed image should not mean noisy mess. The selected mode and graph intent should steer this balance.
+
+Finish Mask role
+================
+
+The current Finish Mask only affects integrated finish tone. It blends between the pre-finish image and the finished tone result. It does not mask RAW exposure, white balance, demosaic, scene prep, or cleanup.
+
+This is actually a useful conceptual boundary.
+
+Finish Mask should be understood as localizing the final look, not localizing RAW development itself.
+
+Future documents should avoid pretending that a Finish Mask is a selective RAW recovery mask. If Stack later adds selective scene prep or selective RAW-stage processing, those should be separate concepts with their own UI and truthfully named behavior.
+
+Graph control: Tone / Finish Feel Map
+=====================================
+
+Tone is a perfect candidate for graph-style control because the user is not usually asking for one isolated value. They are asking for a feel.
+
+A useful Tone / Finish Feel Map could use:
+
+Horizontal axis:
+- Editable / Reserved
+- Finished / Committed
+
+Vertical axis:
+- Soft / Range-Preserving
+- Punchy / Endpoint-Driven
+
+Example meanings:
+
+Lower-left: soft, editable, gentle contrast, more headroom.
+Upper-left: range-preserving but more structured, good for difficult HDR images.
+Lower-right: finished but soft/natural, good for portraits/lifestyle.
+Upper-right: finished, punchy, rich blacks, bright highlights, stronger pop.
+
+This point should not directly set one tone curve. It should bias the solver's choices for:
+
+- midtone placement,
+- contrast strength,
+- highlight shoulder,
+- shadow toe,
+- local contrast allowance,
+- color density,
+- clipping tolerance,
+- denoise/tone coordination.
+
+A second useful graph could be:
+
+Horizontal:
+- Open Shadows
+- Deep Shadows
+
+Vertical:
+- Soft Highlights
+- Bright/Crisp Highlights
+
+This could help the user choose between airy, clean, dramatic, high-key, low-key, and strong highlight looks without needing to understand curve math first.
+
+Graph controls should still reveal the actual authored values in Manual mode.
+
+Candidate tone alternatives
+===========================
+
+Auto candidate solving should include tone variations when useful.
+
+Examples:
+
+- Natural balanced tone.
+- Brighter midtone version.
+- More highlight-preserving version.
+- More punchy contrast version.
+- More open-shadow version.
+- Darker mood-preserving version.
+- Maximum range version.
+
+The solver should not display ten near-identical tone candidates. It should eliminate duplicates and keep visually meaningful alternatives.
+
+If the user selects a candidate, that candidate's tone decisions become the authored Auto state. Manual mode then reveals the underlying settings. Returning to Auto should preserve the user's tone direction as bias unless reset.
+
+Merging candidates
+==================
+
+The user requested the possibility of merging candidates.
+
+This should not mean averaging final pixels. Averaging pixels would often create a weaker image and would not preserve the logic of either candidate.
+
+A better meaning is:
+
+- the user chooses two candidates,
+- Stack blends their intent/state vectors,
+- the solver generates a new candidate near that combined direction,
+- the final authored settings come from that re-solve.
+
+For example, merging "More Range" with "Punchy" should ask the solver to preserve more range while recovering some endpoint contrast. It should not simply crossfade a flat image with a contrasty one.
+
+Better than "add contrast"
+==========================
+
+Stack should avoid vague controls that duplicate each other.
+
+Instead of one giant Contrast control, the design should distinguish:
+
+- RAW exposure / data scaling,
+- visible brightness,
+- midtone contrast,
+- global contrast,
+- local contrast,
+- shadow toe,
+- black point,
+- highlight shoulder,
+- white point,
+- color density,
+- texture clarity.
+
+Auto can control several of these together. Manual should expose them clearly.
+
+This is the difference between a solver and a pile of sliders.
+
+Manual tone controls
+====================
+
+Manual mode should expose tone controls grouped by role:
+
+Foundation Tone:
+- base curve shape,
+- midtone placement,
+- black/white endpoint behavior,
+- overall contrast.
+
+Prepared Tone:
+- how scene prep feeds tone,
+- range compression budget,
+- highlight/shadow balancing.
+
+Finish Tone:
+- final contrast,
+- highlight shoulder,
+- shadow toe,
+- color density interaction,
+- mask/local finish behavior.
+
+Local Scope / Masking:
+- where finish tone applies,
+- how masked finish tone blends with pre-finish.
+
+Diagnostics:
+- pre-finish preview,
+- final tone preview,
+- curve/graph preview,
+- clipping before/after tone,
+- shadow noise risk before/after tone,
+- color density shifts.
+
+Manual should not require the user to see everything all at once. It should reveal complexity progressively while still allowing expert-level control.
+
+Safeguards
+==========
+
+Tone safeguards should include:
+
+- skin highlight protection,
+- large-area highlight dullness detection,
+- shadow mud/noise detection,
+- clipping growth detection,
+- black crush detection for important regions,
+- halo detection if local contrast is involved,
+- color shift detection,
+- flatness detection,
+- over-punch/crunch detection.
+
+Safeguards should not make the adjustment weak by default. They should redirect the solver. If a direct curve makes highlights dull, try a different shoulder. If shadow lift reveals noise, choose denoise, tone darkness, or local-region restraint. If punch creates halos, reduce local contrast and use global contrast instead.
+
+Quality means finding a better route, not simply reducing every adjustment.
+
+Decisions locked from user direction
+====================================
+
+- Natural Finished should be the default Auto tone target.
+- Flat Editing Base should be intentionally visible and easy to manually edit, not ugly.
+- Tone should be mode-dependent.
+- Auto should be allowed to control multiple tone-related settings at once.
+- Tone controls in Auto should guide the solver, not act like direct sliders only.
+- Graph controls should be treated as first-class, especially for tone/finish feel.
+- Some detail may be crushed or softened when the image/mode/user intent calls for it.
+- Stack must not lie about recovery versus reconstruction versus rendering.
+
+Experience-test questions
+=========================
+
+These should be answered by trying actual builds on real images:
+
+- How flat should Flat Editing Base feel before it becomes too dull?
+- How punchy can Punchy mode get before it feels preset-like?
+- How dark should Dark Natural preserve low-key images?
+- How much highlight compression can Natural Finished use before highlights feel gray?
+- What candidate tone alternatives are actually useful versus clutter?
+- Which graph axes feel intuitive in practice?
+- Should users see tone graphs first, or should tone graphs live inside an advanced Auto panel?
+
+Research anchors
+================
+
+- DEVELOP_NODE_CONTEXT.txt, current Stack Develop implementation and limitations.
+- ACES documentation, especially the distinction between scene-referred input transforms and display/output transforms.
+- OpenColorIO documentation, especially scene-referred and display-referred reference spaces and view transforms.
+- darktable documentation on scene-referred workflow, tone mapping, local contrast, and highlight handling.
+- RawPedia documentation on local adjustments and RAW processing concepts.

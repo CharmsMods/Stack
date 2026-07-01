@@ -1,4 +1,5 @@
 #include "Color/LutImporter.h"
+#include "Color/LutCreator.h"
 
 #include <algorithm>
 #include <array>
@@ -178,6 +179,7 @@ bool FinalizeResult(LutImportResult& result, const std::string& path) {
         ClearCanonicalLutData(result.payload);
         return false;
     }
+    ApplyLutCreatorSidecarMetadata(path, result.payload);
     result.payload.importError.clear();
     return true;
 }

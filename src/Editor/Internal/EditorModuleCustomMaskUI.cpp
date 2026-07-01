@@ -390,6 +390,8 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                 link.toSocketId == EditorNodeGraph::kImageInputSocketId ||
                 link.toSocketId == EditorNodeGraph::kMixInputASocketId ||
                 link.toSocketId == EditorNodeGraph::kMixInputBSocketId ||
+                EditorNodeGraph::IsDataMathInputSocketId(link.toSocketId) ||
+                link.toSocketId == EditorNodeGraph::kDataMathBaseInputSocketId ||
                 link.toSocketId == EditorNodeGraph::kHdrMergeInput1SocketId ||
                 link.toSocketId == EditorNodeGraph::kHdrMergeInput2SocketId ||
                 link.toSocketId == EditorNodeGraph::kHdrMergeInput3SocketId ||
@@ -505,6 +507,16 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                     if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kMixInputASocketId)) ||
                         tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kMixInputBSocketId))) {
                         return result;
+                    }
+                } else if (downstream->kind == EditorNodeGraph::NodeKind::DataMath &&
+                    link.toSocketId == EditorNodeGraph::kMaskInputSocketId) {
+                    if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kDataMathBaseInputSocketId))) {
+                        return result;
+                    }
+                    for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+                        if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::DataMathInputSocketId(inputIndex)))) {
+                            return result;
+                        }
                     }
                 } else if (downstream->kind == EditorNodeGraph::NodeKind::Output) {
                     if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(downstream->id))) {

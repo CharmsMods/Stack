@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Local RAW Auto Base validation manifest. Keep large RAW files outside the repository unless a repository asset policy is added.",
+  "externalAssetRoot": "D:/StackValidationRawAssets",
+  "images": [
+    {
+      "id": "dark_foreground_bright_sky_001",
+      "path": "dark_foreground_bright_sky/IMG_0001.ARW",
+      "category": "dark_foreground_bright_sky",
+      "metadata": {
+        "expectedIsoRange": [100, 800],
+        "notes": "Deep foreground with bright sky, not a high-ISO denoise case."
+      },
+      "expected": {
+        "autoViewFit": true,
+        "rawExposureAutoApplied": false,
+        "suggestions": ["OpenBacklitSubject", "ProtectSky"],
+        "highlightRisk": true,
+        "noiseDetail": {
+          "suggestChromaDenoise": false,
+          "autoApplyMinimalChromaDenoise": false,
+          "allowReduceSharpening": false
+        }
+      }
+    },
+    {
+      "id": "high_iso_night_001",
+      "path": "high_iso_night/IMG_0002.CR3",
+      "category": "high_iso_night",
+      "metadata": {
+        "expectedIsoRange": [3200, 51200],
+        "notes": "Use to validate high ISO suggestions without hidden strong denoise."
+      },
+      "expected": {
+        "autoViewFit": true,
+        "rawExposureAutoApplied": false,
+        "suggestions": [],
+        "highlightRisk": false,
+        "noiseDetail": {
+          "suggestChromaDenoise": true,
+          "suggestLumaDenoise": true,
+          "suggestReduceSharpening": true,
+          "autoApplyMinimalChromaDenoise": false
+        }
+      }
+    }
+  ],
+  "requiredCategories": [
+    "dark_foreground_bright_sky",
+    "high_dynamic_range_landscape",
+    "low_key_portrait",
+    "snow_scene",
+    "sunset_golden_hour",
+    "concert_stage_lighting",
+    "indoor_tungsten",
+    "high_iso_night",
+    "macro_foliage",
+    "ocean_sky",
+    "backlit_subject",
+    "black_border_or_panorama_edge",
+    "clipped_specular_highlights",
+    "underexposed_raw"
+  ],
+  "manualReviewMetrics": [
+    "Auto Base made the image readable",
+    "Highlights were protected",
+    "RAW Exposure was left alone when highlight risk was present",
+    "Local Range suggestions were useful and targeted",
+    "Noise/detail suggestions avoided plastic or over-sharpened results"
+  ]
+}

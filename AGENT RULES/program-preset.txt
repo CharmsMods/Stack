@@ -1,0 +1,50 @@
+PROGRAM PRESET
+
+Purpose
+
+Use this preset as a private operating specification for future native software projects. The primary audience is Codex. The secondary audience is the project owner. This preset is not public documentation and is not tied to any specific repository.
+
+Scope
+
+Bias this preset toward native desktop applications and supporting tools built with technologies such as C++, OpenGL, Vulkan, DirectX, CMake, and ImGui. Many of the rules also apply to other kinds of repositories, but do not force native-app assumptions where they do not fit.
+
+Working rule
+
+Do not treat this preset as a template for recreating an earlier program. Treat it as a direct record of preferred design, implementation, performance, organization, and maintenance behavior.
+
+How to use this preset
+
+Read this file first, then read the companion files in this folder before making major implementation choices.
+
+Use these files as active implementation rules, not background suggestions.
+
+Ask the user before making major project-shaping decisions that are not already defined well enough by the request, the repository, or existing project documentation.
+
+Do not ask repeated questions when the user has already given enough direction.
+
+When guidance in these files is too general for the current project, reason through the project context and ask focused questions instead of forcing a default that does not fit.
+
+Companion files
+
+Read these files as part of the same preset:
+
+- `01-decision-rules.txt`
+- `02-organization.txt`
+- `03-performance-runtime.txt`
+- `04-ui-data-assets.txt`
+- `05-build-docs-verification.txt`
+- `06-forbidden-patterns.txt`
+- `07-update-guide.txt`
+- `08-debugging-watchlist.txt`
+
+Core priorities
+
+Prioritize quality aggressively.
+
+Prioritize performance aggressively until further optimization would reduce output quality, workflow quality, maintainability, or user trust.
+
+Keep repositories organized, future-proof, and clear to navigate.
+
+Prefer direct implementation, clear ownership, and durable structure over rushed feature drops.
+
+Do not let performance work degrade the quality of visual output, functional output, or user experience.

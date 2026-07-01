@@ -29,6 +29,7 @@
 *.lib
 *.dll
 *.exp
+!/cmake/*.cmake
 
 # Local app/user data
 /Library/
@@ -37,7 +38,8 @@ StackSettings.json
 StackStartup.log
 imgui.ini
 
-# Local-only notes, old plans, and migration scratch space
+# Local-only workspace, archives, and migration scratch space
+/_workspace/
 /_local_archive/
 /OLD/
 migrate*.ps1
@@ -51,11 +53,8 @@ tools/migrate*.py
 *.DNG
 *.dng
 
-# Neural Denoise, AI models, and ONNX/CUDA runtimes
-/src/NeuralDenoise/
+# Neural Denoise model outputs, tooling, and ONNX/CUDA runtimes
 /tools/neural_denoise/
-/src/Editor/Layers/*NeuralDenoise*
-/src/Editor/Layers/*SceneDenoise*
 /denoise/
 *.onnx
 *.onnx.data
@@ -65,6 +64,9 @@ tools/migrate*.py
 *.tmp
 node_modules/
 dist/
+/.venv/
+__pycache__/
+*.pyc
 
 # System files
 .DS_Store
@@ -72,18 +74,17 @@ Thumbs.db
 Desktop.ini
 
 # Local documentation, notes, and agent configurations
-/Ideas and Fixes/
-/old docs/
-/docs/
 /AGENTS.md
 
 # AI training, model inputs/outputs, and validation tools
-/Denoise Model Training/
 /tools/hdr_merge/
 
-# Website mockups and web assets
-/website/
-
 # Local testing and development files
-/tools/graph_behavior_tests.cpp
 /src/Notes/
+
+# Local LUT prep workspace data and third-party LUTs
+/tools/lut_prep/
+/third_party_luts/
+
+# Local build tools and scripts
+/stack-builder.cmd

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -16,6 +17,19 @@
 
 namespace Raw {
 namespace {
+
+constexpr std::size_t kCancellationCheckInterval = 65536;
+
+bool IsCancelled(const std::function<bool()>& shouldCancel) {
+    return shouldCancel && shouldCancel();
+}
+
+void MarkCancelled(RawImageData& outData) {
+    outData.rawBuffer.clear();
+    outData.linearUInt16Buffer.clear();
+    outData.linearFloatBuffer.clear();
+    outData.metadata.error = "RAW load canceled.";
+}
 
 int EstimateBitDepth(float whiteLevel) {
     if (whiteLevel <= 0.0f) {
@@ -707,43 +721,70 @@ void ExtractMetadata(LibRaw& processor, const std::string& path, RawMetadata& me
     }
 }
 
-void ExtractRawStats(RawImageData& data) {
+bool ExtractRawStats(RawImageData& data, const std::function<bool()>& shouldCancel) {
     if (data.rawBuffer.empty()) {
-        return;
+        return !IsCancelled(shouldCancel);
     }
 
-    auto [minIt, maxIt] = std::minmax_element(data.rawBuffer.begin(), data.rawBuffer.end());
-    data.metadata.rawMinimum = static_cast<float>(*minIt);
-    data.metadata.rawMaximum = static_cast<float>(*maxIt);
-
+    std::uint16_t minValue = data.rawBuffer.front();
+    std::uint16_t maxValue = data.rawBuffer.front();
+    std::size_t clipped = 0;
     const float white = data.metadata.whiteLevel;
+    for (std::size_t i = 0; i < data.rawBuffer.size(); ++i) {
+        if ((i % kCancellationCheckInterval) == 0 && IsCancelled(shouldCancel)) {
+            return false;
+        }
+        const std::uint16_t value = data.rawBuffer[i];
+        minValue = std::min(minValue, value);
+        maxValue = std::max(maxValue, value);
+        if (white > 0.0f && static_cast<float>(value) >= white) {
+            ++clipped;
+        }
+    }
+    data.metadata.rawMinimum = static_cast<float>(minValue);
+    data.metadata.rawMaximum = static_cast<float>(maxValue);
+
     if (white <= 0.0f) {
         data.metadata.defaultWhiteClipPercent = 0.0f;
-        return;
+        return !IsCancelled(shouldCancel);
     }
 
-    const std::size_t clipped = static_cast<std::size_t>(std::count_if(
-        data.rawBuffer.begin(),
-        data.rawBuffer.end(),
-        [white](std::uint16_t value) { return static_cast<float>(value) >= white; }));
     data.metadata.defaultWhiteClipPercent = 100.0f * static_cast<float>(clipped) / static_cast<float>(data.rawBuffer.size());
+    return !IsCancelled(shouldCancel);
 }
 
-void ExtractLinearStats(RawImageData& data) {
+bool ExtractLinearStats(RawImageData& data, const std::function<bool()>& shouldCancel) {
     if (!data.linearUInt16Buffer.empty()) {
-        auto [minIt, maxIt] = std::minmax_element(data.linearUInt16Buffer.begin(), data.linearUInt16Buffer.end());
-        data.metadata.rawMinimum = static_cast<float>(*minIt);
-        data.metadata.rawMaximum = static_cast<float>(*maxIt);
+        std::uint16_t minValue = data.linearUInt16Buffer.front();
+        std::uint16_t maxValue = data.linearUInt16Buffer.front();
+        for (std::size_t i = 0; i < data.linearUInt16Buffer.size(); ++i) {
+            if ((i % kCancellationCheckInterval) == 0 && IsCancelled(shouldCancel)) {
+                return false;
+            }
+            minValue = std::min(minValue, data.linearUInt16Buffer[i]);
+            maxValue = std::max(maxValue, data.linearUInt16Buffer[i]);
+        }
+        data.metadata.rawMinimum = static_cast<float>(minValue);
+        data.metadata.rawMaximum = static_cast<float>(maxValue);
     } else if (!data.linearFloatBuffer.empty()) {
-        auto [minIt, maxIt] = std::minmax_element(data.linearFloatBuffer.begin(), data.linearFloatBuffer.end());
-        data.metadata.rawMinimum = *minIt;
-        data.metadata.rawMaximum = *maxIt;
+        float minValue = data.linearFloatBuffer.front();
+        float maxValue = data.linearFloatBuffer.front();
+        for (std::size_t i = 0; i < data.linearFloatBuffer.size(); ++i) {
+            if ((i % kCancellationCheckInterval) == 0 && IsCancelled(shouldCancel)) {
+                return false;
+            }
+            minValue = std::min(minValue, data.linearFloatBuffer[i]);
+            maxValue = std::max(maxValue, data.linearFloatBuffer[i]);
+        }
+        data.metadata.rawMinimum = minValue;
+        data.metadata.rawMaximum = maxValue;
     }
     data.metadata.defaultWhiteClipPercent = 0.0f;
+    return !IsCancelled(shouldCancel);
 }
 
 template <typename T>
-void CopyColorImageToUInt16(
+bool CopyColorImageToUInt16(
     const T* source,
     int width,
     int height,
@@ -752,25 +793,32 @@ void CopyColorImageToUInt16(
     int stridePixels,
     int sourceChannels,
     int outputChannels,
-    std::vector<std::uint16_t>& output) {
+    std::vector<std::uint16_t>& output,
+    const std::function<bool()>& shouldCancel) {
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     output.assign(pixelCount * static_cast<std::size_t>(outputChannels), 0);
     const int safeStride = stridePixels > 0 ? stridePixels : width;
     for (int y = 0; y < height; ++y) {
+        if ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) % kCancellationCheckInterval == 0 &&
+            IsCancelled(shouldCancel)) {
+            output.clear();
+            return false;
+        }
         for (int x = 0; x < width; ++x) {
             const std::size_t outPixel = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
             const int inPixel = (top + y) * safeStride + (left + x);
             for (int c = 0; c < outputChannels; ++c) {
-            const int srcC = std::min(c, std::max(0, sourceChannels - 1));
+                const int srcC = std::min(c, std::max(0, sourceChannels - 1));
                 output[outPixel * static_cast<std::size_t>(outputChannels) + static_cast<std::size_t>(c)] =
                     static_cast<std::uint16_t>(source[inPixel][srcC]);
             }
         }
     }
+    return !IsCancelled(shouldCancel);
 }
 
 template <typename T>
-void CopyColorImageToFloat(
+bool CopyColorImageToFloat(
     const T* source,
     int width,
     int height,
@@ -779,27 +827,56 @@ void CopyColorImageToFloat(
     int stridePixels,
     int sourceChannels,
     int outputChannels,
-    std::vector<float>& output) {
+    std::vector<float>& output,
+    const std::function<bool()>& shouldCancel) {
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     output.assign(pixelCount * static_cast<std::size_t>(outputChannels), 0.0f);
     const int safeStride = stridePixels > 0 ? stridePixels : width;
     for (int y = 0; y < height; ++y) {
+        if ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) % kCancellationCheckInterval == 0 &&
+            IsCancelled(shouldCancel)) {
+            output.clear();
+            return false;
+        }
         for (int x = 0; x < width; ++x) {
             const std::size_t outPixel = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
             const int inPixel = (top + y) * safeStride + (left + x);
             for (int c = 0; c < outputChannels; ++c) {
-            const int srcC = std::min(c, std::max(0, sourceChannels - 1));
+                const int srcC = std::min(c, std::max(0, sourceChannels - 1));
                 output[outPixel * static_cast<std::size_t>(outputChannels) + static_cast<std::size_t>(c)] =
                     static_cast<float>(source[inPixel][srcC]);
             }
         }
     }
+    return !IsCancelled(shouldCancel);
+}
+
+bool CopyRawImageToBuffer(
+    const std::uint16_t* source,
+    std::size_t pixelCount,
+    std::vector<std::uint16_t>& output,
+    const std::function<bool()>& shouldCancel) {
+    output.assign(pixelCount, 0);
+    std::size_t copied = 0;
+    while (copied < pixelCount) {
+        if (IsCancelled(shouldCancel)) {
+            output.clear();
+            return false;
+        }
+        const std::size_t count = std::min(kCancellationCheckInterval, pixelCount - copied);
+        std::copy(source + copied, source + copied + count, output.begin() + static_cast<std::ptrdiff_t>(copied));
+        copied += count;
+    }
+    return !IsCancelled(shouldCancel);
 }
 #endif
 
 } // namespace
 
-bool DecodeWithLibRaw(const std::string& path, RawImageData& outData) {
+bool DecodeWithLibRaw(
+    const std::string& path,
+    RawImageData& outData,
+    const std::function<bool()>& shouldCancel) {
     outData = {};
     outData.metadata.sourcePath = path;
 
@@ -811,11 +888,20 @@ bool DecodeWithLibRaw(const std::string& path, RawImageData& outData) {
         outData.metadata.error = "No RAW source path.";
         return false;
     }
+    if (IsCancelled(shouldCancel)) {
+        MarkCancelled(outData);
+        return false;
+    }
 
     LibRaw processor;
     int status = processor.open_file(path.c_str());
     if (status != LIBRAW_SUCCESS) {
         outData.metadata.error = std::string("LibRaw open_file failed: ") + libraw_strerror(status);
+        return false;
+    }
+    if (IsCancelled(shouldCancel)) {
+        MarkCancelled(outData);
+        processor.recycle();
         return false;
     }
 
@@ -825,9 +911,19 @@ bool DecodeWithLibRaw(const std::string& path, RawImageData& outData) {
         processor.recycle();
         return false;
     }
+    if (IsCancelled(shouldCancel)) {
+        MarkCancelled(outData);
+        processor.recycle();
+        return false;
+    }
 
     ExtractMetadata(processor, path, outData.metadata);
     if (!outData.metadata.error.empty()) {
+        processor.recycle();
+        return false;
+    }
+    if (IsCancelled(shouldCancel)) {
+        MarkCancelled(outData);
         processor.recycle();
         return false;
     }
@@ -850,26 +946,86 @@ bool DecodeWithLibRaw(const std::string& path, RawImageData& outData) {
         const auto& rawdata = processor.imgdata.rawdata;
         if (rawdata.color3_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(3 * sizeof(std::uint16_t)) : rawWidth;
-            CopyColorImageToUInt16(rawdata.color3_image, visibleWidth, visibleHeight, left, top, stride, 3, channels, outData.linearUInt16Buffer);
+            if (!CopyColorImageToUInt16(
+                    rawdata.color3_image,
+                    visibleWidth,
+                    visibleHeight,
+                    left,
+                    top,
+                    stride,
+                    3,
+                    channels,
+                    outData.linearUInt16Buffer,
+                    shouldCancel)) {
+                MarkCancelled(outData);
+                processor.recycle();
+                return false;
+            }
             outData.metadata.linearSampleFormat = RawSampleFormat::UInt16;
         } else if (rawdata.color4_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(4 * sizeof(std::uint16_t)) : rawWidth;
-            CopyColorImageToUInt16(rawdata.color4_image, visibleWidth, visibleHeight, left, top, stride, 4, channels, outData.linearUInt16Buffer);
+            if (!CopyColorImageToUInt16(
+                    rawdata.color4_image,
+                    visibleWidth,
+                    visibleHeight,
+                    left,
+                    top,
+                    stride,
+                    4,
+                    channels,
+                    outData.linearUInt16Buffer,
+                    shouldCancel)) {
+                MarkCancelled(outData);
+                processor.recycle();
+                return false;
+            }
             outData.metadata.linearSampleFormat = RawSampleFormat::UInt16;
         } else if (rawdata.float3_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(3 * sizeof(float)) : rawWidth;
-            CopyColorImageToFloat(rawdata.float3_image, visibleWidth, visibleHeight, left, top, stride, 3, channels, outData.linearFloatBuffer);
+            if (!CopyColorImageToFloat(
+                    rawdata.float3_image,
+                    visibleWidth,
+                    visibleHeight,
+                    left,
+                    top,
+                    stride,
+                    3,
+                    channels,
+                    outData.linearFloatBuffer,
+                    shouldCancel)) {
+                MarkCancelled(outData);
+                processor.recycle();
+                return false;
+            }
             outData.metadata.linearSampleFormat = RawSampleFormat::Float32;
         } else if (rawdata.float4_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(4 * sizeof(float)) : rawWidth;
-            CopyColorImageToFloat(rawdata.float4_image, visibleWidth, visibleHeight, left, top, stride, 4, channels, outData.linearFloatBuffer);
+            if (!CopyColorImageToFloat(
+                    rawdata.float4_image,
+                    visibleWidth,
+                    visibleHeight,
+                    left,
+                    top,
+                    stride,
+                    4,
+                    channels,
+                    outData.linearFloatBuffer,
+                    shouldCancel)) {
+                MarkCancelled(outData);
+                processor.recycle();
+                return false;
+            }
             outData.metadata.linearSampleFormat = RawSampleFormat::Float32;
         } else {
             outData.metadata.error = "Linear DNG detected but LibRaw did not expose a color3/color4 or float color buffer.";
             processor.recycle();
             return false;
         }
-        ExtractLinearStats(outData);
+        if (!ExtractLinearStats(outData, shouldCancel)) {
+            MarkCancelled(outData);
+            processor.recycle();
+            return false;
+        }
         const int warnings = processor.imgdata.process_warnings;
         if (warnings != 0) {
             outData.metadata.warnings.push_back("LibRaw reported process warnings: " + std::to_string(warnings));
@@ -884,10 +1040,20 @@ bool DecodeWithLibRaw(const std::string& path, RawImageData& outData) {
         return false;
     }
 
-    outData.rawBuffer.assign(
-        processor.imgdata.rawdata.raw_image,
-        processor.imgdata.rawdata.raw_image + pixelCount);
-    ExtractRawStats(outData);
+    if (!CopyRawImageToBuffer(
+            processor.imgdata.rawdata.raw_image,
+            pixelCount,
+            outData.rawBuffer,
+            shouldCancel)) {
+        MarkCancelled(outData);
+        processor.recycle();
+        return false;
+    }
+    if (!ExtractRawStats(outData, shouldCancel)) {
+        MarkCancelled(outData);
+        processor.recycle();
+        return false;
+    }
 
     const int warnings = processor.imgdata.process_warnings;
     if (warnings != 0) {

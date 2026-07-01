@@ -16,12 +16,41 @@ bool SupportsDynamicChannelInputs(const EditorNodeGraph::Node& node) {
         node.kind == EditorNodeGraph::NodeKind::Lut;
 }
 
+bool IsAverageMaskPreviewActive(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
+    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
+        node.dataMathMode == EditorNodeGraph::DataMathMode::Average &&
+        graph.GetSocketPreviewIntent(node.id) == EditorNodeGraph::SocketPreviewIntent::MaskConnection;
+}
+
+bool IsAverageImagePreviewActive(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
+    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
+        node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage &&
+        graph.GetSocketPreviewIntent(node.id) == EditorNodeGraph::SocketPreviewIntent::ImageConnection;
+}
+
+bool IsDataMathAverageMode(EditorNodeGraph::DataMathMode mode) {
+    return mode == EditorNodeGraph::DataMathMode::Average ||
+        mode == EditorNodeGraph::DataMathMode::ImageAverage;
+}
+
 const char* ChannelLabel(const std::string& socketId) {
     if (socketId == "r") return "R";
     if (socketId == "g") return "G";
     if (socketId == "b") return "B";
     if (socketId == "a") return "A";
     return "";
+}
+
+std::string ScalarInputSocketLabel(int index) {
+    if (index < 0) {
+        return "Scalar";
+    }
+    if (index < 26) {
+        std::string label = "Scalar ";
+        label.push_back(static_cast<char>('A' + index));
+        return label;
+    }
+    return "Scalar";
 }
 
 Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
@@ -48,6 +77,8 @@ void Graph::Clear() {
     m_ActiveImageNodeId = -1;
     m_OutputNodeId = -1;
     m_ForceOutputFourPins = false;
+    m_SocketPreviewNodeId = -1;
+    m_SocketPreviewIntent = SocketPreviewIntent::None;
     TouchStructure();
 }
 
@@ -151,6 +182,18 @@ Node* Graph::AddRawSourceNode(RawSourcePayload payload, Vec2 position) {
     return &m_Nodes.back();
 }
 
+Node* Graph::AddRawDevelopmentNode(RawDevelopmentPayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawDevelopment;
+    node.position = position;
+    node.rawDevelopment = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddRawNeuralDenoiseNode(RawNeuralDenoisePayload payload, Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
@@ -217,6 +260,18 @@ Node* Graph::AddHdrMergeNode(HdrMergePayload payload, Vec2 position) {
     node.kind = NodeKind::HdrMerge;
     node.position = position;
     node.hdrMerge = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddMfsrNode(MfsrPayload payload, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::Mfsr;
+    node.position = position;
+    node.mfsr = std::move(payload);
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
     TouchStructure();
@@ -547,6 +602,114 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         return sockets;
     }
 
+    if (node.kind == NodeKind::DataMath) {
+        std::vector<SocketDefinition> sockets;
+        auto add = [&](const std::string& id, SocketDirection direction, SocketType type, const std::string& label, bool optional, bool visible) {
+            if (visibleOnly && !visible) {
+                return;
+            }
+            sockets.push_back(SocketDefinition{ id, node.id, direction, type, label, optional, visible });
+        };
+
+        int highestConnectedInputIndex = 1;
+        bool hasBaseLink = false;
+        bool hasMaskLink = false;
+        for (const Link& link : m_Links) {
+            if (link.toNodeId != node.id) {
+                continue;
+            }
+            const int inputIndex = DataMathInputSocketIndex(link.toSocketId);
+            if (inputIndex >= 0) {
+                highestConnectedInputIndex = std::max(highestConnectedInputIndex, inputIndex);
+            } else if (link.toSocketId == kDataMathBaseInputSocketId) {
+                hasBaseLink = true;
+            } else if (link.toSocketId == kMaskInputSocketId) {
+                hasMaskLink = true;
+            }
+        }
+
+        const bool averageMode = IsDataMathAverageMode(node.dataMathMode);
+        const bool scalarAverageMode = node.dataMathMode == DataMathMode::Average;
+        const bool imageAverageMode = node.dataMathMode == DataMathMode::ImageAverage;
+        int visibleInputCount = 2;
+        if (averageMode) {
+            visibleInputCount = std::max(3, highestConnectedInputIndex + 2);
+        } else if (highestConnectedInputIndex >= 2) {
+            visibleInputCount = highestConnectedInputIndex + 1;
+        }
+        if ((scalarAverageMode && IsAverageMaskPreviewActive(*this, node)) ||
+            (imageAverageMode && IsAverageImagePreviewActive(*this, node))) {
+            visibleInputCount += 1;
+        }
+        visibleInputCount = std::clamp(visibleInputCount, 2, kMaxDataMathInputCount);
+
+        for (int inputIndex = 0; inputIndex < visibleInputCount; ++inputIndex) {
+            add(
+                DataMathInputSocketId(inputIndex),
+                SocketDirection::Input,
+                scalarAverageMode ? SocketType::Mask : SocketType::Image,
+                scalarAverageMode ? ScalarInputSocketLabel(inputIndex) : DataMathInputSocketLabel(inputIndex),
+                inputIndex != 0,
+                true);
+        }
+
+        const bool revealMaskAwareSockets =
+            hasBaseLink ||
+            hasMaskLink;
+        if (!scalarAverageMode && !imageAverageMode) {
+            add(
+                kDataMathBaseInputSocketId,
+                SocketDirection::Input,
+                SocketType::Image,
+                "Base",
+                true,
+                revealMaskAwareSockets);
+            add(
+                kMaskInputSocketId,
+                SocketDirection::Input,
+                SocketType::Mask,
+                "Mask",
+                true,
+                revealMaskAwareSockets);
+        }
+        add(kImageOutputSocketId, SocketDirection::Output, SocketType::Image, scalarAverageMode ? "Scalar Out" : "Data Out", false, true);
+        return sockets;
+    }
+
+    if (node.kind == NodeKind::Mfsr) {
+        std::vector<SocketDefinition> sockets;
+        auto add = [&](const std::string& id, SocketDirection direction, SocketType type, const std::string& label, bool optional, bool visible) {
+            if (visibleOnly && !visible) {
+                return;
+            }
+            sockets.push_back(SocketDefinition{ id, node.id, direction, type, label, optional, visible });
+        };
+
+        int highestConnectedInputIndex = 0;
+        for (const Link& link : m_Links) {
+            if (link.toNodeId != node.id) {
+                continue;
+            }
+            const int inputIndex = MfsrInputSocketIndex(link.toSocketId);
+            if (inputIndex >= 0) {
+                highestConnectedInputIndex = std::max(highestConnectedInputIndex, inputIndex);
+            }
+        }
+
+        const int visibleInputCount = std::clamp(highestConnectedInputIndex + 2, 2, kMaxMfsrInputCount);
+        for (int inputIndex = 0; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
+            add(
+                MfsrInputSocketId(inputIndex),
+                SocketDirection::Input,
+                SocketType::Image,
+                MfsrInputSocketLabel(inputIndex),
+                inputIndex != 0,
+                inputIndex < visibleInputCount);
+        }
+        add(kImageOutputSocketId, SocketDirection::Output, SocketType::Image, "Image", false, true);
+        return sockets;
+    }
+
     if (node.kind == NodeKind::ChannelSplit) {
         std::vector<SocketDefinition> sockets = EditorNodeGraphDefinitions::BuildSockets(node, visibleOnly);
         bool hasAlpha = true;
@@ -625,7 +788,7 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
             return {};
         }
 
-        const char* upstreamSocketId = nullptr;
+        std::string upstreamSocketId;
         if (node->kind == NodeKind::Layer && currentSocketId == kImageOutputSocketId) {
             upstreamSocketId = kImageInputSocketId;
         } else if (node->kind == NodeKind::Lut && currentSocketId == kImageOutputSocketId) {
@@ -635,6 +798,8 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
             upstreamSocketId = kImageInputSocketId;
         } else if (node->kind == NodeKind::HdrMerge && currentSocketId == kImageOutputSocketId) {
             upstreamSocketId = kHdrMergeInput1SocketId;
+        } else if (node->kind == NodeKind::Mfsr && currentSocketId == kImageOutputSocketId) {
+            upstreamSocketId = kMfsrReferenceInputSocketId;
         } else if (node->kind == NodeKind::RawDetailAutoMask && currentSocketId == kMaskOutputSocketId) {
             upstreamSocketId = kImageInputSocketId;
         } else if (node->kind == NodeKind::MaskUtility && currentSocketId == kMaskOutputSocketId) {
@@ -644,10 +809,19 @@ std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId)
         } else if (node->kind == NodeKind::ImageToMask && currentSocketId == kMaskOutputSocketId) {
             upstreamSocketId = kImageToMaskInputSocketId;
         } else if (node->kind == NodeKind::DataMath && currentSocketId == kImageOutputSocketId) {
-            upstreamSocketId = kMixInputASocketId;
+            if (node->dataMathMode == DataMathMode::Average) {
+                return {};
+            }
+            for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                const std::string socketId = DataMathInputSocketId(inputIndex);
+                if (FindAnyInputLink(currentNodeId, socketId)) {
+                    upstreamSocketId = socketId;
+                    break;
+                }
+            }
         }
 
-        if (!upstreamSocketId) {
+        if (upstreamSocketId.empty()) {
             return {};
         }
         const Link* upstream = FindAnyInputLink(currentNodeId, upstreamSocketId);
@@ -710,13 +884,40 @@ bool Graph::IsScalarSocketStream(int nodeId, const std::string& socketId) const 
             case NodeKind::Mix:
             case NodeKind::DataMath:
                 if (currentSocketId == kImageOutputSocketId) {
-                    const Link* inputA = FindAnyInputLink(currentNodeId, kMixInputASocketId);
-                    const Link* inputB = FindAnyInputLink(currentNodeId, kMixInputBSocketId);
-                    const bool scalarA = inputA && resolve(inputA->fromNodeId, inputA->fromSocketId);
-                    const bool scalarB = inputB && resolve(inputB->fromNodeId, inputB->fromSocketId);
-                    const bool hasA = inputA != nullptr;
-                    const bool hasB = inputB != nullptr;
-                    return finish((hasA || hasB) && (!hasA || scalarA) && (!hasB || scalarB));
+                    if (node->kind == NodeKind::DataMath) {
+                        if (node->dataMathMode == DataMathMode::Average) {
+                            bool hasAverageInput = false;
+                            for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                                if (FindAnyInputLink(currentNodeId, DataMathInputSocketId(inputIndex))) {
+                                    hasAverageInput = true;
+                                    break;
+                                }
+                            }
+                            return finish(hasAverageInput);
+                        }
+                        if (node->dataMathMode == DataMathMode::ImageAverage) {
+                            return finish(false);
+                        }
+                    }
+                    bool hasInput = false;
+                    bool allScalar = true;
+                    for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                        const Link* input = FindAnyInputLink(currentNodeId, DataMathInputSocketId(inputIndex));
+                        if (!input) {
+                            continue;
+                        }
+                        hasInput = true;
+                        allScalar = allScalar && resolve(input->fromNodeId, input->fromSocketId);
+                    }
+                    if (node->kind == NodeKind::DataMath) {
+                        if (const Link* baseInput = FindAnyInputLink(currentNodeId, kDataMathBaseInputSocketId)) {
+                            allScalar = allScalar && resolve(baseInput->fromNodeId, baseInput->fromSocketId);
+                        }
+                        if (const Link* maskInput = FindAnyInputLink(currentNodeId, kMaskInputSocketId)) {
+                            allScalar = allScalar && resolve(maskInput->fromNodeId, maskInput->fromSocketId);
+                        }
+                    }
+                    return finish(hasInput && allScalar);
                 }
                 break;
             case NodeKind::ChannelSplit:
@@ -748,6 +949,7 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
         switch (node->kind) {
             case NodeKind::Image:
             case NodeKind::RawSource:
+            case NodeKind::RawDevelopment:
             case NodeKind::ImageGenerator:
             case NodeKind::MaskGenerator:
             case NodeKind::CustomMask:
@@ -791,27 +993,45 @@ int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId)
                 const Link* upstream = FindInputLink(currentNodeId, preferredSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
+            case NodeKind::Mfsr: {
+                std::string preferredSocketId = kMfsrReferenceInputSocketId;
+                if (IsMfsrInputSocketId(currentSocketId)) {
+                    preferredSocketId = currentSocketId;
+                }
+                const Link* upstream = FindInputLink(currentNodeId, preferredSocketId);
+                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
+            }
             case NodeKind::RawDetailAutoMask: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
                 return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
             }
             case NodeKind::Mix: {
                 const Link* inputA = FindInputLink(currentNodeId, kMixInputASocketId);
-                if (inputA) {
-                    const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
-                    if (sourceId > 0) return sourceId;
-                }
                 const Link* inputB = FindInputLink(currentNodeId, kMixInputBSocketId);
-                return inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
+                const int sourceA = inputA ? resolve(inputA->fromNodeId, inputA->fromSocketId) : -1;
+                const int sourceB = inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
+                auto isGeneratedReference = [&](const int sourceId) {
+                    const Node* source = FindNode(sourceId);
+                    return source &&
+                        (source->kind == NodeKind::ImageGenerator ||
+                         source->kind == NodeKind::MaskGenerator ||
+                         source->kind == NodeKind::CustomMask);
+                };
+                if (sourceA > 0 && sourceB > 0 && isGeneratedReference(sourceA) && !isGeneratedReference(sourceB)) {
+                    return sourceB;
+                }
+                return sourceA > 0 ? sourceA : sourceB;
             }
             case NodeKind::DataMath: {
-                const Link* inputA = FindInputLink(currentNodeId, kMixInputASocketId);
-                if (inputA) {
-                    const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
-                    if (sourceId > 0) return sourceId;
+                for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                    if (const Link* input = FindInputLink(currentNodeId, DataMathInputSocketId(inputIndex))) {
+                        const int sourceId = resolve(input->fromNodeId, input->fromSocketId);
+                        if (sourceId > 0) {
+                            return sourceId;
+                        }
+                    }
                 }
-                const Link* inputB = FindInputLink(currentNodeId, kMixInputBSocketId);
-                return inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
+                return -1;
             }
             case NodeKind::ChannelSplit: {
                 const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
@@ -869,9 +1089,11 @@ int Graph::ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const {
 void Graph::ConnectImageToOutput(int nodeId) {
     const Node* node = FindNode(nodeId);
     if (!node || (node->kind != NodeKind::Image &&
+                  node->kind != NodeKind::RawDevelopment &&
                   node->kind != NodeKind::RawDecode &&
                   node->kind != NodeKind::RawDevelop &&
                   node->kind != NodeKind::RawDetailFusion &&
+                  node->kind != NodeKind::Mfsr &&
                   node->kind != NodeKind::HdrMerge &&
                   node->kind != NodeKind::Lut)) {
         return;

@@ -9,6 +9,8 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <functional>
+#include <string>
 
 namespace {
 
@@ -23,6 +25,25 @@ struct AffineTransform2D {
 
 float Clamp01(const float value) {
     return std::clamp(value, 0.0f, 1.0f);
+}
+
+ImVec2 CompositeBaseSize(const EditorModule::CompositeSceneItem& item) {
+    if (item.isScalable && item.keepFullRasterFrame) {
+        return ImVec2(256.0f, 256.0f);
+    }
+
+    const float width = static_cast<float>(std::max(1, item.textureWidth > 0 ? item.textureWidth : item.requestedRasterWidth));
+    const float height = static_cast<float>(std::max(1, item.textureHeight > 0 ? item.textureHeight : item.requestedRasterHeight));
+    return ImVec2(width, height);
+}
+
+template <typename T>
+std::size_t HashValue(const T& value) {
+    return std::hash<T>{}(value);
+}
+
+void HashCombine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
 }
 
 bool IsValidRect(const EditorModule::CompositeFloatRect& rect) {
@@ -47,8 +68,9 @@ EditorModule::CompositeFloatRect MakeNormalizedRect(const float x1, const float 
 }
 
 AffineTransform2D BuildSceneTransform(const EditorModule::CompositeSceneItem& item) {
-    const float baseWidth = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureWidth));
-    const float baseHeight = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureHeight));
+    const ImVec2 baseSize = CompositeBaseSize(item);
+    const float baseWidth = baseSize.x;
+    const float baseHeight = baseSize.y;
     const float width = baseWidth * std::max(0.0001f, item.scale.x);
     const float height = baseHeight * std::max(0.0001f, item.scale.y);
     const float cosR = std::cos(item.rotation);
@@ -88,8 +110,9 @@ ImVec2 TransformPoint(const AffineTransform2D& matrix, const ImVec2& point) {
 
 std::array<ImVec2, 4> ComputeSceneQuadWorld(const EditorModule::CompositeSceneItem& item) {
     const AffineTransform2D transform = BuildSceneTransform(item);
-    const float width = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureWidth));
-    const float height = item.isScalable ? 256.0f : std::max(1.0f, static_cast<float>(item.textureHeight));
+    const ImVec2 baseSize = CompositeBaseSize(item);
+    const float width = baseSize.x;
+    const float height = baseSize.y;
     return {
         TransformPoint(transform, ImVec2(0.0f, 0.0f)),
         TransformPoint(transform, ImVec2(width, 0.0f)),
@@ -229,6 +252,133 @@ void RememberCompositeSnapDefaults(EditorModule::CompositeSnapSettings& settings
 
 } // namespace
 
+std::size_t EditorModule::BuildCompositeChainFingerprint(const EditorNodeGraph::CompletedChainInfo& chain) const {
+    std::size_t fingerprint = HashValue(chain.outputNodeId);
+    HashCombine(fingerprint, HashValue(chain.terminalNodeId));
+    HashCombine(fingerprint, HashValue(chain.sourceNodeId));
+    for (int nodeId : chain.nodeIds) {
+        HashCombine(fingerprint, HashValue(nodeId));
+        const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+        if (!node) {
+            continue;
+        }
+        HashCombine(fingerprint, HashValue(static_cast<int>(node->kind)));
+        switch (node->kind) {
+            case EditorNodeGraph::NodeKind::Image:
+                HashCombine(fingerprint, HashValue(node->image.width));
+                HashCombine(fingerprint, HashValue(node->image.height));
+                HashCombine(fingerprint, HashValue(node->image.channels));
+                HashCombine(fingerprint, HashValue(node->title));
+                break;
+            case EditorNodeGraph::NodeKind::Layer:
+                if (node->layerIndex >= 0 && node->layerIndex < static_cast<int>(m_Layers.size()) && m_Layers[node->layerIndex]) {
+                    HashCombine(fingerprint, HashValue(m_Layers[node->layerIndex]->Serialize().dump()));
+                }
+                break;
+            case EditorNodeGraph::NodeKind::Mix:
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->mixBlendMode)));
+                HashCombine(fingerprint, HashValue(node->mixFactor));
+                break;
+            case EditorNodeGraph::NodeKind::DataMath:
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->dataMathMode)));
+                HashCombine(fingerprint, HashValue(node->dataMathSettings.constantA));
+                HashCombine(fingerprint, HashValue(node->dataMathSettings.constantB));
+                HashCombine(fingerprint, HashValue(node->dataMathSettings.minValue));
+                HashCombine(fingerprint, HashValue(node->dataMathSettings.maxValue));
+                HashCombine(fingerprint, HashValue(node->dataMathSettings.outMin));
+                HashCombine(fingerprint, HashValue(node->dataMathSettings.outMax));
+                break;
+            case EditorNodeGraph::NodeKind::HdrMerge:
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->hdrMerge.settings.debugView)));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->hdrMerge.settings.alignmentMode)));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->hdrMerge.settings.exposureMode)));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->hdrMerge.settings.referenceMode)));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->hdrMerge.settings.deghostMode)));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->hdrMerge.settings.motionPriority)));
+                for (float ev : node->hdrMerge.settings.manualExposureEv) {
+                    HashCombine(fingerprint, HashValue(ev));
+                }
+                for (float ev : node->hdrMerge.settings.exposureOffsetEv) {
+                    HashCombine(fingerprint, HashValue(ev));
+                }
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.autoReliability));
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.clipThreshold));
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.clipFeather));
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.blackThreshold));
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.blackFeather));
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.readNoise));
+                HashCombine(fingerprint, HashValue(node->hdrMerge.settings.noiseAware));
+                break;
+            case EditorNodeGraph::NodeKind::Mfsr:
+                HashCombine(fingerprint, HashValue(node->mfsr.settings.schemaVersion));
+                HashCombine(fingerprint, HashValue(node->mfsr.settings.algorithmVersion));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->mfsr.settings.scalePreset)));
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->mfsr.settings.qualityPreset)));
+                HashCombine(fingerprint, HashValue(node->mfsr.settings.preferRawMosaicPath));
+                HashCombine(fingerprint, HashValue(node->mfsr.settings.maxInputFrames));
+                HashCombine(fingerprint, HashValue(node->mfsr.hasPlaceholderCachedOutput));
+                HashCombine(fingerprint, HashValue(node->mfsr.placeholderStatus));
+                HashCombine(fingerprint, HashValue(node->mfsr.errorMessage));
+                break;
+            case EditorNodeGraph::NodeKind::ImageGenerator:
+                HashCombine(fingerprint, HashValue(static_cast<int>(node->imageGeneratorKind)));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.angle));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.offset));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.text));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.fontSize));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.textBackdropBlur));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.textBackdropOpacity));
+                HashCombine(fingerprint, HashValue(node->imageGeneratorSettings.textBackdropPadding));
+                for (float channel : node->imageGeneratorSettings.colorA) {
+                    HashCombine(fingerprint, HashValue(channel));
+                }
+                for (float channel : node->imageGeneratorSettings.colorB) {
+                    HashCombine(fingerprint, HashValue(channel));
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return fingerprint;
+}
+
+std::string EditorModule::BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const {
+    if (chain.outputNodeId <= 0) {
+        return "Output";
+    }
+
+    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chain.sourceNodeId);
+    const EditorNodeGraph::Node* outputNode = m_NodeGraph.FindNode(chain.outputNodeId);
+    const std::string sourceLabel = sourceNode && !sourceNode->title.empty()
+        ? sourceNode->title
+        : ("Source " + std::to_string(chain.sourceNodeId));
+    const std::string outputLabel = outputNode && !outputNode->title.empty()
+        ? outputNode->title
+        : ("Output " + std::to_string(chain.outputNodeId));
+    return sourceLabel + " -> " + outputLabel;
+}
+
+std::string EditorModule::BuildCompositeChainLabel(int outputNodeId) const {
+    RefreshCompletedChainCacheIfNeeded();
+    auto chainIt = std::find_if(
+        m_CachedCompletedChains.begin(),
+        m_CachedCompletedChains.end(),
+        [outputNodeId](const CachedCompositeChainState& chain) { return chain.info.outputNodeId == outputNodeId; });
+    if (chainIt == m_CachedCompletedChains.end()) {
+        return "Output " + std::to_string(outputNodeId);
+    }
+    return chainIt->label.empty() ? BuildCompositeChainLabel(chainIt->info) : chainIt->label;
+}
+
+bool EditorModule::HasCompositeNode() const {
+    return false;
+}
+
+void EditorModule::EnsureCompositeNode() {
+    // Deprecated: settings have been fully migrated to the unified editor settings panel.
+}
+
 EditorModule::CompositeSceneItem* EditorModule::FindCompositeSceneItem(int outputNodeId) {
     auto it = std::find_if(
         m_CompositeSceneItems.begin(),
@@ -280,7 +430,6 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
 }
 
 bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition) {
-    const int completedBefore = GetCompletedChainCount();
     if (!AddRawSourceNodeFromFile(path, sourcePosition)) {
         return false;
     }
@@ -297,28 +446,9 @@ bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeG
         LoadSourceFromPixels(transparentPixels.data(), width, height, 4);
     }
 
-    AddRawDevelopNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + 250.0f, sourcePosition.y });
-    const int developNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + 500.0f, sourcePosition.y });
-    const int viewNodeId = m_NodeGraph.GetSelectedNodeId();
-    EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 750.0f, sourcePosition.y });
-    if (developNodeId <= 0 || viewNodeId <= 0 || !outputNode) {
+    if (!AddFullRawTreeToSource(sourceNodeId)) {
         return false;
     }
-    const int outputNodeId = outputNode->id;
-
-    std::string errorMessage;
-    if (!ConnectGraphSockets(sourceNodeId, EditorNodeGraph::kRawOutputSocketId, developNodeId, EditorNodeGraph::kRawInputSocketId, &errorMessage) ||
-        !ConnectGraphSockets(developNodeId, EditorNodeGraph::kImageOutputSocketId, viewNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) ||
-        !ConnectGraphSockets(viewNodeId, EditorNodeGraph::kImageOutputSocketId, outputNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage)) {
-        return false;
-    }
-    if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
-        EnsureCompositeNode();
-    }
-    EnsureCompositeSceneState(m_LastCompositeCanvasSize);
-    MoveCompositeOutputToFront(outputNodeId);
-    m_CompositeSelectedOutputNodeId = outputNodeId;
     MarkNodeBrowserThumbnailSourceChanged();
     return true;
 }
@@ -1012,6 +1142,7 @@ void EditorModule::SyncCompositeSceneItems(const ImVec2& canvasSize) {
         }
 
         item.isScalable = CompletedChainSourceUsesScalableGenerator(outputNodeId);
+        item.keepFullRasterFrame = CompletedChainSourceKeepsFullRasterFrame(outputNodeId);
 
         const auto chainIt = std::find_if(
             m_CachedCompletedChains.begin(),
@@ -1032,8 +1163,9 @@ void EditorModule::SyncCompositeSceneItems(const ImVec2& canvasSize) {
             const float visibleWorldH = canvasSize.y / std::max(0.001f, m_CompositeViewZoom);
             const float targetW = visibleWorldW * 0.42f;
             const float targetH = visibleWorldH * 0.42f;
-            const float baseW = item.isScalable ? 256.0f : static_cast<float>(item.textureWidth);
-            const float baseH = item.isScalable ? 256.0f : static_cast<float>(item.textureHeight);
+            const ImVec2 baseSize = CompositeBaseSize(item);
+            const float baseW = baseSize.x;
+            const float baseH = baseSize.y;
             const float fitScale = std::clamp(
                 std::min(targetW / baseW, targetH / baseH),
                 0.1f,

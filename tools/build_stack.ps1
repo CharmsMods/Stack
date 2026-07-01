@@ -28,7 +28,18 @@ if (-not $cmake) {
 }
 
 Write-Host "Configuring Stack in: $BuildDir"
-& $cmake -S $Root -B $BuildDir
+$configureArgs = @(
+    "-S", $Root,
+    "-B", $BuildDir,
+    "-DSTACK_ENABLE_APPWINDOW_TITLEBAR=ON"
+)
+
+$localAppSdkRoot = Join-Path $Root "_workspace\deps\Microsoft.WindowsAppSDK\2.2.0"
+if (Test-Path -LiteralPath $localAppSdkRoot) {
+    $configureArgs += "-DSTACK_WINDOWS_APP_SDK_ROOT=$localAppSdkRoot"
+}
+
+& $cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

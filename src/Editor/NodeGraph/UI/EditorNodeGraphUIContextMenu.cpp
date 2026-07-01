@@ -1,11 +1,15 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
 #include "Library/LibraryManager.h"
+#include "Persistence/StackBinaryFormat.h"
+#include "Presets/PresetManager.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 namespace {
 
@@ -35,12 +39,29 @@ std::string DefaultProjectExportFileName(const EditorModule* editor) {
     return "project.stack";
 }
 
+std::string DefaultPresetName(const EditorModule* editor) {
+    if (!editor) {
+        return "Node Preset";
+    }
+    const auto& selected = editor->GetNodeGraph().GetSelectedNodeIds();
+    if (selected.size() == 1) {
+        if (const EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(selected.front())) {
+            return node->title.empty() ? "Node Preset" : node->title + " Preset";
+        }
+    }
+    return std::to_string(selected.size()) + " Node Preset";
+}
+
 } // namespace
 
 void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
     if (m_OpenRenameProjectPopup) {
         ImGui::OpenPopup("Rename Project##EditorNodeGraph");
         m_OpenRenameProjectPopup = false;
+    }
+    if (m_OpenSavePresetPopup) {
+        ImGui::OpenPopup("Save Preset##EditorNodeGraph");
+        m_OpenSavePresetPopup = false;
     }
 
     float popupAlpha = 1.0f;
@@ -72,6 +93,15 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 DuplicateSelectedNodes(editor);
             }
+            if (ImGui::MenuItem("Save As Preset")) {
+                if (!editor->GetNodeGraph().IsNodeSelected(node->id)) {
+                    editor->GetNodeGraph().SelectNode(node->id, false);
+                }
+                const std::string defaultName = DefaultPresetName(editor);
+                strncpy_s(m_SavePresetNameBuffer, defaultName.c_str(), sizeof(m_SavePresetNameBuffer) - 1);
+                m_SavePresetNameBuffer[sizeof(m_SavePresetNameBuffer) - 1] = '\0';
+                m_OpenSavePresetPopup = true;
+            }
             if (node->kind == EditorNodeGraph::NodeKind::Image) {
                 if (ImGui::BeginMenu("Rotate")) {
                     if (ImGui::MenuItem("90 CW")) {
@@ -86,17 +116,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     ImGui::EndMenu();
                 }
             }
-            const bool hasAdvancedEditor =
-                (node->kind == EditorNodeGraph::NodeKind::RawSource ||
-                 node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-                 node->kind == EditorNodeGraph::NodeKind::RawDecode ||
-                 node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-                 node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-                 node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-                 node->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-                 node->kind == EditorNodeGraph::NodeKind::Lut ||
-                 node->kind == EditorNodeGraph::NodeKind::Layer) &&
-                editor->GetNodeSurfaceSpec(node->id).presentation == NodeSurfacePresentation::RichExpandedSurface;
+            const bool hasAdvancedEditor = editor->NodeHasDedicatedComplexEditor(node->id);
             if (hasAdvancedEditor) {
                 if (ImGui::MenuItem("Open Advanced Editor")) {
                     editor->SwitchToComplexNodeSubWindow(node->id);
@@ -135,8 +155,22 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
             }
             if (node->kind == EditorNodeGraph::NodeKind::RawSource) {
-                if (ImGui::MenuItem("Add Full Tree")) {
+                if (ImGui::MenuItem("Add Manual RAW Chain")) {
                     editor->AddFullRawTreeToSource(node->id);
+                }
+            }
+            if (node->kind == EditorNodeGraph::NodeKind::RawDevelopment) {
+                if (ImGui::MenuItem("Edit In RAW Tab")) {
+                    const std::string sourceKey = !node->rawDevelopment.recipe.source.relativePathKey.empty()
+                        ? node->rawDevelopment.recipe.source.relativePathKey
+                        : node->rawDevelopment.recipe.source.sourcePath;
+                    if (!sourceKey.empty()) {
+                        editor->SelectRawWorkspaceSourceForPreview(sourceKey);
+                    }
+                    editor->RequestOpenRawWorkspaceTab();
+                }
+                if (ImGui::MenuItem("Decompose To Nodes")) {
+                    editor->DecomposeActiveRawWorkspaceProjectToManagedGraph();
                 }
             }
         }
@@ -183,7 +217,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 const std::string projectName = editor->GetCurrentProjectName().empty()
                     ? "New Project"
                     : editor->GetCurrentProjectName();
-                LibraryManager::Get().RequestSaveProject(projectName, editor, editor->GetCurrentProjectFileName());
+                editor->RequestSaveCurrentProject(projectName);
             }
             ImGui::EndDisabled();
 
@@ -202,7 +236,8 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
 
         if (ImGui::BeginMenu("Add")) {
             if (ImGui::MenuItem("Add Image")) {
-                editor->PromptAddImageNodeAt(m_ContextGraphPos);
+                editor->RequestPromptAddImageNodeAt(m_ContextGraphPos);
+                ImGui::CloseCurrentPopup();
             }
             if (ImGui::MenuItem("Add Output")) {
                 editor->AddOutputNodeAt(m_ContextGraphPos);
@@ -304,6 +339,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::MenuItem("Average Images")) {
+                editor->AddDataMathNodeAt(EditorNodeGraph::DataMathMode::ImageAverage, m_ContextGraphPos);
+            }
             if (ImGui::BeginMenu("Generator")) {
                 if (ImGui::MenuItem("Luminance Mask")) {
                     editor->AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind::Luminance, m_ContextGraphPos);
@@ -334,6 +372,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 if (ImGui::MenuItem("HDR Merge")) {
                     editor->AddHdrMergeNodeAt(m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("MFSR")) {
+                    editor->AddMfsrNodeAt(m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }
@@ -366,8 +407,17 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         }
 
         if (ImGui::BeginMenu("Graph")) {
+            const bool hasSelection = !editor->GetNodeGraph().GetSelectedNodeIds().empty();
+            ImGui::BeginDisabled(!hasSelection);
+            if (ImGui::MenuItem("Save Selection As Preset")) {
+                const std::string defaultName = DefaultPresetName(editor);
+                strncpy_s(m_SavePresetNameBuffer, defaultName.c_str(), sizeof(m_SavePresetNameBuffer) - 1);
+                m_SavePresetNameBuffer[sizeof(m_SavePresetNameBuffer) - 1] = '\0';
+                m_OpenSavePresetPopup = true;
+            }
+            ImGui::EndDisabled();
+
             if (ImGui::BeginMenu("Copy Graph Info")) {
-                const bool hasSelection = !editor->GetNodeGraph().GetSelectedNodeIds().empty();
                 ImGui::BeginDisabled(!hasSelection);
                 if (ImGui::MenuItem("Current Selection / Tree Only")) {
                     CopyGraphInfo(editor, false, false);
@@ -393,12 +443,61 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
 
         ImGui::EndPopup();
     }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Save Preset##EditorNodeGraph", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Preset name");
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(340.0f);
+        ImGui::InputText("##SavePresetName", m_SavePresetNameBuffer, sizeof(m_SavePresetNameBuffer));
+        ImGui::Spacing();
+
+        const bool canSave = editor && !editor->GetNodeGraph().GetSelectedNodeIds().empty();
+        ImGui::BeginDisabled(!canSave);
+        if (ImGui::Button("Save Preset", ImVec2(130.0f, 0.0f))) {
+            const auto selectedIds = editor->GetNodeGraph().GetSelectedNodeIds();
+            auto exportResult = EditorNodeGraphSelectionExport::BuildExport(editor, selectedIds, true, false);
+            std::vector<StackBinaryFormat::NodePresetBoundarySocket> boundarySockets;
+            boundarySockets.reserve(exportResult.boundarySockets.size());
+            for (const auto& socket : exportResult.boundarySockets) {
+                StackBinaryFormat::NodePresetBoundarySocket out;
+                out.nodeTitle = socket.nodeTitle;
+                out.socketLabel = socket.socketLabel;
+                out.direction = socket.direction;
+                out.type = socket.type;
+                boundarySockets.push_back(std::move(out));
+            }
+
+            std::string error;
+            if (PresetManager::Get().SaveUserPreset(
+                    m_SavePresetNameBuffer,
+                    exportResult.clipboardPayload.value("payload", nlohmann::json::object()),
+                    {},
+                    boundarySockets,
+                    exportResult.nodeCount,
+                    &error)) {
+                m_StatusMessage = "Preset saved.";
+                editor->SwitchToSubWindow(EditorModule::EditorSubWindow::Presets);
+                ImGui::CloseCurrentPopup();
+            } else {
+                m_StatusMessage = error.empty() ? "Preset save failed." : error;
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
     if (!ImGui::IsPopupOpen("EditorNodeGraphContextMenu")) {
         m_ContextMenuFadeActive = false;
     }
     ImGui::PopStyleVar();
 
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("Rename Project##EditorNodeGraph", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Project name");
@@ -412,7 +511,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             if (newName.empty()) {
                 newName = "Untitled Project";
             }
-            LibraryManager::Get().RequestSaveProject(newName, editor, editor->GetCurrentProjectFileName());
+            editor->RequestSaveCurrentProject(newName);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TaskState.h"
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -19,6 +20,8 @@ public:
 
     void Initialize();
     void Shutdown();
+    void RequestStopDiscardQueued();
+    bool IsDrainedForShutdown() const;
 
     void Submit(Task task);
     void PostToMain(Task task);
@@ -40,6 +43,7 @@ private:
     std::condition_variable m_WorkCv;
     std::queue<Task> m_WorkQueue;
     std::vector<std::thread> m_Workers;
+    std::atomic<std::size_t> m_ActiveWorkers = 0;
 
     std::mutex m_MainMutex;
     std::queue<Task> m_MainQueue;

@@ -2,6 +2,7 @@
 
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Raw/RawAutoBase.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLLoader.h"
 #include <GLFW/glfw3.h>
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <sstream>
 
 namespace {
 
@@ -25,7 +27,37 @@ void ReleaseResultResources(EditorRenderWorker::Result& result) {
         glDeleteTextures(1, &result.outputTexture.texture);
         result.outputTexture.texture = 0;
     }
+    if (result.outputTiles.readyFence) {
+        glDeleteSync(result.outputTiles.readyFence);
+        result.outputTiles.readyFence = nullptr;
+    }
+    for (EditorRenderWorker::SharedTextureTile& tile : result.outputTiles.tiles) {
+        if (tile.texture != 0) {
+            glDeleteTextures(1, &tile.texture);
+            tile.texture = 0;
+        }
+    }
+    result.outputTiles.tiles.clear();
 }
+
+Stack::RawAnalysis::CurrentFrameInputStats ToRawCurrentFrameInputStats(const RenderTextureStats& stats) {
+    Stack::RawAnalysis::CurrentFrameInputStats rawStats;
+    rawStats.valid = stats.valid;
+    rawStats.p001Luma = stats.p001Luma;
+    rawStats.p01Luma = stats.p01Luma;
+    rawStats.p05Luma = stats.p05Luma;
+    rawStats.p50Luma = stats.p50Luma;
+    rawStats.p95Luma = stats.p95Luma;
+    rawStats.p99Luma = stats.p99Luma;
+    rawStats.p999Luma = stats.p999Luma;
+    rawStats.logAverageLuma = stats.logAverageLuma;
+    rawStats.dynamicRangeEv = stats.dynamicRangeEv;
+    rawStats.validPixelPercent = stats.validPixelPercent;
+    rawStats.hdrPixelPercent = stats.hdrPixelPercent;
+    rawStats.displayClipPercent = stats.displayClipPercent;
+    return rawStats;
+}
+
 int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot& snapshot) {
     int steps = 0;
     if (!snapshot.compositeOutputs.empty()) {
@@ -74,6 +106,212 @@ float MillisecondsBetween(
     std::chrono::steady_clock::time_point begin,
     std::chrono::steady_clock::time_point end) {
     return std::chrono::duration<float, std::milli>(end - begin).count();
+}
+
+SharedPixelBuffer CropSharedPixelBuffer(
+    const SharedPixelBuffer& source,
+    int sourceWidth,
+    int sourceHeight,
+    int channels,
+    int x,
+    int y,
+    int width,
+    int height) {
+    const int safeChannels = std::max(1, channels);
+    if (source.empty() || sourceWidth <= 0 || sourceHeight <= 0 || width <= 0 || height <= 0) {
+        return {};
+    }
+    x = std::clamp(x, 0, sourceWidth - 1);
+    y = std::clamp(y, 0, sourceHeight - 1);
+    width = std::clamp(width, 1, sourceWidth - x);
+    height = std::clamp(height, 1, sourceHeight - y);
+    const std::size_t expectedSize =
+        static_cast<std::size_t>(sourceWidth) *
+        static_cast<std::size_t>(sourceHeight) *
+        static_cast<std::size_t>(safeChannels);
+    if (source.size() < expectedSize) {
+        return {};
+    }
+
+    std::vector<unsigned char> cropped(
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) *
+        static_cast<std::size_t>(safeChannels),
+        0);
+    const unsigned char* sourceData = source.data();
+    for (int row = 0; row < height; ++row) {
+        const std::size_t srcOffset =
+            (static_cast<std::size_t>(y + row) * static_cast<std::size_t>(sourceWidth) +
+             static_cast<std::size_t>(x)) *
+            static_cast<std::size_t>(safeChannels);
+        const std::size_t dstOffset =
+            static_cast<std::size_t>(row) *
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(safeChannels);
+        std::copy_n(
+            sourceData + srcOffset,
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(safeChannels),
+            cropped.data() + dstOffset);
+    }
+    return MakeSharedPixelBufferOwned(std::move(cropped));
+}
+
+void FlipRgbaRowsInPlace(std::vector<unsigned char>& pixels, int width, int height) {
+    if (pixels.empty() || width <= 0 || height <= 1) {
+        return;
+    }
+    const std::size_t rowBytes = static_cast<std::size_t>(width) * 4u;
+    const std::size_t expectedBytes = rowBytes * static_cast<std::size_t>(height);
+    if (pixels.size() < expectedBytes) {
+        return;
+    }
+
+    std::vector<unsigned char> tempRow(rowBytes);
+    for (int y = 0; y < height / 2; ++y) {
+        unsigned char* top = pixels.data() + static_cast<std::size_t>(y) * rowBytes;
+        unsigned char* bottom = pixels.data() + static_cast<std::size_t>(height - 1 - y) * rowBytes;
+        std::copy_n(top, rowBytes, tempRow.data());
+        std::copy_n(bottom, rowBytes, top);
+        std::copy_n(tempRow.data(), rowBytes, bottom);
+    }
+}
+
+bool CaptureMainOutputPixelsForUiUpload(RenderPipeline& pipeline, EditorRenderWorker::Result& result) {
+    result.pixels = pipeline.GetOutputPixels(result.width, result.height);
+    if (result.pixels.empty() || result.width <= 0 || result.height <= 0) {
+        result.pixels.clear();
+        result.width = 0;
+        result.height = 0;
+        return false;
+    }
+
+    // GetOutputPixels returns top-left row order for file/export consumers. The
+    // viewport upload path expects the same bottom-left row order as GL output.
+    FlipRgbaRowsInPlace(result.pixels, result.width, result.height);
+    return true;
+}
+
+void CaptureRawWorkspaceLocalRangeOverlay(RenderPipeline& pipeline, EditorRenderWorker::Result& result) {
+    result.rawWorkspace.localRangeOverlayPixels.clear();
+    result.rawWorkspace.localRangeOverlayWidth = 0;
+    result.rawWorkspace.localRangeOverlayHeight = 0;
+    if (result.rawWorkspace.sourceKey.empty() ||
+        result.rawWorkspace.localRangeOverlayMode.empty() ||
+        result.rawWorkspace.localRangeOverlayMode == "none") {
+        return;
+    }
+
+    result.rawWorkspace.localRangeOverlayPixels =
+        pipeline.GetRawDevelopmentLocalRangeOverlayPixels(
+            result.rawWorkspace.localRangeOverlayWidth,
+            result.rawWorkspace.localRangeOverlayHeight);
+    if (result.rawWorkspace.localRangeOverlayPixels.empty() ||
+        result.rawWorkspace.localRangeOverlayWidth <= 0 ||
+        result.rawWorkspace.localRangeOverlayHeight <= 0) {
+        result.rawWorkspace.localRangeOverlayPixels.clear();
+        result.rawWorkspace.localRangeOverlayWidth = 0;
+        result.rawWorkspace.localRangeOverlayHeight = 0;
+        return;
+    }
+    FlipRgbaRowsInPlace(
+        result.rawWorkspace.localRangeOverlayPixels,
+        result.rawWorkspace.localRangeOverlayWidth,
+        result.rawWorkspace.localRangeOverlayHeight);
+}
+
+void CaptureRawWorkspaceLocalRangeTargetSample(RenderPipeline& pipeline, EditorRenderWorker::Result& result) {
+    result.rawWorkspace.localRangeTargetSample.valid = false;
+    result.rawWorkspace.localRangeTargetSample.sceneEv = 0.0f;
+    result.rawWorkspace.localRangeTargetSample.sceneLuma = 0.0f;
+    result.rawWorkspace.localRangeTargetSample.sceneR = 0.0f;
+    result.rawWorkspace.localRangeTargetSample.sceneG = 0.0f;
+    result.rawWorkspace.localRangeTargetSample.sceneB = 0.0f;
+    result.rawWorkspace.localRangeTargetSample.u = 0.0f;
+    result.rawWorkspace.localRangeTargetSample.v = 0.0f;
+    if (result.rawWorkspace.sourceKey.empty()) {
+        return;
+    }
+
+    float sceneEv = 0.0f;
+    float sceneLuma = 0.0f;
+    float sampleU = 0.0f;
+    float sampleV = 0.0f;
+    std::array<float, 3> sceneRgb = { 0.0f, 0.0f, 0.0f };
+    if (!pipeline.GetRawDevelopmentLocalRangeTargetSample(sceneEv, sceneLuma, sampleU, sampleV, &sceneRgb)) {
+        return;
+    }
+
+    result.rawWorkspace.localRangeTargetSample.valid = true;
+    result.rawWorkspace.localRangeTargetSample.sceneEv = sceneEv;
+    result.rawWorkspace.localRangeTargetSample.sceneLuma = sceneLuma;
+    result.rawWorkspace.localRangeTargetSample.sceneR = sceneRgb[0];
+    result.rawWorkspace.localRangeTargetSample.sceneG = sceneRgb[1];
+    result.rawWorkspace.localRangeTargetSample.sceneB = sceneRgb[2];
+    result.rawWorkspace.localRangeTargetSample.u = sampleU;
+    result.rawWorkspace.localRangeTargetSample.v = sampleV;
+}
+
+void CaptureRawWorkspaceViewTransformInputStats(RenderPipeline& pipeline, EditorRenderWorker::Result& result) {
+    if (result.rawWorkspace.sourceKey.empty()) {
+        result.rawWorkspace.viewTransformInputStats = {};
+        result.rawWorkspace.analysis =
+            Stack::RawAnalysis::BuildUnavailableAnalysis({}, "No RAW workspace source is active.");
+        return;
+    }
+    result.rawWorkspace.viewTransformInputStats = pipeline.GetRawDevelopmentViewTransformInputStats();
+    result.rawWorkspace.analysis =
+        Stack::RawAnalysis::BuildCurrentFrameAnalysisFromCurrentFrameStats(
+            ToRawCurrentFrameInputStats(result.rawWorkspace.viewTransformInputStats),
+            result.rawWorkspace.sourceKey);
+}
+
+void CaptureRawWorkspaceAutoBaseRecommendations(
+    RenderPipeline& pipeline,
+    const EditorRenderWorker::Snapshot& snapshot,
+    EditorRenderWorker::Result& result) {
+    result.rawWorkspace.recommendations = Stack::RawAutoBase::AutoBaseRecommendations();
+    if (result.rawWorkspace.sourceKey.empty() ||
+        !snapshot.rawWorkspace.hasRecipe ||
+        !result.rawWorkspace.analysis.currentFrameStats.valid) {
+        return;
+    }
+
+    const Stack::RawAutoBase::LocalSuggestionAnalysisImage& localImage =
+        pipeline.GetRawDevelopmentLocalSuggestionImage();
+    result.rawWorkspace.recommendations =
+        Stack::RawAutoBase::BuildAutoBaseRecommendations(
+            result.rawWorkspace.analysis,
+            snapshot.rawWorkspace.recipe,
+            nullptr,
+            &localImage);
+}
+
+RenderGraphSnapshot BuildTileGraphSnapshot(
+    const RenderGraphSnapshot& graph,
+    int fullWidth,
+    int fullHeight,
+    const RenderTileRect& tile) {
+    RenderGraphSnapshot tileGraph = graph;
+    for (RenderGraphNode& node : tileGraph.nodes) {
+        if (node.kind != RenderGraphNodeKind::Image ||
+            node.image.pixels.empty() ||
+            node.image.width != fullWidth ||
+            node.image.height != fullHeight) {
+            continue;
+        }
+        node.image.pixels = CropSharedPixelBuffer(
+            node.image.pixels,
+            node.image.width,
+            node.image.height,
+            node.image.channels,
+            tile.haloX,
+            tile.haloY,
+            tile.haloWidth,
+            tile.haloHeight);
+        node.image.width = tile.haloWidth;
+        node.image.height = tile.haloHeight;
+    }
+    return tileGraph;
 }
 
 float DevelopRiskAbove(float value, float safeValue, float fullRiskValue) {
@@ -1052,8 +1290,22 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
         return true;
     }
 
+    glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     m_WorkerWindow = glfwCreateWindow(16, 16, "Stack Editor Render Worker", nullptr, sharedWindow);
+    glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
     if (!m_WorkerWindow) {
         return false;
     }
@@ -1062,6 +1314,7 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_StopRequested = false;
         m_HasPending = false;
+        m_InvalidBeforeGeneration = 0;
         m_InitComplete = false;
         m_InitSucceeded = false;
         m_InitError.clear();
@@ -1096,12 +1349,17 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
     return false;
 }
 
-void EditorRenderWorker::Shutdown() {
+void EditorRenderWorker::RequestStopForShutdown() {
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_StopRequested = true;
+        m_HasPending = false;
     }
     m_Cv.notify_all();
+}
+
+void EditorRenderWorker::Shutdown() {
+    RequestStopForShutdown();
     if (m_Thread.joinable()) {
         m_Thread.join();
     }
@@ -1111,10 +1369,30 @@ void EditorRenderWorker::Shutdown() {
     }
 }
 
+bool EditorRenderWorker::HasPendingOrBusyForShutdown() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_HasPending || m_Busy.load();
+}
+
+void EditorRenderWorker::InvalidateSnapshotsBefore(std::uint64_t generation) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_InvalidBeforeGeneration = std::max(m_InvalidBeforeGeneration, generation);
+    if (m_HasPending && m_Pending.generation < m_InvalidBeforeGeneration) {
+        m_HasPending = false;
+        m_Pending = {};
+    }
+    if (m_Busy.load()) {
+        m_ProgressLabel = "Cancelling stale render...";
+    }
+}
+
 void EditorRenderWorker::Submit(Snapshot snapshot) {
     const int progressTotal = EstimateRenderProgressStepCount(snapshot);
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
+        if (snapshot.generation < m_InvalidBeforeGeneration) {
+            return;
+        }
         const bool replacingInFlightWork = m_Busy.load() || m_HasPending;
         m_Pending = std::move(snapshot);
         m_HasPending = true;
@@ -1186,7 +1464,8 @@ bool EditorRenderWorker::ShouldAbortStaleSnapshot(std::uint64_t currentGeneratio
         currentGeneration,
         m_StopRequested,
         m_HasPending,
-        m_Pending.generation);
+        m_Pending.generation) ||
+        currentGeneration < m_InvalidBeforeGeneration;
 }
 
 void EditorRenderWorker::ThreadMain() {
@@ -1235,6 +1514,15 @@ void EditorRenderWorker::ThreadMain() {
             m_HasPending = false;
             m_Busy = true;
         }
+        if (ShouldAbortStaleSnapshot(snapshot.generation)) {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_Busy = m_HasPending;
+            if (!m_Busy.load()) {
+                m_ProgressCompletedSteps = m_ProgressTotalSteps;
+                m_ProgressLabel = "Stale render cancelled.";
+            }
+            continue;
+        }
         SetProgress(0, EstimateRenderProgressStepCount(snapshot), "Starting render...");
 
         Result result = RenderSnapshot(snapshot);
@@ -1274,6 +1562,11 @@ void EditorRenderWorker::ThreadMain() {
 EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& snapshot) {
     Result result;
     result.generation = snapshot.generation;
+    result.previewMaxDimension = snapshot.previewMaxDimension;
+    result.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
+    result.rawWorkspace.localRangeOverlayMode = snapshot.rawWorkspace.localRangeOverlayMode;
+    result.rawWorkspace.localRangeTargetSample.u = snapshot.rawWorkspace.localRangeTargetSampleU;
+    result.rawWorkspace.localRangeTargetSample.v = snapshot.rawWorkspace.localRangeTargetSampleV;
 
     try {
         if (!m_PersistentPipeline) {
@@ -1519,6 +1812,123 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         loadSourceBuffer(snapshot.sourcePixels, snapshot.width, snapshot.height, snapshot.channels);
 
         if (!snapshot.graph.nodes.empty()) {
+            GLint maxTextureSize = 0;
+            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
+            const ViewportTilingSettings tilingSettings =
+                RenderTiling::NormalizeSettings(snapshot.viewportTiling, maxTextureSize);
+            std::string tileSafetyReason;
+            const bool rawWorkspaceMainOutput = !snapshot.rawWorkspace.sourceKey.empty();
+            const bool canTileGraph =
+                !rawWorkspaceMainOutput &&
+                RenderTiling::ShouldUseTiling(tilingSettings, snapshot.width, snapshot.height, maxTextureSize) &&
+                RenderTiling::IsGraphTileSafe(snapshot.graph, snapshot.width, snapshot.height, &tileSafetyReason);
+            if (canTileGraph) {
+                std::vector<RenderTileRect> tiles =
+                    RenderTiling::PlanTiles(snapshot.width, snapshot.height, tilingSettings);
+                if (!tiles.empty()) {
+                    reportProgress("Rendering tiled main output...");
+                    const auto mainRenderBegin = std::chrono::steady_clock::now();
+                    result.outputTiles.fullWidth = snapshot.width;
+                    result.outputTiles.fullHeight = snapshot.height;
+                    result.outputTiles.tiled = true;
+                    result.outputTiles.debugOverlay = tilingSettings.debugOverlay;
+                    result.outputTiles.tiles.reserve(tiles.size());
+                    int tileIndex = 0;
+                    auto releasePartialTiles = [&]() {
+                        for (SharedTextureTile& partialTile : result.outputTiles.tiles) {
+                            if (partialTile.texture != 0) {
+                                glDeleteTextures(1, &partialTile.texture);
+                                partialTile.texture = 0;
+                            }
+                        }
+                        result.outputTiles.tiles.clear();
+                        result.outputTiles.complete = false;
+                        result.outputTiles.readyFence = nullptr;
+                    };
+                    for (const RenderTileRect& tile : tiles) {
+                        if (shouldAbortStaleWork()) {
+                            reportSupersededWork();
+                            result.error = "Render superseded by a newer snapshot.";
+                            releasePartialTiles();
+                            return result;
+                        }
+                        reportProgress(
+                            "Rendering tile " +
+                            std::to_string(tileIndex + 1) +
+                            "/" +
+                            std::to_string(static_cast<int>(tiles.size())) +
+                            "...");
+                        SharedPixelBuffer tileSource;
+                        if (!snapshot.sourcePixels.empty()) {
+                            tileSource = CropSharedPixelBuffer(
+                                snapshot.sourcePixels,
+                                snapshot.width,
+                                snapshot.height,
+                                snapshot.channels,
+                                tile.haloX,
+                                tile.haloY,
+                                tile.haloWidth,
+                                tile.haloHeight);
+                            if (tileSource.empty()) {
+                                result.error = "Failed to crop source tile.";
+                                break;
+                            }
+                        }
+                        loadSourceBuffer(tileSource, tile.haloWidth, tile.haloHeight, snapshot.channels);
+                        RenderGraphSnapshot tileGraph =
+                            BuildTileGraphSnapshot(snapshot.graph, snapshot.width, snapshot.height, tile);
+                        pipeline.ExecuteGraph(tileGraph);
+                        int tileTextureW = 0;
+                        int tileTextureH = 0;
+                        const unsigned int tileTexture =
+                            pipeline.PublishSharedOutputTexture(tileTextureW, tileTextureH);
+                        if (tileTexture == 0 || tileTextureW <= 0 || tileTextureH <= 0) {
+                            if (tileTexture != 0) {
+                                glDeleteTextures(1, &tileTexture);
+                            }
+                            result.error = "Tiled render produced an empty tile.";
+                            break;
+                        }
+                        SharedTextureTile sharedTile;
+                        sharedTile.texture = tileTexture;
+                        sharedTile.x = tile.x;
+                        sharedTile.y = tile.y;
+                        sharedTile.width = tile.width;
+                        sharedTile.height = tile.height;
+                        sharedTile.haloX = tile.haloX;
+                        sharedTile.haloY = tile.haloY;
+                        sharedTile.haloWidth = tileTextureW;
+                        sharedTile.haloHeight = tileTextureH;
+                        result.outputTiles.tiles.push_back(sharedTile);
+                        ++tileIndex;
+                    }
+                    result.mainRenderMs = MillisecondsBetween(mainRenderBegin, std::chrono::steady_clock::now());
+                    result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
+                    result.outputTiles.complete =
+                        result.outputTiles.tiles.size() == tiles.size() &&
+                        result.error.empty();
+                    result.success = result.outputTiles.complete && !result.outputTiles.tiles.empty();
+                    if (result.success) {
+                        result.outputTiles.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                        glFlush();
+                    } else if (result.error.empty()) {
+                        result.error = "Tiled render failed.";
+                    }
+                    if (!result.success) {
+                        releasePartialTiles();
+                    }
+                    finishProgressStep(result.success ? "Tiled main output rendered." : "Tiled render failed.");
+                    renderDevelopCandidateRequests();
+                    renderPreviewRequests();
+                    return result;
+                }
+            }
+
+            if (shouldAbortStaleWork()) {
+                reportSupersededWork();
+                result.error = "Render superseded by a newer snapshot.";
+                return result;
+            }
             reportProgress("Rendering main output...");
             const auto mainRenderBegin = std::chrono::steady_clock::now();
             pipeline.ExecuteGraph(snapshot.graph);
@@ -1530,12 +1940,22 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 result.error = "Render superseded by a newer snapshot.";
                 return result;
             }
-            result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
-            if (result.outputTexture.texture != 0) {
-                result.outputTexture.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-                glFlush();
+            if (rawWorkspaceMainOutput) {
+                CaptureRawWorkspaceViewTransformInputStats(pipeline, result);
+                CaptureRawWorkspaceAutoBaseRecommendations(pipeline, snapshot, result);
+                result.success = CaptureMainOutputPixelsForUiUpload(pipeline, result);
+                if (result.success) {
+                    CaptureRawWorkspaceLocalRangeTargetSample(pipeline, result);
+                    CaptureRawWorkspaceLocalRangeOverlay(pipeline, result);
+                }
+            } else {
+                result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
+                if (result.outputTexture.texture != 0) {
+                    result.outputTexture.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                    glFlush();
+                }
+                result.success = result.outputTexture.texture != 0;
             }
-            result.success = result.outputTexture.texture != 0;
             if (!result.success) {
                 result.error = "Render produced no pixels.";
             }
@@ -1575,6 +1995,11 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             }
         }
 
+        if (shouldAbortStaleWork()) {
+            reportSupersededWork();
+            result.error = "Render superseded by a newer snapshot.";
+            return result;
+        }
         reportProgress("Rendering layer stack...");
         pipeline.ExecuteMasked(steps, snapshot.masks);
         if (shouldAbortStaleWork()) {
@@ -1582,12 +2007,22 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.error = "Render superseded by a newer snapshot.";
             return result;
         }
-        result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
-        if (result.outputTexture.texture != 0) {
-            result.outputTexture.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-            glFlush();
+        if (!snapshot.rawWorkspace.sourceKey.empty()) {
+            CaptureRawWorkspaceViewTransformInputStats(pipeline, result);
+            CaptureRawWorkspaceAutoBaseRecommendations(pipeline, snapshot, result);
+            result.success = CaptureMainOutputPixelsForUiUpload(pipeline, result);
+            if (result.success) {
+                CaptureRawWorkspaceLocalRangeTargetSample(pipeline, result);
+                CaptureRawWorkspaceLocalRangeOverlay(pipeline, result);
+            }
+        } else {
+            result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
+            if (result.outputTexture.texture != 0) {
+                result.outputTexture.readyFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                glFlush();
+            }
+            result.success = result.outputTexture.texture != 0;
         }
-        result.success = result.outputTexture.texture != 0;
         if (!result.success) {
             result.error = "Render produced no pixels.";
         }
@@ -1596,8 +2031,29 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         renderPreviewRequests();
     } catch (const std::exception& e) {
         result.error = e.what();
+        std::cerr
+            << "[EditorRenderWorker] RenderSnapshot failed"
+            << " generation=" << snapshot.generation
+            << " rawSourceKey=" << snapshot.rawWorkspace.sourceKey
+            << " previewMax=" << snapshot.previewMaxDimension
+            << " outputConnected=" << (snapshot.outputConnected ? 1 : 0)
+            << " graphNodes=" << snapshot.graph.nodes.size()
+            << " previews=" << snapshot.previews.size()
+            << " compositeOutputs=" << snapshot.compositeOutputs.size()
+            << " error=" << result.error
+            << "\n";
     } catch (...) {
         result.error = "Unknown render worker failure.";
+        std::cerr
+            << "[EditorRenderWorker] RenderSnapshot failed"
+            << " generation=" << snapshot.generation
+            << " rawSourceKey=" << snapshot.rawWorkspace.sourceKey
+            << " previewMax=" << snapshot.previewMaxDimension
+            << " outputConnected=" << (snapshot.outputConnected ? 1 : 0)
+            << " graphNodes=" << snapshot.graph.nodes.size()
+            << " previews=" << snapshot.previews.size()
+            << " compositeOutputs=" << snapshot.compositeOutputs.size()
+            << " error=unknown exception\n";
     }
 
     return result;

@@ -1,0 +1,41 @@
+DECISION RULES
+
+Major decisions
+
+Pause and ask before choosing a major project-shaping direction when it is not already defined clearly enough.
+
+Major decisions include architecture direction, renderer model, graphics API, persistence format, dependency strategy, packaging strategy, update behavior, and broad refactors that would shape future work.
+
+Do not stop to ask when the user request, existing repository structure, or established project documentation already answers the question well enough.
+
+Do not ask broad open-ended questions when a targeted question can remove the uncertainty.
+
+Defaults and non-defaults
+
+Treat CMake as the default build system for native desktop projects unless the user says otherwise.
+
+Do not set a default dependency strategy. Dependency choices are project-specific and should be discussed when they matter.
+
+Do not assume default UI style, UX density, visual language, or interaction philosophy across projects. Ask when those choices are relevant and not already defined.
+
+Do not force domain-based organization or technical-layer organization as a universal rule. Reason through the application, scale, ownership boundaries, and future change patterns before choosing the structure.
+
+Abstraction
+
+Do not overbuild abstractions for hypothetical future work.
+
+Do not write code so narrowly that meaningful future expansion would require heavy restructuring for normal growth.
+
+Create structure that supports likely growth, not imaginary frameworks.
+
+Prefer abstractions only when they remove clear duplication, isolate ownership cleanly, or protect a stable boundary that the project actually needs.
+
+Change planning
+
+Before implementing a feature, fix, or refactor, reason through whether the work belongs in an existing file, a new file, a new folder, or a different ownership boundary.
+
+Before broad refactors that affect architecture, persistence, dependencies, shipping direction, or core behavior, stop and confirm the direction unless the project already establishes it clearly.
+
+When a project is too early for shipping concerns, do not drag implementation off course by prematurely building release systems, installers, updater flows, or packaging complexity.
+
+When a project is clearly headed toward shipping, start reasoning about those concerns before the structure hardens in the wrong direction.

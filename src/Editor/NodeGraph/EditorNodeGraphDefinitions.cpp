@@ -74,6 +74,7 @@ const char* DataMathTitle(EditorNodeGraph::DataMathMode mode) {
         case EditorNodeGraph::DataMathMode::Max: return "Maximum";
         case EditorNodeGraph::DataMathMode::Difference: return "Difference";
         case EditorNodeGraph::DataMathMode::Remap: return "Remap";
+        case EditorNodeGraph::DataMathMode::ImageAverage: return "Average Images";
     }
     return "Math";
 }
@@ -90,11 +91,13 @@ std::string BuildPreviewKey(EditorNodeGraph::NodeKind kind, int value) {
             }
             return "scope";
         case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "raw-neural-denoise";
+        case EditorNodeGraph::NodeKind::RawDevelopment: return "raw-development";
         case EditorNodeGraph::NodeKind::RawDecode: return "raw-decode";
         case EditorNodeGraph::NodeKind::RawDevelop: return "develop";
         case EditorNodeGraph::NodeKind::RawDetailAutoMask: return "raw-detail-automask";
         case EditorNodeGraph::NodeKind::RawDetailFusion: return "raw-detail-fusion";
         case EditorNodeGraph::NodeKind::HdrMerge: return "hdr-merge";
+        case EditorNodeGraph::NodeKind::Mfsr: return "mfsr";
         case EditorNodeGraph::NodeKind::Lut: return "lut";
         case EditorNodeGraph::NodeKind::CustomMask: return "custom-mask";
         case EditorNodeGraph::NodeKind::Mix: return "blend-images";
@@ -155,6 +158,7 @@ std::string BuildPreviewKey(EditorNodeGraph::NodeKind kind, int value) {
                 case EditorNodeGraph::DataMathMode::Max: return "data-math:max";
                 case EditorNodeGraph::DataMathMode::Difference: return "data-math:difference";
                 case EditorNodeGraph::DataMathMode::Remap: return "data-math:remap";
+                case EditorNodeGraph::DataMathMode::ImageAverage: return "data-math:image-average";
             }
             return "data-math";
         case EditorNodeGraph::NodeKind::Image:
@@ -192,6 +196,9 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::RawSource:
             node.title = node.rawSource.label.empty() ? "RAW" : node.rawSource.label;
             break;
+        case EditorNodeGraph::NodeKind::RawDevelopment:
+            node.title = "RAW Development";
+            break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             node.title = "RAW/CFA Neural Denoise";
             break;
@@ -209,6 +216,9 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             break;
         case EditorNodeGraph::NodeKind::HdrMerge:
             node.title = "HDR Merge";
+            break;
+        case EditorNodeGraph::NodeKind::Mfsr:
+            node.title = "MFSR";
             break;
         case EditorNodeGraph::NodeKind::Lut:
             node.title = "LUT";
@@ -288,6 +298,9 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
         case EditorNodeGraph::NodeKind::RawSource:
             add(EditorNodeGraph::kRawOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
             break;
+        case EditorNodeGraph::NodeKind::RawDevelopment:
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            break;
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
             add(EditorNodeGraph::kRawInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
             add(EditorNodeGraph::kRawOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Raw, "RAW", false, true);
@@ -317,6 +330,16 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kHdrMergeInput2SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 2", true, true);
             add(EditorNodeGraph::kHdrMergeInput3SocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image 3", true, true);
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Scene HDR", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::Mfsr:
+            add(EditorNodeGraph::kMfsrReferenceInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Reference", false, true);
+            add(EditorNodeGraph::MfsrInputSocketId(1).c_str(), EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Frame 2", true, true);
+            for (int inputIndex = 2; inputIndex < EditorNodeGraph::kMaxMfsrInputCount; ++inputIndex) {
+                const std::string socketId = EditorNodeGraph::MfsrInputSocketId(inputIndex);
+                const std::string label = EditorNodeGraph::MfsrInputSocketLabel(inputIndex);
+                add(socketId.c_str(), EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, label.c_str(), true, false);
+            }
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::Lut:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
@@ -402,6 +425,8 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
             return EditorNodeGraph::kImageInputSocketId;
         case EditorNodeGraph::NodeKind::HdrMerge:
             return EditorNodeGraph::kHdrMergeInput1SocketId;
+        case EditorNodeGraph::NodeKind::Mfsr:
+            return EditorNodeGraph::kMfsrReferenceInputSocketId;
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
@@ -426,6 +451,7 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::MaskGenerator:
         case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::RawDevelopment:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::Image:
             break;
@@ -436,10 +462,12 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
 std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Image:
+        case EditorNodeGraph::NodeKind::RawDevelopment:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::HdrMerge:
+        case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::Lut:
         case EditorNodeGraph::NodeKind::Layer:
         case EditorNodeGraph::NodeKind::Mix:
@@ -497,6 +525,13 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Scope, static_cast<int>(EditorNodeGraph::ScopeKind::RGBParade), "RGB Parade", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Preview, 0, "Preview", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
     entries.push_back(MakeCatalogEntry(
+        EditorNodeGraph::NodeKind::RawDevelopment,
+        0,
+        "RAW Development",
+        "Input / Output",
+        NodeCatalogPreviewStrategy::NoPreview,
+        1));
+    entries.push_back(MakeCatalogEntry(
         EditorNodeGraph::NodeKind::RawNeuralDenoise,
         0,
         "RAW/CFA Neural Denoise",
@@ -513,11 +548,12 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back(MakeCatalogEntry(
         EditorNodeGraph::NodeKind::RawDevelop,
         0,
-        "Develop",
-        "Input / Output",
+        "Develop (Advanced Auto)",
+        "Advanced RAW",
         NodeCatalogPreviewStrategy::NoPreview,
         2));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::HdrMerge, 0, "HDR Merge", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
+    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::Mfsr, 0, "MFSR", "Input / Output", NodeCatalogPreviewStrategy::FallbackOnly));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::CustomMask, 0, "Custom Mask", "Masks", NodeCatalogPreviewStrategy::FallbackOnly));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Solid), "Solid Mask", "Masks"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::LinearGradient), "Linear Gradient Mask", "Masks"));
@@ -542,6 +578,7 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Max), "Maximum", "Mask / Math"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Difference), "Difference", "Mask / Math"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::Remap), "Remap", "Mask / Math"));
+    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::DataMath, static_cast<int>(EditorNodeGraph::DataMathMode::ImageAverage), "Average Images", "Image Operations"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::SolidColor), "Solid Color Image", "Texture / Generate"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::ColorGradient), "Color Gradient Image", "Texture / Generate"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::ImageGenerator, static_cast<int>(EditorNodeGraph::ImageGeneratorKind::Square), "Square", "Texture / Generate"));

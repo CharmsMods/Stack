@@ -1,0 +1,1012 @@
+DEVELOP NODE CONTEXT DOCUMENT
+Stack image editor / node graph
+Generated: 2026-06-09
+
+Purpose
+=======
+
+This document describes the current "Develop" node in Stack's node graph as implemented in the repository at the time this file was written. It is intended as a truthful technical context document for research and future planning. It does not describe an ideal RAW developer, and it does not claim behavior that is not present in code.
+
+The node is implemented internally as NodeKind::RawDevelop. The user-facing node title and node browser label are "Develop". Older code and serialization still use the string "RawDevelop" for the node kind, but the UI renames empty or legacy "RAW Develop" titles to "Develop".
+
+Important source files:
+
+- src/Editor/NodeGraph/EditorNodeGraph.h
+- src/Editor/NodeGraph/EditorNodeGraph.cpp
+- src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp
+- src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp
+- src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp
+- src/Editor/NodeGraph/EditorNodeGraphSerializer.cpp
+- src/Editor/EditorModule.cpp
+- src/Editor/Internal/EditorModuleGraphMutation.cpp
+- src/Editor/Internal/EditorModuleProjectLifecycle.cpp
+- src/Editor/Internal/EditorModuleRawUI.cpp
+- src/Editor/Internal/EditorModuleRendering.cpp
+- src/App/Validation/ValidationCommandRunner.cpp
+- src/Renderer/MaskRenderTypes.h
+- src/Renderer/RenderPipeline.cpp
+- src/Raw/RawImageData.h
+- src/Raw/RawImageData.cpp
+- src/Raw/RawGpuPipeline.h
+- src/Raw/RawGpuPipeline.cpp
+- src/Editor/Layers/ToneLayers.cpp
+- src/Editor/Layers/ToneLayers.h
+
+
+High-level description
+======================
+
+Develop is the graph node that converts RAW-domain input into an image-domain output. It accepts RAW sensor data or RAW-domain output from the RAW/CFA neural denoise node, runs Stack's GPU RAW development path, and outputs an unclamped scene-linear float RGB image. In the current code, the node also embeds two additional image-processing stages after the base RAW conversion:
+
+1. Scene Prep: local pre-exposure balancing using RawDetailFusionSettings / the Pre-Local Exposure machinery.
+2. Finish Tone: an integrated ToneCurve layer stored inside the Develop node as JSON.
+
+The current implementation forces scene prep and integrated finish tone on in several places. In the editor UI, RenderRawDevelopControls sets payload.scenePrepEnabled = true and payload.integratedToneEnabled = true whenever the controls are rendered. AddRawDevelopNodeFromPayload also forces both to true. BuildRenderGraphSnapshot copies the node to the render graph with renderNode.rawDevelop.scenePrepEnabled = true and renderNode.rawDevelop.integratedToneEnabled = true. This means the saved booleans exist and are serialized, but normal current usage does not treat them as user-facing optional toggles.
+
+Develop is not a display transform. It outputs scene-linear RGB and the UI explicitly says "Output: unclamped scene-linear float RGB". A full RAW tree created by AddFullRawTreeToSource connects RAW Source -> Develop -> View Transform -> Output, so View Transform remains the downstream display stage.
+
+Develop is also not an HDR merge node. It can be used before HDR Merge and HDR Merge reads Develop exposure metadata from upstream Develop nodes for normalization context, but Develop itself only develops one RAW input.
+
+
+Node identity and payload
+=========================
+
+Editor-side node kind:
+
+- EditorNodeGraph::NodeKind::RawDevelop
+
+Render-side node kind:
+
+- RenderGraphNodeKind::RawDevelop
+
+Serialized kind string:
+
+- "RawDevelop"
+
+User-visible title:
+
+- "Develop"
+
+Node browser category:
+
+- "Input / Output"
+
+Editor payload:
+
+struct RawDevelopPayload contains:
+
+- Raw::RawDevelopSettings settings
+- bool scenePrepEnabled = true
+- Raw::RawDetailFusionSettings scenePrepSettings
+- bool integratedToneEnabled = true
+- nlohmann::json integratedToneLayerJson
+- DevelopAutoGuidance autoGuidance
+- RawDevelopUiMode uiMode = Auto
+
+DevelopAutoGuidance contains:
+
+- autoStrength, default 0.78
+- exposureBias, default 0.0
+- dynamicRange, default 1.0
+- shadowLift, default 0.0
+- highlightGuard, default 0.0
+- highlightCharacter, default 0.0
+- contrastBias, default 0.0
+
+The guidance values are clamped by EditorModule::NormalizeDevelopAutoGuidance:
+
+- autoStrength: 0.0 to 2.4
+- exposureBias: -2.0 to 2.0
+- dynamicRange: 0.25 to 3.0
+- shadowLift: -1.25 to 1.25
+- highlightGuard: -1.25 to 1.25
+- highlightCharacter: -1.25 to 1.25
+- contrastBias: -1.25 to 1.25
+
+The UI mode enum has only two modes:
+
+- Auto
+- Manual
+
+Older serialized "Advanced" mode is loaded as Manual.
+
+
+Sockets and graph wiring
+========================
+
+Develop sockets are created in EditorNodeGraphDefinitions::ApplyNodeMetadata:
+
+- Input: "RAW", socket id rawIn, SocketType::Raw, visible
+- Input: "Finish Mask", socket id maskIn, SocketType::Mask, optional, visible
+- Output: "Image", socket id imageOut, SocketType::Image, visible
+- Output: "Pre-Finish", socket id preFinishImageOut, SocketType::Image, not visible
+
+The normal default input socket for Develop is rawIn.
+
+The normal default output socket for Develop is imageOut.
+
+RAW link rules:
+
+- RAW sockets can only connect from a RawSource or RawNeuralDenoise node.
+- The source socket must be rawOut.
+- The target node must be RawNeuralDenoise or RawDevelop.
+- The target socket must be rawIn.
+- Develop does not output RAW. It is the RAW-to-image boundary.
+
+Image link rules:
+
+- Develop's visible Image output is treated as an image-producing render-chain output.
+- Image render-chain links cannot target a Develop node; Develop only accepts RAW and optional mask input.
+- Develop is allowed as a source for downstream image nodes such as layers, mix, output, preview/scope paths, HDR Merge references, and other image-domain nodes, subject to the general graph rules.
+
+Mask link rules:
+
+- Develop has an optional mask input named "Finish Mask".
+- Valid mask sources include mask generators, mask combine/utility/image-to-mask nodes, RawDetailAutoMask, RawDetailFusion, channel split outputs, and image outputs that resolve to a channel socket.
+- The Finish Mask input is used by the integrated finish stage. It is not a RAW-stage mask and it is not a scene-prep mask.
+
+Hidden Pre-Finish output:
+
+- preFinishImageOut exists but is not visible in normal node UI.
+- It is computed before the integrated finish mask is applied.
+- Cycle detection explicitly ignores outgoing links from preFinishImageOut, with a comment explaining that Raw Develop's hidden pre-finish output is computed before the integrated finish mask and therefore image-to-mask links sourced from it do not form a true feedback cycle.
+- The render fingerprint treats preFinishImageOut differently: integrated tone and finish mask state are not included when the requested socket is preFinishImageOut.
+
+
+How Develop fits into a graph
+=============================
+
+The simplest full RAW graph constructed by AddFullRawTreeToSource is:
+
+RAW Source -> Develop -> View Transform -> Output
+
+Develop is considered a main-chain node for graph traversal. BuildChainFromOutput visits Develop by following its rawIn link upstream. If no raw input exists, the chain is not valid through that node.
+
+For render-layer path resolution, Develop is treated similarly to an Image source. In GetRenderLayerNodePath, if the upstream source is Image or RawDevelop, traversal stops and returns the downstream layer path. This means the current layer-stack style path sees Develop as an image-producing boundary.
+
+For reference source and dimension resolution, Develop uses upstream RAW metadata to infer output dimensions. It resolves the nearest upstream RawSource through RawNeuralDenoise if needed. Width and height are based on visible RAW dimensions and effective orientation. If rotateToFitFrame is false, EXIF/manual orientation that swaps dimensions will swap width and height. If rotateToFitFrame is true, the output keeps the visible width/height frame.
+
+
+Creation and defaults
+=====================
+
+AddRawDevelopNodeAt creates a RawDevelopPayload with:
+
+- scenePrepEnabled = true
+- integratedToneEnabled = true
+- integratedToneLayerJson = default ToneCurve serialization
+- uiMode = Auto
+
+If the currently selected graph node is a RAW Source, AddRawDevelopNodeAt initializes RAW settings from that source's metadata and immediately applies the auto solve.
+
+BuildRawDevelopSettingsFromMetadata sets:
+
+- exposureStops to metadata.dngBaselineExposure when hasDngBaselineExposure is true
+- blackLevelOverride to metadata.blackLevel
+- whiteLevelOverride to metadata.whiteLevel
+- cameraTransformSource based on DNG/non-DNG metadata
+
+Camera transform source selection:
+
+- Non-DNG files default to LibRawRgbCam.
+- DNG files with usable DNG color tags generally default to DngAuto.
+- DNG files with dual forward matrices but without calibration metadata can prefer LibRawRgbCam when metadata.hasCameraMatrix is true, because the code comment says Stack's own DNG dual-illuminant blend is still approximate.
+- If DNG color metadata is absent, LibRawRgbCam is used.
+
+AddRawDevelopNodeFromPayload normalizes auto guidance, ensures an integrated tone JSON object exists, forces scene prep and integrated tone on, adds the node, selects it, and marks render dirty.
+
+
+RAW settings and defaults
+=========================
+
+Raw::RawDevelopSettings currently contains:
+
+- exposureStops, default 0.0
+- whiteBalanceMode, default AsShot
+- manualWhiteBalance RGB multipliers, default 1.0 / 1.0 / 1.0
+- overrideBlackLevel, default false
+- blackLevelOverride, default 0.0
+- overrideWhiteLevel, default false
+- whiteLevelOverride, default 65535.0
+- highlightMode, default Off
+- highlightStrength, default 0.5
+- highlightThreshold, default 0.98
+- demosaicMethod, default Bilinear
+- cameraTransformEnabled, default true
+- cameraTransformSource, default DngAuto
+- debugBypassCameraTransform, default false
+- debugTransposeCameraMatrix, default false
+- debugView, default FinalOutput
+- rotationDegrees, default 0
+- rotateToFitFrame, default false
+- flipHorizontally, default false
+- flipVertically, default false
+- falseColorSuppression, default 0.25
+- defringeStrength, default 0.30
+- highlightEdgeCleanup, default 0.40
+- chromaRadius, default 1
+- preserveRealColor, default 0.70
+- lateralRedCyan, default 0.0
+- lateralBlueYellow, default 0.0
+- mosaicDenoise settings
+
+RawMosaicDenoiseSettings defaults:
+
+- enabled = false
+- hotPixelSuppression = true
+- hotPixelThreshold = 0.12
+- lumaStrength = 0.35
+- chromaStrength = 0.55
+- radius = 2
+- edgeProtection = 0.55
+- iterations = 1
+
+White balance modes:
+
+- AsShot: uses cameraWhiteBalance metadata normalized to green = 1.
+- Auto: uses daylightWhiteBalance metadata normalized to green = 1.
+- Neutral: uses 1.0 / 1.0 / 1.0.
+- Manual: uses manualWhiteBalance directly.
+
+Demosaic method:
+
+- The enum currently contains only Bilinear.
+- The UI text says "Only Bilinear is selectable in this build; unsafe demosaic modes are forced back to Bilinear."
+- The shader contains a qualityDemosaic path selected by uDemosaicMethod == 1, but RawGpuPipeline::Render currently sends static_cast<int>(Raw::DemosaicMethod::Bilinear), so the current public build is effectively bilinear only.
+
+Highlight reconstruction modes:
+
+- Off
+- Clip / Neutral
+- Luminance
+- Color Reconstruction
+
+These are RAW-stage highlight reconstruction modes, separate from Scene Prep Highlight Guard. The UI states that this recovery is before scene prep.
+
+Debug views:
+
+- Final Output
+- Normalized Mosaic
+- CFA False Color
+- Demosaiced Camera RGB
+- White Balanced RGB
+- Camera Transformed RGB
+- Clipped RAW Channels
+- Pre-Denoise Mosaic
+- Post-Denoise Mosaic
+- Hot Pixel Mask
+- Denoise Difference
+- False Color Mask
+- Defringe Mask
+- Highlight Edge Mask
+
+When debugView is not FinalOutput, render-side scene prep and integrated finish tone are not applied. In RenderPipeline.cpp, both the integrated final path and scene prep path require settings.debugView == RawDebugView::FinalOutput.
+
+
+UI behavior
+===========
+
+Develop controls are rendered by EditorModule::RenderRawDevelopControls.
+
+The UI always initializes/normalizes these before drawing:
+
+- scenePrepEnabled is set true
+- integratedToneEnabled is set true
+- auto guidance is clamped
+- integratedToneLayerJson is initialized to a default ToneCurve JSON object if missing
+
+The top section is "DEVELOP". If a RAW Source input is connected directly, it displays the RAW source name and "Output: unclamped scene-linear float RGB". If not, it displays "Connect a RAW Source node to develop sensor data."
+
+Important nuance: the UI metadata lookup only uses the immediate raw input if that immediate node is RawSource. If the Develop node receives RAW through RawNeuralDenoise, the UI's local metadata variable falls back to empty metadata in this function. Other graph/render helpers can walk upstream through RawNeuralDenoise, but this specific control renderer does not do that for the display metadata block.
+
+Mode combo:
+
+- Auto
+- Manual
+
+Auto mode description shown in UI:
+
+- "Auto is the default merged Develop workflow. It solves RAW conversion, scene prep, and finish tone together."
+
+Manual mode description shown in UI:
+
+- "Manual freezes the current auto-authored result and reveals the deeper RAW, prep, and finish controls."
+
+Manual mode buttons:
+
+- Return To Auto
+- Recalibrate Auto
+
+Return To Auto switches uiMode back to Auto and forces reanalysis.
+
+Recalibrate Auto calls ApplyDevelopAutoSolve(payload, metadata, true).
+
+Auto mode controls:
+
+- Auto Calibrate button
+- Reset Auto button
+- Auto Strength, range 0.0 to 2.4
+- Exposure Bias, range -2.0 to 2.0 EV
+- Dynamic Range, range 0.25 to 3.0
+- Shadow Lift, range -1.25 to 1.25
+- Highlight Guard, range -1.25 to 1.25
+- Highlight Character, range -1.25 to 1.25
+- Contrast Bias, range -1.25 to 1.25
+
+Auto mode uses a draft state while sliders are active. The payload guidance is committed when sliders are no longer active. Exposure Bias changes can force a fuller auto reanalysis.
+
+Auto mode status:
+
+- If integrated tone JSON has autoSceneStatsValid, the UI shows current solve exposure, white balance mode, highlight reconstruction mode, scene prep strength, scene prep shadow bias, and highlight guard.
+- Otherwise it says Develop will analyze the connected RAW image on the next render.
+
+Manual mode normal controls:
+
+- RAW COLOR:
+  - White Balance combo: Camera WB, Auto WB, Neutral, Manual
+  - Red Mult, Green Mult, Blue Mult sliders from 0.05 to 16.0
+  - Effective WB RGB readout
+  - WB source readout if metadata.whiteBalanceSource exists
+
+- RAW EXPOSURE + RANGE:
+  - RAW Baseline Exposure slider from -8.0 to 8.0 stops
+  - DNG baseline exposure metadata readout if present
+  - Exposure edits use a draft value while the slider is active and update settings after release, with a short recent-interaction render delay mechanism in EditorModuleRendering.
+
+- SCENE PREP: LOCAL EXPOSURE:
+  - Amount, range 0.0 to 1.25
+  - Shadow Lift
+  - Highlight Compression
+  - Noise Guard
+  - Highlight Guard
+  - Shadow Guard
+  - These use bias sliders when Auto Safety is enabled, and direct absolute controls when Auto Safety is disabled.
+  - A live Pre-Local Exposure summary section appears when available.
+
+Advanced/sidebar-only manual controls:
+
+- SCENE PREP ADVANCED:
+  - Local Baseline / base EV
+  - Midtone Target / target bias
+  - Smooth Gradient Protection
+  - Halo Guard
+  - Apply Preset
+  - Expert overrides
+  - Spatial model
+  - Smoothing
+
+- SCENE PREP DIAGNOSTICS:
+  - Public preview labels: EV Adjustment Map, Protection / Confidence, Clipping Limited, Noise / SNR Limited
+  - Developer labels include Effective EV Map, Confidence Map, Highlight Safety, Shadow / Noise Protection, Sample Selection, Smooth Gradient Protection, True Edge Map, Texture Detail Map, etc.
+
+- RAW HIGHLIGHT RECONSTRUCTION:
+  - Mode: Off, Clip / Neutral, Luminance, Color Reconstruction
+  - Strength, range 0.0 to 1.0
+  - Clip Threshold, range 0.8 to 1.0
+  - Disabled when the input is not mosaiced Bayer.
+
+- RAW DEMOSAIC:
+  - Informational only in this build: "Method: Fast / Bilinear (preview-safe)"
+  - Only Bilinear is selectable in this build.
+
+- RAW INPUT LEVELS:
+  - Override Black
+  - Black Level input
+  - Override White
+  - White Level input
+  - Effective black/white readout
+
+- RAW ORIENTATION:
+  - Manual Rotation: 0 Degrees, 90 Degrees CW, 180 Degrees, 270 Degrees CW
+  - Stretch To Fit Frame
+  - Flip Horizontally
+  - Flip Vertically
+
+- RAW CLEANUP:
+  - False Color Suppression, 0.0 to 1.0
+  - Defringe Strength, 0.0 to 1.0
+  - Highlight Edge Cleanup, 0.0 to 1.0
+  - Chroma Radius, 1 to 3 px
+  - Preserve Real Color, 0.0 to 1.0
+  - Red / Cyan CA, -8.0 to 8.0 px in UI
+  - Blue / Yellow CA, -8.0 to 8.0 px in UI
+  - Disabled when the input is not mosaiced Bayer.
+
+Save/load clamp caveat for CA:
+
+- The UI allows lateralRedCyan and lateralBlueYellow from -8.0 to 8.0.
+- DeserializeRawSettings clamps both to -3.0 to 3.0.
+- Therefore values outside +/-3 can be set live but will not round-trip through saved graph state as-is.
+
+- RAW MOSAIC DENOISE:
+  - Enable
+  - Hot Pixel Suppression
+  - Hot Pixel Threshold, 0.005 to 0.5 in UI
+  - Luminance Strength, 0.0 to 1.0
+  - Chroma Strength, 0.0 to 1.0
+  - Radius, 1 to 4 CFA steps
+  - Edge Protection, 0.0 to 1.0
+  - Iterations, 1 to 2
+  - Disabled when the input is not mosaiced Bayer.
+
+- CAMERA COLOR TRANSFORM:
+  - Camera Transform checkbox
+  - Matrix Source: LibRaw rgb_cam, DNG Auto (approx), DNG ForwardMatrix 1, DNG ForwardMatrix 2, DNG ColorMatrix inverse
+  - Bypass Transform
+  - Matrix Transpose Debug
+  - Metadata preferred readout if metadata.cameraMatrixSource is present
+
+- RAW DEBUG:
+  - Debug View combo with the debug views listed above.
+
+Finish tone controls:
+
+After RAW and scene prep controls, Develop constructs a ToneCurveLayer from integratedToneLayerJson, restores transient state for the node id, and renders "FINISH TONE: FINAL GRAPH" through ToneCurveLayer::RenderDevelopFinishGraphPanel.
+
+In advanced/sidebar mode, it also exposes:
+
+- PREPARED TONE ADVANCED through RenderDevelopPreparedControlsPanel
+- FOUNDATION TONE ADVANCED through RenderDevelopFoundationControlsPanel
+- LOCAL SCOPE / MASKING through RenderDevelopScopedMaskPanel
+
+In non-advanced mode, the UI tells the user that Prepared Tone, Foundation Tone, and local masking controls are in the sidebar.
+
+If RAW develop settings or scene prep settings changed before finish tone and the integrated tone layer has auto prepared state, the integrated tone layer receives NotifyUpstreamDevelopChanged().
+
+Any payload change marks the node/render dirty.
+
+
+Auto solve behavior
+===================
+
+Auto solve is implemented by EditorModule::ApplyDevelopAutoSolve and EditorModule::UpdateDevelopAutoState.
+
+ApplyDevelopAutoSolve:
+
+- Normalizes auto guidance.
+- Forces scenePrepEnabled and integratedToneEnabled true.
+- Ensures integratedToneLayerJson is an object.
+- Copies the integrated tone JSON and applies guidance into it.
+- Reads tone auto stats from the tone JSON.
+- Builds RAW defaults from metadata.
+- Uses the guidance values and available stats to set RAW settings, scene prep settings, and integrated tone JSON.
+
+Auto guidance maps to stages, per UI text:
+
+- Exposure Bias writes RAW baseline exposure.
+- Shadow Lift, Dynamic Range, and Highlight Guard shape Scene Prep and Prepared Tone.
+- Contrast Bias is tone, not exposure.
+
+The auto trigger hash includes:
+
+- metadata sourcePath
+- DNG baseline exposure presence/value
+- black/white levels
+- camera white balance
+- daylight white balance
+- uiMode
+- auto guidance values
+
+The code intentionally does not hash live tone-analysis stats into the auto solve trigger hash, with a comment explaining that doing so would create a closed-loop auto solve that can oscillate while the Develop window is open.
+
+UpdateDevelopAutoState only runs in Auto mode. If uiMode is Manual, it clears the auto solve trigger hash maps and returns false.
+
+Auto mode can force reanalysis when:
+
+- Mode changes
+- User clicks Auto Calibrate
+- User clicks Reset Auto
+- Guidance values change
+- Raw-relevant trigger hash changes
+- Full reanalysis is requested
+
+Auto solve state is tracked by:
+
+- m_DevelopAutoSolveTriggerHashes
+- m_DevelopAutoRawSolveTriggerHashes
+- m_DevelopAutoRawCalibrationHashes
+- m_DevelopAutoGuidanceDrafts
+
+These are runtime editor maps, not serialized payload fields.
+
+
+Render path in detail
+=====================
+
+BuildRenderGraphSnapshot converts editor Develop nodes into RenderGraphNodeKind::RawDevelop nodes. It copies:
+
+- settings
+- scenePrepSettings
+- integratedToneLayerJson
+
+It forces:
+
+- renderNode.rawDevelop.scenePrepEnabled = true
+- renderNode.rawDevelop.integratedToneEnabled = true
+
+RenderGraphRawDevelopPayload contains:
+
+- RawDevelopSettings settings
+- bool scenePrepEnabled
+- RawDetailFusionSettings scenePrepSettings
+- bool integratedToneEnabled
+- integratedToneLayerJson
+
+RenderPipeline::ExecuteGraph handles RawDevelop by:
+
+1. Finding the rawIn link.
+2. Finding the upstream RawSource, walking through RawNeuralDenoise if needed.
+3. Loading RAW data from the RawSource path through RawLoader if no embedded raw data is available.
+4. Caching loaded RawImageData by source node id and path/cache key.
+5. Calling m_RawPipelines[node.nodeId].Render(rawData, node.rawDevelop.settings, m_PreviewMaxDimension) to produce the RAW-developed base texture.
+6. Caching that base texture under an internal "__rawDevelopBase" cache key.
+7. Updating render dimensions to the RAW pipeline output width/height.
+8. Depending on requested socket and settings:
+   - returning the base or scene-prepped pre-finish image
+   - or applying integrated ToneCurve finish
+   - or applying an optional Finish Mask blend between pre-tone and finished result
+
+Internal cache behavior:
+
+- The base RAW develop result is separately fingerprinted with socket "__rawDevelopBase".
+- The full image output fingerprint includes RAW input, render dimensions, all RAW settings, scene prep state/settings unless requesting raw base, and integrated tone JSON plus finish mask unless requesting pre-finish/raw base.
+- preFinishImageOut excludes integrated tone and finish mask from its fingerprint.
+
+Render failure behavior:
+
+- If RawGpuPipeline::Render returns 0, RenderPipeline logs a message:
+  "[RAW] Render failed for develop node ...", including the path and RawGpuPipeline's last error when available.
+
+Scene prep render behavior:
+
+- Scene prep only runs when:
+  - node.rawDevelop.scenePrepEnabled is true
+  - settings.debugView == RawDebugView::FinalOutput
+  - result texture is nonzero
+
+- Before rendering scene prep, RenderPipeline copies scenePrepSettings and normalizes the mode to AutoAnalyze.
+- It forces debugView to FinalImage.
+- It clears/inactivates manual mask behavior:
+  - invertMask = false
+  - maskBlackPoint = 0.0
+  - maskWhitePoint = 1.0
+  - maskGamma = 1.0
+  - manualBlend = 0.0
+
+- If Auto Safety is enabled and overrideBaseEv is false, it forces overrideBaseEv true and sets baseEv to clamped baseEvBias. The code comment says Develop already chose RAW baseline exposure and this prevents Scene Prep from recomputing a second global base that can cancel that authored intent.
+
+- It stores a PreLocalExposureSummary for the Develop node id.
+- It renders a RawDetailAutoMask-style exposure map with RenderRawDetailAutoMask.
+- It applies that map with RenderRawDetailFusion.
+- If the exposure map or fusion result is zero, scene prep does not replace the current result.
+
+Integrated finish tone render behavior:
+
+- Integrated finish tone only runs for normal image output when:
+  - the requested socket is not preFinishImageOut
+  - integratedToneEnabled is true
+  - settings.debugView == FinalOutput
+  - integratedToneLayerJson is an object
+
+- It first evaluates preFinishImageOut, so finish tone receives the scene-prepped result.
+- It creates a ToneCurve layer through LayerRegistry::CreateLayerFromTypeId("ToneCurve").
+- It initializes GL for that layer.
+- It deserializes integratedToneLayerJson.
+- If the layer is ToneCurveLayer, it sets:
+  - Auto rewrite render context, using node id and request revision.
+  - Develop scene prep tone budget: scenePrepEnabled, scenePrepSettings.strength, scenePrepSettings.maxEvBias.
+- It renders ToneCurve with ExecuteWithSource(preToneTexture, preToneTexture, width, height, quad) into a new target texture.
+- If rendering fails, it falls back to the pre-tone texture.
+- If the ToneCurve reports pending auto rewrite feedback, RenderPipeline collects it in m_ToneCurveAutoRewriteFeedback.
+
+Finish Mask behavior:
+
+- After integrated tone renders, RenderPipeline checks for a maskIn link.
+- If a finish mask texture exists, it blends between preToneTexture and finishedResult using RenderMaskBlend.
+- The mask therefore controls where the integrated finish tone result replaces the pre-finish image.
+- The mask is not applied to RAW development or scene prep.
+
+
+RawGpuPipeline behavior
+=======================
+
+RawGpuPipeline::Render is the base RAW development implementation.
+
+Output texture:
+
+- GL_RGBA16F
+- OpenGL texture containing float RGBA
+- The RGB values are not clamped to display range by the final shader path.
+
+Input layouts:
+
+1. Mosaic Bayer RAW
+
+- Requires metadata.pixelLayout == MosaicBayer.
+- Requires a known CFA pattern.
+- Uploads rawBuffer to GL_R16UI / GL_RED_INTEGER / GL_UNSIGNED_SHORT.
+- Optionally builds a corrected RAW texture for DNG gain maps.
+- Uses kRawDevelopShader.
+
+2. Linear RGB RAW/DNG
+
+- Uses metadata.pixelLayout == LinearRgb.
+- Requires linearUInt16Buffer or linearFloatBuffer.
+- Uploads an RGBA16F texture through UploadLinearTexture.
+- Uses kLinearDngShader.
+- Skips demosaic and mosaic-specific cleanup/denoise.
+
+Unsupported pixel layout:
+
+- If pixelLayout is neither LinearRgb nor MosaicBayer, RawGpuPipeline returns 0 with "RAW render failed: unsupported RAW pixel layout."
+
+Missing CFA:
+
+- If MosaicBayer has CfaPattern::Unknown, RawGpuPipeline returns 0 with "RAW render failed: missing or unsupported CFA pattern."
+
+Core mosaic development shader order:
+
+1. Orient/flips UVs.
+2. Read visible/cropped RAW sample.
+3. Normalize RAW values using black/white level and per-channel black where available.
+4. Optionally use corrected raw values when DNG gain maps are present.
+5. Optionally apply same-CFA mosaic denoise/hot pixel cleanup.
+6. Demosaic, currently bilinear in the current public path.
+7. Apply lateral CA correction by offsetting red/blue sampling.
+8. Build clipped channel masks.
+9. Apply highlight reconstruction mode.
+10. Apply white balance.
+11. Apply color edge cleanup: false color suppression, defringe, highlight edge cleanup.
+12. Optionally apply camera-to-working transform.
+13. Apply exposure scale pow(2, exposureStops).
+14. Output vec4(rgb, 1.0).
+
+The shader has early returns for debug views, so many debug outputs are intermediate diagnostic images rather than the final developed image.
+
+Linear RGB shader order:
+
+1. Orient/flips UVs.
+2. Sample linear RGB texture.
+3. Optionally apply camera-to-working transform.
+4. Apply exposure scale.
+5. Output vec4(rgb, 1.0).
+
+Linear RGB path limitations:
+
+- It does not use white balance controls in the same way as mosaic RAW.
+- It skips highlight reconstruction, mosaic denoise, demosaic, false-color cleanup, defringe, and clipped RAW channel debug paths because those are mosaic-specific.
+
+Orientation behavior:
+
+- RawGpuPipeline combines EXIF orientation and manual rotation.
+- Manual rotation UI is clockwise, but the shader step mapping is inverted for OpenGL's bottom-left origin.
+- Effective orientations 5, 6, 7, and 8 swap output dimensions unless rotateToFitFrame is true.
+- rotateToFitFrame keeps output width/height at the visible RAW frame size instead of swapping dimensions.
+- flipHorizontally and flipVertically are applied in the shader UV orientation function.
+
+DNG gain map behavior:
+
+- If metadata.dngGainMaps is non-empty, UploadCorrectedRawTexture builds a corrected float texture from the raw mosaic.
+- It normalizes each raw value using black/white levels, applies DNG gain map samples over the visible/cropped region, and uploads an RGBA16F corrected texture.
+- The raw shader uses uCorrectedRaw when uUseCorrectedRaw is true.
+- This is gain-map correction, not HDR gain-map export or display gain-map behavior.
+
+Camera transform behavior:
+
+- BuildCameraToWorking chooses a matrix from DNG ForwardMatrix, DNG ColorMatrix inverse, or LibRaw cameraToSrgb depending on metadata and settings.cameraTransformSource.
+- The code comments state Stack does not yet have a full color-management module and uses LibRaw's camera-to-sRGB matrix as an approximate working transform for V1 when falling back.
+- If metadata has no camera matrix, identity is used.
+- cameraTransformEnabled can disable the transform.
+- debugBypassCameraTransform can bypass it even if enabled.
+- debugTransposeCameraMatrix changes matrix upload transpose behavior for debugging.
+
+White balance:
+
+- AsShot uses metadata.cameraWhiteBalance.
+- Auto uses metadata.daylightWhiteBalance.
+- Neutral uses all ones.
+- Manual uses settings.manualWhiteBalance.
+- The matrix builder can also use white-balance-derived camera neutral values for DNG ForwardMatrix calculations.
+
+
+Scene prep / Pre-Local Exposure behavior
+=======================================
+
+Develop's scene prep uses Raw::RawDetailFusionSettings, the same settings structure used by the standalone Pre-Local Exposure node and RAW Detail Auto Mask/Fusion tools.
+
+Scene prep is meant to prepare the developed scene-linear image before final tone. It is local exposure shaping, not true reconstruction of missing clipped data.
+
+UI help text in the same codebase explicitly says Pre-Local Exposure:
+
+- "does not recover clipped detail"
+- remains scene-linear HDR
+- should use View Transform downstream for display output
+
+In Develop, the scene prep mask input/manual blend path is disabled by RenderPipeline for the integrated path. The Finish Mask is separate and only affects integrated finish tone blending.
+
+Scene prep settings include:
+
+- autoSafetyEnabled
+- overrides for min EV, max EV, base EV, noise protection, highlight protection, shadow lift limit, well-exposed target
+- bias values for min/max/base EV, noise, highlight, shadow, target
+- minEv, maxEv, baseEv
+- strength
+- sampleCount
+- baseRadiusPercent
+- highlightProtection
+- shadowLiftLimit
+- noiseProtection
+- detailWeight
+- wellExposedTarget
+- smoothGradientProtection
+- textureSensitivity
+- skyBias
+- invertMask / mask black / mask white / mask gamma / manualBlend, though the Develop integrated scene prep path forces these to neutral values
+- smoothnessRadius
+- smoothAreaRadius
+- edgeAwareness
+- haloGuard
+- maskDebandDither
+
+Scene prep summary:
+
+- RenderPipeline stores a PreLocalExposureSummary for the Develop node id.
+- The UI can display scene-prep metrics such as base EV, EV range, noise ratio, clipping ratio, texture confidence, and badges such as Noise Limited, Highlight Limited, Gradient Protected, or Balanced.
+
+
+Integrated ToneCurve finish behavior
+====================================
+
+Develop stores an integrated ToneCurve layer as JSON in integratedToneLayerJson.
+
+The default integrated tone JSON is created by constructing a ToneCurveLayer and calling Serialize().
+
+The integrated tone is not a separate graph Layer node. It lives inside the Develop payload and render node. It is executed in RenderPipeline by creating a ToneCurve layer instance at render time, deserializing the JSON, and executing it against the pre-finish texture.
+
+Develop-specific ToneCurve panels include:
+
+- Finish Graph panel
+- Prepared controls panel
+- Foundation controls panel
+- Targeting panel
+- Scoped mask panel
+- Prepared graph preview panel
+
+The Finish Graph panel can switch between "Final Graph" and "Prepared Graph". In normal Develop, the Prepared Graph is inspect-only unless allowed by the advanced path.
+
+The integrated ToneCurve can produce auto rewrite feedback. RenderPipeline collects this feedback and EditorModule can use it to update the integrated tone JSON.
+
+Canvas targeting:
+
+- EditorModule treats integrated Develop tone as a possible focused ToneCurve target.
+- ResolveFocusedToneCurveNodeId returns a RawDevelop node id when it has integratedToneEnabled.
+- RawDevelop can participate in ToneCurve viewport sampling and targeting through transient integrated tone state.
+
+Local Scope / Masking:
+
+- Develop's advanced integrated tone UI can render the scoped mask panel embedded in Develop.
+- The UI text says this creates or refines Develop's Finish Mask while keeping actual finish processing inside the merged path.
+- Region seed capture can use the inline Develop targeting probe.
+
+
+Finish Mask behavior
+====================
+
+The Finish Mask input is optional. It affects only the integrated finish stage.
+
+When a Finish Mask is connected and the integrated tone render succeeds, RenderPipeline blends:
+
+- preToneTexture: the image before integrated finish tone
+- finishedResult: the image after integrated ToneCurve
+- finishMaskTexture: the mask connected to maskIn
+
+This means the mask controls where the finish tone applies. It does not mask:
+
+- RAW exposure
+- white balance
+- demosaic
+- RAW cleanup
+- mosaic denoise
+- scene prep local exposure
+
+Because preFinishImageOut exists before the finish stage, mask-building workflows can derive masks from the pre-finish image without a real feedback cycle.
+
+
+Auto/Manual mode meaning
+========================
+
+Auto is the default merged workflow. It attempts to write a coherent set of RAW baseline exposure, scene prep, and finish tone state from metadata, auto guidance, and render feedback stats.
+
+Manual is not a different render algorithm. It is a UI/workflow mode that freezes the current auto-authored state and exposes direct editing controls. The same render path still runs with the current payload settings.
+
+Manual does not turn off scene prep or integrated tone. In current code, both are still forced on.
+
+Manual mode clears auto solve trigger hash maps. Auto mode maintains them.
+
+
+Serialization
+=============
+
+Develop serialization writes:
+
+- rawSettings
+- scenePrepEnabled
+- scenePrepSettings
+- integratedToneEnabled
+- integratedToneLayer
+- developAutoGuidance
+- uiMode
+
+rawSettings serializes:
+
+- exposureStops
+- whiteBalanceMode
+- manualWhiteBalance
+- black/white override flags and values
+- highlight mode/strength/threshold
+- demosaicMethod
+- cameraTransformEnabled
+- cameraTransformSource
+- debugView
+- debug camera transform flags
+- rotationDegrees
+- rotateToFitFrame
+- flips
+- cleanup controls
+- lateral CA controls
+- mosaic denoise controls
+
+scenePrepSettings serializes the RawDetailFusionSettings fields listed above.
+
+developAutoGuidance serializes:
+
+- autoStrength
+- exposureBias
+- dynamicRange
+- shadowLift
+- highlightGuard
+- highlightCharacter
+- contrastBias
+
+uiMode serializes as:
+
+- "Manual" or "Auto"
+
+Deserialization:
+
+- Loads rawSettings with defaults when fields are missing.
+- Supports legacy debugShowNormalizedMosaic by mapping it to NormalizedMosaic debug view.
+- Loads scene prep and integrated tone fields.
+- Loads "Advanced" uiMode as Manual.
+- Renames empty or "RAW Develop" title to "Develop".
+
+Normalization after load:
+
+- Many raw and scene prep values are clamped during deserialization.
+- Scene prep and integrated tone booleans may be loaded from file, but normal editor/render construction later forces them true.
+
+
+Caching and dirtying
+====================
+
+Develop changes call MarkRenderDirty(node.id) through RenderRawDevelopControls when the payload changes.
+
+The render pipeline fingerprints:
+
+- Upstream RAW input fingerprint
+- Render width/height
+- RAW settings
+- Mosaic denoise settings
+- Scene prep settings when relevant
+- Integrated tone JSON when relevant
+- Finish mask fingerprint when relevant
+
+The base RAW development texture is cached separately from scene prep and finish tone.
+
+RawGpuPipeline also caches GL textures:
+
+- raw sensor texture
+- corrected raw texture for gain maps
+- linear RGB texture
+- output texture/FBO
+
+Upload caches use fingerprints of raw/linear buffers and dimensions.
+
+
+Validation and smoke coverage
+=============================
+
+src/App/Validation/ValidationCommandRunner.cpp contains Develop-related validation helpers, including:
+
+- ValidateDevelopAutoSolveBehavior
+- ValidateDevelopGraphStateSerialization
+- ValidateDevelopNodeSmoke
+- ValidateDevelopRealRawSmoke
+
+The smoke validation constructs synthetic RAW data and render graph nodes, runs RawDevelop through RenderPipeline, and checks nonblank output for balanced, dark, highlight, noisy, noisy tone-only, and DNG calibration cases. It also exercises orientation and real RAW preview-output paths.
+
+This is useful coverage, but it is not a full image-quality validation suite. It checks that the node renders and that some auto-solve behavior remains stable/nonblank; it does not prove color accuracy, highlight reconstruction quality, professional demosaic quality, or correctness across all camera models.
+
+
+Known current limitations and caveats
+=====================================
+
+1. Demosaic is effectively bilinear only.
+
+The enum currently only exposes Bilinear, the UI says only Bilinear is selectable, and RawGpuPipeline currently uploads Bilinear as the demosaic method. The shader contains additional code, but current public settings do not expose it.
+
+2. The node is scene-linear, not display-ready by itself.
+
+Develop outputs scene-linear RGB. A View Transform or other display/output transform is still needed downstream for display-referred output.
+
+3. Scene prep does not recover missing clipped detail.
+
+Scene prep is local exposure shaping. It can redistribute/prepare scene-linear values that exist, but it is not true recovery of missing sensor data. RAW highlight reconstruction is the earlier RAW-stage recovery attempt.
+
+4. Integrated scene prep and tone are forced on.
+
+Although booleans exist in payload and serialization, current editor/render paths force scenePrepEnabled and integratedToneEnabled true. Treat them as implementation fields, not reliable user-facing toggles in this build.
+
+5. Finish Mask only masks integrated finish tone.
+
+It does not mask RAW conversion or scene prep. This matters for research about selective RAW development.
+
+6. The UI metadata path only directly recognizes a RawSource input.
+
+If Develop is fed through RawNeuralDenoise, RenderPipeline can walk upstream to RawSource, but RenderRawDevelopControls' immediate metadata lookup falls back to empty metadata unless the direct input node is RawSource.
+
+7. RAW/CFA neural denoise is currently a RAW-domain pass-through placeholder in the UI text.
+
+Develop can accept RAW from RawNeuralDenoise, but the separate neural node says execution is bypass/pass-through until real inference is implemented.
+
+8. Camera transform is approximate.
+
+The code comment says Stack does not have a full color-management module yet and uses LibRaw's camera-to-sRGB matrix as an approximate working transform for V1 fallback.
+
+9. DNG matrix handling is implemented but not guaranteed to be complete.
+
+DNG ForwardMatrix, ColorMatrix inverse, calibration, analog balance, and dual-illuminant blend logic exist. The metadata-based default selection explicitly avoids some under-specified DNG cases by preferring LibRaw when Stack's own DNG dual-illuminant blend is considered approximate.
+
+10. Lateral CA UI/save range mismatch exists.
+
+The UI sliders allow +/-8 px, but deserialization clamps to +/-3 px.
+
+11. Debug views bypass final processing.
+
+When debugView is not FinalOutput, scene prep and integrated tone are not applied. The debug output is diagnostic, not the node's normal final image.
+
+12. Linear RGB RAW/DNG path skips mosaic-specific controls.
+
+For LinearRgb input, demosaic, mosaic denoise, RAW highlight reconstruction, clipped CFA debug, false color cleanup, and similar mosaic-specific stages are not used the same way.
+
+13. Auto solve depends on render feedback stats stored in integrated tone JSON.
+
+Auto mode can display "Develop will analyze the connected RAW image on the next render." This means first-run or stale cases may need a render pass before full stats-informed auto behavior appears.
+
+14. Pre-Finish is hidden.
+
+It exists and is important internally, but normal users may not see it as a visible socket. Research workflows should account for it as a hidden output in code, not necessarily a user-visible node graph affordance.
+
+15. Develop does not store raw sensor buffers.
+
+RawSource nodes serialize metadata and source path, not the raw sensor buffer. RenderPipeline reloads the RAW file through RawLoader at render time unless embedded raw data exists in the render payload.
+
+
+Research-relevant summary
+=========================
+
+The current Develop node is a merged RAW workflow node. It is the RAW-to-image conversion boundary, but it also contains local scene preparation and final tone-curve finishing inside the same node. Its output is scene-linear float RGB unless a debug view is selected; downstream View Transform remains necessary for display output.
+
+The RAW conversion path is GPU-based and uses Stack-owned RawImageData/RawDevelopSettings rather than LibRaw's dcraw_process final image path. It supports mosaiced Bayer RAW and linear RGB RAW/DNG inputs, but the most complete behavior is for mosaiced Bayer. The mosaic path normalizes black/white levels, handles white balance, demosaics, optionally performs RAW-stage highlight reconstruction, cleanup, mosaic denoise, DNG gain-map correction, camera matrix transform, orientation/flips, and exposure scaling.
+
+The node's Auto mode is not just automatic exposure. It writes settings across RAW baseline exposure, Scene Prep local exposure, and integrated ToneCurve state. Manual mode preserves those authored settings and exposes direct controls. In current code, scene prep and integrated tone are forced on, so research should treat Develop as a combined RAW + pre-local exposure + finish tone node unless specifically inspecting hidden pre-finish/base outputs.
+
+The most important separation points are:
+
+- RAW base: internal "__rawDevelopBase" texture from RawGpuPipeline::Render.
+- Pre-Finish: hidden image output after RAW base and scene prep, before integrated tone and finish mask.
+- Final Image: visible image output after integrated ToneCurve and optional Finish Mask blend.
+
+Truthful capability statement:
+
+Develop can currently convert supported RAW inputs into scene-linear RGB, apply metadata/manual white balance, exposure, orientation, camera transform, simple bilinear demosaic, RAW highlight reconstruction modes, cleanup/denoise controls, scene-prep local exposure shaping, and integrated ToneCurve finishing. It can output normal image data to downstream graph nodes and can use a mask to localize the final integrated tone stage. It cannot currently be described as a full professional RAW engine with advanced demosaic selection, full color management, guaranteed camera-profile accuracy, true recovery of missing clipped data, or completed neural RAW denoise.

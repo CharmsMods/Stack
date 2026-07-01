@@ -1,0 +1,73 @@
+UPDATE GUIDE
+
+Purpose
+
+Use this file when updating the preset bundle itself.
+
+The goal is to keep the bundle specific, sharp, consistent, and easy to extend without letting it become repetitive, lazy, generic, or bloated.
+
+Default update behavior
+
+When the user wants to update the preset bundle, ask only the minimum focused questions needed to place and shape the change correctly.
+
+Do not ask broad brainstorming questions when the user already knows the new preference.
+
+Do not force the user to rewrite the change in document language. Convert it into the preset style directly.
+
+Core update questions
+
+Ask only the questions that matter for the current change:
+
+1. Is this a new standing rule, a refinement of an existing rule, or an exception to an existing rule?
+2. Should this apply across future projects, or only in certain kinds of projects?
+3. Which existing file should own this change, or does the topic now justify a new companion file?
+4. Does this replace existing wording, tighten it, or add a missing constraint?
+5. Does any other file need a matching update so the bundle stays consistent?
+
+Placement rules
+
+Prefer updating an existing file when the new guidance clearly belongs inside its current scope.
+
+Create a new companion file only when the topic has grown enough that forcing it into an existing file would weaken organization or clarity.
+
+Do not create a new file for a minor addition that cleanly fits an existing file.
+
+If a new file is added, update the main `program-preset.txt` companion list.
+
+Writing rules for updates
+
+Keep the language crisp, imperative, and direct.
+
+Do not add filler, motivational language, or obvious statements.
+
+Do not soften rules into vague suggestions unless the user explicitly wants flexibility.
+
+When a change sharpens an existing rule, prefer rewriting the existing passage instead of stacking extra paragraphs beneath it.
+
+Prefer replacing weaker wording with clearer wording over appending near-duplicates.
+
+Specificity rules
+
+Do not let new text drift into generic best-practice language.
+
+Keep each update tied to an actual preference, constraint, tradeoff, or operating rule.
+
+If a new point is too broad, ask a short follow-up question before writing it into the bundle.
+
+Consistency rules
+
+After each update, check for overlap, contradiction, and repeated guidance across files.
+
+If two files now say nearly the same thing, tighten one of them or move the rule to the better owner.
+
+Do not let one file quietly introduce a rule that conflicts with the rest of the bundle.
+
+What to avoid during updates
+
+Do not turn the preset bundle into a public README.
+
+Do not let project-specific details leak into this bundle unless the user explicitly wants a reusable rule drawn from them.
+
+Do not keep piling on small additions without occasionally tightening earlier wording.
+
+Do not preserve weak wording just because it already exists.

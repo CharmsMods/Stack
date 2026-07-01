@@ -1,0 +1,35 @@
+FORBIDDEN PATTERNS
+
+Do not create giant files that absorb multiple unrelated responsibilities.
+
+Do not split code into many tiny files with no meaningful ownership benefit.
+
+Do not create vague helper dumping grounds.
+
+Do not keep adding features to the nearest convenient file when the architecture is already signaling for a cleaner boundary.
+
+Do not overengineer abstractions for hypothetical future needs.
+
+Do not hard-code the project into doing only the exact current task if realistic future growth would clearly require expensive restructuring.
+
+Do not choose major dependencies casually or by habit.
+
+Do not default to slow or bloated text formats for data that should be optimized storage.
+
+Do not freeze, stall, or lag the UI with work that should have been structured as background processing.
+
+Do not let background work become invisible when doing so would confuse the user or hide important state.
+
+Do not leave hacks, placeholders, dead paths, or fix-later structures in real implementation without explicitly calling them out in project documentation.
+
+Do not leave comments that are vague, stale, opinionated, decorative, or false.
+
+Do not leave the repository without a clear root guide.
+
+Do not leave build steps obscure, scattered, or guess-based.
+
+Do not make runtime data placement accidental.
+
+Do not assume shipping requirements too early, and do not ignore them too late.
+
+Do not sacrifice output quality, correctness, or user trust for performance gains.

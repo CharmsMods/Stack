@@ -1,0 +1,759 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+09 - Manual Mode, Auto Handoff, Bias Preservation, and Expert Controls
+======================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose
+=======
+
+This guide defines Manual mode, the Auto-to-Manual handoff, how manual edits should be preserved when returning to Auto, and how expert controls should be organized without duplication.
+
+The key principle is:
+
+Manual is not a separate image pipeline. Manual is the exposed, editable version of the authored Develop state.
+
+Auto solves. Manual reveals and refines. Returning to Auto should preserve user intent as mathematical bias unless the user asks for a clean recalibration.
+
+Current Stack anchor
+====================
+
+The current Develop node already treats Manual this way conceptually. The current context document says:
+
+- Auto is the default merged workflow.
+- Auto writes settings across RAW baseline exposure, Scene Prep, and integrated ToneCurve state.
+- Manual freezes the current auto-authored result and reveals deeper RAW, prep, and finish controls.
+- Manual does not switch to a different render algorithm.
+- Scene prep and integrated tone remain part of the same render path.
+
+That is the correct conceptual foundation.
+
+The future design should make this stronger and clearer. Manual should not feel like a different app hidden inside the node. It should feel like opening the hood on exactly what Auto built.
+
+What Manual mode should be
+==========================
+
+Manual mode should be the place where the user can edit the real authored state behind the image.
+
+It should expose:
+
+- RAW exposure and scene-linear data scaling,
+- visible brightness/tone controls,
+- white balance and camera color interpretation,
+- black/white levels,
+- highlight reconstruction/recovery behavior,
+- demosaic/detail behavior,
+- pre-demosaic denoise,
+- post-demosaic denoise,
+- hot pixel and sensor cleanup,
+- false color suppression,
+- defringe and chromatic aberration controls,
+- local exposure / scene prep controls,
+- highlight and shadow guards,
+- subject/importance masks and biases,
+- finish tone controls,
+- graph-control positions,
+- candidate selection history,
+- diagnostics and confidence maps.
+
+Manual should be powerful. The user explicitly does not want important controls left out just to keep the UI simple. But Manual should also be organized well. Deep control is good. Duplicate confusing controls are not.
+
+Manual should not duplicate the same operation under different names
+====================================================================
+
+One of the biggest design risks is ending up with several controls that appear to do the same thing.
+
+For example, a user could see:
+
+- Exposure,
+- Brightness,
+- Midtones,
+- Local Exposure,
+- Shadow Lift,
+- Tone Curve,
+- Gamma,
+- View Transform compensation,
+
+and all of them make the image "brighter" in some way.
+
+That is not automatically wrong, but it becomes wrong if the UI does not explain what each one actually does.
+
+Manual should clearly separate:
+
+Data Exposure:
+- scene-linear EV multiplication,
+- changes the scale of image values,
+- affects highlight risk downstream.
+
+Visible Brightness:
+- rendered appearance,
+- may use tone, local exposure, and display mapping,
+- does not necessarily mean multiplying RAW values.
+
+Highlight Reconstruction:
+- RAW-stage use of existing/partial channel data,
+- happens before scene prep/tone,
+- not the same as making highlights look nice.
+
+Highlight Rolloff:
+- tone/display-facing brightness mapping,
+- makes highlights transition into white,
+- does not recover missing data.
+
+Shadow Lift:
+- scene prep/local exposure behavior,
+- makes dark data more visible,
+- may reveal noise.
+
+Shadow Toe:
+- tone behavior,
+- decides how shadows become visually dark,
+- may hide noise.
+
+White Balance:
+- adapts/corrects the camera/channel interpretation of neutral color.
+
+Color Rendering:
+- makes color pleasing, realistic, rich, restrained, mood-preserved, or memory-color protected.
+
+Denoise:
+- removes or suppresses noise.
+
+Texture/Detail:
+- preserves, enhances, or softens real structure.
+
+The UI should teach these distinctions without making the user feel like they are reading a textbook every time.
+
+Manual grouping
+===============
+
+Manual controls should be grouped by purpose, not by random implementation structure.
+
+Recommended groups:
+
+1. Data Foundation
+------------------
+
+This group controls the basic interpretation of the RAW data.
+
+Includes:
+
+- black level,
+- white level,
+- RAW baseline exposure,
+- true EV scale,
+- clipping readouts,
+- scene-linear output information,
+- input metadata confidence,
+- DNG baseline exposure display,
+- source camera/file information,
+- current processing confidence.
+
+This group answers: "What raw data range are we working with?"
+
+2. RAW Color and Camera Interpretation
+--------------------------------------
+
+Includes:
+
+- white balance mode,
+- manual RGB multipliers,
+- effective WB readout,
+- camera transform enabled/source,
+- DNG/LibRaw color source information,
+- camera matrix diagnostics,
+- color transform warnings.
+
+This group answers: "How is sensor color being interpreted?"
+
+3. RAW Reconstruction and Cleanup
+---------------------------------
+
+Includes:
+
+- highlight reconstruction mode,
+- clipped channel behavior,
+- threshold/strength,
+- hot pixel suppression,
+- false color suppression,
+- defringe,
+- chromatic aberration,
+- highlight edge cleanup,
+- preserve real color,
+- debug masks.
+
+This group answers: "What sensor/demosaic artifacts or damaged highlight areas are being handled?"
+
+4. Demosaic, Denoise, Texture, and Detail
+-----------------------------------------
+
+Includes:
+
+- demosaic method/quality mode,
+- pre-demosaic denoise,
+- post-demosaic denoise,
+- edge protection,
+- chroma/luma denoise,
+- texture preservation,
+- sharpening/capture detail,
+- noise maps,
+- detail maps.
+
+This group answers: "How clean and detailed should the developed image be?"
+
+5. Range Preparation / Scene Prep
+---------------------------------
+
+Includes:
+
+- global/local exposure relationship,
+- scene prep strength,
+- shadow lift,
+- highlight compression,
+- noise guard,
+- highlight guard,
+- shadow guard,
+- base EV,
+- min/max local EV,
+- halo guard,
+- smooth gradient protection,
+- edge awareness,
+- local exposure maps.
+
+This group answers: "How is the scene-linear image being made workable before final tone?"
+
+6. Subject and Importance Bias
+------------------------------
+
+Includes:
+
+- user-painted importance brush,
+- importance mask display,
+- edge-aware brush interpretation,
+- subject weighting strength,
+- subject confidence,
+- preserve mood versus reveal subject,
+- marked-region exposure/tone/color protection.
+
+This group answers: "What parts of the image should matter more to the solver?"
+
+7. Color Rendering and Realism
+------------------------------
+
+Includes:
+
+- neutral/mood blend,
+- color density,
+- memory color protection,
+- skin protection,
+- saturation behavior,
+- warm/cool mood,
+- color cast tolerance,
+- camera profile trust,
+- color diagnostics.
+
+This group answers: "How should the colors feel after they are technically interpreted?"
+
+8. Finish Tone
+--------------
+
+Includes:
+
+- tone graph,
+- midtone placement,
+- contrast,
+- highlight shoulder,
+- shadow toe,
+- black/white endpoint behavior,
+- local finish mask,
+- prepared/foundation tone panels,
+- final before/after tone preview.
+
+This group answers: "How should the image become a finished-looking photograph?"
+
+9. Diagnostics and Education
+----------------------------
+
+Includes:
+
+- clipping map,
+- EV map,
+- local exposure map,
+- noise/SNR risk,
+- confidence map,
+- stage previews,
+- candidate history,
+- solve explanation,
+- what changed since Auto,
+- current locks and biases.
+
+This group answers: "What happened, why did it happen, and what is risky?"
+
+Progressive reveal
+==================
+
+Manual should not dump every possible control on screen at once.
+
+Recommended levels:
+
+Manual Essentials:
+- RAW Exposure,
+- Visible Brightness/Tone,
+- WB,
+- Dynamic Range/Local Exposure,
+- Denoise/Cleanliness,
+- Finish Feel graph,
+- key diagnostics warnings.
+
+Manual Advanced:
+- all grouped controls listed above,
+- graph + numeric controls,
+- stage previews,
+- candidate state.
+
+Manual Expert / Diagnostics:
+- camera matrix details,
+- black/white override,
+- debug views,
+- raw masks,
+- confidence maps,
+- exact EV maps,
+- reconstruction maps,
+- developer-facing readouts.
+
+This preserves power without turning first contact into a cockpit explosion.
+
+Graph controls in Manual
+========================
+
+The user wants to lean into graph-style controls rather than relying only on sliders. Manual mode should support that.
+
+The difference between Auto graph controls and Manual graph controls:
+
+Auto graph controls:
+- tell the solver what direction to move,
+- may change many hidden settings,
+- are intent controls.
+
+Manual graph controls:
+- adjust a grouped authored state,
+- should show what underlying values are affected,
+- can still be intelligent but should be more inspectable.
+
+Important Manual graph controls:
+
+Exposure / Range Map:
+- Brighten Important Mids versus Protect Highlights.
+- Preserve Natural Contrast versus Reveal More Range.
+
+White Balance / Mood Map:
+- Neutral Correction versus Mood Preservation.
+- Cooler/Cleaner versus Warmer/Atmospheric.
+
+Color Realism Map:
+- Accurate/Neutral versus Pleasing/Memory-Color Rendered.
+- Restrained Color versus Rich Color Density.
+
+Texture / Cleanliness Map:
+- Clean/Smooth versus Natural Texture/Detail.
+- Hide Noise in Tone versus Reveal Detail with Denoise Support.
+
+Tone / Finish Feel Map:
+- Editable/Reserved versus Finished/Committed.
+- Soft/Range-Preserving versus Punchy/Endpoint-Driven.
+
+Subject / Scene Intent Map:
+- Global Scene Integrity versus Marked Subject Priority.
+- Preserve Mood versus Improve Readability.
+
+These graphs should not hide what they are doing forever. In Manual mode, moving a graph point should optionally reveal affected values: for example, shadow toe changed, local max EV changed, highlight shoulder changed, color density changed, denoise increased in lifted shadows, etc.
+
+The graph is the human control. The values are the authored state.
+
+Sliders still matter
+====================
+
+Graph controls should not replace every slider.
+
+Sliders are still better for:
+
+- exact EV values,
+- black/white override levels,
+- denoise strength when a user wants a specific value,
+- clipping thresholds,
+- manual WB multipliers,
+- radius values,
+- debug settings,
+- direct expert overrides.
+
+Graphs are best where a one-dimensional slider would hide too much meaning.
+
+A good rule:
+
+Use graphs for intent and tradeoff spaces.
+Use sliders for direct numeric values.
+Use toggles for actual mode changes.
+Use maps/previews for understanding.
+
+Auto-to-Manual handoff
+======================
+
+When the user switches from Auto to Manual, the selected Auto result should freeze as the authored state.
+
+Manual should reveal:
+
+- the selected Auto mode,
+- Auto Strength,
+- graph positions,
+- candidate selected,
+- RAW exposure used,
+- visible brightness/tone choices,
+- WB and color interpretation,
+- local exposure settings,
+- denoise/detail settings,
+- subject/importance bias,
+- safeguards that limited the solve,
+- confidence warnings,
+- stage previews.
+
+The user should not have to guess what Auto did.
+
+Manual should feel like:
+
+"Here is the image Stack solved. Here are the real levers that produced it. Change anything."
+
+Not:
+
+"Auto gave you a look, and now Manual starts over."
+
+Returning to Auto
+=================
+
+Returning from Manual to Auto is one of the most important behaviors.
+
+The user does not want Auto to wipe out manual work. Manual changes should become mathematical biases unless locked or reset.
+
+Examples:
+
+If the user made the image warmer:
+- Auto should preserve a warmer color intent unless recalibrated.
+
+If the user made the image brighter:
+- Auto should preserve a brighter visible result even if it changes RAW exposure/local exposure/tone internally.
+
+If the user opened shadows:
+- Auto should interpret that as a preference for more shadow readability, but it may still restrain noisy areas.
+
+If the user made the image punchier:
+- Auto should preserve stronger tone/contrast direction while still preventing halos/clipping.
+
+If the user reduced denoise for more texture:
+- Auto should avoid plastic cleanup unless the user resets that intent.
+
+If the user marked a subject:
+- Auto should keep that subject/importance bias until removed.
+
+Manual edits should not all become rigid locks. They should become intent unless explicitly locked.
+
+Biases, locks, and resets
+=========================
+
+Develop should distinguish:
+
+Bias:
+- "Lean this way, but still solve intelligently."
+
+Lock:
+- "Do not change this value or section unless I unlock it."
+
+Reset:
+- "Forget my manual edit and re-solve this section."
+
+Recommended lockable sections:
+
+- RAW Exposure lock,
+- White Balance lock,
+- Camera Transform lock,
+- Highlight Reconstruction lock,
+- Scene Prep lock,
+- Subject Mask lock,
+- Denoise/Detail lock,
+- Color Rendering lock,
+- Finish Tone lock,
+- Finish Mask lock.
+
+Recommended bias categories:
+
+- brightness intent,
+- warmth/mood intent,
+- contrast/punch intent,
+- range openness,
+- shadow readability,
+- highlight protection,
+- texture/cleanliness,
+- subject importance.
+
+A powerful UI pattern would be a small lock/bias indicator per group:
+
+- Auto: solver owns it.
+- Biased: user preference influences it.
+- Locked: solver cannot change it.
+- Manual: user directly controls it.
+
+Recalibrate Auto
+================
+
+Recalibrate Auto should have modes.
+
+Possible options:
+
+Full Recalibrate:
+- ignore most manual biases,
+- solve from current mode/settings,
+- useful when the user wants a clean new Auto.
+
+Recalibrate With Manual Intent:
+- keep graph positions and user edits as bias,
+- update the solve around them,
+- likely default when returning from Manual.
+
+Recalibrate Selected Section:
+- re-solve only color, or only range, or only tone, etc.
+
+Reset Section:
+- remove manual changes for one group.
+
+This prevents the user from losing work while still allowing a fresh solve when desired.
+
+Manual safety systems
+=====================
+
+Manual mode should have safety systems enabled by default, but with override controls.
+
+This matches the user's direction: they want power and flexibility, but not accidental broken output. Manual should not become weak, but it should protect against obvious disasters unless the user intentionally disables protections.
+
+Recommended safety levels:
+
+Auto Safety On:
+- safeguards active,
+- direct controls may use bias behavior,
+- protects against clipping, halos, extreme noise lift, ugly color shifts.
+
+Soft Safety:
+- allows stronger moves,
+- warns instead of blocking,
+- good for advanced manual edits.
+
+Expert Override:
+- user can fully break the image,
+- diagnostics remain visible,
+- Stack does not pretend the output is protected.
+
+The current Develop node already has the idea of Auto Safety in scene prep where controls can act as biases when Auto Safety is enabled and direct controls when disabled. Future Manual mode can generalize that pattern.
+
+Do not make safety equal weakness
+=================================
+
+A bad safety system just reduces every adjustment until the image becomes flat and boring.
+
+A good safety system redirects.
+
+Examples:
+
+- If shadow lift reveals noise, consider denoise, tone darkness, local restraint, or candidate alternatives.
+- If highlight protection makes clouds gray, alter shoulder or midtone placement instead of simply reducing compression.
+- If local contrast causes halos, use smoother maps or global/midtone contrast.
+- If skin clips, protect skin highlights while allowing speculars elsewhere.
+- If denoise smears texture, use region-adaptive denoise rather than lowering all denoise blindly.
+
+Manual safety should help the user make stronger images safely.
+
+Candidate history in Manual
+===========================
+
+If Auto generated candidates, Manual should know which candidate was selected.
+
+Manual should be able to show:
+
+- selected candidate,
+- rejected candidates if still available,
+- differences between candidates,
+- settings that changed between them,
+- whether manual edits moved away from the candidate,
+- whether the user wants to create a new candidate from the manual state.
+
+This supports the user's idea of candidate rendering as a way to discover preferences through experience.
+
+A future "Create Candidate From Manual State" button could take the current manual look and ask Auto to produce nearby alternatives without abandoning the manual direction.
+
+Merging after Manual
+====================
+
+If candidate merging exists, Manual mode should preserve the logic.
+
+A candidate merge should not be pixel averaging. It should merge authored intent/state, then re-solve.
+
+Manual mode can expose:
+
+- Candidate A settings,
+- Candidate B settings,
+- merged bias vector,
+- new solve result,
+- final authored state.
+
+This makes merging meaningful and editable.
+
+Manual diagnostics
+==================
+
+Manual diagnostics should be especially strong because this is where the user learns what the image data is doing.
+
+Useful diagnostics:
+
+- RAW clipping map,
+- post-highlight-reconstruction map,
+- local EV adjustment map,
+- noise/SNR risk map,
+- denoise difference map,
+- false color mask,
+- highlight edge mask,
+- pre-finish image,
+- final tone image,
+- before/after finish mask,
+- color shift map,
+- confidence map,
+- safeguard limitation badges.
+
+Plain-language examples:
+
+- "Global exposure lowered to protect important highlights; midtones lifted locally."
+- "Shadow lift limited because selected region contains high noise risk."
+- "WB preserved warm mood instead of forcing neutral."
+- "Denoise stronger in lifted flat shadows, weaker on textured areas."
+- "Tone uses deeper shadow toe to hide low-signal background."
+
+These explanations should not be marketing. They should be truthful descriptions of what happened.
+
+Manual and education
+====================
+
+Stack should teach users what is actually happening.
+
+This does not mean dumping equations everywhere. It means using small, honest explanations:
+
+- "+1 EV doubles scene-linear values."
+- "Visible brightness can change without changing RAW exposure."
+- "Highlight rolloff makes bright areas render smoothly; it does not recover missing clipped detail."
+- "Pre-demosaic denoise cleans sensor-pattern noise before RGB reconstruction."
+- "Post-demosaic denoise cleans visible image noise after RGB reconstruction."
+- "Tone can hide noise by keeping weak shadows dark."
+
+This matches the user's original learning path: sitting down and asking what "brightness" really means until discovering EV and multiplication.
+
+Manual should support that curiosity.
+
+Better than normal "Advanced" mode
+==================================
+
+Many apps treat "Advanced" as a drawer full of miscellaneous controls.
+
+Stack should not.
+
+Manual should be built around ideas:
+
+- What is the data?
+- How is the camera interpreted?
+- What is damaged or uncertain?
+- What should be visible?
+- What should remain dark or bright?
+- What should feel realistic?
+- What should be clean versus textured?
+- What should be finished versus flexible?
+
+The implementation can be complex. The user's mental model should be clear.
+
+Render/reprocess behavior in Manual
+===================================
+
+Manual changes should not always trigger full reprocessing.
+
+Conceptual categories:
+
+RAW foundation changes:
+- black/white levels, RAW exposure, WB, camera transform, orientation.
+- likely require base/raw-stage rerender and downstream updates.
+
+Reconstruction/cleanup changes:
+- highlight reconstruction, demosaic, pre-demosaic denoise, false color cleanup.
+- require RAW-stage rerender and downstream updates.
+
+Scene prep changes:
+- local exposure, dynamic range, guards, subject weighting.
+- require scene prep and downstream tone updates; may not require raw reload.
+
+Finish tone changes:
+- curve, shoulder, toe, contrast, finish mask.
+- should update downstream quickly.
+
+Graph intent changes:
+- may trigger partial or full re-solve depending on which graph moved.
+
+Subject brush changes:
+- require subject/importance map update and likely scene prep/tone re-solve, but not necessarily RAW demosaic.
+
+Manual should show when a change is expensive, but not make the user think about render internals constantly.
+
+Decisions locked from user direction
+====================================
+
+- Manual mode should expose as much meaningful control as possible.
+- Manual mode should not duplicate basically identical controls under different names.
+- Manual should reveal the Auto-authored state.
+- Returning from Manual to Auto should preserve user edits as biases where possible.
+- Manual edits should not become rigid locks by default.
+- Locks should exist for users who want them.
+- Safety should stay available, but expert override should exist.
+- Pre-demosaic and post-demosaic denoise should both be separately exposed.
+- Graph controls should be a major part of both Auto and Manual where useful.
+
+Experience-test questions
+=========================
+
+These should be tested with real UI builds:
+
+- Which manual groups feel intuitive?
+- How many graph controls should be visible in Manual Essentials?
+- Should graph controls show affected values immediately or only on expand?
+- How should locks/biases be displayed without clutter?
+- How much should Auto explain when returning from Manual?
+- Should Manual default to Auto Safety On or Soft Safety?
+- Which controls should remain sliders rather than graphs?
+
+Research anchors
+================
+
+- DEVELOP_NODE_CONTEXT.txt, current Stack Develop implementation and Auto/Manual behavior.
+- darktable and RawPedia documentation for examples of explicit, module-based RAW editing concepts.
+- DaVinci Resolve and Adobe color-grading controls as examples of multidimensional user controls that express tone/color direction rather than only one-dimensional slider values.

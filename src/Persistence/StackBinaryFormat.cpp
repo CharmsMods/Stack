@@ -30,8 +30,10 @@ constexpr std::array<char, 4> kThumbnailSection = { 'T', 'H', 'M', 'B' };
 constexpr std::array<char, 4> kSourceSection = { 'S', 'R', 'C', 'I' };
 constexpr std::array<char, 4> kPipelineSection = { 'P', 'I', 'P', 'E' };
 constexpr std::array<char, 4> kNodeBrowserSection = { 'N', 'B', 'R', 'W' };
+constexpr std::array<char, 4> kRawWorkspaceSection = { 'R', 'A', 'W', 'K' };
 constexpr std::array<char, 4> kProjectsSection = { 'P', 'R', 'O', 'J' };
 constexpr std::array<char, 4> kAssetsSection = { 'A', 'S', 'S', 'T' };
+constexpr std::array<char, 4> kPresetBoundarySection = { 'B', 'N', 'D', 'Y' };
 
 enum class CompressionCodec : std::uint8_t {
     None = 0,
@@ -153,14 +155,22 @@ std::string SectionKey(const std::array<char, 4>& id) {
 }
 
 bool IsCompressionCandidate(FileKind kind, const std::array<char, 4>& id, std::size_t byteCount) {
-    if (kind != FileKind::Project || byteCount < kCompressionAttemptThreshold) {
+    if (byteCount < kCompressionAttemptThreshold) {
         return false;
     }
 
-    return id == kPipelineSection ||
-           id == kThumbnailSection ||
-           id == kSourceSection ||
-           id == kNodeBrowserSection;
+    if (kind == FileKind::Project) {
+        return id == kPipelineSection ||
+               id == kThumbnailSection ||
+               id == kSourceSection ||
+               id == kNodeBrowserSection;
+    }
+    if (kind == FileKind::NodePreset) {
+        return id == kPipelineSection ||
+               id == kThumbnailSection ||
+               id == kPresetBoundarySection;
+    }
+    return false;
 }
 
 bool CompressDeflateBytes(const std::vector<unsigned char>& input, std::vector<unsigned char>& output) {
@@ -630,6 +640,66 @@ bool ProjectMetadataFromJson(const json& value, ProjectMetadata& metadata) {
     return true;
 }
 
+json NodePresetMetadataToJson(const NodePresetMetadata& metadata) {
+    return {
+        { "id", metadata.id },
+        { "displayName", metadata.displayName },
+        { "timestamp", metadata.timestamp },
+        { "savedWithVersion", metadata.savedWithVersion },
+        { "presetVersion", metadata.presetVersion },
+        { "nodeCount", metadata.nodeCount },
+        { "inputCount", metadata.inputCount },
+        { "outputCount", metadata.outputCount }
+    };
+}
+
+bool NodePresetMetadataFromJson(const json& value, NodePresetMetadata& metadata) {
+    if (!value.is_object()) {
+        return false;
+    }
+    metadata.id = value.value("id", std::string());
+    metadata.displayName = value.value("displayName", "Untitled Preset");
+    metadata.timestamp = value.value("timestamp", std::string());
+    metadata.savedWithVersion = value.value("savedWithVersion", std::string());
+    metadata.presetVersion = value.value("presetVersion", 1u);
+    metadata.nodeCount = value.value("nodeCount", 0u);
+    metadata.inputCount = value.value("inputCount", 0u);
+    metadata.outputCount = value.value("outputCount", 0u);
+    return !metadata.id.empty();
+}
+
+json NodePresetBoundarySocketsToJson(const std::vector<NodePresetBoundarySocket>& sockets) {
+    json array = json::array();
+    for (const NodePresetBoundarySocket& socket : sockets) {
+        array.push_back({
+            { "nodeTitle", socket.nodeTitle },
+            { "socketLabel", socket.socketLabel },
+            { "direction", socket.direction },
+            { "type", socket.type }
+        });
+    }
+    return array;
+}
+
+std::vector<NodePresetBoundarySocket> NodePresetBoundarySocketsFromJson(const json& value) {
+    std::vector<NodePresetBoundarySocket> sockets;
+    if (!value.is_array()) {
+        return sockets;
+    }
+    for (const json& socketValue : value) {
+        if (!socketValue.is_object()) {
+            continue;
+        }
+        NodePresetBoundarySocket socket;
+        socket.nodeTitle = socketValue.value("nodeTitle", std::string());
+        socket.socketLabel = socketValue.value("socketLabel", std::string());
+        socket.direction = socketValue.value("direction", std::string());
+        socket.type = socketValue.value("type", std::string());
+        sockets.push_back(std::move(socket));
+    }
+    return sockets;
+}
+
 json BundledProjectToJson(const BundledProjectDocument& project) {
     json value = json::object();
     value["fileName"] = project.fileName;
@@ -641,6 +711,9 @@ json BundledProjectToJson(const BundledProjectDocument& project) {
     value["thumbnailPng"] = MakeBinaryJson(project.project.thumbnailBytes);
     value["sourcePng"] = MakeBinaryJson(project.project.sourceImageBytes);
     value["pipeline"] = project.project.pipelineData.is_null() ? json::array() : project.project.pipelineData;
+    value["rawWorkspace"] = project.project.rawWorkspaceData.is_null()
+        ? json::object()
+        : project.project.rawWorkspaceData;
     json nodeBrowserThumbs = json::array();
     for (const NodeBrowserThumbnailEntry& entry : project.project.nodeBrowserThumbnailEntries) {
         nodeBrowserThumbs.push_back({
@@ -663,6 +736,7 @@ bool BundledProjectFromJson(const json& value, BundledProjectDocument& project) 
     project.project.metadata.sourceWidth = value.value("sourceWidth", 0);
     project.project.metadata.sourceHeight = value.value("sourceHeight", 0);
     project.project.pipelineData = value.value("pipeline", json::array());
+    project.project.rawWorkspaceData = value.value("rawWorkspace", json::object());
     project.project.nodeBrowserThumbnailEntries.clear();
 
     if (value.contains("thumbnailPng") && value["thumbnailPng"].is_binary()) {
@@ -748,6 +822,7 @@ bool WriteProjectFile(const std::filesystem::path& path, const ProjectDocument& 
     sections.push_back(MakeSectionData(FileKind::Project, kSourceSection, document.sourceImageBytes));
     sections.push_back(MakeSectionData(FileKind::Project, kPipelineSection, SerializeJson(document.pipelineData.is_null() ? json::array() : document.pipelineData)));
     sections.push_back(MakeSectionData(FileKind::Project, kNodeBrowserSection, SerializeJson(nodeBrowserThumbs)));
+    sections.push_back(MakeSectionData(FileKind::Project, kRawWorkspaceSection, SerializeJson(document.rawWorkspaceData.is_null() ? json::object() : document.rawWorkspaceData)));
     return WriteSectionedFile(path, FileKind::Project, sections);
 }
 
@@ -818,6 +893,85 @@ bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& documen
         }
     } else {
         document.nodeBrowserThumbnailEntries.clear();
+    }
+
+    if (options.includeRawWorkspaceData) {
+        std::vector<unsigned char> rawWorkspaceBytes;
+        if (ReadSectionBytes(file, sections, kRawWorkspaceSection, rawWorkspaceBytes)) {
+            if (!DeserializeJson(rawWorkspaceBytes, document.rawWorkspaceData)) {
+                return false;
+            }
+            if (!document.rawWorkspaceData.is_object()) {
+                document.rawWorkspaceData = json::object();
+            }
+        } else {
+            document.rawWorkspaceData = json::object();
+        }
+    } else {
+        document.rawWorkspaceData = json();
+    }
+
+    return true;
+}
+
+bool WriteNodePresetFile(const std::filesystem::path& path, const NodePresetDocument& document) {
+    std::vector<SectionData> sections;
+    sections.push_back(MakeSectionData(FileKind::NodePreset, kMetaSection, SerializeJson(NodePresetMetadataToJson(document.metadata))));
+    sections.push_back(MakeSectionData(FileKind::NodePreset, kThumbnailSection, document.thumbnailBytes));
+    sections.push_back(MakeSectionData(FileKind::NodePreset, kPipelineSection, SerializeJson(document.graphPayload.is_null() ? json::object() : document.graphPayload)));
+    sections.push_back(MakeSectionData(FileKind::NodePreset, kPresetBoundarySection, SerializeJson(NodePresetBoundarySocketsToJson(document.boundarySockets))));
+    return WriteSectionedFile(path, FileKind::NodePreset, sections);
+}
+
+bool ReadNodePresetFile(const std::filesystem::path& path, NodePresetDocument& document, const NodePresetLoadOptions& options) {
+    std::ifstream file;
+    std::unordered_map<std::string, SectionInfo> sections;
+    if (!ReadSectionTable(path, FileKind::NodePreset, file, sections, options.verifyChecksum)) {
+        return false;
+    }
+
+    std::vector<unsigned char> metaBytes;
+    if (!ReadSectionBytes(file, sections, kMetaSection, metaBytes)) {
+        return false;
+    }
+
+    json metaJson;
+    if (!DeserializeJson(metaBytes, metaJson) || !NodePresetMetadataFromJson(metaJson, document.metadata)) {
+        return false;
+    }
+
+    if (options.includeThumbnail) {
+        ReadSectionBytes(file, sections, kThumbnailSection, document.thumbnailBytes);
+    } else {
+        document.thumbnailBytes.clear();
+    }
+
+    if (options.includeGraphPayload) {
+        std::vector<unsigned char> graphBytes;
+        if (ReadSectionBytes(file, sections, kPipelineSection, graphBytes)) {
+            if (!DeserializeJson(graphBytes, document.graphPayload)) {
+                return false;
+            }
+        } else {
+            document.graphPayload = json::object();
+        }
+    } else {
+        document.graphPayload = json();
+    }
+
+    if (options.includeBoundarySockets) {
+        std::vector<unsigned char> boundaryBytes;
+        if (ReadSectionBytes(file, sections, kPresetBoundarySection, boundaryBytes)) {
+            json boundaryJson;
+            if (!DeserializeJson(boundaryBytes, boundaryJson)) {
+                return false;
+            }
+            document.boundarySockets = NodePresetBoundarySocketsFromJson(boundaryJson);
+        } else {
+            document.boundarySockets.clear();
+        }
+    } else {
+        document.boundarySockets.clear();
     }
 
     return true;
@@ -908,6 +1062,7 @@ bool AreProjectsIdentical(const ProjectDocument& a, const ProjectDocument& b) {
     if (a.metadata.sourceHeight != b.metadata.sourceHeight) return false;
     if (a.sourceImageBytes != b.sourceImageBytes) return false;
     if (a.pipelineData != b.pipelineData) return false;
+    if (a.rawWorkspaceData != b.rawWorkspaceData) return false;
     return true;
 }
 

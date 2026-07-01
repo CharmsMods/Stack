@@ -1,6 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
+#include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,6 +15,8 @@ ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
 using EditorNodeGraphUIMetrics::IsPointNearCubicBezier;
 using EditorNodeGraphUIMetrics::LinkBezierHandle;
 using EditorNodeGraphUIMetrics::LinkHitRadiusForZoom;
+using Stack::Editor::NodeGraphUIVisuals::ChannelLaneOffset;
+using Stack::Editor::NodeGraphUIVisuals::ResolveLinkVisualStyle;
 
 } // namespace
 
@@ -39,26 +42,15 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::OutputPinScreenPos(const EditorNodeGrap
     return EditorNodeGraph::Vec2{ pos.x + screenSize.x, pos.y + screenSize.y * 0.5f };
 }
 
-EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
+EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
     const float hitRadius = std::max(1.0f, NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
-    std::vector<const EditorNodeGraph::Node*> orderedNodes;
-    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        orderedNodes.push_back(&node);
-    }
-    std::sort(orderedNodes.begin(), orderedNodes.end(), [&](const EditorNodeGraph::Node* a, const EditorNodeGraph::Node* b) {
-        const bool richA = a->kind == EditorNodeGraph::NodeKind::Layer && a->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(a->layerIndex);
-        const bool richB = b->kind == EditorNodeGraph::NodeKind::Layer && b->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(b->layerIndex);
-        if (richA != richB) {
-            return richA > richB;
+    const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
+    for (const int nodeId : orderedNodes) {
+        const EditorNodeGraph::Node* nodePtr = FindCachedNode(graph, nodeId);
+        if (!nodePtr) {
+            continue;
         }
-        const auto itA = m_NodeFrontOrder.find(a->id);
-        const auto itB = m_NodeFrontOrder.find(b->id);
-        const std::uint64_t stampA = itA != m_NodeFrontOrder.end() ? itA->second : 0;
-        const std::uint64_t stampB = itB != m_NodeFrontOrder.end() ? itB->second : 0;
-        return stampA > stampB;
-    });
-    for (const EditorNodeGraph::Node* nodePtr : orderedNodes) {
         const EditorNodeGraph::Node& node = *nodePtr;
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
@@ -75,26 +67,15 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
     return {};
 }
 
-EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
+EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
     const float hitRadius = std::max(1.0f, NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
-    std::vector<const EditorNodeGraph::Node*> orderedNodes;
-    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        orderedNodes.push_back(&node);
-    }
-    std::sort(orderedNodes.begin(), orderedNodes.end(), [&](const EditorNodeGraph::Node* a, const EditorNodeGraph::Node* b) {
-        const bool richA = a->kind == EditorNodeGraph::NodeKind::Layer && a->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(a->layerIndex);
-        const bool richB = b->kind == EditorNodeGraph::NodeKind::Layer && b->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(b->layerIndex);
-        if (richA != richB) {
-            return richA > richB;
+    const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
+    for (const int nodeId : orderedNodes) {
+        const EditorNodeGraph::Node* nodePtr = FindCachedNode(graph, nodeId);
+        if (!nodePtr) {
+            continue;
         }
-        const auto itA = m_NodeFrontOrder.find(a->id);
-        const auto itB = m_NodeFrontOrder.find(b->id);
-        const std::uint64_t stampA = itA != m_NodeFrontOrder.end() ? itA->second : 0;
-        const std::uint64_t stampB = itB != m_NodeFrontOrder.end() ? itB->second : 0;
-        return stampA > stampB;
-    });
-    for (const EditorNodeGraph::Node* nodePtr : orderedNodes) {
         const EditorNodeGraph::Node& node = *nodePtr;
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
@@ -111,24 +92,13 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
     return {};
 }
 
-int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
-    std::vector<const EditorNodeGraph::Node*> orderedNodes;
-    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        orderedNodes.push_back(&node);
-    }
-    std::sort(orderedNodes.begin(), orderedNodes.end(), [&](const EditorNodeGraph::Node* a, const EditorNodeGraph::Node* b) {
-        const bool richA = a->kind == EditorNodeGraph::NodeKind::Layer && a->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(a->layerIndex);
-        const bool richB = b->kind == EditorNodeGraph::NodeKind::Layer && b->expanded && m_ActiveEditor && m_ActiveEditor->LayerUsesRichNodeSurface(b->layerIndex);
-        if (richA != richB) {
-            return richA > richB;
+int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
+    const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
+    for (const int nodeId : orderedNodes) {
+        const EditorNodeGraph::Node* node = FindCachedNode(graph, nodeId);
+        if (!node) {
+            continue;
         }
-        const auto itA = m_NodeFrontOrder.find(a->id);
-        const auto itB = m_NodeFrontOrder.find(b->id);
-        const std::uint64_t stampA = itA != m_NodeFrontOrder.end() ? itA->second : 0;
-        const std::uint64_t stampB = itB != m_NodeFrontOrder.end() ? itB->second : 0;
-        return stampA > stampB;
-    });
-    for (const EditorNodeGraph::Node* node : orderedNodes) {
         if (const NodeLayoutCache* cache = FindNodeLayoutCache(node->id)) {
             if (cache->frameRect.Contains(ToImVec2(screenPos))) {
                 return node->id;
@@ -146,14 +116,24 @@ int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const Edi
     return -1;
 }
 
-EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) const {
-    for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
-        const EditorNodeGraph::Node* from = graph.FindNode(link.fromNodeId);
-        const EditorNodeGraph::Node* to = graph.FindNode(link.toNodeId);
+EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
+    const auto& links = graph.GetLinks();
+    for (auto it = links.rbegin(); it != links.rend(); ++it) {
+        const EditorNodeGraph::Link& link = *it;
+        const EditorNodeGraph::Node* from = FindCachedNode(graph, link.fromNodeId);
+        const EditorNodeGraph::Node* to = FindCachedNode(graph, link.toNodeId);
         if (!from || !to) {
             continue;
         }
-        if (IsPointNearLink(screenPos, OutputPinScreenPos(*from, link.fromSocketId), InputPinScreenPos(*to, link.toSocketId))) {
+
+        EditorNodeGraph::Vec2 fromPos = OutputPinScreenPos(*from, link.fromSocketId);
+        EditorNodeGraph::Vec2 toPos = InputPinScreenPos(*to, link.toSocketId);
+        const auto visualStyle = ResolveLinkVisualStyle(graph, link);
+        const float laneOffset = ChannelLaneOffset(visualStyle.channel, m_Zoom);
+        fromPos.y += laneOffset;
+        toPos.y += laneOffset;
+
+        if (IsPointNearLink(screenPos, fromPos, toPos)) {
             return link;
         }
     }

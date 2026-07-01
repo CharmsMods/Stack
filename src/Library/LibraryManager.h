@@ -5,6 +5,8 @@
 #include "Persistence/StackBinaryFormat.h"
 #include "ProjectData.h"
 #include "Utils/UiNotifications.h"
+#include <chrono>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -77,6 +79,39 @@ struct AssetImportConflict {
     bool previewsReady = false;
 };
 
+struct LibraryRefreshSnapshot {
+    Async::TaskState state = Async::TaskState::Idle;
+    std::uint64_t generation = 0;
+    int current = 0;
+    int total = 0;
+    int projectCount = 0;
+    int assetCount = 0;
+    std::string statusText;
+    std::string currentItem;
+};
+
+struct LibraryTextureUploadStats {
+    int projectDecodeQueued = 0;
+    int assetDecodeQueued = 0;
+    int projectUploads = 0;
+    int assetUploads = 0;
+    int pendingProjectDecodes = 0;
+    int pendingAssetDecodes = 0;
+    int pendingReadyUploads = 0;
+    int projectCount = 0;
+    int assetCount = 0;
+    double elapsedMs = 0.0;
+    bool budgetHit = false;
+};
+
+struct LibraryAutoRefreshStats {
+    double elapsedMs = 0.0;
+    bool requestedSignature = false;
+    bool signatureBusy = false;
+    bool skippedForBusyWork = false;
+    bool skippedForWarmup = false;
+};
+
 class LibraryManager {
 public:
     LibraryManager();
@@ -90,8 +125,13 @@ public:
     void RefreshLibrary(
         std::function<void(int current, int total, const std::string& name)> progressCallback = {},
         bool syncEmbeddedProjectAssets = false);
-    void UploadLibraryTextures(int projectBudget = 2, int assetBudget = 0);
-    void TickAutoRefresh();
+    void RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets = false);
+    void CancelLibraryRefreshRequests();
+    LibraryRefreshSnapshot GetRefreshSnapshot() const;
+    bool IsRefreshBusy() const;
+    void SetThumbnailWarmupPriority(std::vector<std::string> projectFileNames, std::vector<std::string> assetFileNames);
+    LibraryTextureUploadStats UploadLibraryTextures(double maxMainThreadMs = 2.0);
+    LibraryAutoRefreshStats TickAutoRefresh();
 
     int GetProjectCount() const;
 
@@ -196,6 +236,9 @@ public:
 private:
     void InitializeThumbnail(std::shared_ptr<ProjectEntry> project);
     void InitializeAssetThumbnail(std::shared_ptr<AssetEntry> asset);
+    void QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEntry>& project);
+    void QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>& asset);
+    bool HasPendingThumbnailWarmup() const;
     std::vector<unsigned char> GenerateThumbnailBytes(const std::vector<unsigned char>& pixels, int width, int height);
     void ReleaseProjectTextures(std::shared_ptr<ProjectEntry> project);
     void ReleaseAssetTextures(std::shared_ptr<AssetEntry> asset);
@@ -210,18 +253,30 @@ private:
     void FinalizeImport(const StackBinaryFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices);
 
     std::uintmax_t BuildLibrarySignature() const;
+    void RequestLibrarySignatureAsync();
     std::filesystem::path BuildAssetPathForProjectFile(const std::string& projectFileName) const;
     void QueueSavedProjectEvent(const std::string& fileName, const std::string& projectKind);
     void QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
 
     std::vector<std::shared_ptr<ProjectEntry>> m_Projects;
     std::vector<std::shared_ptr<AssetEntry>> m_Assets;
-    std::mutex m_ProjectsMutex;
+    mutable std::mutex m_ProjectsMutex;
     std::mutex m_ProjectFileIoMutex;
+    mutable std::mutex m_RefreshMutex;
 
     std::filesystem::path m_LibraryPath;
     std::filesystem::path m_AssetsPath;
     std::uintmax_t m_LastLibrarySignature = 0;
+    std::uint64_t m_LibraryRefreshGeneration = 0;
+    LibraryRefreshSnapshot m_LibraryRefreshSnapshot;
+    std::chrono::steady_clock::time_point m_LastAutoRefreshSignatureCheck {};
+    mutable std::mutex m_SignatureMutex;
+    std::uint64_t m_LibrarySignatureGeneration = 0;
+    Async::TaskState m_LibrarySignatureTaskState = Async::TaskState::Idle;
+    std::vector<std::string> m_ProjectThumbnailPriority;
+    std::vector<std::string> m_AssetThumbnailPriority;
+    std::size_t m_ProjectThumbnailWarmupCursor = 0;
+    std::size_t m_AssetThumbnailWarmupCursor = 0;
 
     Async::TaskState m_SaveTaskState = Async::TaskState::Idle;
     std::string m_SaveStatusText;

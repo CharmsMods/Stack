@@ -7,6 +7,7 @@ enum class TaskState : unsigned char {
     Queued,
     Running,
     Applying,
+    Ready,
     Failed
 };
 
@@ -22,6 +23,7 @@ inline const char* ToString(TaskState state) {
         case TaskState::Queued: return "Queued";
         case TaskState::Running: return "Running";
         case TaskState::Applying: return "Applying";
+        case TaskState::Ready: return "Ready";
         case TaskState::Failed: return "Failed";
     }
 

@@ -15,6 +15,38 @@ bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
 
+bool IsDataMathImageInputSocketId(const std::string& socketId) {
+    return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
+        socketId == EditorNodeGraph::kDataMathBaseInputSocketId;
+}
+
+bool IsScalarAverageNode(const Node& node) {
+    return node.kind == NodeKind::DataMath &&
+        node.dataMathMode == DataMathMode::Average;
+}
+
+bool IsImageAverageNode(const Node& node) {
+    return node.kind == NodeKind::DataMath &&
+        node.dataMathMode == DataMathMode::ImageAverage;
+}
+
+bool DataMathAllowsScalarToImageTarget(const Node& node, const std::string& socketId) {
+    return node.kind == NodeKind::DataMath &&
+        !IsScalarAverageNode(node) &&
+        !IsImageAverageNode(node) &&
+        IsDataMathImageInputSocketId(socketId);
+}
+
+bool DataMathAllowsFullImageTarget(const Node& node, const std::string& socketId) {
+    if (node.kind != NodeKind::DataMath || IsScalarAverageNode(node)) {
+        return false;
+    }
+    if (IsImageAverageNode(node)) {
+        return EditorNodeGraph::IsDataMathInputSocketId(socketId);
+    }
+    return IsDataMathImageInputSocketId(socketId);
+}
+
 bool ContainsNodeId(const std::vector<Node>& nodes, int id) {
     return std::any_of(nodes.begin(), nodes.end(), [id](const Node& node) {
         return node.id == id;
@@ -24,6 +56,7 @@ bool ContainsNodeId(const std::vector<Node>& nodes, int id) {
 bool IsSourceLikeNode(const Node& node) {
     return node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
+        node.kind == NodeKind::RawDevelopment ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::MaskGenerator ||
         node.kind == NodeKind::CustomMask;
@@ -39,6 +72,7 @@ int LayoutKindPriority(const Node& node) {
     switch (node.kind) {
         case NodeKind::Image:
         case NodeKind::RawSource:
+        case NodeKind::RawDevelopment:
         case NodeKind::ImageGenerator:
             return 0;
         case NodeKind::MaskGenerator:
@@ -52,6 +86,7 @@ int LayoutKindPriority(const Node& node) {
         case NodeKind::Lut:
         case NodeKind::RawDetailAutoMask:
         case NodeKind::RawDetailFusion:
+        case NodeKind::Mfsr:
         case NodeKind::ImageToMask:
         case NodeKind::MaskUtility:
         case NodeKind::Mix:
@@ -335,7 +370,10 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Link uses an invalid socket direction.");
         }
-        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDecode || from->kind == NodeKind::RawDevelop) {
+        if (from->kind == NodeKind::Image ||
+            from->kind == NodeKind::RawDevelopment ||
+            from->kind == NodeKind::RawDecode ||
+            from->kind == NodeKind::RawDevelop) {
             outgoingImages.insert(from->id);
         }
 
@@ -390,18 +428,7 @@ ValidationResult Graph::Validate() const {
             const bool isScalarToImage = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image;
 
             if (isScalarToScalar || isScalarImageToScalar) {
-                const bool validScalarTarget =
-                    (to->kind == NodeKind::RawDevelop && link.toSocketId == kMaskInputSocketId) ||
-                    (to->kind == NodeKind::Layer && link.toSocketId == kMaskInputSocketId) ||
-                    (to->kind == NodeKind::Lut && link.toSocketId == kMaskInputSocketId) ||
-                    (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kMaskInputSocketId) ||
-                    (to->kind == NodeKind::Mix && link.toSocketId == kMixFactorSocketId) ||
-                    (to->kind == NodeKind::MaskCombine &&
-                        (link.toSocketId == kMaskCombineInputASocketId || link.toSocketId == kMaskCombineInputBSocketId)) ||
-                    (to->kind == NodeKind::MaskUtility && link.toSocketId == kMaskUtilityInputSocketId) ||
-                    (to->kind == NodeKind::Lut && IsChannelSocketId(link.toSocketId)) ||
-                    (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(link.toSocketId)) ||
-                    (to->kind == NodeKind::Output && IsChannelSocketId(link.toSocketId));
+                const bool validScalarTarget = IsScalarTargetSocket(link.toNodeId, link.toSocketId);
                 if (!validScalarSource || !validScalarTarget) {
                     result.valid = false;
                     result.messages.push_back("Invalid scalar link.");
@@ -416,7 +443,7 @@ ValidationResult Graph::Validate() const {
                     (to->kind == NodeKind::Output && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::ImageToMask && link.toSocketId == kImageToMaskInputSocketId) ||
                     (to->kind == NodeKind::ChannelSplit && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::DataMath && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId));
+                    DataMathAllowsScalarToImageTarget(*to, link.toSocketId);
                 if (!validScalarSource || !validImageTarget) {
                     result.valid = false;
                     result.messages.push_back("Invalid scalar-to-image link.");
@@ -430,9 +457,20 @@ ValidationResult Graph::Validate() const {
                 result.valid = false;
                 result.messages.push_back("Render-chain links must connect image sockets.");
             }
-            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
+            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDevelopment || to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
                 result.valid = false;
                 result.messages.push_back("Invalid render-chain link.");
+            }
+            if (to->kind == NodeKind::DataMath) {
+                const bool validDataMathImageTarget =
+                    DataMathAllowsFullImageTarget(*to, link.toSocketId) &&
+                    !(IsImageAverageNode(*to) && IsScalarSocketStream(link.fromNodeId, link.fromSocketId));
+                if (!validDataMathImageTarget) {
+                    result.valid = false;
+                    result.messages.push_back(IsScalarAverageNode(*to)
+                        ? "Average inputs require scalar masks or channel streams."
+                        : "Invalid Data Math image input.");
+                }
             }
         }
     }
@@ -486,7 +524,11 @@ std::vector<int> Graph::GetRenderLayerNodePath(int outputNodeId) const {
             return {};
         }
         visited.insert(from->id);
-        if (from->kind == NodeKind::Image || from->kind == NodeKind::RawDecode || from->kind == NodeKind::RawDevelop) {
+        if (from->kind == NodeKind::Image ||
+            from->kind == NodeKind::RawDevelopment ||
+            from->kind == NodeKind::RawDecode ||
+            from->kind == NodeKind::RawDevelop ||
+            from->kind == NodeKind::Mfsr) {
             std::reverse(reversePath.begin(), reversePath.end());
             return reversePath;
         }
@@ -528,12 +570,14 @@ LinkRole Graph::GetLinkRole(const Link& link) const {
 bool Graph::IsRenderChainNode(const Node& node) const {
     return node.kind == NodeKind::Image ||
         node.kind == NodeKind::RawSource ||
+        node.kind == NodeKind::RawDevelopment ||
         node.kind == NodeKind::RawNeuralDenoise ||
         node.kind == NodeKind::RawDecode ||
         node.kind == NodeKind::RawDevelop ||
         node.kind == NodeKind::RawDetailAutoMask ||
         node.kind == NodeKind::RawDetailFusion ||
         node.kind == NodeKind::HdrMerge ||
+        node.kind == NodeKind::Mfsr ||
         node.kind == NodeKind::Lut ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::Layer ||

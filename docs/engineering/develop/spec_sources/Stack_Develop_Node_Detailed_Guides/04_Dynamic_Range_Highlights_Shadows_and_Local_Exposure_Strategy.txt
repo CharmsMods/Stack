@@ -1,0 +1,328 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+04 - Dynamic Range, Highlights, Shadows, and Local Exposure Strategy
+====================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide defines Stack's dynamic-range philosophy: global exposure, local exposure, highlights, shadows, clipping, shadow noise, range compression, and the requirement that bright things can stay bright and dark things can stay dark.
+
+The core target is not "show everything." The target is a good, realistic, high-quality image under the selected mode and user intent.
+
+The main problem
+================
+RAW files can contain far more range than a normal display can show directly. A camera may capture a sky, a face in shade, specular reflections, dark clothing, and deep background shadows in one file. If Stack simply scales the whole image until the histogram looks balanced, it may sacrifice the subject. If it protects every highlight, it may make the whole image dark. If it lifts every shadow, it may reveal noise. If it compresses everything equally, it may create gray HDR mush.
+
+Therefore dynamic-range handling must be selective, local, mode-aware, and honest about missing data.
+
+What not to optimize for
+========================
+Do not optimize for a perfectly filled histogram. Some good images are high-key. Some are low-key. Some have huge empty dark backgrounds. Some have tiny clipped speculars. Some have intentional silhouettes.
+
+Do not optimize for no clipping anywhere. Small specular clipping can be normal. Light sources can clip. Trying to preserve every tiny highlight can make the image dull.
+
+Do not optimize for maximum visible shadow detail everywhere. Deep shadows may contain mostly read noise or may be artistically intended.
+
+Do not optimize for flat even exposure. Human perception and good photography both tolerate strong brightness hierarchy.
+
+What to optimize for instead
+============================
+Stack should optimize for:
+
+- Important midtones landing well.
+- Subject/readability when subject importance is high.
+- Meaningful highlight detail and smooth highlight rolloff.
+- Dark areas remaining believable and not noisy gray mush.
+- A preserved lighting story.
+- Mode-specific intent.
+- A good final visual result without fake recovery claims.
+
+The global/local relationship
+=============================
+Global and local exposure should be solved together but authored separately.
+
+The solver should analyze local regions before deciding the global baseline because the image average may be misleading. A backlit portrait is not just "too dark" or "too bright." It is a sky/subject conflict. A black-background product shot is not underexposed just because most pixels are dark.
+
+However, the actual pipeline should still preserve logical order:
+
+1. RAW/data exposure baseline.
+2. Scene-linear local exposure / range prep.
+3. Finish tone / contrast / rolloff.
+
+This keeps the system understandable and cacheable. The solver can think in a coupled way while the render remains inspectable.
+
+Highlight handling philosophy
+=============================
+Highlights need three separate concepts:
+
+1. Recovery
+-----------
+Use real data that still exists. For example, if one channel is clipped but another is not, or if neighboring unclipped pixels can guide the reconstruction, some highlight information can be recovered or estimated from actual image evidence.
+
+2. Reconstruction
+-----------------
+Estimate missing or partial data using unclipped channels, adjacent pixels, surrounding color ratios, gradients, or inpainting-like behavior. This can make clipped highlights look more plausible, but it is not the same as truly recovering sensor detail.
+
+3. Rolloff / rendering
+----------------------
+Shape how bright values transition into display white. Even when detail is gone, the rolloff can be smooth and beautiful instead of harsh or ugly.
+
+Stack should use these words accurately in docs and diagnostics. If all channels are clipped, Stack can render the highlight nicely, but it cannot know the original detail.
+
+What highlights should be protected
+===================================
+Highlight protection should be importance-aware.
+
+Usually important:
+
+- Skin highlights.
+- Clouds/sky gradients when they occupy meaningful area.
+- White clothing with texture.
+- Product surfaces.
+- Bright architectural surfaces.
+- Highlight edges where ugly color clipping would be visible.
+
+Often acceptable to clip:
+
+- Tiny specular reflections.
+- Bare light bulbs.
+- Sun glints.
+- Chrome pinpoints.
+- Fire/sparks/neon cores, if the glow/rolloff looks believable.
+
+The solver should distinguish small point-source clipping from large meaningful highlight failure.
+
+Bright things should stay bright
+================================
+A common failure of highlight protection is gray highlights. The image technically preserves more detail, but the sky, lamp, or white surface stops feeling bright. This is not good realism.
+
+Highlight compression should preserve the feeling of light. Possible strategies:
+
+- Compress only the top range with a smooth shoulder.
+- Preserve local contrast where possible.
+- Use local highlight compression only where the highlight is important.
+- Allow small clipping in less important specular cores.
+- Keep surrounding midtones positioned so highlights have visual separation.
+- Avoid pulling large bright regions so far down that they become midgray.
+
+The solver should score both highlight detail and highlight brightness feeling.
+
+Shadow handling philosophy
+==========================
+Darkness is not automatically a problem. A dark region can be:
+
+- Important subject matter.
+- Empty background.
+- Noise-limited sensor data.
+- Intentional mood.
+- A silhouette.
+- A region the user wants visible.
+
+The solver should not lift all shadows equally. It should classify dark areas as meaningful, possibly meaningful, or likely disposable, then act with appropriate confidence.
+
+Meaningful dark regions might include:
+
+- User-brushed subject areas.
+- Faces/people/central objects.
+- Detailed foregrounds.
+- Textured objects with enough signal.
+- Important compositional shapes.
+
+Likely disposable dark regions might include:
+
+- Featureless black background.
+- Corners with no detail.
+- Areas below noise threshold.
+- Intentional silhouettes if mood confidence is high.
+
+Shadow lift and denoise must be coupled
+=======================================
+Shadow lift reveals noise. Denoise smears detail if pushed. Tone can hide noise by keeping shadows darker. These are not separate problems.
+
+For each dark region, Auto should ask:
+
+- Is there meaningful signal here?
+- Is the signal-to-noise ratio high enough to lift?
+- Does the selected mode want shadow visibility?
+- Would lifting this region break the mood?
+- Would denoise make it clean enough without plastic texture?
+- Would a tone decision hide the noise better than lifting it?
+
+A good result may leave some regions dark because that is the highest-quality choice.
+
+Local exposure strategy
+=======================
+Local exposure is scene preparation, not magic recovery. It should redistribute existing scene-linear values so later tone can create a better visual result.
+
+Local exposure can:
+
+- Lift clean meaningful shadows.
+- Compress large important highlight regions.
+- Improve subject readability.
+- Reduce extreme global/local conflicts.
+- Prepare a flat editing base.
+- Mimic some human visual adaptation.
+- Create a better starting point for tone.
+
+Local exposure should avoid:
+
+- Halos around contrast edges.
+- Flattening all lighting relationships.
+- Raising noise into visibility.
+- Making the scene look relit artificially.
+- Creating color shifts.
+- Destroying texture or local contrast.
+
+The Local Laplacian research anchor is important here because it shows that edge-aware local tone/detail operations can be designed to reduce halos. Stack does not need to copy that specific algorithm, but it should copy the principle: local range manipulation must understand edges and scales.
+
+Mode-specific dynamic range behavior
+====================================
+Natural Finished
+----------------
+Balanced. Preserve important highlights and shadows without over-flattening. Strong corrections are allowed only when they remain invisible and realistic.
+
+Flat Editing Base
+-----------------
+More aggressive range visibility. Bring mids and useful shadows into a workable range, restrain endpoints, preserve editing room.
+
+Clean Base
+----------
+Moderate. Technical quality and recoverability matter more than final punch.
+
+Bright Natural
+--------------
+Bias toward open mids and brighter subject/readability. Protect important highlights with rolloff rather than clipping.
+
+Dark Natural
+------------
+Preserve dark mood. Lift only meaningful regions when doing so improves the image without destroying darkness.
+
+Punchy / High Contrast
+----------------------
+Allow deeper darks and brighter highlights. Some detail can be crushed if not important or if the user/mode wants punch.
+
+Maximum Range / Detail
+----------------------
+Most aggressive range compression, but still with anti-halo, anti-noise, and anti-gray safeguards.
+
+Graph control: Dynamic Range Strategy Map
+=========================================
+A useful graph for this guide:
+
+Horizontal axis:
+Highlight Priority  <---------------------->  Shadow / Subject Visibility
+
+Vertical axis:
+Natural Contrast  <------------------------>  Maximum Visible Range
+
+This graph is better than a single Dynamic Range slider because the user may want different things:
+
+- Preserve the sky but leave shadows dark.
+- Reveal the subject but let tiny highlights clip.
+- Show maximum range for manual editing.
+- Keep a dramatic high-contrast look.
+
+Moving the point should bias:
+
+- RAW exposure candidate placement.
+- Highlight reconstruction/rolloff strength.
+- Local exposure max EV.
+- Shadow lift limits.
+- Noise guard.
+- Tone shoulder/toe.
+- Candidate scoring.
+
+Safeguards that should exist
+============================
+1. Clipping maps
+----------------
+Show raw/channel clipping, post-exposure clipping risk, and final display clipping. These are not the same.
+
+2. Highlight importance maps
+----------------------------
+Separate specular/point clipping from broad highlight surfaces.
+
+3. Noise-risk maps
+------------------
+Mark shadow regions where lift is likely to reveal noise.
+
+4. Local EV maps
+----------------
+Show where scene prep changed exposure and by how much.
+
+5. Halo-risk checks
+-------------------
+Compare local exposure maps against strong edges and smooth gradients.
+
+6. Brightness hierarchy checks
+------------------------------
+Detect when dynamic range compression makes the image too flat or gray.
+
+7. Subject-region checks
+------------------------
+Make sure important regions remain readable unless the user/mode prefers silhouette/darkness.
+
+A better way than basic HDR compression
+=======================================
+The obvious approach is to lower highlights, lift shadows, and add contrast. That often produces fake HDR.
+
+A better approach:
+
+- Decide global exposure using important regions.
+- Estimate what local range conflicts remain.
+- Generate local exposure maps with edge/gradient protection.
+- Couple shadow lift with noise and texture analysis.
+- Couple highlight compression with rolloff and brightness-feeling analysis.
+- Rebuild final tone so the image still has endpoints and hierarchy.
+- Compare candidate renders for damage.
+
+This is why dynamic range must be part of the iterative solver, not a one-shot slider.
+
+Research anchors for this guide
+===============================
+- darktable highlight reconstruction docs: highlight reconstruction methods use unclipped channels and/or adjacent pixels to estimate missing data.
+- Local Laplacian Filters: edge-aware tone/detail processing can avoid halos when designed carefully.
+- RawPedia local adjustments: shadows/highlights, tone equalizers, log encoding, and dynamic-range tools are related but separate operations.
+- Stack current context: Scene Prep / Pre-Local Exposure is local exposure shaping and does not recover clipped detail.
+
+Recommended document-level decisions
+====================================
+- Dynamic range handling should prioritize important midtones/subjects and believable lighting, not histogram balance.
+- Highlight handling must separate recovery, reconstruction, and rolloff.
+- Some clipping is acceptable and natural.
+- Shadow lift should be meaning/noise/mode aware.
+- Tone can be used to hide noise by preserving darkness.
+- Local exposure should be powerful but edge-aware and anti-halo.
+- Maximum Range mode can be more aggressive; Natural Finished should be more restrained; Punchy may crush unimportant detail when appropriate.
+- Dynamic range controls should lean heavily into graph-style intent.
+
+Open experience-test questions
+==============================
+- What amount of highlight grayness becomes unacceptable?
+- How much shadow noise is acceptable in Natural versus Maximum Range?
+- How often should Auto present both "Preserve Mood" and "Reveal Subject" candidates?
+- Should users be able to paint shadow regions that must remain dark?
+- How should the UI explain that a clipped light was rendered nicely but not truly recovered?

@@ -68,7 +68,7 @@ void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
 }
 
 void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
-    if (graph.GetNodes().empty()) {
+    if (graph.GetNodes().empty() || m_MiddlePanCaptureActive) {
         return;
     }
 
@@ -93,13 +93,13 @@ void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
         }
     }
 
-    const float margin = 360.0f;
     const float canvasW = std::max(1.0f, m_CanvasMax.x - m_CanvasMin.x);
     const float canvasH = std::max(1.0f, m_CanvasMax.y - m_CanvasMin.y);
-    const float minPanX = canvasW - (maxX + margin) * m_Zoom;
-    const float maxPanX = (-minX + margin) * m_Zoom;
-    const float minPanY = canvasH - (maxY + margin) * m_Zoom;
-    const float maxPanY = (-minY + margin) * m_Zoom;
+    const float marginPx = std::clamp(std::min(canvasW, canvasH) * 0.85f, 420.0f, 1200.0f);
+    const float minPanX = -marginPx - (maxX * m_Zoom);
+    const float maxPanX = canvasW + marginPx - (minX * m_Zoom);
+    const float minPanY = -marginPx - (maxY * m_Zoom);
+    const float maxPanY = canvasH + marginPx - (minY * m_Zoom);
     m_Pan.x = std::clamp(m_Pan.x, std::min(minPanX, maxPanX), std::max(minPanX, maxPanX));
     m_Pan.y = std::clamp(m_Pan.y, std::min(minPanY, maxPanY), std::max(minPanY, maxPanY));
 }

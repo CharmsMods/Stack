@@ -1,8 +1,11 @@
 #include "EditorViewport.h"
+#include "App/Resources/EmbeddedTabIcons.h"
 #include "Editor/EditorModule.h"
+#include "App/settings/AppearanceTheme.h"
 #include "EditorViewportHelpers.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
+#include "ThirdParty/stb_image.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include <imgui.h>
@@ -33,59 +36,103 @@ ImU32 ApplyAlpha(ImU32 color, float alpha) {
     return ImGui::ColorConvertFloat4ToU32(rgba);
 }
 
+float AnimateUiValue(float current, float target, float deltaTime, float onSpeed = 16.0f, float offSpeed = 10.0f) {
+    return ImGuiExtras::AnimateTowards(current, target, deltaTime, target > current ? onSpeed : offSpeed);
+}
+
+bool SeamlessSurfaceStylingEnabled(EditorModule* editor) {
+    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+    return appearance && appearance->GetSeamlessSurfaceStylingEnabled();
+}
+
+StackAppearance::RuntimeSurfacePalette GetWallpaperSurfacePalette(EditorModule* editor) {
+    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+    return appearance ? appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
+}
+
+unsigned int LoadViewportResourceTexture(const unsigned char* data, unsigned int size, const char* debugName) {
+    if (!data || size == 0) {
+        return 0;
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load_thread(0);
+    unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
+    if (!pixels) {
+        fprintf(stderr, "[EditorViewport] Failed to decode embedded %s icon.\n", debugName);
+        return 0;
+    }
+    const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    return texture;
+}
+
 bool DrawDetachedPreviewToggle(
     EditorModule* editor,
     ImDrawList* drawList,
     const ImVec2& contentScreen,
     const ImVec2& avail,
     float alpha,
-    EditorViewport::HostMode hostMode) {
+    EditorViewport::HostMode hostMode,
+    unsigned int iconTexture,
+    float& hoverAnim,
+    float& pressAnim,
+    float deltaTime) {
     if (!editor || !drawList || alpha <= 0.01f || avail.x <= 48.0f || avail.y <= 32.0f) {
+        hoverAnim = AnimateUiValue(hoverAnim, 0.0f, deltaTime);
+        pressAnim = AnimateUiValue(pressAnim, 0.0f, deltaTime, 22.0f, 14.0f);
+        return false;
+    }
+
+    if (iconTexture == 0) {
+        hoverAnim = AnimateUiValue(hoverAnim, 0.0f, deltaTime);
+        pressAnim = AnimateUiValue(pressAnim, 0.0f, deltaTime, 22.0f, 14.0f);
         return false;
     }
 
     const char* label = hostMode == EditorViewport::HostMode::DetachedFullscreen ? "Dock Back" : "Pop Out";
-    const ImVec2 textSize = ImGui::CalcTextSize(label);
-    const ImVec2 buttonSize(
-        std::max(78.0f, textSize.x + 24.0f),
-        26.0f);
+    constexpr float hitSize = 34.0f;
+    constexpr float iconSize = 22.0f;
+    constexpr float edgeMargin = 20.0f;
+    const ImVec2 buttonSize(hitSize, hitSize);
     const ImVec2 buttonMin(
-        contentScreen.x + std::max(0.0f, avail.x - buttonSize.x - 14.0f),
-        contentScreen.y + 12.0f);
+        contentScreen.x + std::max(0.0f, avail.x - buttonSize.x - edgeMargin),
+        contentScreen.y + std::max(0.0f, avail.y - buttonSize.y - edgeMargin));
     const ImVec2 buttonMax(buttonMin.x + buttonSize.x, buttonMin.y + buttonSize.y);
 
     const bool hovered = ImGui::IsMouseHoveringRect(buttonMin, buttonMax, false);
     const bool active = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    hoverAnim = AnimateUiValue(hoverAnim, hovered ? 1.0f : 0.0f, deltaTime, 17.0f, 11.0f);
+    pressAnim = AnimateUiValue(pressAnim, active ? 1.0f : 0.0f, deltaTime, 24.0f, 15.0f);
 
     if (hovered) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("%s", label);
     }
 
-    ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_Button);
-    ImVec4 border = ImGui::GetStyleColorVec4(ImGuiCol_Border);
-    ImVec4 text = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-    if (active) {
-        bg = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
-    } else if (hovered) {
-        bg = ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered);
-    }
-
-    bg.w = std::clamp(bg.w * alpha, 0.0f, 1.0f);
-    border.w = std::clamp(std::max(border.w, 0.55f) * alpha, 0.0f, 1.0f);
-    text.w = std::clamp(text.w * alpha, 0.0f, 1.0f);
-
-    drawList->AddRectFilled(buttonMin, buttonMax, ImGui::GetColorU32(bg), 9.0f);
-    drawList->AddRect(buttonMin, buttonMax, ImGui::GetColorU32(border), 9.0f, 0, 1.0f);
-    drawList->AddText(
-        ImVec2(
-            buttonMin.x + std::max(0.0f, (buttonSize.x - textSize.x) * 0.5f),
-            buttonMin.y + std::max(0.0f, (buttonSize.y - textSize.y) * 0.5f) - 1.0f),
-        ImGui::GetColorU32(text),
-        label);
+    const float scale = 1.0f + hoverAnim * 0.020f - pressAnim * 0.024f;
+    const float verticalLift = hoverAnim * 1.25f - pressAnim * 0.45f;
+    const ImVec2 center((buttonMin.x + buttonMax.x) * 0.5f, (buttonMin.y + buttonMax.y) * 0.5f - verticalLift);
+    const ImVec2 halfSize(iconSize * 0.5f * scale, iconSize * 0.5f * scale);
+    const ImVec2 animatedMin(center.x - halfSize.x, center.y - halfSize.y);
+    const ImVec2 animatedMax(center.x + halfSize.x, center.y + halfSize.y);
+    ImU32 iconTint = StackAppearance::ResolveThemedMonochromeIconTint(
+        editor->GetAppearance(),
+        active || hostMode == EditorViewport::HostMode::DetachedFullscreen,
+        hovered);
+    iconTint = ApplyAlpha(iconTint, alpha);
+    drawList->AddImage(
+        (ImTextureID)(intptr_t)iconTexture,
+        animatedMin,
+        animatedMax,
+        ImVec2(0, 0),
+        ImVec2(1, 1),
+        iconTint);
 
     if (clicked) {
-        editor->ToggleDetachedPreviewFullscreen();
+        editor->RequestToggleDetachedPreviewFullscreen();
     }
 
     return hovered;
@@ -445,6 +492,7 @@ EditorViewport::EditorViewport()
 
 EditorViewport::~EditorViewport() {
     if (m_CheckerTex) glDeleteTextures(1, &m_CheckerTex);
+    if (m_DetachedToggleTexture) glDeleteTextures(1, &m_DetachedToggleTexture);
 }
 
 void EditorViewport::ResetSinglePreviewState() {
@@ -455,6 +503,12 @@ void EditorViewport::ResetSinglePreviewState() {
     m_ShowStaticSingleCompare = false;
     m_StaticSingleCompareBlend = 0.0f;
     m_StaticCompareRectsInitialized = false;
+    m_DetachedToggleHoverAnim = 0.0f;
+    m_DetachedTogglePressAnim = 0.0f;
+    m_ViewportHudAnim = 0.0f;
+    m_CompositeSelectionOutlineAnim = 0.0f;
+    m_CompositeSelectionHandleAnim = 0.0f;
+    m_CompositeHoverOutlineAnim = 0.0f;
     m_ActiveDevelopSubjectHandle = DevelopSubjectRegionHandle::None;
     m_ActiveDevelopSubjectNodeId = -1;
     m_ActiveDevelopSubjectRegionId = -1;
@@ -475,10 +529,19 @@ void EditorViewport::Initialize() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (m_DetachedToggleTexture == 0) {
+        m_DetachedToggleTexture = LoadViewportResourceTexture(
+            EmbeddedTabIcons::PopoutCanvasWindow_png_data,
+            EmbeddedTabIcons::PopoutCanvasWindow_png_size,
+            "PopoutCanvasWindow");
+    }
 }
 
 void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode hostMode) {
     const float viewportRevealAlpha = std::clamp(revealAlpha, 0.0f, 1.0f);
+    const float deltaTime = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+    const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(editor);
     auto& pipeline = editor->GetPipeline();
     const bool compositeMode = editor->IsCompositeViewportMode();
     const ImVec2 hostAvail = ImGui::GetContentRegionAvail();
@@ -490,9 +553,24 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         hostScreen,
         hostAvail,
         viewportRevealAlpha,
-        hostMode);
+        hostMode,
+        m_DetachedToggleTexture,
+        m_DetachedToggleHoverAnim,
+        m_DetachedTogglePressAnim,
+        deltaTime);
+
+    if (!compositeMode && m_PendingCompositeAddImageDialog) {
+        m_PendingCompositeAddImageDialog = false;
+    }
 
     if (compositeMode) {
+        if (m_PendingCompositeAddImageDialog) {
+            m_PendingCompositeAddImageDialog = false;
+            const std::string path = FileDialogs::OpenImageFileDialog("Add image to composite");
+            if (!path.empty()) {
+                editor->AddCompositeImageChainFromFile(path);
+            }
+        }
         editor->ClearToneCurveViewportProbe();
         const ImVec2 avail = hostAvail;
         const ImVec2 screenPos = hostScreen;
@@ -506,7 +584,9 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         const ImVec2 canvasMin(screenPos.x + margin, screenPos.y + margin);
         const ImVec2 canvasMax(screenPos.x + avail.x - margin, screenPos.y + avail.y - margin);
         const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
-        drawList->AddRectFilled(canvasMin, canvasMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kCanvasRounding);
+        if (!wallpaperSurfaces) {
+            drawList->AddRectFilled(canvasMin, canvasMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kCanvasRounding);
+        }
 
         const float checkerScale = 24.0f;
         const float canvasW = std::max(1.0f, avail.x - margin * 2.0f);
@@ -519,7 +599,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             canvasMax,
             ImVec2(0.0f, 0.0f),
             ImVec2(tilesX, tilesY),
-            IM_COL32(255, 255, 255, static_cast<int>(105.0f * viewportRevealAlpha)),
+            IM_COL32(255, 255, 255, static_cast<int>((wallpaperSurfaces ? 84.0f : 105.0f) * viewportRevealAlpha)),
             kCanvasRounding);
 
         ImGui::InvisibleButton("CompositeCanvasSurface", avail);
@@ -579,6 +659,33 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             }
         }
         const EditorModule::CompositeSceneItem* selectedItem = editor->FindCompositeSceneItem(editor->GetCompositeSelectedOutputNodeId());
+        const bool isEditingComplexNode = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode;
+        const bool showSelectedOutline = selectedItem && !isExportSettingsActive;
+        const bool showSelectedHandles = showSelectedOutline && !editor->IsPickingColor() && !isEditingComplexNode;
+        const bool showHoveredOutline =
+            !editor->IsPickingColor() &&
+            !isEditingComplexNode &&
+            !isExportSettingsActive &&
+            hoveredItem &&
+            (!selectedItem || hoveredItem->outputNodeId != selectedItem->outputNodeId);
+        m_CompositeSelectionOutlineAnim = AnimateUiValue(
+            m_CompositeSelectionOutlineAnim,
+            showSelectedOutline ? 1.0f : 0.0f,
+            deltaTime,
+            15.0f,
+            10.0f);
+        m_CompositeSelectionHandleAnim = AnimateUiValue(
+            m_CompositeSelectionHandleAnim,
+            showSelectedHandles ? 1.0f : 0.0f,
+            deltaTime,
+            17.0f,
+            11.0f);
+        m_CompositeHoverOutlineAnim = AnimateUiValue(
+            m_CompositeHoverOutlineAnim,
+            showHoveredOutline ? 1.0f : 0.0f,
+            deltaTime,
+            16.0f,
+            11.0f);
         if (selectedItem && (canvasFocused || hovered) && editor->CanConsumeEditorCommandKeys()) {
             if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
                 editor->SetCompositeResizeMode(EditorModule::CompositeResizeMode::Stretch);
@@ -718,7 +825,6 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             editor->ClampCompositeViewPanToContent(avail);
         }
 
-        const bool isEditingComplexNode = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode;
         if (!editor->IsPickingColor() && !isEditingComplexNode && !isExportSettingsActive && hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
             ImGui::OpenPopup("CompositeCanvasContext");
         }
@@ -1259,10 +1365,8 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
 
         if (ImGui::BeginPopup("CompositeCanvasContext")) {
             if (ImGui::MenuItem("Add Image")) {
-                const std::string path = FileDialogs::OpenImageFileDialog("Add image to composite");
-                if (!path.empty()) {
-                    editor->AddCompositeImageChainFromFile(path);
-                }
+                m_PendingCompositeAddImageDialog = true;
+                ImGui::CloseCurrentPopup();
             }
             if (ImGui::MenuItem("Add Library Asset")) {
                 m_ShowCompositeAssetPicker = true;
@@ -1343,14 +1447,34 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
                 screenQuad[2],
                 screenQuad[3]);
 
-            const bool isEditingComplexNode = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::ComplexNode;
             if (editor->GetCompositeSelectedOutputNodeId() == item->outputNodeId) {
                 if (isExportSettingsActive) {
                     // Locked: render no selection handles or borders
                 } else if (editor->IsPickingColor() || isEditingComplexNode) {
-                    drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(95, 165, 255, 200), 2.0f);
+                    drawList->AddQuad(
+                        screenQuad[0],
+                        screenQuad[1],
+                        screenQuad[2],
+                        screenQuad[3],
+                        ApplyAlpha(IM_COL32(95, 165, 255, 200), viewportRevealAlpha * (0.55f + m_CompositeSelectionOutlineAnim * 0.45f)),
+                        1.7f + m_CompositeSelectionOutlineAnim * 0.7f);
                 } else {
-                    drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(225, 240, 247, 235), 2.0f);
+                    if (m_CompositeSelectionOutlineAnim > 0.001f) {
+                        drawList->AddQuad(
+                            screenQuad[0],
+                            screenQuad[1],
+                            screenQuad[2],
+                            screenQuad[3],
+                            ApplyAlpha(IM_COL32(120, 196, 255, 155), viewportRevealAlpha * 0.55f * m_CompositeSelectionOutlineAnim),
+                            3.0f + m_CompositeSelectionOutlineAnim * 1.5f);
+                    }
+                    drawList->AddQuad(
+                        screenQuad[0],
+                        screenQuad[1],
+                        screenQuad[2],
+                        screenQuad[3],
+                        ApplyAlpha(IM_COL32(225, 240, 247, 235), viewportRevealAlpha * (0.45f + m_CompositeSelectionOutlineAnim * 0.55f)),
+                        1.6f + m_CompositeSelectionOutlineAnim * 0.9f);
                     const ImVec2 topCenter = Midpoint(screenQuad[0], screenQuad[1]);
                     const ImVec2 rightCenter = Midpoint(screenQuad[1], screenQuad[2]);
                     const ImVec2 bottomCenter = Midpoint(screenQuad[2], screenQuad[3]);
@@ -1358,10 +1482,24 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
                     const ImVec2 center = Midpoint(screenQuad[0], screenQuad[2]);
                     const ImVec2 outward = NormalizeOrZero(ImVec2(topCenter.x - center.x, topCenter.y - center.y));
                     const ImVec2 rotateHandle = ImVec2(topCenter.x + outward.x * 30.0f, topCenter.y + outward.y * 30.0f);
-                    drawList->AddLine(topCenter, rotateHandle, IM_COL32(225, 240, 247, 200), 1.5f);
+                    const float handleAnim = m_CompositeSelectionHandleAnim;
+                    drawList->AddLine(
+                        topCenter,
+                        rotateHandle,
+                        ApplyAlpha(IM_COL32(225, 240, 247, 200), viewportRevealAlpha * (0.35f + handleAnim * 0.65f)),
+                        1.2f + handleAnim * 0.7f);
                     auto drawHandle = [&](const ImVec2& point, const ImU32 fillColor, const float radius) {
-                        drawList->AddCircleFilled(point, radius, fillColor, 20);
-                        drawList->AddCircle(point, radius, IM_COL32(10, 14, 18, 255), 20, 1.5f);
+                        const float animatedRadius = radius + handleAnim * 0.75f;
+                        if (handleAnim > 0.001f) {
+                            drawList->AddCircle(
+                                point,
+                                animatedRadius + 1.5f,
+                                ApplyAlpha(IM_COL32(120, 196, 255, 150), viewportRevealAlpha * 0.50f * handleAnim),
+                                20,
+                                1.0f + handleAnim * 0.6f);
+                        }
+                        drawList->AddCircleFilled(point, animatedRadius, ApplyAlpha(fillColor, viewportRevealAlpha), 20);
+                        drawList->AddCircle(point, animatedRadius, ApplyAlpha(IM_COL32(10, 14, 18, 255), viewportRevealAlpha), 20, 1.2f + handleAnim * 0.4f);
                     };
                     const ImU32 resizeFill = IM_COL32(230, 238, 244, 245);
                     drawHandle(screenQuad[0], resizeFill, 5.0f);
@@ -1375,7 +1513,13 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
                     drawHandle(rotateHandle, IM_COL32(120, 196, 255, 245), 6.0f);
                 }
             } else if (!editor->IsPickingColor() && !isEditingComplexNode && !isExportSettingsActive && hoveredItem && hoveredItem->outputNodeId == item->outputNodeId) {
-                drawList->AddQuad(screenQuad[0], screenQuad[1], screenQuad[2], screenQuad[3], IM_COL32(154, 199, 224, 150), 1.0f);
+                drawList->AddQuad(
+                    screenQuad[0],
+                    screenQuad[1],
+                    screenQuad[2],
+                    screenQuad[3],
+                    ApplyAlpha(IM_COL32(154, 199, 224, 150), viewportRevealAlpha * (0.20f + m_CompositeHoverOutlineAnim * 0.80f)),
+                    0.9f + m_CompositeHoverOutlineAnim * 0.7f);
             }
         }
         for (const SnapGuideLine& guide : m_CompositeSnapGuides) {
@@ -1385,33 +1529,35 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         // Draw an ultra-premium, gap-free, non-overlapping concentric rounded vignette.
         // This completely eliminates overlapping artifacts, double-blending at corners,
         // and hard edges, creating a mathematically perfect and smooth blend for the canvas.
-        const float seamFade = 48.0f;
-        const float edgeFade = 24.0f;
-        const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
+        if (!wallpaperSurfaces) {
+            const float seamFade = 48.0f;
+            const float edgeFade = 24.0f;
+            const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
 
-        constexpr int N = 32;
-        for (int i = 0; i < N; ++i) {
-            float t = static_cast<float>(i) / N;
+            constexpr int N = 32;
+            for (int i = 0; i < N; ++i) {
+                float t = static_cast<float>(i) / N;
 
-            // Inset from canvas edges moving inward
-            float leftInset = t * seamFade;
-            float rightInset = t * edgeFade;
-            float topInset = t * edgeFade;
-            float bottomInset = t * edgeFade;
+                // Inset from canvas edges moving inward
+                float leftInset = t * seamFade;
+                float rightInset = t * edgeFade;
+                float topInset = t * edgeFade;
+                float bottomInset = t * edgeFade;
 
-            ImVec2 rectMin(canvasMin.x + leftInset, canvasMin.y + topInset);
-            ImVec2 rectMax(canvasMax.x - rightInset, canvasMax.y - bottomInset);
+                ImVec2 rectMin(canvasMin.x + leftInset, canvasMin.y + topInset);
+                ImVec2 rectMax(canvasMax.x - rightInset, canvasMax.y - bottomInset);
 
-            // Premium cubic falloff for a cinematic, natural-looking smooth transition
-            float smoothAlpha = std::pow(1.0f - t, 2.5f);
-            ImU32 color = ImGui::ColorConvertFloat4ToU32(ImVec4(workspaceBg.x, workspaceBg.y, workspaceBg.z, smoothAlpha));
+                // Premium cubic falloff for a cinematic, natural-looking smooth transition
+                float smoothAlpha = std::pow(1.0f - t, 2.5f);
+                ImU32 color = ImGui::ColorConvertFloat4ToU32(ImVec4(workspaceBg.x, workspaceBg.y, workspaceBg.z, smoothAlpha));
 
-            // Adjust corner rounding radius to match the inset rectangle perfectly
-            float rounding = std::max(0.0f, kCanvasRounding - (t * edgeFade));
+                // Adjust corner rounding radius to match the inset rectangle perfectly
+                float rounding = std::max(0.0f, kCanvasRounding - (t * edgeFade));
 
-            // Draw concentric rounded rectangle outlines with a thickness of 2.0f.
-            // This ensures overlaps are continuous and completely gap-free.
-            drawList->AddRect(rectMin, rectMax, color, rounding, ImDrawFlags_None, 2.0f);
+                // Draw concentric rounded rectangle outlines with a thickness of 2.0f.
+                // This ensures overlaps are continuous and completely gap-free.
+                drawList->AddRect(rectMin, rectMax, color, rounding, ImDrawFlags_None, 2.0f);
+            }
         }
 
         drawList->PopClipRect();
@@ -1464,7 +1610,8 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     }
 
     const bool outputConnected = editor->GetNodeGraph().IsOutputConnected();
-    const bool hasOutputTexture = pipeline.GetOutputTexture() != 0;
+    const bool hasViewportTiles = editor->HasViewportOutputTiles();
+    const bool hasOutputTexture = pipeline.GetOutputTexture() != 0 || hasViewportTiles;
     if (!outputConnected || !hasOutputTexture) {
         editor->ClearToneCurveViewportProbe();
         const char* emptyMessage = nullptr;
@@ -1512,13 +1659,14 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     
     unsigned int outputTex = pipeline.GetOutputTexture();
     unsigned int sourceTex = pipeline.GetCompareSourceTexture();
-    int imgW = pipeline.GetCanvasWidth();
-    int imgH = pipeline.GetCanvasHeight();
+    const EditorRenderWorker::SharedTextureTileSet& viewportTiles = editor->GetViewportOutputTiles();
+    int imgW = hasViewportTiles ? viewportTiles.fullWidth : pipeline.GetCanvasWidth();
+    int imgH = hasViewportTiles ? viewportTiles.fullHeight : pipeline.GetCanvasHeight();
     const bool singleOutputMode = editor->GetViewportMode() == EditorModule::ViewportMode::SingleOutputPreview;
     EditorModule::DevelopSubjectViewportState developSubjectState;
     const bool hasDevelopSubjectOverlay =
         singleOutputMode && editor->GetDevelopSubjectImportanceViewportState(developSubjectState);
-    const bool canStaticCompare = singleOutputMode && sourceTex != 0 && sourceTex != outputTex;
+    const bool canStaticCompare = singleOutputMode && sourceTex != 0 && (hasViewportTiles || sourceTex != outputTex);
     if (!canStaticCompare || !singleOutputMode) {
         m_ShowStaticSingleCompare = false;
     }
@@ -1621,6 +1769,47 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             outMin = ImVec2(slotMin.x + (slotW - imageW) * 0.5f, slotMin.y + (slotH - imageH) * 0.5f);
             outMax = ImVec2(outMin.x + imageW, outMin.y + imageH);
         };
+        auto drawViewportTileSet = [&](ImVec2 min, ImVec2 max, float alpha) {
+            alpha *= viewportRevealAlpha;
+            if (!hasViewportTiles || alpha <= 0.001f || viewportTiles.fullWidth <= 0 || viewportTiles.fullHeight <= 0) {
+                return;
+            }
+            const float drawW = std::max(1.0f, max.x - min.x);
+            const float drawH = std::max(1.0f, max.y - min.y);
+            drawList->PushClipRect(min, max, true);
+            for (const EditorRenderWorker::SharedTextureTile& tile : viewportTiles.tiles) {
+                if (tile.texture == 0 || tile.width <= 0 || tile.height <= 0 || tile.haloWidth <= 0 || tile.haloHeight <= 0) {
+                    continue;
+                }
+                const float tileMinX = min.x + (static_cast<float>(tile.x) / static_cast<float>(viewportTiles.fullWidth)) * drawW;
+                const float tileMaxX = min.x + (static_cast<float>(tile.x + tile.width) / static_cast<float>(viewportTiles.fullWidth)) * drawW;
+                const float tileMinY = max.y - (static_cast<float>(tile.y + tile.height) / static_cast<float>(viewportTiles.fullHeight)) * drawH;
+                const float tileMaxY = max.y - (static_cast<float>(tile.y) / static_cast<float>(viewportTiles.fullHeight)) * drawH;
+                const float localX = static_cast<float>(tile.x - tile.haloX);
+                const float localY = static_cast<float>(tile.y - tile.haloY);
+                const float u0 = (localX + 0.5f) / static_cast<float>(tile.haloWidth);
+                const float u1 = (localX + static_cast<float>(tile.width) - 0.5f) / static_cast<float>(tile.haloWidth);
+                const float bottomV = (localY + 0.5f) / static_cast<float>(tile.haloHeight);
+                const float topV = (localY + static_cast<float>(tile.height) - 0.5f) / static_cast<float>(tile.haloHeight);
+                drawList->AddImage(
+                    (ImTextureID)(intptr_t)tile.texture,
+                    ImVec2(tileMinX, tileMinY),
+                    ImVec2(tileMaxX, tileMaxY),
+                    ImVec2(u0, 1.0f - topV),
+                    ImVec2(u1, 1.0f - bottomV),
+                    IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f))));
+                if (viewportTiles.debugOverlay) {
+                    drawList->AddRect(
+                        ImVec2(tileMinX, tileMinY),
+                        ImVec2(tileMaxX, tileMaxY),
+                        IM_COL32(95, 190, 255, static_cast<int>(190.0f * std::clamp(alpha, 0.0f, 1.0f))),
+                        0.0f,
+                        0,
+                        1.0f);
+                }
+            }
+            drawList->PopClipRect();
+        };
         auto drawAnimatedImage = [&](unsigned int texture, ImVec2 min, ImVec2 max, float alpha) {
             alpha *= viewportRevealAlpha;
             if (alpha <= 0.001f) {
@@ -1630,7 +1819,9 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             const float imageH = std::max(1.0f, max.y - min.y);
             const float tilesX = std::max(1.0f, imageW / 16.0f);
             const float tilesY = std::max(1.0f, imageH / 16.0f);
-            drawList->AddRectFilled(min, max, ApplyAlpha(workspaceFill, alpha), kImageRounding);
+            if (!wallpaperSurfaces) {
+                drawList->AddRectFilled(min, max, ApplyAlpha(workspaceFill, alpha), kImageRounding);
+            }
             drawList->AddImageRounded(
                 (ImTextureID)(intptr_t)m_CheckerTex,
                 min,
@@ -1639,14 +1830,18 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
                 ImVec2(tilesX, tilesY),
                 IM_COL32(255, 255, 255, static_cast<int>(170.0f * std::clamp(alpha, 0.0f, 1.0f))),
                 kImageRounding);
-            drawList->AddImageRounded(
-                (ImTextureID)(intptr_t)texture,
-                min,
-                max,
-                ImVec2(uInset, 1.0f - vInset),
-                ImVec2(1.0f - uInset, vInset),
-                IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f))),
-                kImageRounding);
+            if (hasViewportTiles && texture == outputTex) {
+                drawViewportTileSet(min, max, alpha / std::max(0.001f, viewportRevealAlpha));
+            } else {
+                drawList->AddImageRounded(
+                    (ImTextureID)(intptr_t)texture,
+                    min,
+                    max,
+                    ImVec2(uInset, 1.0f - vInset),
+                    ImVec2(1.0f - uInset, vInset),
+                    IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f))),
+                    kImageRounding);
+            }
         };
 
         const ImVec2 min(contentScreen.x + outerMargin, contentScreen.y + outerMargin);
@@ -1693,21 +1888,24 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     }
 
     const bool showHud = m_IsLocked || editor->IsEditorRenderBusy() || editor->IsAutoGainMaskPreviewActive();
-    if (showHud) {
-        const ImVec2 hudPos = ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f);
+    m_ViewportHudAnim = AnimateUiValue(m_ViewportHudAnim, showHud ? 1.0f : 0.0f, deltaTime, 13.0f, 9.0f);
+    if (m_ViewportHudAnim > 0.01f) {
+        const float hudBaseY = contentScreen.y + 10.0f + (1.0f - m_ViewportHudAnim) * -6.0f;
+        const ImVec2 hudPos = ImVec2(contentScreen.x + 10.0f, hudBaseY);
+        const float hudAlpha = viewportRevealAlpha * m_ViewportHudAnim;
         if (m_IsLocked) {
-            drawList->AddText(hudPos, ApplyAlpha(IM_COL32(255, 150, 40, 255), viewportRevealAlpha), "[ ZOOM LOCKED ] - Press 'L' to unlock");
+            drawList->AddText(hudPos, ApplyAlpha(IM_COL32(255, 150, 40, 255), hudAlpha), "[ ZOOM LOCKED ] - Press 'L' to unlock");
         }
         if (editor->IsEditorRenderBusy()) {
             const float busyOffsetY = m_IsLocked ? 22.0f : 0.0f;
-            drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f + busyOffsetY),
-                              ApplyAlpha(IM_COL32(190, 195, 205, 230), viewportRevealAlpha),
+            drawList->AddText(ImVec2(contentScreen.x + 10.0f, hudBaseY + busyOffsetY),
+                              ApplyAlpha(IM_COL32(190, 195, 205, 230), hudAlpha),
                               "Rendering...");
         }
         if (editor->IsAutoGainMaskPreviewActive()) {
             const float maskOffsetY = (m_IsLocked ? 22.0f : 0.0f) + (editor->IsEditorRenderBusy() ? 22.0f : 0.0f);
-            drawList->AddText(ImVec2(contentScreen.x + 10.0f, contentScreen.y + 10.0f + maskOffsetY),
-                              ApplyAlpha(IM_COL32(180, 215, 255, 235), viewportRevealAlpha),
+            drawList->AddText(ImVec2(contentScreen.x + 10.0f, hudBaseY + maskOffsetY),
+                              ApplyAlpha(IM_COL32(180, 215, 255, 235), hudAlpha),
                               "Pre-Local Exposure preview - click image to return");
         }
     }
@@ -2015,7 +2213,9 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         }
     }
     const ImU32 workspaceFill = ImGui::ColorConvertFloat4ToU32(editor->GetWorkspaceBaseColor());
-    drawList->AddRectFilled(imageMin, imageMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kImageRounding);
+    if (!wallpaperSurfaces) {
+        drawList->AddRectFilled(imageMin, imageMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kImageRounding);
+    }
     drawList->AddImageRounded((ImTextureID)(intptr_t)m_CheckerTex, imageMin, imageMax,
                               ImVec2(0, 0), ImVec2(tilesX, tilesY), IM_COL32(255, 255, 255, static_cast<int>(170.0f * viewportRevealAlpha)), kImageRounding);
 
@@ -2030,8 +2230,52 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     // 2) Draw processed output fully opaque, then fade the original over it.
     const float uInset = imgW > 1 ? (0.5f / static_cast<float>(imgW)) : 0.0f;
     const float vInset = imgH > 1 ? (0.5f / static_cast<float>(imgH)) : 0.0f;
-    drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
-                              ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding);
+    auto drawViewportTileSet = [&](ImVec2 min, ImVec2 max, float alpha) {
+        if (!hasViewportTiles || alpha <= 0.001f || viewportTiles.fullWidth <= 0 || viewportTiles.fullHeight <= 0) {
+            return;
+        }
+        const float drawW = std::max(1.0f, max.x - min.x);
+        const float drawH = std::max(1.0f, max.y - min.y);
+        drawList->PushClipRect(min, max, true);
+        for (const EditorRenderWorker::SharedTextureTile& tile : viewportTiles.tiles) {
+            if (tile.texture == 0 || tile.width <= 0 || tile.height <= 0 || tile.haloWidth <= 0 || tile.haloHeight <= 0) {
+                continue;
+            }
+            const float tileMinX = min.x + (static_cast<float>(tile.x) / static_cast<float>(viewportTiles.fullWidth)) * drawW;
+            const float tileMaxX = min.x + (static_cast<float>(tile.x + tile.width) / static_cast<float>(viewportTiles.fullWidth)) * drawW;
+            const float tileMinY = max.y - (static_cast<float>(tile.y + tile.height) / static_cast<float>(viewportTiles.fullHeight)) * drawH;
+            const float tileMaxY = max.y - (static_cast<float>(tile.y) / static_cast<float>(viewportTiles.fullHeight)) * drawH;
+            const float localX = static_cast<float>(tile.x - tile.haloX);
+            const float localY = static_cast<float>(tile.y - tile.haloY);
+            const float u0 = (localX + 0.5f) / static_cast<float>(tile.haloWidth);
+            const float u1 = (localX + static_cast<float>(tile.width) - 0.5f) / static_cast<float>(tile.haloWidth);
+            const float bottomV = (localY + 0.5f) / static_cast<float>(tile.haloHeight);
+            const float topV = (localY + static_cast<float>(tile.height) - 0.5f) / static_cast<float>(tile.haloHeight);
+            drawList->AddImage(
+                (ImTextureID)(intptr_t)tile.texture,
+                ImVec2(tileMinX, tileMinY),
+                ImVec2(tileMaxX, tileMaxY),
+                ImVec2(u0, 1.0f - topV),
+                ImVec2(u1, 1.0f - bottomV),
+                IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f))));
+            if (viewportTiles.debugOverlay) {
+                drawList->AddRect(
+                    ImVec2(tileMinX, tileMinY),
+                    ImVec2(tileMaxX, tileMaxY),
+                    IM_COL32(95, 190, 255, static_cast<int>(190.0f * std::clamp(alpha, 0.0f, 1.0f))),
+                    0.0f,
+                    0,
+                    1.0f);
+            }
+        }
+        drawList->PopClipRect();
+    };
+    if (hasViewportTiles) {
+        drawViewportTileSet(imageMin, imageMax, viewportRevealAlpha);
+    } else {
+        drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
+                                  ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding);
+    }
 
     if (currentFactor > 0.001f) {
         if (sourceTex != 0 && sourceTex != outputTex) {

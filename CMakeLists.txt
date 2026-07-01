@@ -35,6 +35,12 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 option(STACK_ENABLE_LIBRAW "Enable LibRaw-backed Sony ARW RAW loading" ON)
+if (WIN32)
+    option(STACK_ENABLE_APPWINDOW_TITLEBAR "Enable Windows App SDK AppWindowTitleBar bridge" ON)
+else()
+    option(STACK_ENABLE_APPWINDOW_TITLEBAR "Enable Windows App SDK AppWindowTitleBar bridge" OFF)
+endif()
+set(STACK_WINDOWS_APP_SDK_ROOT "" CACHE PATH "Optional root of a Microsoft.WindowsAppSDK NuGet package")
 
 set(STACK_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps")
 if (EXISTS "${STACK_DEPS_DIR}/glfw-src/CMakeLists.txt")
@@ -144,20 +150,9 @@ add_custom_target(BakeFonts
     VERBATIM
 )
 
-file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
-    "src/*.cpp"
-    "src/*.h"
-)
+include(cmake/StackSources.cmake)
 
-if (WIN32)
-    list(APPEND SRC_FILES "${CMAKE_BINARY_DIR}/generated/src/resources.rc")
-endif()
-
-# Legacy aggregate layer implementations were replaced by split, registry-backed
-# nodes. Keep the files in the tree for migration reference, but do not compile them.
-list(FILTER SRC_FILES EXCLUDE REGEX "/src/Editor/Layers/(AdjustmentsLayer|BlurLayer|CompressionLayer|CorruptionLayer|CropTransformLayer|DenoisingLayer|DitherLayer|EdgeEffectsLayer|HeatwaveLayer)\\.(cpp|h)$")
-
-add_executable(${PROJECT_NAME} ${SRC_FILES})
+add_executable(${PROJECT_NAME} ${STACK_APP_SOURCE_FILES})
 add_dependencies(${PROJECT_NAME} BakeAssets BakeTabIcons BakeFonts)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -166,6 +161,152 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     src
     src/ThirdParty
 )
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    STACK_ENABLE_APPWINDOW_TITLEBAR=$<BOOL:${STACK_ENABLE_APPWINDOW_TITLEBAR}>
+)
+
+if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
+    set(STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS)
+    if (STACK_WINDOWS_APP_SDK_ROOT)
+        list(APPEND STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS "${STACK_WINDOWS_APP_SDK_ROOT}")
+    endif()
+    if (DEFINED ENV{STACK_WINDOWS_APP_SDK_ROOT} AND NOT "$ENV{STACK_WINDOWS_APP_SDK_ROOT}" STREQUAL "")
+        list(APPEND STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS "$ENV{STACK_WINDOWS_APP_SDK_ROOT}")
+    endif()
+    if (DEFINED ENV{USERPROFILE})
+        file(GLOB STACK_WINDOWS_APP_SDK_NUGET_ROOTS
+            LIST_DIRECTORIES true
+            "$ENV{USERPROFILE}/.nuget/packages/microsoft.windowsappsdk/*"
+        )
+        if (STACK_WINDOWS_APP_SDK_NUGET_ROOTS)
+            list(SORT STACK_WINDOWS_APP_SDK_NUGET_ROOTS COMPARE NATURAL ORDER DESCENDING)
+            list(APPEND STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS ${STACK_WINDOWS_APP_SDK_NUGET_ROOTS})
+        endif()
+    endif()
+    file(GLOB STACK_WINDOWS_APP_SDK_LOCAL_PACKAGE_ROOTS
+        LIST_DIRECTORIES true
+        "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/deps/Microsoft.WindowsAppSDK/*"
+        "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/deps/nuget/Microsoft.WindowsAppSDK.*/*"
+    )
+    if (STACK_WINDOWS_APP_SDK_LOCAL_PACKAGE_ROOTS)
+        list(SORT STACK_WINDOWS_APP_SDK_LOCAL_PACKAGE_ROOTS COMPARE NATURAL ORDER DESCENDING)
+        list(APPEND STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS ${STACK_WINDOWS_APP_SDK_LOCAL_PACKAGE_ROOTS})
+    endif()
+    set(STACK_WINDOWS_APP_SDK_GENERATED_CPPWINRT "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/deps/generated/cppwinrt")
+
+    set(STACK_HAS_WINDOWS_APP_SDK OFF)
+    foreach(STACK_WINDOWS_APP_SDK_CANDIDATE IN LISTS STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS)
+        if (STACK_HAS_WINDOWS_APP_SDK)
+            break()
+        endif()
+
+        set(STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS)
+        if (EXISTS "${STACK_WINDOWS_APP_SDK_GENERATED_CPPWINRT}/winrt/Microsoft.UI.Windowing.h")
+            list(APPEND STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS "${STACK_WINDOWS_APP_SDK_GENERATED_CPPWINRT}")
+        endif()
+        foreach(STACK_WINDOWS_APP_SDK_INCLUDE_ROOT IN LISTS STACK_WINDOWS_APP_SDK_CANDIDATE_ROOTS)
+            foreach(STACK_WINDOWS_APP_SDK_INCLUDE_DIR
+                "${STACK_WINDOWS_APP_SDK_INCLUDE_ROOT}/include"
+                "${STACK_WINDOWS_APP_SDK_INCLUDE_ROOT}/include/winrt"
+                "${STACK_WINDOWS_APP_SDK_INCLUDE_ROOT}/build/native/include")
+                if (EXISTS "${STACK_WINDOWS_APP_SDK_INCLUDE_DIR}")
+                    list(APPEND STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS "${STACK_WINDOWS_APP_SDK_INCLUDE_DIR}")
+                endif()
+            endforeach()
+        endforeach()
+        list(REMOVE_DUPLICATES STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS)
+
+        unset(STACK_WINDOWS_APP_SDK_WINRT_INCLUDE CACHE)
+        unset(STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE CACHE)
+        unset(STACK_WINDOWS_APP_SDK_VERSION_INCLUDE CACHE)
+        unset(STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB CACHE)
+        unset(STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL CACHE)
+        find_path(STACK_WINDOWS_APP_SDK_WINRT_INCLUDE
+            NAMES
+                winrt/Microsoft.UI.Windowing.h
+                winrt/Microsoft.UI.Input.h
+                winrt/Microsoft.UI.Interop.h
+                winrt/Microsoft.ui.interop.h
+            PATHS ${STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS}
+            NO_DEFAULT_PATH
+        )
+        find_path(STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE
+            NAMES mddbootstrap.h MddBootstrap.h
+            PATHS ${STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS}
+            NO_DEFAULT_PATH
+        )
+        find_path(STACK_WINDOWS_APP_SDK_VERSION_INCLUDE
+            NAMES WindowsAppSDK-VersionInfo.h
+            PATHS ${STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS}
+            NO_DEFAULT_PATH
+        )
+        find_library(STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB
+            NAMES Microsoft.WindowsAppRuntime.Bootstrap
+            PATHS
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/native/x64"
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/win10-x64"
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/x64"
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/native"
+            NO_DEFAULT_PATH
+        )
+        find_file(STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL
+            NAMES Microsoft.WindowsAppRuntime.Bootstrap.dll
+            PATHS
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/runtimes/win-x64/native"
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/runtimes-framework/win-x64/native"
+                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/bin/x64"
+            NO_DEFAULT_PATH
+        )
+
+        if (STACK_WINDOWS_APP_SDK_WINRT_INCLUDE AND
+            STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE AND
+            STACK_WINDOWS_APP_SDK_VERSION_INCLUDE AND
+            STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB AND
+            STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL)
+            set(STACK_HAS_WINDOWS_APP_SDK ON)
+            set(STACK_WINDOWS_APP_SDK_ROOT_RESOLVED "${STACK_WINDOWS_APP_SDK_CANDIDATE}")
+        endif()
+    endforeach()
+
+    file(GLOB STACK_WINDOWS_CPPWINRT_INCLUDE_CANDIDATES
+        LIST_DIRECTORIES true
+        "C:/Program Files (x86)/Windows Kits/10/Include/*/cppwinrt"
+    )
+    if (STACK_WINDOWS_CPPWINRT_INCLUDE_CANDIDATES)
+        list(SORT STACK_WINDOWS_CPPWINRT_INCLUDE_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+        list(GET STACK_WINDOWS_CPPWINRT_INCLUDE_CANDIDATES 0 STACK_WINDOWS_CPPWINRT_INCLUDE)
+    endif()
+
+    if (STACK_HAS_WINDOWS_APP_SDK)
+        message(STATUS "Windows App SDK titlebar bridge enabled from: ${STACK_WINDOWS_APP_SDK_ROOT_RESOLVED}")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_HAS_WINDOWS_APP_SDK=1)
+        target_include_directories(${PROJECT_NAME} PRIVATE
+            "${STACK_WINDOWS_APP_SDK_WINRT_INCLUDE}"
+            "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE}"
+            "${STACK_WINDOWS_APP_SDK_VERSION_INCLUDE}"
+            ${STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS}
+        )
+        if (STACK_WINDOWS_CPPWINRT_INCLUDE)
+            target_include_directories(${PROJECT_NAME} PRIVATE "${STACK_WINDOWS_CPPWINRT_INCLUDE}")
+        endif()
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB}"
+            runtimeobject
+        )
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL}"
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+            VERBATIM
+        )
+    else()
+        message(WARNING "STACK_ENABLE_APPWINDOW_TITLEBAR=ON, but Microsoft.WindowsAppSDK was not found. Stack will build with the native titlebar fallback.")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_HAS_WINDOWS_APP_SDK=0)
+    endif()
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_HAS_WINDOWS_APP_SDK=0)
+endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE 
     glfw 
@@ -212,20 +353,26 @@ elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
 
+if (WIN32)
+    set(STACK_BUILDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/stack_builder")
+    if (EXISTS "${STACK_BUILDER_DIR}/CMakeLists.txt")
+        add_subdirectory("${STACK_BUILDER_DIR}" "${CMAKE_BINARY_DIR}/stack_builder")
+    endif()
+endif()
+
 option(STACK_BUILD_GRAPH_TESTS "Build focused node graph behavior tests" ON)
 if (STACK_BUILD_GRAPH_TESTS)
-    add_executable(StackGraphBehaviorTests
-        tools/graph_behavior_tests.cpp
-        src/Color/LutImporter.cpp
-        src/Editor/NodeGraph/EditorNodeGraph.cpp
-        src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp
-        src/Editor/NodeGraph/Model/EditorNodeGraphLayoutValidation.cpp
-        src/Editor/NodeGraph/Model/EditorNodeGraphMutation.cpp
-        src/Editor/NodeGraph/Model/EditorNodeGraphSelection.cpp
-        src/Editor/NodeGraph/Model/EditorNodeGraphTraversal.cpp
-    )
+    add_executable(StackGraphBehaviorTests ${STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES})
     target_include_directories(StackGraphBehaviorTests PRIVATE
         src
         src/ThirdParty
     )
+    if (STACK_ENABLE_LIBRAW)
+        target_compile_definitions(StackGraphBehaviorTests PRIVATE STACK_ENABLE_LIBRAW=1)
+        target_link_libraries(StackGraphBehaviorTests PRIVATE stack_libraw)
+        if (WIN32 AND MSVC)
+            target_link_options(StackGraphBehaviorTests PRIVATE "/DELAYLOAD:libraw.dll")
+            target_link_libraries(StackGraphBehaviorTests PRIVATE delayimp)
+        endif()
+    endif()
 endif()

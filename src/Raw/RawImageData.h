@@ -130,6 +130,11 @@ struct RawMosaicDenoiseSettings {
     int iterations = 1;
 };
 
+struct RawToneCurvePoint {
+    float input = 0.0f;
+    float output = 0.0f;
+};
+
 struct RawDetailFusionSettings {
     RawDetailFusionMode mode = RawDetailFusionMode::AutoAnalyze;
     RawDetailFusionDebugView debugView = RawDetailFusionDebugView::FinalImage;
@@ -367,6 +372,7 @@ struct RawDevelopSettings {
     float preserveRealColor = 0.70f;
     float lateralRedCyan = 0.0f;
     float lateralBlueYellow = 0.0f;
+    std::vector<RawToneCurvePoint> toneCurvePoints;
     RawMosaicDenoiseSettings mosaicDenoise;
 };
 

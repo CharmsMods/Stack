@@ -1,0 +1,43 @@
+UI, DATA, AND ASSETS
+
+UI direction
+
+Do not assume a default visual style, interaction style, or control density across projects.
+
+Ask when UI direction matters and is not already defined.
+
+Regardless of style, the UI should be high quality, consistent, clear, and tightly aligned with the program's actual functionality.
+
+The UI should feel intentional. It should not fight the workflow, hide important state carelessly, or feel disconnected from what the program is doing.
+
+Data formats
+
+Prefer binary, compiled, or otherwise efficient formats when they materially improve speed, size, load time, robustness, or runtime behavior.
+
+Use human-readable formats when there is a real reason to prefer them, not just out of habit.
+
+Do not default to large, slow, loosely structured text formats for data that users are unlikely to inspect or edit directly.
+
+Asset strategy
+
+Bake assets into the executable by default when the size is reasonable.
+
+Do this to simplify shipping, reduce loose-file fragility, and keep runtime setup cleaner.
+
+Do not bloat the executable with unusually large assets when external placement is the better engineering choice.
+
+Large assets
+
+Keep unusually large assets outside the executable in a clear runtime folder when that is the better tradeoff.
+
+If external assets are used, their location should be explicit, predictable, and easy for the program to resolve.
+
+Do not create confusing asset lookup behavior.
+
+Persistence behavior
+
+Choose persistence formats and storage layouts based on performance, durability, scale, and actual usage patterns.
+
+Do not force user-editable storage unless it serves a real need.
+
+When a program owns meaningful user data, reason early about durability, recovery, and safe handling instead of treating them as afterthoughts.

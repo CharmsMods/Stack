@@ -1,0 +1,325 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+05 - Subject Importance, User-Guided Bias Brushes, and Scene Understanding
+==========================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide defines subject importance, user-guided bias brushes, and scene understanding for Stack's Develop Auto solver.
+
+The goal is not to build a magical AI editor that decides taste for the user. The goal is to give the solver better information about what matters in the image, so it stops making global math decisions that sacrifice the important area.
+
+Why subject importance matters
+==============================
+A RAW file is not just a distribution of pixel values. It is a photograph. Some regions matter more than others. A face in shade, a product on a dark background, a car at sunset, a central flower, or a user-marked object may matter more than a bright sky or empty wall.
+
+Without subject importance, Auto can make mathematically reasonable but visually wrong decisions:
+
+- Underexpose a backlit person to protect the sky.
+- Lift empty black background because the histogram has lots of shadows.
+- Neutralize warm mood because it sees a color cast.
+- Compress highlights on the wrong object.
+- Denoise texture that is important.
+- Add contrast that makes the subject less readable.
+
+Subject importance tells the solver where to spend quality budget.
+
+The risk
+========
+Subject awareness can also go wrong. If Stack overtrusts subject detection, it may:
+
+- Lift a silhouette that should stay dark.
+- Over-brighten a subject until the image feels fake.
+- Sacrifice beautiful highlights for a guessed subject.
+- Misclassify warm objects as skin.
+- Make the processing feel weak or unpredictable.
+- Turn every image into subject-centered exposure regardless of mood.
+
+Therefore subject importance must be confidence-weighted, mode-aware, and user-controllable.
+
+Subject importance should be a bias, not a dictator
+===================================================
+The safest principle is:
+
+Subject importance should influence candidate scoring and local/global tradeoffs, but it should not automatically override the whole image unless the user explicitly marks that region as dominant.
+
+In practice:
+
+- Automatic subject detection creates soft bias.
+- User brush marking creates stronger bias.
+- A lock or "Expose for this" command creates very strong bias.
+- Mode still matters. Dark Natural may preserve a marked area darker than Bright Natural.
+- Noise and clipping safeguards still apply.
+
+Possible sources of subject confidence
+======================================
+1. User brush
+-------------
+The strongest and most honest signal. The user paints what matters.
+
+2. Face/person detection
+------------------------
+Useful for portraits and people, but should avoid overfitting the whole system to faces.
+
+3. Central/compositional weighting
+----------------------------------
+Often helpful, but not always true. Use as a weak prior.
+
+4. Detail/edge density
+----------------------
+Detailed regions may be important, but texture can also be background clutter.
+
+5. Color or brightness isolation
+--------------------------------
+A distinct object may be subject-like. Again, use as soft evidence.
+
+6. Saliency-like attention
+--------------------------
+Could be useful, but should remain a bias rather than a command.
+
+7. Manual node/selection context
+--------------------------------
+If future Stack workflows have masks, selections, or linked regions, those can feed importance.
+
+The user-guided importance brush
+================================
+The brush idea should be treated as a major feature, not a minor helper.
+
+User experience:
+
+- The user activates an Importance Brush before Auto, during candidate solving, or after one or more passes.
+- The brush paints a slightly transparent overlay.
+- Brush edges should be soft by default.
+- Brush opacity/strength can represent importance strength.
+- The user can erase or reduce importance.
+- The brush should support multiple regions.
+- The user can mark "important," "protect," "reveal," or possibly "ignore" regions in later versions.
+
+Behind the scenes:
+
+- The painted mask should be interpreted, not used as a hard edge.
+- Edge detection should refine the region so the solver can understand likely subject boundaries.
+- Feathering should preserve natural transitions.
+- The solver should generate a confidence/importance map from the brush + image structure.
+- The importance map should feed exposure, local exposure, tone, color, and denoise decisions.
+
+This is not necessarily AI subject selection. It can be edge-aware image processing and mask refinement.
+
+Brush modes
+===========
+Starting brush modes could be:
+
+1. Important
+------------
+"This region matters." It biases exposure, detail, color, and denoise decisions.
+
+2. Reveal
+---------
+"Make this more visible if quality allows." Useful for dark subjects.
+
+3. Protect
+----------
+"Do not clip, smear, over-denoise, or over-compress this." Useful for skin, white clothing, product highlights, skies.
+
+4. Preserve Mood
+----------------
+"This area is allowed to remain dark or bright." Useful for silhouettes, shadows, light sources.
+
+5. Ignore / Low Priority
+------------------------
+"Do not waste dynamic range or denoise budget here." Useful for empty dark background or irrelevant bright objects.
+
+Version 1 could start with only Important, but the docs should preserve the wider concept.
+
+Subject-aware exposure behavior
+===============================
+When a region is important, the solver should:
+
+- Include it in global exposure candidate scoring.
+- Evaluate whether it lands in a usable midtone range.
+- Avoid clipping it unless clipping is natural and allowed.
+- Avoid over-lifting it if that reveals noise or breaks mood.
+- Generate alternatives if the correct treatment is ambiguous.
+
+Example: backlit portrait
+-------------------------
+Candidate A: preserve sky, modest subject lift.
+Candidate B: brighter subject, more sky compression.
+Candidate C: flat editing base with both subject and sky visible.
+
+The user can pick or merge.
+
+Example: silhouette sunset
+--------------------------
+If the subject is detected but the scene strongly suggests silhouette, Auto should not automatically lift it. It should either preserve mood or offer a reveal-subject candidate.
+
+Example: black-background product
+---------------------------------
+The product should be exposed and detailed. The black background should likely stay dark. The solver should not lift the entire shadow mass.
+
+Subject-aware denoise/detail
+============================
+Important regions should receive careful detail treatment.
+
+- Skin should not become plastic.
+- Hair/fabric/product texture should not smear.
+- Important shadow regions may need denoise if lifted.
+- Empty low-priority shadows can stay dark instead of being denoised and lifted.
+- The denoise/detail graph should be allowed to bias important regions differently from background regions.
+
+This does not mean important regions always get less denoise. A noisy face may need denoise, but the denoise should be texture-protective and skin-aware.
+
+Subject-aware color
+===================
+Subject-aware color must be cautious. Skin protection is valuable, but hard-coded skin correction can become ugly or biased. The best approach is confidence-based:
+
+- If the solver has high confidence in skin, protect it from extreme hue/saturation/tone shifts.
+- If the user marks a face/skin region, confidence increases.
+- If confidence is low, use soft memory-color protection rather than strong correction.
+- Allow the user to choose mood/neutrality through graph controls.
+
+Subject-aware local exposure
+============================
+Local exposure should use subject maps to decide where range compression/lift matters most.
+
+The solver should avoid obvious local halos around the subject. A user-painted mask must not become a visible glow. Edge refinement should help, but so should:
+
+- Multi-scale feathering.
+- Gradient protection.
+- Maximum local EV delta limits near strong edges.
+- Local contrast preservation within the subject.
+- Similar treatment of adjacent regions when needed for realism.
+
+The goal is not to cut out the subject and brighten it. The goal is to rebalance the scene so the subject sits believably in the light.
+
+Graph control: Subject / Scene Intent Map
+=========================================
+A useful graph:
+
+Horizontal axis:
+Global Scene Integrity  <------------------->  Marked Subject Priority
+
+Vertical axis:
+Preserve Mood  <---------------------------->  Improve Readability
+
+Examples:
+
+- A dramatic silhouette would sit near Global Scene Integrity + Preserve Mood.
+- A backlit portrait rescue would sit near Marked Subject Priority + Improve Readability.
+- Natural Finished default might be near center, slightly toward readability if a clear subject exists.
+- Flat Editing Base might lean toward readability without committing to final contrast.
+
+The graph should influence:
+
+- Candidate generation.
+- Global exposure priority.
+- Local exposure map weighting.
+- Shadow lift limits.
+- Tone curve midtone emphasis.
+- Denoise/detail protection.
+- Candidate labels.
+
+Diagnostics for subject importance
+==================================
+Advanced diagnostics should show:
+
+- User brush overlay.
+- Refined importance map.
+- Subject confidence map.
+- Edges used to refine the brush.
+- Regions considered high/low priority.
+- Solve notes explaining how importance affected candidates.
+
+Example explanation:
+
+"Marked region increased midtone priority. Auto rejected a stronger lift because shadow noise crossed the selected clean/texture threshold."
+
+This teaches the user what happened without requiring code knowledge.
+
+Manual handoff
+==============
+When switching to Manual, user-guided subject importance should remain visible as an authored map/bias where appropriate. Manual should expose:
+
+- Importance map strength.
+- Subject exposure bias.
+- Subject protection bias.
+- Local exposure influence.
+- Denoise/detail influence.
+- Whether the brush is active for future Auto solves.
+
+Manual should allow the user to lock or remove the importance map.
+
+Returning from Manual to Auto
+=============================
+If the user has brushed importance or manually shaped subject exposure, returning to Auto should preserve that as a bias. It should not reset to global-only analysis unless the user chooses Reset Auto or removes the bias.
+
+Manual edits can also teach subject intent:
+
+- User lifted a region manually: treat as readability intent.
+- User darkened a region manually: treat as mood/low-priority intent.
+- User protected highlights manually: treat as protection intent.
+
+This should be approximate, not a rigid lock, unless explicitly locked.
+
+A better way than AI subject guessing
+=====================================
+The obvious modern path would be to use AI segmentation and call it solved. That may be useful later, but it is not the whole answer.
+
+A better Stack-first approach:
+
+- Start with user-guided importance as the most trustworthy signal.
+- Add edge-aware mask refinement.
+- Add automatic subject/saliency only as soft confidence.
+- Make the influence visible and editable.
+- Let the solver generate alternatives when intent is ambiguous.
+- Preserve subject choices into Manual and future Auto passes.
+
+This avoids a black-box tool that decides the image for the user.
+
+Research anchors for this guide
+===============================
+- Local Laplacian Filters: edge-aware local operations should preserve edges and avoid halos.
+- RawPedia local adjustments: local tools can work through scopes/spots and local masks rather than only full-image operations.
+- Stack current context: Finish Mask currently affects integrated finish tone only; subject importance for future RAW/local solve should not be confused with current finish masking.
+
+Recommended document-level decisions
+====================================
+- Subject importance should be both automatic and user-guided.
+- A soft overlay Importance Brush should be a core future feature.
+- Brush masks should be interpreted with edge-aware refinement, not used as hard cutouts.
+- Subject importance should bias the solver, not blindly override the scene.
+- Candidate generation should handle ambiguous cases like silhouette versus reveal-subject.
+- Subject maps should affect exposure, local exposure, tone, color, denoise, and detail.
+- Manual mode should preserve and expose subject importance as authored state.
+- Graph-style controls are ideal for subject/global/mood/readability tradeoffs.
+
+Open experience-test questions
+==============================
+- How simple can the first brush be while still feeling powerful?
+- Should there be separate Important, Reveal, Protect, and Ignore brushes in the first implementation, or just one brush with graph intent?
+- How visible should the overlay be during candidate solving?
+- Should the candidate gallery show "Subject Priority" alternatives automatically when a brush exists?
+- How should user-marked importance interact with masks elsewhere in Stack?

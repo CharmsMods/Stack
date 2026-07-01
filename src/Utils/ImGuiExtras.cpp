@@ -18,6 +18,7 @@ namespace {
 NodeControlState g_NodeControlState;
 float g_RoutedMouseWheel = 0.0f;
 bool g_SliderWheelModifierActive = false;
+bool g_SliderWheelConsumed = false;
 int g_GraphNodeControlScopeDepth = 0;
 GraphNodeControlScopeConfig g_GraphNodeControlScopeConfig;
 
@@ -355,6 +356,7 @@ bool ApplyFloatSliderWheel(
     if (!sliderHovered || sliderActive || ImGui::GetIO().WantTextInput || wheelDelta == 0.0f) {
         return false;
     }
+    g_SliderWheelConsumed = true;
     const float span = std::max(std::abs(vMax - vMin), 0.0001f);
     float step = std::max(span * 0.01f, 0.001f);
     if (ImGui::GetIO().KeyShift) {
@@ -391,6 +393,7 @@ bool ApplyIntSliderWheel(
     if (!sliderHovered || sliderActive || ImGui::GetIO().WantTextInput || wheelDelta == 0.0f) {
         return false;
     }
+    g_SliderWheelConsumed = true;
     const int span = std::max(std::abs(vMax - vMin), 1);
     int step = std::max(1, span / 100);
     if (ImGui::GetIO().KeyShift) {
@@ -826,16 +829,17 @@ void BeginFrameInputRouting() {
     PruneGraphSliderStates();
     g_HasPendingCursorCaptureRequest = false;
     g_PendingCursorCaptureRequest = {};
-    g_SliderWheelModifierActive = ImGui::IsKeyDown(ImGuiKey_W) && !io.WantTextInput;
+    g_SliderWheelModifierActive = io.KeyCtrl && !io.WantTextInput;
+    g_SliderWheelConsumed = false;
     g_RoutedMouseWheel = io.MouseWheel;
-    if (g_SliderWheelModifierActive) {
-        io.MouseWheel = 0.0f;
-        io.MouseWheelH = 0.0f;
-    }
 }
 
 bool IsSliderWheelModifierActive() {
     return g_SliderWheelModifierActive;
+}
+
+bool IsSliderWheelConsumed() {
+    return g_SliderWheelConsumed;
 }
 
 float GetSliderWheelDelta() {

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -30,14 +31,26 @@ constexpr const char* kLegacyThemeKey = "themePreset";
 constexpr const char* kGraphVisualModeKey = "graphVisualMode";
 constexpr const char* kGraphSpotlightHaloOutlinesKey = "graphSpotlightHaloOutlines";
 constexpr const char* kGraphDottedMaskLinksKey = "graphDottedMaskLinks";
+constexpr const char* kGraphLineOpacityKey = "graphLineOpacity";
+constexpr const char* kViewportTilingKey = "viewportTiling";
+constexpr const char* kViewportTilingModeKey = "mode";
+constexpr const char* kViewportTilingTileSizeKey = "tileSize";
+constexpr const char* kViewportTilingHaloPixelsKey = "haloPixels";
+constexpr const char* kViewportTilingAutoThresholdKey = "autoPixelThresholdMegapixels";
+constexpr const char* kViewportTilingProgressiveKey = "progressive";
+constexpr const char* kViewportTilingDebugOverlayKey = "debugOverlay";
 constexpr const char* kBackgroundImageEnabledKey = "backgroundImageEnabled";
 constexpr const char* kBackgroundImagePathKey = "backgroundImagePath";
+constexpr const char* kBackgroundImagesKey = "backgroundImages";
 constexpr const char* kBackgroundImageStrengthKey = "backgroundImageStrength";
 constexpr const char* kUiSurfaceTransparencyKey = "uiSurfaceTransparency";
 constexpr const char* kFactoryThemeToken = "premium-dark-studio";
+constexpr const char* kDefaultPresetToken = kSolarizedPresetId;
 constexpr const char* kManagedBackgroundImageBaseName = "StackBackgroundImage";
 constexpr float kMinTextScale = 0.75f;
 constexpr float kMaxTextScale = 1.60f;
+
+std::string MakeBackgroundImageIdFromPath(const std::string& storedPath);
 
 ImVec4 MakeColor(float r, float g, float b, float a = 1.0f) {
     return ImVec4(r, g, b, a);
@@ -67,17 +80,17 @@ float Luminance(const ImVec4& color) {
 }
 
 float ComputeSurfaceAlphaMultiplier(float transparency) {
-    return 1.0f - (ClampUnit(transparency) * 0.75f);
+    return std::clamp(0.18f + ((1.0f - ClampUnit(transparency)) * 0.28f), 0.18f, 0.46f);
 }
 
 float ComputePopupAlphaMultiplier(float transparency) {
-    return 1.0f - (ClampUnit(transparency) * 0.42f);
+    return std::clamp(ComputeSurfaceAlphaMultiplier(transparency) + 0.14f, 0.28f, 0.62f);
 }
 
-RuntimeSurfacePalette BuildRuntimeSurfacePalette(const ThemeDefinition& theme, float transparency, bool backgroundImageEnabled) {
+RuntimeSurfacePalette BuildRuntimeSurfacePalette(const ThemeDefinition& theme, float transparency, bool seamlessSurfaceStylingEnabled) {
     RuntimeSurfacePalette palette;
 
-    if (!backgroundImageEnabled) {
+    if (!seamlessSurfaceStylingEnabled) {
         palette.appSurface = theme.colors[ImGuiCol_WindowBg];
         palette.panelSurface = theme.colors[ImGuiCol_ChildBg];
         palette.popupSurface = theme.colors[ImGuiCol_PopupBg];
@@ -105,21 +118,23 @@ RuntimeSurfacePalette BuildRuntimeSurfacePalette(const ThemeDefinition& theme, f
     const ImVec4& frameBgHovered = theme.colors[ImGuiCol_FrameBgHovered];
     const ImVec4& frameBgActive = theme.colors[ImGuiCol_FrameBgActive];
     const bool isLightTheme = Luminance(windowBg) >= 0.5f;
-    const ImVec4 baseSurface = Blend(windowBg, childBg, isLightTheme ? 0.10f : 0.16f);
-    const float controlAlpha = std::clamp(surfaceAlpha + 0.06f, 0.0f, 1.0f);
+    const ImVec4 baseSurface = Blend(windowBg, childBg, isLightTheme ? 0.14f : 0.22f);
+    const float controlAlpha = std::clamp(surfaceAlpha + 0.08f, 0.0f, 1.0f);
+    const float drawerAlpha = std::clamp(surfaceAlpha + 0.08f, 0.0f, 1.0f);
+    const ImVec4 sharedSurface = ApplyAlphaMultiplier(baseSurface, surfaceAlpha);
 
-    palette.appSurface = ApplyAlphaMultiplier(baseSurface, surfaceAlpha);
-    palette.panelSurface = palette.appSurface;
-    palette.chromeSurface = palette.appSurface;
-    palette.drawerSurface = palette.appSurface;
+    palette.appSurface = sharedSurface;
+    palette.panelSurface = sharedSurface;
+    palette.chromeSurface = sharedSurface;
+    palette.drawerSurface = ApplyAlphaMultiplier(Blend(baseSurface, popupBg, isLightTheme ? 0.04f : 0.08f), drawerAlpha);
     palette.drawerSurfaceTransparent = palette.drawerSurface;
     palette.drawerSurfaceTransparent.w = 0.0f;
-    palette.popupSurface = ApplyAlphaMultiplier(Blend(popupBg, baseSurface, 0.16f), std::max(popupAlpha, std::min(1.0f, surfaceAlpha + 0.12f)));
-    palette.border = ApplyAlphaMultiplier(border, std::clamp(surfaceAlpha * 0.36f, 0.08f, 0.44f));
-    palette.separator = ApplyAlphaMultiplier(separator, std::clamp(surfaceAlpha * 0.28f, 0.06f, 0.34f));
-    palette.controlSurface = ApplyAlphaMultiplier(Blend(frameBg, baseSurface, 0.15f), controlAlpha);
-    palette.controlSurfaceHovered = ApplyAlphaMultiplier(Blend(frameBgHovered, header, 0.12f), std::clamp(controlAlpha + 0.05f, 0.0f, 1.0f));
-    palette.controlSurfaceActive = ApplyAlphaMultiplier(Blend(frameBgActive, header, 0.10f), std::clamp(controlAlpha + 0.08f, 0.0f, 1.0f));
+    palette.popupSurface = ApplyAlphaMultiplier(Blend(popupBg, baseSurface, 0.22f), popupAlpha);
+    palette.border = ApplyAlphaMultiplier(border, std::clamp(surfaceAlpha * 0.58f, 0.10f, 0.34f));
+    palette.separator = ApplyAlphaMultiplier(separator, std::clamp(surfaceAlpha * 0.42f, 0.08f, 0.28f));
+    palette.controlSurface = ApplyAlphaMultiplier(Blend(frameBg, baseSurface, 0.18f), controlAlpha);
+    palette.controlSurfaceHovered = ApplyAlphaMultiplier(Blend(frameBgHovered, header, 0.16f), std::clamp(controlAlpha + 0.05f, 0.0f, 1.0f));
+    palette.controlSurfaceActive = ApplyAlphaMultiplier(Blend(frameBgActive, header, 0.14f), std::clamp(controlAlpha + 0.08f, 0.0f, 1.0f));
     return palette;
 }
 
@@ -136,7 +151,7 @@ const char* GraphVisualModeToString(GraphVisualMode mode) {
         case GraphVisualMode::BlackNodes: return "BlackNodes";
         case GraphVisualMode::SpotlightPrototype: return "SpotlightPrototype";
     }
-    return "BlackNodes";
+    return "Classic";
 }
 
 GraphVisualMode GraphVisualModeFromString(const std::string& value) {
@@ -152,7 +167,7 @@ GraphVisualMode GraphVisualModeFromString(const std::string& value) {
     if (value == "Classic") {
         return GraphVisualMode::Classic;
     }
-    return GraphVisualMode::BlackNodes;
+    return GraphVisualMode::Classic;
 }
 
 json WriteVec2(const ImVec2& value) {
@@ -288,6 +303,33 @@ json ThemeDefinitionToJson(const ThemeDefinition& theme) {
     result[kThemeKey]["colors"] = WriteColorArray(theme.colors);
     result[kThemeKey]["style"] = ThemeStyleToJson(theme.style);
     return result;
+}
+
+json BackgroundImageEntryToJson(const BackgroundImageEntry& entry) {
+    json result = json::object();
+    result[kIdKey] = entry.id;
+    result[kNameKey] = entry.displayName;
+    result[kBackgroundImagePathKey] = entry.path;
+    return result;
+}
+
+bool BackgroundImageEntryFromJson(const json& value, BackgroundImageEntry& outEntry) {
+    if (!value.is_object()) {
+        return false;
+    }
+    outEntry.id = value.value(kIdKey, std::string());
+    outEntry.displayName = value.value(kNameKey, std::string());
+    outEntry.path = value.value(kBackgroundImagePathKey, std::string());
+    if (outEntry.path.empty()) {
+        return false;
+    }
+    if (outEntry.id.empty()) {
+        outEntry.id = MakeBackgroundImageIdFromPath(outEntry.path);
+    }
+    if (outEntry.displayName.empty()) {
+        outEntry.displayName = std::filesystem::path(outEntry.path).stem().string();
+    }
+    return true;
 }
 
 ThemeDefinition ThemeDefinitionFromJson(
@@ -460,8 +502,133 @@ std::filesystem::path ResolveManagedBackgroundImagePath(const std::string& store
     return workingDirectory.empty() ? path : (workingDirectory / path);
 }
 
+std::string MakeBackgroundImageIdFromPath(const std::string& storedPath) {
+    std::string base = NormalizeName(std::filesystem::path(storedPath).stem().string());
+    return base.empty() ? std::string("background") : base;
+}
+
+std::string MakeUniqueBackgroundImageId(const std::string& baseId, const AppearanceLibrary& library) {
+    std::unordered_set<std::string> usedIds;
+    for (const BackgroundImageEntry& entry : library.backgroundImages) {
+        if (!entry.id.empty()) {
+            usedIds.insert(entry.id);
+        }
+    }
+    return MakeUniqueId(baseId.empty() ? std::string("background") : baseId, usedIds);
+}
+
+std::string MakeUniqueBackgroundImageDisplayName(const std::string& baseName, const AppearanceLibrary& library) {
+    std::unordered_set<std::string> usedNames;
+    for (const BackgroundImageEntry& entry : library.backgroundImages) {
+        if (!entry.displayName.empty()) {
+            usedNames.insert(entry.displayName);
+        }
+    }
+    return MakeUniqueDisplayName(baseName.empty() ? std::string("Background Image") : baseName, usedNames);
+}
+
+std::filesystem::path MakeUniqueManagedBackgroundImagePath(const std::filesystem::path& sourcePath) {
+    const std::string extension = NormalizeExtension(sourcePath.extension().string());
+    const std::string stem = NormalizeName(sourcePath.stem().string());
+    const std::string baseName = stem.empty() ? std::string(kManagedBackgroundImageBaseName) : stem;
+    const std::filesystem::path directory = GetWorkingDirectoryPath();
+    for (int suffix = 1; suffix < 1000; ++suffix) {
+        const std::string candidateName = suffix == 1
+            ? baseName + extension
+            : baseName + "-" + std::to_string(suffix) + extension;
+        const std::filesystem::path candidate = directory / candidateName;
+        std::error_code ec;
+        if (!std::filesystem::exists(candidate, ec) || ec) {
+            return candidate;
+        }
+    }
+    return directory / (baseName + "-generated" + extension);
+}
+
+BackgroundImageEntry MakeBackgroundImageEntry(
+    const std::string& storedPath,
+    const std::string& displayName,
+    const AppearanceLibrary& library) {
+    BackgroundImageEntry entry;
+    entry.path = storedPath;
+    entry.id = MakeUniqueBackgroundImageId(MakeBackgroundImageIdFromPath(storedPath), library);
+    entry.displayName = MakeUniqueBackgroundImageDisplayName(
+        displayName.empty() ? std::filesystem::path(storedPath).stem().string() : displayName,
+        library);
+    return entry;
+}
+
+const BackgroundImageEntry* FindBackgroundImageById(const AppearanceLibrary& library, const std::string& imageId) {
+    for (const BackgroundImageEntry& entry : library.backgroundImages) {
+        if (entry.id == imageId) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+BackgroundImageEntry* FindBackgroundImageById(AppearanceLibrary& library, const std::string& imageId) {
+    for (BackgroundImageEntry& entry : library.backgroundImages) {
+        if (entry.id == imageId) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+bool BackgroundImagePathInLibrary(const AppearanceLibrary& library, const std::string& storedPath) {
+    return std::any_of(
+        library.backgroundImages.begin(),
+        library.backgroundImages.end(),
+        [&](const BackgroundImageEntry& entry) { return entry.path == storedPath; });
+}
+
 bool ThemeDefinitionEquals(const ThemeDefinition& lhs, const ThemeDefinition& rhs) {
     return ThemeDefinitionToJson(lhs) == ThemeDefinitionToJson(rhs);
+}
+
+ThemeStyleValues BlendThemeStyle(const ThemeStyleValues& from, const ThemeStyleValues& to, float t) {
+    ThemeStyleValues result;
+    result.alpha = from.alpha + (to.alpha - from.alpha) * t;
+    result.windowPadding = Blend(from.windowPadding, to.windowPadding, t);
+    result.framePadding = Blend(from.framePadding, to.framePadding, t);
+    result.cellPadding = Blend(from.cellPadding, to.cellPadding, t);
+    result.itemSpacing = Blend(from.itemSpacing, to.itemSpacing, t);
+    result.itemInnerSpacing = Blend(from.itemInnerSpacing, to.itemInnerSpacing, t);
+    result.indentSpacing = from.indentSpacing + (to.indentSpacing - from.indentSpacing) * t;
+    result.scrollbarSize = from.scrollbarSize + (to.scrollbarSize - from.scrollbarSize) * t;
+    result.grabMinSize = from.grabMinSize + (to.grabMinSize - from.grabMinSize) * t;
+    result.windowBorderSize = from.windowBorderSize + (to.windowBorderSize - from.windowBorderSize) * t;
+    result.childBorderSize = from.childBorderSize + (to.childBorderSize - from.childBorderSize) * t;
+    result.popupBorderSize = from.popupBorderSize + (to.popupBorderSize - from.popupBorderSize) * t;
+    result.frameBorderSize = from.frameBorderSize + (to.frameBorderSize - from.frameBorderSize) * t;
+    result.tabBorderSize = from.tabBorderSize + (to.tabBorderSize - from.tabBorderSize) * t;
+    result.windowRounding = from.windowRounding + (to.windowRounding - from.windowRounding) * t;
+    result.childRounding = from.childRounding + (to.childRounding - from.childRounding) * t;
+    result.frameRounding = from.frameRounding + (to.frameRounding - from.frameRounding) * t;
+    result.popupRounding = from.popupRounding + (to.popupRounding - from.popupRounding) * t;
+    result.scrollbarRounding = from.scrollbarRounding + (to.scrollbarRounding - from.scrollbarRounding) * t;
+    result.grabRounding = from.grabRounding + (to.grabRounding - from.grabRounding) * t;
+    result.tabRounding = from.tabRounding + (to.tabRounding - from.tabRounding) * t;
+    result.windowTitleAlign = Blend(from.windowTitleAlign, to.windowTitleAlign, t);
+    result.buttonTextAlign = Blend(from.buttonTextAlign, to.buttonTextAlign, t);
+    result.selectableTextAlign = Blend(from.selectableTextAlign, to.selectableTextAlign, t);
+    result.antiAliasedLines = t < 0.5f ? from.antiAliasedLines : to.antiAliasedLines;
+    result.antiAliasedFill = t < 0.5f ? from.antiAliasedFill : to.antiAliasedFill;
+    result.curveTessellationTol = from.curveTessellationTol + (to.curveTessellationTol - from.curveTessellationTol) * t;
+    return result;
+}
+
+ThemeDefinition BlendThemeDefinition(const ThemeDefinition& from, const ThemeDefinition& to, float t) {
+    ThemeDefinition result = to;
+    result.displayName = t < 1.0f ? from.displayName : to.displayName;
+    result.readOnly = to.readOnly;
+    result.textScale = from.textScale + (to.textScale - from.textScale) * t;
+    for (std::size_t index = 0; index < result.colors.size(); ++index) {
+        result.colors[index] = Blend(from.colors[index], to.colors[index], t);
+    }
+    result.style = BlendThemeStyle(from.style, to.style, t);
+    return result;
 }
 
 void ApplyCommonThemeStyle(ThemeDefinition& theme) {
@@ -1059,12 +1226,29 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
     json root = json::object();
     root[kVersionKey] = kAppearanceSettingsVersion;
     root[kAppearanceKey] = json::object();
-    root[kAppearanceKey][kActivePresetIdKey] = library.activePresetId.empty() ? std::string(kFactoryThemeToken) : library.activePresetId;
+    const ViewportTilingSettings viewportTiling = RenderTiling::NormalizeSettings(library.viewportTiling);
+    root[kAppearanceKey][kActivePresetIdKey] = library.activePresetId.empty() ? std::string(kDefaultPresetToken) : library.activePresetId;
     root[kAppearanceKey][kGraphVisualModeKey] = GraphVisualModeToString(library.graphVisualMode);
     root[kAppearanceKey][kGraphSpotlightHaloOutlinesKey] = library.graphSpotlightHaloOutlines;
     root[kAppearanceKey][kGraphDottedMaskLinksKey] = library.graphDottedMaskLinks;
+    root[kAppearanceKey][kGraphLineOpacityKey] = ClampUnit(library.graphLineOpacity);
+    root[kAppearanceKey][kViewportTilingKey] = json::object();
+    root[kAppearanceKey][kViewportTilingKey][kViewportTilingModeKey] =
+        RenderTiling::ViewportTilingModeToString(viewportTiling.mode);
+    root[kAppearanceKey][kViewportTilingKey][kViewportTilingTileSizeKey] = viewportTiling.tileSize;
+    root[kAppearanceKey][kViewportTilingKey][kViewportTilingHaloPixelsKey] = viewportTiling.haloPixels;
+    root[kAppearanceKey][kViewportTilingKey][kViewportTilingAutoThresholdKey] =
+        viewportTiling.autoPixelThresholdMegapixels;
+    root[kAppearanceKey][kViewportTilingKey][kViewportTilingProgressiveKey] = viewportTiling.progressive;
+    root[kAppearanceKey][kViewportTilingKey][kViewportTilingDebugOverlayKey] = viewportTiling.debugOverlay;
     root[kAppearanceKey][kBackgroundImageEnabledKey] = library.backgroundImageEnabled;
     root[kAppearanceKey][kBackgroundImagePathKey] = library.backgroundImagePath;
+    root[kAppearanceKey][kBackgroundImagesKey] = json::array();
+    for (const BackgroundImageEntry& entry : library.backgroundImages) {
+        if (!entry.path.empty()) {
+            root[kAppearanceKey][kBackgroundImagesKey].push_back(BackgroundImageEntryToJson(entry));
+        }
+    }
     root[kAppearanceKey][kBackgroundImageStrengthKey] = ClampUnit(library.backgroundImageStrength);
     root[kAppearanceKey][kUiSurfaceTransparencyKey] = ClampUnit(library.uiSurfaceTransparency);
     root[kAppearanceKey][kPresetsKey] = json::array();
@@ -1076,14 +1260,17 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
 
 bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibrary, bool* outNeedsMigration = nullptr) {
     outLibrary = {};
-    outLibrary.activePresetId = kFactoryThemeToken;
-    outLibrary.graphVisualMode = GraphVisualMode::BlackNodes;
+    outLibrary.activePresetId = kDefaultPresetToken;
+    outLibrary.graphVisualMode = GraphVisualMode::Classic;
     outLibrary.graphSpotlightHaloOutlines = false;
-    outLibrary.graphDottedMaskLinks = true;
+    outLibrary.graphDottedMaskLinks = false;
+    outLibrary.graphLineOpacity = 1.0f;
+    outLibrary.viewportTiling = RenderTiling::NormalizeSettings({});
     outLibrary.backgroundImageEnabled = false;
     outLibrary.backgroundImagePath.clear();
     outLibrary.backgroundImageStrength = 0.58f;
     outLibrary.uiSurfaceTransparency = 0.18f;
+    outLibrary.backgroundImages.clear();
     outLibrary.customPresets.clear();
 
     if (!root.is_object()) {
@@ -1100,14 +1287,21 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         const json appearance = root.value(kAppearanceKey, json::object());
         const std::string legacyToken = appearance.value(kLegacyThemeKey, std::string(kFactoryThemeToken));
         (void)legacyToken;
-        outLibrary.activePresetId = kFactoryThemeToken;
-        outLibrary.graphVisualMode = GraphVisualMode::BlackNodes;
+        outLibrary.activePresetId = kDefaultPresetToken;
+        outLibrary.graphVisualMode = GraphVisualMode::Classic;
         outLibrary.graphSpotlightHaloOutlines = false;
-        outLibrary.graphDottedMaskLinks = true;
+        outLibrary.graphDottedMaskLinks = false;
+        outLibrary.graphLineOpacity = 1.0f;
+        outLibrary.viewportTiling = RenderTiling::NormalizeSettings({});
         return true;
     }
 
-    if (version != 2 && version != static_cast<int>(kAppearanceSettingsVersion)) {
+    if (version != 2 &&
+        version != 3 &&
+        version != 4 &&
+        version != 5 &&
+        version != 6 &&
+        version != static_cast<int>(kAppearanceSettingsVersion)) {
         return false;
     }
     if (version < static_cast<int>(kAppearanceSettingsVersion) && outNeedsMigration) {
@@ -1115,15 +1309,56 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
     }
 
     const json appearance = root.value(kAppearanceKey, json::object());
-    outLibrary.activePresetId = appearance.value(kActivePresetIdKey, std::string(kFactoryThemeToken));
+    outLibrary.activePresetId = appearance.value(kActivePresetIdKey, std::string(kDefaultPresetToken));
     outLibrary.graphVisualMode = GraphVisualModeFromString(
-        appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::BlackNodes))));
+        appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::Classic))));
     outLibrary.graphSpotlightHaloOutlines = appearance.value(kGraphSpotlightHaloOutlinesKey, false);
-    outLibrary.graphDottedMaskLinks = appearance.value(kGraphDottedMaskLinksKey, true);
+    outLibrary.graphDottedMaskLinks = appearance.value(kGraphDottedMaskLinksKey, false);
+    outLibrary.graphLineOpacity = ClampUnit(appearance.value(kGraphLineOpacityKey, 1.0f));
+    ViewportTilingSettings viewportTiling;
+    const json viewportTilingJson = appearance.value(kViewportTilingKey, json::object());
+    if (viewportTilingJson.is_object()) {
+        viewportTiling.mode = RenderTiling::ViewportTilingModeFromString(
+            viewportTilingJson.value(kViewportTilingModeKey, std::string("Auto")));
+        viewportTiling.tileSize = viewportTilingJson.value(kViewportTilingTileSizeKey, viewportTiling.tileSize);
+        viewportTiling.haloPixels = viewportTilingJson.value(kViewportTilingHaloPixelsKey, viewportTiling.haloPixels);
+        viewportTiling.autoPixelThresholdMegapixels =
+            viewportTilingJson.value(kViewportTilingAutoThresholdKey, viewportTiling.autoPixelThresholdMegapixels);
+        viewportTiling.progressive =
+            viewportTilingJson.value(kViewportTilingProgressiveKey, viewportTiling.progressive);
+        viewportTiling.debugOverlay =
+            viewportTilingJson.value(kViewportTilingDebugOverlayKey, viewportTiling.debugOverlay);
+    }
+    outLibrary.viewportTiling = RenderTiling::NormalizeSettings(viewportTiling);
     outLibrary.backgroundImageEnabled = appearance.value(kBackgroundImageEnabledKey, false);
     outLibrary.backgroundImagePath = appearance.value(kBackgroundImagePathKey, std::string());
     outLibrary.backgroundImageStrength = ClampUnit(appearance.value(kBackgroundImageStrengthKey, 0.58f));
     outLibrary.uiSurfaceTransparency = ClampUnit(appearance.value(kUiSurfaceTransparencyKey, 0.18f));
+    const json backgroundImages = appearance.value(kBackgroundImagesKey, json::array());
+    if (backgroundImages.is_array()) {
+        std::unordered_set<std::string> usedIds;
+        std::unordered_set<std::string> usedNames;
+        for (const json& entryValue : backgroundImages) {
+            BackgroundImageEntry entry;
+            if (!BackgroundImageEntryFromJson(entryValue, entry)) {
+                continue;
+            }
+            entry.id = MakeUniqueId(NormalizeName(entry.id), usedIds);
+            usedIds.insert(entry.id);
+            entry.displayName = MakeUniqueDisplayName(entry.displayName, usedNames);
+            usedNames.insert(entry.displayName);
+            outLibrary.backgroundImages.push_back(std::move(entry));
+        }
+    }
+    if (!outLibrary.backgroundImagePath.empty() && !BackgroundImagePathInLibrary(outLibrary, outLibrary.backgroundImagePath)) {
+        outLibrary.backgroundImages.push_back(MakeBackgroundImageEntry(
+            outLibrary.backgroundImagePath,
+            std::filesystem::path(outLibrary.backgroundImagePath).stem().string(),
+            outLibrary));
+        if (outNeedsMigration) {
+            *outNeedsMigration = true;
+        }
+    }
 
     const json presets = appearance.value(kPresetsKey, json::array());
     if (!presets.is_array()) {
@@ -1147,6 +1382,19 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         outLibrary.customPresets.push_back(std::move(preset));
     }
 
+    if (version < 7) {
+        const bool oldGraphDefaults =
+            outLibrary.graphVisualMode == GraphVisualMode::BlackNodes &&
+            outLibrary.graphDottedMaskLinks;
+        if (outLibrary.activePresetId == kFactoryThemeToken) {
+            outLibrary.activePresetId = kDefaultPresetToken;
+        }
+        if (oldGraphDefaults) {
+            outLibrary.graphVisualMode = GraphVisualMode::Classic;
+            outLibrary.graphDottedMaskLinks = false;
+        }
+    }
+
     const auto factoryThemes = MakeFactoryThemes();
     const bool activePresetFound = std::any_of(
         factoryThemes.begin(),
@@ -1157,7 +1405,7 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
             outLibrary.customPresets.end(),
             [&](const ThemeDefinition& preset) { return preset.id == outLibrary.activePresetId; });
     if (!activePresetFound) {
-        outLibrary.activePresetId = kFactoryThemeToken;
+        outLibrary.activePresetId = kDefaultPresetToken;
     }
 
     return true;
@@ -1197,15 +1445,15 @@ const char* GraphVisualModeLabel(GraphVisualMode mode) {
         case GraphVisualMode::BlackNodes: return "Black Nodes";
         case GraphVisualMode::SpotlightPrototype: return "Soft Spotlight Prototype";
     }
-    return "Black Nodes";
+    return "Classic";
 }
 
 const char* GraphVisualModeDescription(GraphVisualMode mode) {
     switch (mode) {
         case GraphVisualMode::Classic:
-            return "Use the current stable node graph rendering.";
+            return "Use the default stable node graph rendering.";
         case GraphVisualMode::BlackNodes:
-            return "Use the new default graph rendering with near-black nodes and theme-derived accents.";
+            return "Use near-black nodes with theme-derived accents.";
         case GraphVisualMode::SpotlightPrototype:
             return "Use the experimental graph where nodes read as soft lighter spots in the canvas.";
     }
@@ -1254,7 +1502,7 @@ ThemeDefinition* FindPresetById(AppearanceLibrary& library, const std::string& p
 
 bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary) {
     outLibrary = {};
-    outLibrary.activePresetId = kFactoryThemeToken;
+    outLibrary.activePresetId = kDefaultPresetToken;
     outLibrary.customPresets.clear();
 
     const std::filesystem::path settingsPath = GetSettingsPath();
@@ -1376,6 +1624,24 @@ bool SaveThemePresetFile(const std::filesystem::path& path, const ThemeDefinitio
     return file.good();
 }
 
+bool UseDarkIconsForCurrentTheme(const AppearanceManager* appearance) {
+    if (appearance == nullptr) {
+        return false;
+    }
+    return Luminance(appearance->GetWorkingTheme().colors[ImGuiCol_WindowBg]) >= 0.52f;
+}
+
+ImU32 ResolveThemedMonochromeIconTint(const AppearanceManager* appearance, bool emphasized, bool hovered) {
+    if (UseDarkIconsForCurrentTheme(appearance)) {
+        return emphasized
+            ? IM_COL32(18, 22, 26, 255)
+            : (hovered ? IM_COL32(48, 54, 60, 232) : IM_COL32(104, 110, 118, 188));
+    }
+    return emphasized
+        ? IM_COL32(255, 255, 255, 255)
+        : (hovered ? IM_COL32(220, 220, 220, 230) : IM_COL32(150, 150, 150, 165));
+}
+
 AppearanceManager::AppearanceManager()
     : m_FactoryTheme(),
       m_WorkingTheme(),
@@ -1386,7 +1652,8 @@ AppearanceManager::AppearanceManager()
     } else {
         m_FactoryTheme = MakeFactoryPremiumDarkStudioTheme();
     }
-    m_WorkingTheme = m_FactoryTheme;
+    m_Library = {};
+    m_WorkingTheme = ResolveActiveTheme(m_Library, m_FactoryTheme);
 }
 
 bool AppearanceManager::Load() {
@@ -1396,19 +1663,71 @@ bool AppearanceManager::Load() {
     m_Library = {};
     m_BackgroundImageRevision = 0;
     m_BackgroundImageRuntimeStatus.clear();
+    m_ThemeTransitionActive = false;
 
     if (!LoadAppearanceLibrary(m_Library)) {
-        m_Library.activePresetId = kFactoryThemeToken;
+        m_Library = {};
+        m_Library.activePresetId = kDefaultPresetToken;
         m_Library.customPresets.clear();
+        m_WorkingTheme = ResolveActiveTheme(m_Library, m_FactoryTheme);
+        TouchRevision();
         return false;
     }
 
     m_WorkingTheme = ResolveActiveTheme(m_Library, m_FactoryTheme);
+    TouchRevision();
     return true;
 }
 
 bool AppearanceManager::Save() const {
     return SaveAppearanceLibrary(m_Library);
+}
+
+void AppearanceManager::TouchRevision() {
+    ++m_Revision;
+    if (m_Revision == 0) {
+        m_Revision = 1;
+    }
+}
+
+void AppearanceManager::StartThemeTransition(const ThemeDefinition& targetTheme, double nowSeconds) {
+    m_ThemeTransitionFrom = m_WorkingTheme;
+    m_ThemeTransitionTo = targetTheme;
+    m_ThemeTransitionTo.readOnly = targetTheme.readOnly;
+    m_ThemeTransitionStartTime = nowSeconds;
+    m_ThemeTransitionActive = true;
+    m_WorkingTheme = m_ThemeTransitionFrom;
+    TouchRevision();
+}
+
+void AppearanceManager::FinishThemeTransition() {
+    if (!m_ThemeTransitionActive) {
+        return;
+    }
+    m_WorkingTheme = m_ThemeTransitionTo;
+    m_WorkingTheme.readOnly = m_ThemeTransitionTo.readOnly;
+    m_ThemeTransitionActive = false;
+    TouchRevision();
+}
+
+bool AppearanceManager::UpdateThemeTransition(double nowSeconds) {
+    if (!m_ThemeTransitionActive) {
+        return false;
+    }
+    const double elapsed = nowSeconds - m_ThemeTransitionStartTime;
+    const float linearT = static_cast<float>(std::clamp(elapsed / std::max(0.001, m_ThemeTransitionDuration), 0.0, 1.0));
+    const float easedT = 1.0f - std::pow(1.0f - linearT, 3.0f);
+    if (linearT >= 1.0f) {
+        FinishThemeTransition();
+        return true;
+    }
+    m_WorkingTheme = BlendThemeDefinition(m_ThemeTransitionFrom, m_ThemeTransitionTo, easedT);
+    TouchRevision();
+    return true;
+}
+
+bool AppearanceManager::IsThemeTransitionActive() const {
+    return m_ThemeTransitionActive;
 }
 
 const ThemeDefinition& AppearanceManager::GetFactoryTheme() const {
@@ -1464,12 +1783,28 @@ bool AppearanceManager::GetGraphDottedMaskLinks() const {
     return m_Library.graphDottedMaskLinks;
 }
 
+float AppearanceManager::GetGraphLineOpacity() const {
+    return ClampUnit(m_Library.graphLineOpacity);
+}
+
+const ViewportTilingSettings& AppearanceManager::GetViewportTilingSettings() const {
+    return m_Library.viewportTiling;
+}
+
 bool AppearanceManager::GetBackgroundImageEnabled() const {
     return m_Library.backgroundImageEnabled;
 }
 
+bool AppearanceManager::GetSeamlessSurfaceStylingEnabled() const {
+    return !m_Library.backgroundImagePath.empty();
+}
+
 const std::string& AppearanceManager::GetBackgroundImagePath() const {
     return m_Library.backgroundImagePath;
+}
+
+const std::vector<BackgroundImageEntry>& AppearanceManager::GetBackgroundImages() const {
+    return m_Library.backgroundImages;
 }
 
 float AppearanceManager::GetBackgroundImageStrength() const {
@@ -1481,14 +1816,18 @@ float AppearanceManager::GetUiSurfaceTransparency() const {
 }
 
 float AppearanceManager::GetUiSurfaceAlphaMultiplier() const {
-    if (!m_Library.backgroundImageEnabled) {
+    if (!GetSeamlessSurfaceStylingEnabled()) {
         return 1.0f;
     }
     return ComputeSurfaceAlphaMultiplier(m_Library.uiSurfaceTransparency);
 }
 
 RuntimeSurfacePalette AppearanceManager::GetRuntimeSurfacePalette() const {
-    return BuildRuntimeSurfacePalette(m_WorkingTheme, m_Library.uiSurfaceTransparency, m_Library.backgroundImageEnabled);
+    return BuildRuntimeSurfacePalette(m_WorkingTheme, m_Library.uiSurfaceTransparency, GetSeamlessSurfaceStylingEnabled());
+}
+
+std::uint64_t AppearanceManager::GetRevision() const {
+    return m_Revision;
 }
 
 std::uint64_t AppearanceManager::GetBackgroundImageRevision() const {
@@ -1541,8 +1880,7 @@ bool AppearanceManager::SelectPresetById(const std::string& presetId) {
     }
 
     m_Library.activePresetId = preset->id;
-    m_WorkingTheme = *preset;
-    m_WorkingTheme.readOnly = preset->readOnly;
+    StartThemeTransition(*preset, ImGui::GetTime());
     return Save();
 }
 
@@ -1551,6 +1889,7 @@ bool AppearanceManager::SetGraphVisualMode(GraphVisualMode mode) {
         return true;
     }
     m_Library.graphVisualMode = mode;
+    TouchRevision();
     return Save();
 }
 
@@ -1559,6 +1898,7 @@ bool AppearanceManager::SetGraphSpotlightHaloOutlines(bool enabled) {
         return true;
     }
     m_Library.graphSpotlightHaloOutlines = enabled;
+    TouchRevision();
     return Save();
 }
 
@@ -1567,6 +1907,33 @@ bool AppearanceManager::SetGraphDottedMaskLinks(bool enabled) {
         return true;
     }
     m_Library.graphDottedMaskLinks = enabled;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphLineOpacity(float opacity) {
+    const float clamped = ClampUnit(opacity);
+    if (std::abs(m_Library.graphLineOpacity - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphLineOpacity = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetViewportTilingSettings(const ViewportTilingSettings& settings) {
+    const ViewportTilingSettings normalized = RenderTiling::NormalizeSettings(settings);
+    const ViewportTilingSettings current = RenderTiling::NormalizeSettings(m_Library.viewportTiling);
+    if (current.mode == normalized.mode &&
+        current.tileSize == normalized.tileSize &&
+        current.haloPixels == normalized.haloPixels &&
+        current.autoPixelThresholdMegapixels == normalized.autoPixelThresholdMegapixels &&
+        current.progressive == normalized.progressive &&
+        current.debugOverlay == normalized.debugOverlay) {
+        return true;
+    }
+    m_Library.viewportTiling = normalized;
+    TouchRevision();
     return Save();
 }
 
@@ -1575,6 +1942,7 @@ bool AppearanceManager::SetBackgroundImageEnabled(bool enabled) {
         return true;
     }
     m_Library.backgroundImageEnabled = enabled;
+    TouchRevision();
     return Save();
 }
 
@@ -1584,6 +1952,7 @@ bool AppearanceManager::SetBackgroundImageStrength(float strength) {
         return true;
     }
     m_Library.backgroundImageStrength = clamped;
+    TouchRevision();
     return Save();
 }
 
@@ -1593,6 +1962,7 @@ bool AppearanceManager::SetUiSurfaceTransparency(float transparency) {
         return true;
     }
     m_Library.uiSurfaceTransparency = clamped;
+    TouchRevision();
     return Save();
 }
 
@@ -1606,9 +1976,27 @@ bool AppearanceManager::ImportBackgroundImageFromPath(const std::filesystem::pat
         return false;
     }
 
-    const std::string extension = NormalizeExtension(sourcePath.extension().string());
-    const std::string fileName = std::string(kManagedBackgroundImageBaseName) + extension;
-    const std::filesystem::path destinationPath = ResolveManagedBackgroundImagePath(fileName);
+    const std::filesystem::path normalizedSource = sourcePath.lexically_normal();
+    for (const BackgroundImageEntry& entry : m_Library.backgroundImages) {
+        const std::filesystem::path existingPath = ResolveManagedBackgroundImagePath(entry.path);
+        if (existingPath.empty()) {
+            continue;
+        }
+        const bool sameManagedPath =
+            normalizedSource == existingPath.lexically_normal() ||
+            (std::filesystem::equivalent(sourcePath, existingPath, ec) && !ec);
+        ec.clear();
+        if (sameManagedPath) {
+            m_Library.backgroundImagePath = entry.path;
+            m_Library.backgroundImageEnabled = true;
+            m_BackgroundImageRuntimeStatus.clear();
+            ++m_BackgroundImageRevision;
+            TouchRevision();
+            return Save();
+        }
+    }
+
+    const std::filesystem::path destinationPath = MakeUniqueManagedBackgroundImagePath(sourcePath);
     if (destinationPath.empty()) {
         if (errorMessage) {
             *errorMessage = "Unable to resolve the app background image path.";
@@ -1617,7 +2005,6 @@ bool AppearanceManager::ImportBackgroundImageFromPath(const std::filesystem::pat
         return false;
     }
 
-    const std::filesystem::path previousPath = ResolveManagedBackgroundImagePath(m_Library.backgroundImagePath);
     if (!destinationPath.parent_path().empty()) {
         std::filesystem::create_directories(destinationPath.parent_path(), ec);
         if (ec) {
@@ -1630,17 +2017,13 @@ bool AppearanceManager::ImportBackgroundImageFromPath(const std::filesystem::pat
     }
 
     bool sourceAlreadyManaged = false;
-    const std::filesystem::path normalizedSource = sourcePath.lexically_normal();
     const std::filesystem::path normalizedDestination = destinationPath.lexically_normal();
     if (normalizedSource == normalizedDestination) {
         sourceAlreadyManaged = true;
-    } else {
-        sourceAlreadyManaged = std::filesystem::equivalent(sourcePath, destinationPath, ec) && !ec;
-        ec.clear();
     }
 
     if (!sourceAlreadyManaged) {
-        std::filesystem::copy_file(sourcePath, destinationPath, std::filesystem::copy_options::overwrite_existing, ec);
+        std::filesystem::copy_file(sourcePath, destinationPath, std::filesystem::copy_options::none, ec);
     }
     if (ec) {
         if (errorMessage) {
@@ -1650,23 +2033,46 @@ bool AppearanceManager::ImportBackgroundImageFromPath(const std::filesystem::pat
         return false;
     }
 
-    if (!m_Library.backgroundImagePath.empty() && previousPath != destinationPath) {
-        std::filesystem::remove(previousPath, ec);
-        ec.clear();
-    }
-
+    const std::string fileName = destinationPath.filename().string();
+    m_Library.backgroundImages.push_back(MakeBackgroundImageEntry(fileName, sourcePath.stem().string(), m_Library));
     m_Library.backgroundImagePath = fileName;
     m_Library.backgroundImageEnabled = true;
     m_BackgroundImageRuntimeStatus.clear();
     ++m_BackgroundImageRevision;
+    TouchRevision();
     return Save();
 }
 
-bool AppearanceManager::ClearBackgroundImage(std::string* errorMessage) {
+bool AppearanceManager::SelectBackgroundImageById(const std::string& imageId) {
+    const BackgroundImageEntry* entry = FindBackgroundImageById(m_Library, imageId);
+    if (entry == nullptr || entry->path.empty()) {
+        return false;
+    }
+    if (m_Library.backgroundImagePath == entry->path && m_Library.backgroundImageEnabled) {
+        return true;
+    }
+    m_Library.backgroundImagePath = entry->path;
+    m_Library.backgroundImageEnabled = true;
+    m_BackgroundImageRuntimeStatus.clear();
+    ++m_BackgroundImageRevision;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::RemoveBackgroundImageById(const std::string& imageId, std::string* errorMessage) {
+    auto it = std::find_if(
+        m_Library.backgroundImages.begin(),
+        m_Library.backgroundImages.end(),
+        [&](const BackgroundImageEntry& entry) { return entry.id == imageId; });
+    if (it == m_Library.backgroundImages.end()) {
+        return false;
+    }
+
+    const bool removingActive = it->path == m_Library.backgroundImagePath;
+    const std::filesystem::path managedPath = ResolveManagedBackgroundImagePath(it->path);
     std::error_code ec;
-    const std::filesystem::path previousPath = ResolveManagedBackgroundImagePath(m_Library.backgroundImagePath);
-    if (!m_Library.backgroundImagePath.empty()) {
-        std::filesystem::remove(previousPath, ec);
+    if (!managedPath.empty()) {
+        std::filesystem::remove(managedPath, ec);
         if (ec) {
             if (errorMessage) {
                 *errorMessage = "Unable to remove the managed background image file.";
@@ -1676,10 +2082,31 @@ bool AppearanceManager::ClearBackgroundImage(std::string* errorMessage) {
         }
     }
 
+    m_Library.backgroundImages.erase(it);
+    if (removingActive) {
+        if (!m_Library.backgroundImages.empty()) {
+            m_Library.backgroundImagePath = m_Library.backgroundImages.front().path;
+            m_Library.backgroundImageEnabled = true;
+        } else {
+            m_Library.backgroundImagePath.clear();
+            m_Library.backgroundImageEnabled = false;
+        }
+        ++m_BackgroundImageRevision;
+    }
+    m_BackgroundImageRuntimeStatus.clear();
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::ClearBackgroundImage(std::string* errorMessage) {
+    (void)errorMessage;
+    if (!m_Library.backgroundImageEnabled) {
+        return true;
+    }
     m_Library.backgroundImageEnabled = false;
-    m_Library.backgroundImagePath.clear();
     m_BackgroundImageRuntimeStatus.clear();
     ++m_BackgroundImageRevision;
+    TouchRevision();
     return Save();
 }
 
@@ -1691,10 +2118,14 @@ bool AppearanceManager::ResetWorkingTheme() {
     const ThemeDefinition* activePreset = GetActivePreset();
     if (activePreset == nullptr) {
         m_WorkingTheme = m_FactoryTheme;
+        m_ThemeTransitionActive = false;
+        TouchRevision();
         return true;
     }
 
     m_WorkingTheme = *activePreset;
+    m_ThemeTransitionActive = false;
+    TouchRevision();
     return true;
 }
 
@@ -1709,9 +2140,11 @@ bool AppearanceManager::SaveWorkingTheme() {
     }
 
     m_WorkingTheme.readOnly = false;
+    m_ThemeTransitionActive = false;
     *preset = m_WorkingTheme;
     preset->id = m_Library.activePresetId;
     preset->readOnly = false;
+    TouchRevision();
     return Save();
 }
 
@@ -1727,6 +2160,8 @@ bool AppearanceManager::SaveWorkingThemeAsNew(std::string displayName) {
     m_Library.customPresets.push_back(preset);
     m_Library.activePresetId = presetId;
     m_WorkingTheme = preset;
+    m_ThemeTransitionActive = false;
+    TouchRevision();
     return Save();
 }
 
@@ -1747,6 +2182,8 @@ bool AppearanceManager::ImportPreset(const std::filesystem::path& path, std::str
     m_Library.customPresets.push_back(importedTheme);
     m_Library.activePresetId = importedTheme.id;
     m_WorkingTheme = importedTheme;
+    m_ThemeTransitionActive = false;
+    TouchRevision();
     return Save();
 }
 
@@ -1757,7 +2194,7 @@ bool AppearanceManager::ExportWorkingTheme(const std::filesystem::path& path, st
 void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const {
     ImGui::StyleColorsDark(&style);
     const RuntimeSurfacePalette palette = GetRuntimeSurfacePalette();
-    const bool backgroundImageEnabled = m_Library.backgroundImageEnabled;
+    const bool seamlessSurfaceStylingEnabled = GetSeamlessSurfaceStylingEnabled();
 
     // Premium hardcoded style values for a clean, consistent modern look
     style.Alpha = 1.0f;
@@ -1793,7 +2230,7 @@ void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const 
         style.Colors[index] = m_WorkingTheme.colors[static_cast<std::size_t>(index)];
     }
 
-    if (backgroundImageEnabled) {
+    if (seamlessSurfaceStylingEnabled) {
         style.Colors[ImGuiCol_WindowBg] = palette.appSurface;
         style.Colors[ImGuiCol_ChildBg] = palette.panelSurface;
         style.Colors[ImGuiCol_PopupBg] = palette.popupSurface;

@@ -1,213 +1,19 @@
 #include "Editor/EditorModule.h"
 
-#include "Async/TaskSystem.h"
 #include "Editor/Layers/ToneLayers.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
-#include "Library/LibraryManager.h"
-#include "Raw/LibRawRuntime.h"
-#include "Raw/RawLoader.h"
 #include "Renderer/GLHelpers.h"
-#include "ThirdParty/stb_image.h"
-#include "ThirdParty/stb_image_write.h"
-#include "Utils/FileDialogs.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <functional>
 #include <optional>
 #include <unordered_set>
 
 namespace {
-
-struct DecodedImageData {
-    std::vector<unsigned char> pixels;
-    int width = 0;
-    int height = 0;
-    int channels = 4;
-    int originalChannels = 4;
-};
-
-bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
-    outImage = {};
-
-    stbi_set_flip_vertically_on_load_thread(1);
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
-    if (!pixels) {
-        return false;
-    }
-
-    outImage.width = width;
-    outImage.height = height;
-    outImage.channels = 4;
-    outImage.originalChannels = channels;
-    outImage.pixels.assign(pixels, pixels + (width * height * 4));
-    stbi_image_free(pixels);
-    return true;
-}
-
-void PngWriteCallback(void* context, void* data, int size) {
-    auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-    const auto* begin = static_cast<unsigned char*>(data);
-    bytes->insert(bytes->end(), begin, begin + size);
-}
-
-std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    std::vector<unsigned char> pngBytes;
-    if (pixels.empty() || width <= 0 || height <= 0) {
-        return pngBytes;
-    }
-
-    const int safeChannels = std::max(1, channels);
-    stbi_write_png_to_func(PngWriteCallback, &pngBytes, width, height, safeChannels, pixels.data(), width * safeChannels);
-    return pngBytes;
-}
-
-std::string FileNameFromPath(const std::string& path) {
-    try {
-        return std::filesystem::path(path).filename().string();
-    } catch (...) {
-        return path.empty() ? std::string("Image") : path;
-    }
-}
-
-nlohmann::json BuildDefaultIntegratedToneLayerJson() {
-    ToneCurveLayer toneCurve;
-    return toneCurve.Serialize();
-}
-
-std::vector<unsigned char> EncodePngBytesForImageStorage(
-    const std::vector<unsigned char>& bottomLeftPixels,
-    int width,
-    int height,
-    int channels) {
-    if (bottomLeftPixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
-        return {};
-    }
-
-    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
-    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
-    return EncodePngBytes(topLeftPixels, width, height, channels);
-}
-
-int NormalizeQuarterTurnsClockwise(int quarterTurnsClockwise) {
-    int normalized = quarterTurnsClockwise % 4;
-    if (normalized < 0) {
-        normalized += 4;
-    }
-    return normalized;
-}
-
-std::vector<unsigned char> RotateBottomLeftImagePixels(
-    const std::vector<unsigned char>& pixels,
-    int width,
-    int height,
-    int channels,
-    int quarterTurnsClockwise,
-    int& outWidth,
-    int& outHeight) {
-    outWidth = width;
-    outHeight = height;
-    const int safeChannels = std::max(1, channels);
-    const int normalizedTurns = NormalizeQuarterTurnsClockwise(quarterTurnsClockwise);
-    if (pixels.empty() || width <= 0 || height <= 0 || normalizedTurns == 0) {
-        return pixels;
-    }
-
-    if (normalizedTurns == 2) {
-        std::vector<unsigned char> rotated(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(safeChannels));
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int srcX = width - 1 - x;
-                const int srcY = height - 1 - y;
-                const std::size_t dstIndex = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * static_cast<std::size_t>(safeChannels);
-                const std::size_t srcIndex = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * static_cast<std::size_t>(safeChannels);
-                std::copy_n(pixels.data() + srcIndex, safeChannels, rotated.data() + dstIndex);
-            }
-        }
-        return rotated;
-    }
-
-    outWidth = height;
-    outHeight = width;
-    std::vector<unsigned char> rotated(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight) * static_cast<std::size_t>(safeChannels));
-    for (int y = 0; y < outHeight; ++y) {
-        for (int x = 0; x < outWidth; ++x) {
-            int srcX = 0;
-            int srcY = 0;
-            if (normalizedTurns == 1) {
-                srcX = width - 1 - y;
-                srcY = x;
-            } else {
-                srcX = y;
-                srcY = height - 1 - x;
-            }
-            const std::size_t dstIndex = (static_cast<std::size_t>(y) * static_cast<std::size_t>(outWidth) + static_cast<std::size_t>(x)) * static_cast<std::size_t>(safeChannels);
-            const std::size_t srcIndex = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * static_cast<std::size_t>(safeChannels);
-            std::copy_n(pixels.data() + srcIndex, safeChannels, rotated.data() + dstIndex);
-        }
-    }
-
-    return rotated;
-}
-
-EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
-    const std::string& path,
-    DecodedImageData decoded) {
-    EditorNodeGraph::ImagePayload payload;
-    payload.label = FileNameFromPath(path);
-    payload.sourcePath = path;
-    payload.width = decoded.width;
-    payload.height = decoded.height;
-    payload.channels = decoded.channels;
-    payload.originalChannels = decoded.originalChannels;
-    payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
-    payload.pixels = std::move(decoded.pixels);
-    return payload;
-}
-
-EditorNodeGraph::RawSourcePayload BuildRawPayloadFromMetadata(
-    const std::string& path,
-    Raw::RawMetadata metadata) {
-    EditorNodeGraph::RawSourcePayload payload;
-    payload.label = FileNameFromPath(path).empty() ? "RAW" : FileNameFromPath(path);
-    payload.sourcePath = path;
-    payload.metadata = std::move(metadata);
-    payload.metadata.sourcePath = path;
-    return payload;
-}
-
-Raw::RawDevelopSettings BuildRawDevelopSettingsFromMetadata(const Raw::RawMetadata& metadata) {
-    Raw::RawDevelopSettings settings;
-    if (metadata.hasDngBaselineExposure) {
-        settings.exposureStops = metadata.dngBaselineExposure;
-    }
-    settings.blackLevelOverride = metadata.blackLevel;
-    settings.whiteLevelOverride = metadata.whiteLevel;
-    const bool dngHasColorTags = metadata.hasDngForwardMatrix1 || metadata.hasDngForwardMatrix2 ||
-        metadata.hasDngColorMatrix1 || metadata.hasDngColorMatrix2;
-    const bool dngHasCalibrationTags = metadata.hasDngCameraCalibration1 || metadata.hasDngCameraCalibration2;
-    const bool dngHasDualForwardMatrices = metadata.hasDngForwardMatrix1 && metadata.hasDngForwardMatrix2;
-    const bool preferLibRawForUnderSpecifiedDng =
-        metadata.isDng &&
-        metadata.hasCameraMatrix &&
-        dngHasDualForwardMatrices &&
-        !dngHasCalibrationTags;
-    if (!metadata.isDng || preferLibRawForUnderSpecifiedDng) {
-        settings.cameraTransformSource = Raw::RawCameraTransformSource::LibRawRgbCam;
-    } else if (dngHasColorTags) {
-        settings.cameraTransformSource = Raw::RawCameraTransformSource::DngAuto;
-    } else {
-        settings.cameraTransformSource = Raw::RawCameraTransformSource::LibRawRgbCam;
-    }
-    return settings;
-}
 
 std::shared_ptr<LayerBase> CloneLayerInstance(const std::shared_ptr<LayerBase>& source) {
     if (!source) {
@@ -237,31 +43,6 @@ struct ScenePathState {
     bool hasViewTransform = false;
 };
 
-const EditorNodeGraph::Node* FindUpstreamRawSourceNode(
-    const EditorNodeGraph::Graph& graph,
-    const EditorNodeGraph::Node& rawDomainNode) {
-    const EditorNodeGraph::Link* rawInput = graph.FindInputLink(rawDomainNode.id, EditorNodeGraph::kRawInputSocketId);
-    std::unordered_set<int> visited;
-    while (rawInput) {
-        if (!visited.insert(rawInput->fromNodeId).second) {
-            return nullptr;
-        }
-
-        const EditorNodeGraph::Node* upstream = graph.FindNode(rawInput->fromNodeId);
-        if (!upstream) {
-            return nullptr;
-        }
-        if (upstream->kind == EditorNodeGraph::NodeKind::RawSource) {
-            return upstream;
-        }
-        if (upstream->kind != EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-            return nullptr;
-        }
-        rawInput = graph.FindInputLink(upstream->id, EditorNodeGraph::kRawInputSocketId);
-    }
-    return nullptr;
-}
-
 ScenePathState MergeScenePathState(ScenePathState a, const ScenePathState& b) {
     a.sceneReferred = a.sceneReferred || b.sceneReferred;
     a.hasViewTransform = a.hasViewTransform || b.hasViewTransform;
@@ -284,7 +65,7 @@ ScenePathState AnalyzeScenePathFromNode(
         return state;
     }
 
-    auto mergeInput = [&](const char* socketId) {
+    auto mergeInput = [&](const std::string& socketId) {
         if (const EditorNodeGraph::Link* input = graph.FindInputLink(nodeId, socketId)) {
             state = MergeScenePathState(state, AnalyzeScenePathFromNode(graph, layers, input->fromNodeId, visiting));
         }
@@ -305,6 +86,12 @@ ScenePathState AnalyzeScenePathFromNode(
             mergeInput(EditorNodeGraph::kHdrMergeInput1SocketId);
             mergeInput(EditorNodeGraph::kHdrMergeInput2SocketId);
             mergeInput(EditorNodeGraph::kHdrMergeInput3SocketId);
+            break;
+        case EditorNodeGraph::NodeKind::Mfsr:
+            state.sceneReferred = true;
+            for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxMfsrInputCount; ++inputIndex) {
+                mergeInput(EditorNodeGraph::MfsrInputSocketId(inputIndex));
+            }
             break;
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             state.sceneReferred = true;
@@ -332,9 +119,14 @@ ScenePathState AnalyzeScenePathFromNode(
             }
             break;
         case EditorNodeGraph::NodeKind::Mix:
-        case EditorNodeGraph::NodeKind::DataMath:
             mergeInput(EditorNodeGraph::kMixInputASocketId);
             mergeInput(EditorNodeGraph::kMixInputBSocketId);
+            break;
+        case EditorNodeGraph::NodeKind::DataMath:
+            for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+                mergeInput(EditorNodeGraph::DataMathInputSocketId(inputIndex));
+            }
+            mergeInput(EditorNodeGraph::kDataMathBaseInputSocketId);
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             mergeInput(EditorNodeGraph::kImageInputSocketId);
@@ -440,12 +232,27 @@ std::optional<GraphReconnectPlan> BuildReconnectSourcePlan(
         }
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::DataMath: {
-            const EditorNodeGraph::Link* inputA = graph.FindInputLink(node.id, EditorNodeGraph::kMixInputASocketId);
-            const EditorNodeGraph::Link* inputB = graph.FindInputLink(node.id, EditorNodeGraph::kMixInputBSocketId);
-            const EditorNodeGraph::Link* selectedInput =
-                inputA && !inputB ? inputA :
-                inputB && !inputA ? inputB :
-                nullptr;
+            const EditorNodeGraph::Link* selectedInput = nullptr;
+            int connectedInputCount = 0;
+            if (node.kind == EditorNodeGraph::NodeKind::Mix) {
+                const EditorNodeGraph::Link* inputA = graph.FindInputLink(node.id, EditorNodeGraph::kMixInputASocketId);
+                const EditorNodeGraph::Link* inputB = graph.FindInputLink(node.id, EditorNodeGraph::kMixInputBSocketId);
+                selectedInput =
+                    inputA && !inputB ? inputA :
+                    inputB && !inputA ? inputB :
+                    nullptr;
+            } else {
+                for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+                    if (const EditorNodeGraph::Link* input = graph.FindInputLink(node.id, EditorNodeGraph::DataMathInputSocketId(inputIndex))) {
+                        ++connectedInputCount;
+                        selectedInput = input;
+                        if (connectedInputCount > 1) {
+                            selectedInput = nullptr;
+                            break;
+                        }
+                    }
+                }
+            }
             if (!selectedInput) {
                 return std::nullopt;
             }
@@ -488,114 +295,6 @@ std::vector<GraphReconnectPlan> BuildReconnectPlansForNodeRemoval(
     return plans;
 }
 
-template <typename T>
-std::size_t HashValue(const T& value) {
-    return std::hash<T>{}(value);
-}
-
-void HashCombine(std::size_t& seed, std::size_t value) {
-    seed ^= value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
-}
-
-void HashDevelopSubjectImportance(std::size_t& hash, const EditorNodeGraph::DevelopSubjectImportanceMap& importance) {
-    HashCombine(hash, HashValue(importance.enabled));
-    HashCombine(hash, HashValue(importance.regions.size()));
-    for (const EditorNodeGraph::DevelopSubjectImportanceRegion& region : importance.regions) {
-        HashCombine(hash, HashValue(region.id));
-        HashCombine(hash, HashValue(static_cast<int>(region.mode)));
-        HashCombine(hash, HashValue(region.enabled));
-        HashCombine(hash, HashValue(region.centerX));
-        HashCombine(hash, HashValue(region.centerY));
-        HashCombine(hash, HashValue(region.radiusX));
-        HashCombine(hash, HashValue(region.radiusY));
-        HashCombine(hash, HashValue(region.feather));
-        HashCombine(hash, HashValue(region.strength));
-    }
-    HashCombine(hash, HashValue(importance.strokes.size()));
-    for (const EditorNodeGraph::DevelopSubjectImportanceStroke& stroke : importance.strokes) {
-        HashCombine(hash, HashValue(stroke.id));
-        HashCombine(hash, HashValue(static_cast<int>(stroke.mode)));
-        HashCombine(hash, HashValue(stroke.enabled));
-        HashCombine(hash, HashValue(stroke.subtract));
-        HashCombine(hash, HashValue(stroke.radius));
-        HashCombine(hash, HashValue(stroke.feather));
-        HashCombine(hash, HashValue(stroke.strength));
-        HashCombine(hash, HashValue(stroke.points.size()));
-        for (const EditorNodeGraph::DevelopSubjectImportanceStrokePoint& point : stroke.points) {
-            HashCombine(hash, HashValue(point.x));
-            HashCombine(hash, HashValue(point.y));
-        }
-    }
-}
-
-std::size_t BuildDevelopAutoSolveTriggerHash(
-    const EditorNodeGraph::RawDevelopPayload& payload,
-    const Raw::RawMetadata& metadata) {
-    std::size_t hash = HashValue(metadata.sourcePath);
-    HashCombine(hash, HashValue(metadata.hasDngBaselineExposure));
-    HashCombine(hash, HashValue(metadata.dngBaselineExposure));
-    HashCombine(hash, HashValue(metadata.blackLevel));
-    HashCombine(hash, HashValue(metadata.whiteLevel));
-    HashCombine(hash, HashValue(metadata.cameraWhiteBalance[0]));
-    HashCombine(hash, HashValue(metadata.cameraWhiteBalance[1]));
-    HashCombine(hash, HashValue(metadata.cameraWhiteBalance[2]));
-    HashCombine(hash, HashValue(metadata.daylightWhiteBalance[0]));
-    HashCombine(hash, HashValue(metadata.daylightWhiteBalance[1]));
-    HashCombine(hash, HashValue(metadata.daylightWhiteBalance[2]));
-    HashCombine(hash, HashValue(static_cast<int>(payload.uiMode)));
-    HashCombine(hash, HashValue(static_cast<int>(payload.autoGuidance.intent)));
-    HashCombine(hash, HashValue(payload.autoGuidance.autoStrength));
-    HashCombine(hash, HashValue(payload.autoGuidance.exposureBias));
-    HashCombine(hash, HashValue(payload.autoGuidance.dynamicRange));
-    HashCombine(hash, HashValue(payload.autoGuidance.shadowLift));
-    HashCombine(hash, HashValue(payload.autoGuidance.highlightGuard));
-    HashCombine(hash, HashValue(payload.autoGuidance.highlightCharacter));
-    HashCombine(hash, HashValue(payload.autoGuidance.contrastBias));
-    HashCombine(hash, HashValue(payload.autoGuidance.subjectSceneBias));
-    HashCombine(hash, HashValue(payload.autoGuidance.moodReadabilityBias));
-    HashDevelopSubjectImportance(hash, payload.subjectImportance);
-    return hash;
-}
-
-std::size_t BuildDevelopAutoRawSolveTriggerHash(
-    const EditorNodeGraph::RawDevelopPayload& payload,
-    const Raw::RawMetadata& metadata) {
-    std::size_t hash = HashValue(metadata.sourcePath);
-    HashCombine(hash, HashValue(metadata.hasDngBaselineExposure));
-    HashCombine(hash, HashValue(metadata.dngBaselineExposure));
-    HashCombine(hash, HashValue(metadata.blackLevel));
-    HashCombine(hash, HashValue(metadata.whiteLevel));
-    HashCombine(hash, HashValue(metadata.cameraWhiteBalance[0]));
-    HashCombine(hash, HashValue(metadata.cameraWhiteBalance[1]));
-    HashCombine(hash, HashValue(metadata.cameraWhiteBalance[2]));
-    HashCombine(hash, HashValue(metadata.daylightWhiteBalance[0]));
-    HashCombine(hash, HashValue(metadata.daylightWhiteBalance[1]));
-    HashCombine(hash, HashValue(metadata.daylightWhiteBalance[2]));
-    HashCombine(hash, HashValue(static_cast<int>(payload.uiMode)));
-    HashCombine(hash, HashValue(static_cast<int>(payload.autoGuidance.intent)));
-    HashCombine(hash, HashValue(payload.autoGuidance.autoStrength));
-    HashCombine(hash, HashValue(payload.autoGuidance.exposureBias));
-    HashCombine(hash, HashValue(payload.autoGuidance.dynamicRange));
-    HashCombine(hash, HashValue(payload.autoGuidance.shadowLift));
-    HashCombine(hash, HashValue(payload.autoGuidance.highlightGuard));
-    HashCombine(hash, HashValue(payload.autoGuidance.highlightCharacter));
-    HashCombine(hash, HashValue(payload.autoGuidance.contrastBias));
-    HashCombine(hash, HashValue(payload.autoGuidance.subjectSceneBias));
-    HashCombine(hash, HashValue(payload.autoGuidance.moodReadabilityBias));
-    HashDevelopSubjectImportance(hash, payload.subjectImportance);
-    return hash;
-}
-
-EditorNodeGraph::MaskCombineMode ToGraphMaskCombineMode(ToneCurveScopeMaskAction action) {
-    switch (action) {
-        case ToneCurveScopeMaskAction::Add: return EditorNodeGraph::MaskCombineMode::Add;
-        case ToneCurveScopeMaskAction::Subtract: return EditorNodeGraph::MaskCombineMode::Subtract;
-        case ToneCurveScopeMaskAction::Intersect:
-        case ToneCurveScopeMaskAction::NewMask:
-        default: return EditorNodeGraph::MaskCombineMode::Intersect;
-    }
-}
-
 bool ConnectionUsesImageAsRenderSource(
     const EditorNodeGraph::Graph& graph,
     int fromNodeId,
@@ -622,6 +321,10 @@ bool ConnectionUsesImageAsRenderSource(
         toSocketId == EditorNodeGraph::kHdrMergeInput1SocketId) {
         return true;
     }
+    if (to->kind == EditorNodeGraph::NodeKind::Mfsr &&
+        toSocketId == EditorNodeGraph::kMfsrReferenceInputSocketId) {
+        return true;
+    }
     if (to->kind == EditorNodeGraph::NodeKind::Output && toSocketId == EditorNodeGraph::kImageInputSocketId) {
         return true;
     }
@@ -631,8 +334,12 @@ bool ConnectionUsesImageAsRenderSource(
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::DataMath &&
-        (toSocketId == EditorNodeGraph::kMixInputASocketId ||
-         toSocketId == EditorNodeGraph::kMixInputBSocketId)) {
+        (EditorNodeGraph::IsDataMathInputSocketId(toSocketId) ||
+         toSocketId == EditorNodeGraph::kDataMathBaseInputSocketId)) {
+        return true;
+    }
+    if (to->kind == EditorNodeGraph::NodeKind::ImageToMask &&
+        toSocketId == EditorNodeGraph::kImageToMaskInputSocketId) {
         return true;
     }
     if (to->kind == EditorNodeGraph::NodeKind::ChannelSplit &&
@@ -759,24 +466,53 @@ void EditorModule::SelectGraphNode(int nodeId) {
 }
 
 bool EditorModule::LayerUsesRichNodeSurface(int layerIndex) const {
-    // Rich expanded surface layers now render as clean, compact nodes in the graph
-    // and open their settings in dedicated settings pages instead of expanding on-graph.
+    (void)layerIndex;
+    // Rich expanded layer surfaces remain available in the sidebar complex editor,
+    // but they no longer expand inline on the graph canvas.
     return false;
 }
 
-bool EditorModule::NodeUsesRichNodeSurface(int nodeId) const {
+bool EditorModule::NodeUsesSidebarOnlyComplexEditor(int nodeId) const {
     const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    return node &&
-        ((node->kind == EditorNodeGraph::NodeKind::Layer && LayerUsesRichNodeSurface(node->layerIndex)) ||
-         node->kind == EditorNodeGraph::NodeKind::RawSource ||
-         node->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise ||
-         node->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         node->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-         node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         node->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         node->kind == EditorNodeGraph::NodeKind::Lut ||
-         node->kind == EditorNodeGraph::NodeKind::CustomMask);
+    if (!node) {
+        return false;
+    }
+
+    if (node->kind == EditorNodeGraph::NodeKind::Lut ||
+        node->kind == EditorNodeGraph::NodeKind::CustomMask) {
+        return true;
+    }
+
+    if (node->kind != EditorNodeGraph::NodeKind::Layer) {
+        return false;
+    }
+
+    return GetLayerNodeSurfaceSpec(node->layerIndex).presentation == NodeSurfacePresentation::RichExpandedSurface;
+}
+
+bool EditorModule::NodeHasDedicatedComplexEditor(int nodeId) const {
+    if (NodeUsesSidebarOnlyComplexEditor(nodeId)) {
+        return true;
+    }
+
+    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    if (!node) {
+        return false;
+    }
+
+    switch (node->kind) {
+        case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+        case EditorNodeGraph::NodeKind::RawDecode:
+        case EditorNodeGraph::NodeKind::RawDevelop:
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+        case EditorNodeGraph::NodeKind::HdrMerge:
+        case EditorNodeGraph::NodeKind::Mfsr:
+            return true;
+        default:
+            return false;
+    }
 }
 
 NodeSurfaceSpec EditorModule::GetLayerNodeSurfaceSpec(int layerIndex) const {
@@ -805,6 +541,7 @@ NodeSurfaceSpec EditorModule::GetNodeSurfaceSpec(int nodeId) const {
         node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
         node->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
         node->kind == EditorNodeGraph::NodeKind::HdrMerge ||
+        node->kind == EditorNodeGraph::NodeKind::Mfsr ||
         node->kind == EditorNodeGraph::NodeKind::Lut) {
         NodeSurfaceSpec spec;
         spec.presentation = NodeSurfacePresentation::RichExpandedSurface;
@@ -957,444 +694,6 @@ void EditorModule::ApplyGraphLayerOrder() {
         }
     }
     RefreshGraphLayerMetadata();
-}
-
-void EditorModule::PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    const std::string path = FileDialogs::OpenImageFileDialog("Add Image Node");
-    if (!path.empty()) {
-        AddImageNodeFromFile(path, graphPosition);
-    }
-}
-
-bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition) {
-    if (Raw::RawLoader::IsRawPath(path)) {
-        const Raw::LibRawRuntimeStatus& runtimeStatus = Raw::GetLibRawRuntimeStatus();
-        if (!runtimeStatus.runtimeAvailable) {
-            QueueUiNotification(UiNotificationSeverity::Error, runtimeStatus.message, "editor-raw-runtime");
-            return false;
-        }
-        return AddRawSourceNodeFromFile(path, graphPosition);
-    }
-    DecodedImageData decoded;
-    if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
-        return false;
-    }
-
-    return AddImageNodeFromPayload(BuildImagePayloadFromDecoded(path, std::move(decoded)), graphPosition);
-}
-
-bool EditorModule::AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition) {
-    if (!Raw::IsLibRawRuntimeAvailable()) {
-        return false;
-    }
-
-    Raw::RawImageData rawData;
-    const bool loaded = Raw::RawLoader::LoadFile(path, rawData);
-    if (!loaded && rawData.metadata.sourcePath.empty()) {
-        rawData.metadata.sourcePath = path;
-    }
-    if (!loaded && rawData.metadata.error.empty()) {
-        rawData.metadata.error = "Failed to load RAW file.";
-    }
-
-    EditorNodeGraph::RawSourcePayload payload = BuildRawPayloadFromMetadata(path, std::move(rawData.metadata));
-    return AddRawSourceNodeFromPayload(std::move(payload), graphPosition);
-}
-
-bool EditorModule::AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddImageNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-    }
-    return node != nullptr;
-}
-
-bool EditorModule::AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    if (payload.metadata.sourcePath.empty()) {
-        payload.metadata.sourcePath = payload.sourcePath;
-    }
-    if (!Raw::IsLibRawRuntimeAvailable() &&
-        !payload.metadata.sourcePath.empty() &&
-        payload.metadata.error.empty()) {
-        payload.metadata.error = Raw::GetLibRawRuntimeStatus().message;
-    }
-
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawSourceNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-void EditorModule::AddRawNeuralDenoiseNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::RawNeuralDenoisePayload payload;
-    AddRawNeuralDenoiseNodeFromPayload(std::move(payload), graphPosition);
-}
-
-bool EditorModule::AddRawNeuralDenoiseNodeFromPayload(EditorNodeGraph::RawNeuralDenoisePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawNeuralDenoiseNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-void EditorModule::AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::RawDevelopPayload payload;
-    payload.scenePrepEnabled = true;
-    payload.integratedToneEnabled = true;
-    payload.integratedToneLayerJson = BuildDefaultIntegratedToneLayerJson();
-    payload.uiMode = EditorNodeGraph::RawDevelopUiMode::Auto;
-    if (const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId())) {
-        if (selected->kind == EditorNodeGraph::NodeKind::RawSource) {
-            payload.settings = BuildRawDevelopSettingsFromMetadata(selected->rawSource.metadata);
-            ApplyDevelopAutoSolve(payload, selected->rawSource.metadata, true);
-        }
-    }
-    AddRawDevelopNodeFromPayload(std::move(payload), graphPosition);
-}
-
-void EditorModule::AddRawDecodeNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::RawDecodePayload payload;
-    if (const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId())) {
-        if (selected->kind == EditorNodeGraph::NodeKind::RawSource) {
-            payload.settings = BuildRawDevelopSettingsFromMetadata(selected->rawSource.metadata);
-        } else if (selected->kind == EditorNodeGraph::NodeKind::RawNeuralDenoise) {
-            if (const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_NodeGraph, *selected)) {
-                payload.settings = BuildRawDevelopSettingsFromMetadata(rawSourceNode->rawSource.metadata);
-            }
-        }
-    }
-    AddRawDecodeNodeFromPayload(std::move(payload), graphPosition);
-}
-
-bool EditorModule::AddRawDecodeNodeFromPayload(EditorNodeGraph::RawDecodePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDecodeNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-bool EditorModule::AddRawDevelopNodeFromPayload(EditorNodeGraph::RawDevelopPayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    payload.scenePrepEnabled = true;
-    payload.integratedToneEnabled = true;
-    NormalizeDevelopAutoGuidance(payload.autoGuidance);
-    NormalizeDevelopSubjectImportance(payload.subjectImportance);
-    if (!payload.integratedToneLayerJson.is_object()) {
-        payload.integratedToneLayerJson = BuildDefaultIntegratedToneLayerJson();
-    }
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDevelopNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-bool EditorModule::UpdateDevelopAutoState(
-    int nodeId,
-    EditorNodeGraph::RawDevelopPayload& payload,
-    const Raw::RawMetadata& metadata,
-    bool forceReanalysis,
-    bool forceFullReanalysis) {
-    if (payload.uiMode != EditorNodeGraph::RawDevelopUiMode::Auto) {
-        m_DevelopAutoSolveTriggerHashes.erase(nodeId);
-        m_DevelopAutoRawSolveTriggerHashes.erase(nodeId);
-        m_DevelopAutoRawCalibrationHashes.erase(nodeId);
-        return false;
-    }
-
-    const std::size_t triggerHash = BuildDevelopAutoSolveTriggerHash(payload, metadata);
-    const std::size_t rawTriggerHash = BuildDevelopAutoRawSolveTriggerHash(payload, metadata);
-    const auto it = m_DevelopAutoSolveTriggerHashes.find(nodeId);
-    const auto rawIt = m_DevelopAutoRawSolveTriggerHashes.find(nodeId);
-    const auto rawCalibrationIt = m_DevelopAutoRawCalibrationHashes.find(nodeId);
-    const bool rawInputsChanged =
-        rawIt == m_DevelopAutoRawSolveTriggerHashes.end() ||
-        rawIt->second != rawTriggerHash;
-    const bool explicitRawCalibrationNeeded =
-        forceFullReanalysis &&
-        (rawCalibrationIt == m_DevelopAutoRawCalibrationHashes.end() ||
-         rawCalibrationIt->second != rawTriggerHash);
-    const bool anySolveNeeded =
-        forceReanalysis ||
-        forceFullReanalysis ||
-        it == m_DevelopAutoSolveTriggerHashes.end() ||
-        it->second != triggerHash ||
-        rawInputsChanged;
-    if (!anySolveNeeded) {
-        return false;
-    }
-
-    const bool fullSolveNeeded =
-        forceFullReanalysis ||
-        rawInputsChanged ||
-        explicitRawCalibrationNeeded;
-    ApplyDevelopAutoSolve(payload, metadata, true, fullSolveNeeded);
-    m_DevelopAutoSolveTriggerHashes[nodeId] = BuildDevelopAutoSolveTriggerHash(payload, metadata);
-    m_DevelopAutoRawSolveTriggerHashes[nodeId] = BuildDevelopAutoRawSolveTriggerHash(payload, metadata);
-    if (fullSolveNeeded) {
-        m_DevelopAutoRawCalibrationHashes[nodeId] = rawTriggerHash;
-    }
-    return true;
-}
-
-void EditorModule::AddRawDetailAutoMaskNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::RawDetailAutoMaskPayload payload;
-    AddRawDetailAutoMaskNodeFromPayload(std::move(payload), graphPosition);
-}
-
-bool EditorModule::AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetailAutoMaskPayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDetailAutoMaskNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-void EditorModule::AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected &&
-        (selected->kind == EditorNodeGraph::NodeKind::Image ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         selected->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         selected->kind == EditorNodeGraph::NodeKind::Lut ||
-         selected->kind == EditorNodeGraph::NodeKind::Layer ||
-         selected->kind == EditorNodeGraph::NodeKind::Mix ||
-         selected->kind == EditorNodeGraph::NodeKind::DataMath ||
-         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
-         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
-
-    EditorNodeGraph::RawDetailFusionPayload fusionPayload;
-    EditorNodeGraph::Node* fusionNode = m_NodeGraph.AddRawDetailFusionNode(std::move(fusionPayload), graphPosition);
-    if (!fusionNode) {
-        return;
-    }
-    const int fusionNodeId = fusionNode->id;
-
-    std::string errorMessage;
-    if (upstreamNodeId > 0) {
-        ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, fusionNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
-    }
-    SelectGraphNode(fusionNodeId);
-    MarkRenderDirty(fusionNodeId);
-}
-
-bool EditorModule::AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailFusionPayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawDetailFusionNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-void EditorModule::AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected &&
-        (selected->kind == EditorNodeGraph::NodeKind::Image ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         selected->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         selected->kind == EditorNodeGraph::NodeKind::Lut ||
-         selected->kind == EditorNodeGraph::NodeKind::Layer ||
-         selected->kind == EditorNodeGraph::NodeKind::Mix ||
-         selected->kind == EditorNodeGraph::NodeKind::DataMath ||
-         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
-         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
-
-    EditorNodeGraph::HdrMergePayload payload;
-    EditorNodeGraph::Node* hdrNode = m_NodeGraph.AddHdrMergeNode(std::move(payload), graphPosition);
-    if (!hdrNode) {
-        return;
-    }
-    const int hdrNodeId = hdrNode->id;
-
-    std::string errorMessage;
-    if (upstreamNodeId > 0) {
-        if (!ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, hdrNodeId, EditorNodeGraph::kHdrMergeInput1SocketId, &errorMessage) &&
-            !errorMessage.empty()) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "HDR Merge auto-connect failed: " + errorMessage,
-                "hdr-merge-autoconnect");
-        }
-    }
-    SelectGraphNode(hdrNodeId);
-    MarkRenderDirty(hdrNodeId);
-}
-
-bool EditorModule::AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddHdrMergeNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-void EditorModule::AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected &&
-        (selected->kind == EditorNodeGraph::NodeKind::Image ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         selected->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         selected->kind == EditorNodeGraph::NodeKind::Lut ||
-         selected->kind == EditorNodeGraph::NodeKind::Layer ||
-         selected->kind == EditorNodeGraph::NodeKind::Mix ||
-         selected->kind == EditorNodeGraph::NodeKind::DataMath ||
-         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
-         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
-
-    EditorNodeGraph::LutPayload payload;
-    EditorNodeGraph::Node* lutNode = m_NodeGraph.AddLutNode(std::move(payload), graphPosition);
-    if (!lutNode) {
-        return;
-    }
-    const int lutNodeId = lutNode->id;
-    std::string errorMessage;
-
-    const EditorNodeGraph::Vec2 maskPosition{
-        graphPosition.x - 172.0f,
-        graphPosition.y + 78.0f
-    };
-    EditorNodeGraph::Node* solidMaskNode = m_NodeGraph.AddMaskGeneratorNode(EditorNodeGraph::MaskGeneratorKind::Solid, maskPosition);
-    if (solidMaskNode) {
-        if (!ConnectGraphSockets(
-                solidMaskNode->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                lutNodeId,
-                EditorNodeGraph::kMaskInputSocketId,
-                &errorMessage) &&
-            !errorMessage.empty()) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "LUT mask auto-connect failed: " + errorMessage,
-                "lut-mask-autoconnect");
-            errorMessage.clear();
-        }
-    }
-
-    if (upstreamNodeId > 0) {
-        if (!ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, lutNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
-            !errorMessage.empty()) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "LUT auto-connect failed: " + errorMessage,
-                "lut-autoconnect");
-        }
-    }
-
-    SelectGraphNode(lutNodeId);
-    MarkRenderDirty(lutNodeId);
-    SwitchToComplexNodeSubWindow(lutNodeId);
-}
-
-bool EditorModule::AddLutNodeFromPayload(EditorNodeGraph::LutPayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddLutNode(std::move(payload), graphPosition);
-    if (node) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-    return node != nullptr;
-}
-
-bool EditorModule::ConvertRawDetailFusionToHybrid(int fusionNodeId) {
-    EditorNodeGraph::Node* fusionNode = m_NodeGraph.FindNode(fusionNodeId);
-    if (!fusionNode || fusionNode->kind != EditorNodeGraph::NodeKind::RawDetailFusion) {
-        return false;
-    }
-    const EditorNodeGraph::Link* maskInput = m_NodeGraph.FindInputLink(fusionNodeId, EditorNodeGraph::kMaskInputSocketId);
-    if (!maskInput) {
-        return false;
-    }
-    const EditorNodeGraph::Node* autoMaskNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
-    if (!autoMaskNode || autoMaskNode->kind != EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-        maskInput->fromSocketId != EditorNodeGraph::kMaskOutputSocketId) {
-        return false;
-    }
-    const int autoMaskNodeId = autoMaskNode->id;
-    const EditorNodeGraph::Vec2 autoMaskPosition = autoMaskNode->position;
-    const EditorNodeGraph::Vec2 fusionPosition = fusionNode->position;
-
-    const EditorNodeGraph::Vec2 pos{
-        (autoMaskPosition.x + fusionPosition.x) * 0.5f,
-        autoMaskPosition.y
-    };
-    EditorNodeGraph::Node* levelsNode = m_NodeGraph.AddMaskUtilityNode(EditorNodeGraph::MaskUtilityKind::Levels, pos);
-    if (!levelsNode) {
-        return false;
-    }
-
-    std::string errorMessage;
-    if (!ConnectGraphSockets(autoMaskNodeId, EditorNodeGraph::kMaskOutputSocketId, levelsNode->id, EditorNodeGraph::kMaskUtilityInputSocketId, &errorMessage)) {
-        return false;
-    }
-    if (!ConnectGraphSockets(levelsNode->id, EditorNodeGraph::kMaskOutputSocketId, fusionNodeId, EditorNodeGraph::kMaskInputSocketId, &errorMessage)) {
-        return false;
-    }
-    SelectGraphNode(levelsNode->id);
-    MarkRenderDirty(fusionNodeId);
-    return true;
-}
-
-bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
-    const EditorNodeGraph::Node* rawSourceNode = m_NodeGraph.FindNode(rawSourceNodeId);
-    if (!rawSourceNode || rawSourceNode->kind != EditorNodeGraph::NodeKind::RawSource) {
-        return false;
-    }
-
-    const int completedBefore = GetCompletedChainCount();
-    const EditorNodeGraph::Vec2 sourcePosition = rawSourceNode->position;
-    SelectGraphNode(rawSourceNodeId);
-
-    constexpr float kNodeSpacing = 280.0f;
-    AddRawDecodeNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 1.0f, sourcePosition.y });
-    const int rawDecodeNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ToneCurve, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 2.0f, sourcePosition.y });
-    const int toneCurveNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 3.0f, sourcePosition.y });
-    const int viewTransformNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddOutputNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 4.0f, sourcePosition.y });
-    const int outputNodeId = m_NodeGraph.GetSelectedNodeId();
-
-    if (rawDecodeNodeId <= 0 || toneCurveNodeId <= 0 || viewTransformNodeId <= 0 || outputNodeId <= 0) {
-        return false;
-    }
-
-    std::string errorMessage;
-    const bool ok =
-        ConnectGraphSockets(rawSourceNodeId, EditorNodeGraph::kRawOutputSocketId, rawDecodeNodeId, EditorNodeGraph::kRawInputSocketId, &errorMessage) &&
-        ConnectGraphSockets(rawDecodeNodeId, EditorNodeGraph::kImageOutputSocketId, toneCurveNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
-        ConnectGraphSockets(toneCurveNodeId, EditorNodeGraph::kImageOutputSocketId, viewTransformNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
-        ConnectGraphSockets(viewTransformNodeId, EditorNodeGraph::kImageOutputSocketId, outputNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
-    if (!ok) {
-        return false;
-    }
-
-    if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
-        EnsureCompositeNode();
-    }
-    EnsureCompositeSceneState(m_LastCompositeCanvasSize);
-    MoveCompositeOutputToFront(outputNodeId);
-    m_CompositeSelectedOutputNodeId = outputNodeId;
-    m_NodeGraph.SetOutputNodeId(outputNodeId);
-    MarkRenderDirty(outputNodeId);
-    SelectGraphNode(outputNodeId);
-    return true;
 }
 
 bool EditorModule::SplitLayerNodeIntoChannels(int layerNodeId) {
@@ -1570,6 +869,149 @@ bool EditorModule::SplitLayerNodeIntoChannels(int layerNodeId) {
     return true;
 }
 
+bool EditorModule::SplitImageAverageNodeIntoChannelAverages(int dataMathNodeId) {
+    EditorNodeGraph::Node* averageNode = m_NodeGraph.FindNode(dataMathNodeId);
+    if (!averageNode ||
+        averageNode->kind != EditorNodeGraph::NodeKind::DataMath ||
+        averageNode->dataMathMode != EditorNodeGraph::DataMathMode::ImageAverage) {
+        return false;
+    }
+
+    struct AverageInputLink {
+        std::string socketId;
+        EditorNodeGraph::Link link;
+    };
+
+    std::vector<AverageInputLink> inputLinks;
+    inputLinks.reserve(EditorNodeGraph::kMaxDataMathInputCount);
+    for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+        const std::string socketId = EditorNodeGraph::DataMathInputSocketId(inputIndex);
+        if (const EditorNodeGraph::Link* input = m_NodeGraph.FindInputLink(dataMathNodeId, socketId)) {
+            if (m_NodeGraph.IsScalarSocketStream(input->fromNodeId, input->fromSocketId)) {
+                return false;
+            }
+            inputLinks.push_back(AverageInputLink{ socketId, *input });
+        }
+    }
+    if (inputLinks.size() < 2) {
+        return false;
+    }
+
+    std::vector<EditorNodeGraph::Link> outputLinks;
+    for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
+        if (link.fromNodeId == dataMathNodeId && link.fromSocketId == EditorNodeGraph::kImageOutputSocketId) {
+            outputLinks.push_back(link);
+        }
+    }
+
+    const EditorNodeGraph::Vec2 originalPos = averageNode->position;
+    const EditorNodeGraph::Graph graphSnapshot = m_NodeGraph;
+
+    std::vector<int> downstreamNodeIds = m_NodeGraph.GetDownstreamRenderNodeIds(dataMathNodeId);
+    downstreamNodeIds.erase(
+        std::remove(downstreamNodeIds.begin(), downstreamNodeIds.end(), dataMathNodeId),
+        downstreamNodeIds.end());
+    for (const int downstreamNodeId : downstreamNodeIds) {
+        if (EditorNodeGraph::Node* downstream = m_NodeGraph.FindNode(downstreamNodeId)) {
+            downstream->position.x += 520.0f;
+        }
+    }
+
+    std::vector<int> splitNodeIds;
+    splitNodeIds.reserve(inputLinks.size());
+    const float inputStartY = originalPos.y - (static_cast<float>(inputLinks.size() - 1) * 84.0f);
+    for (std::size_t inputIndex = 0; inputIndex < inputLinks.size(); ++inputIndex) {
+        EditorNodeGraph::Node* splitNode = m_NodeGraph.AddChannelSplitNode(EditorNodeGraph::Vec2{
+            originalPos.x - 360.0f,
+            inputStartY + static_cast<float>(inputIndex) * 168.0f
+        });
+        if (!splitNode) {
+            m_NodeGraph = graphSnapshot;
+            MarkRenderDirty();
+            return false;
+        }
+        splitNodeIds.push_back(splitNode->id);
+    }
+
+    std::array<int, 4> averageNodeIds{ -1, -1, -1, -1 };
+    constexpr const char* kChannels[4] = { "r", "g", "b", "a" };
+    constexpr float kChannelRows[4] = { -210.0f, -70.0f, 70.0f, 210.0f };
+    for (int channelIndex = 0; channelIndex < 4; ++channelIndex) {
+        EditorNodeGraph::Node* channelAverage = m_NodeGraph.AddDataMathNode(
+            EditorNodeGraph::DataMathMode::Average,
+            EditorNodeGraph::Vec2{ originalPos.x, originalPos.y + kChannelRows[channelIndex] });
+        if (!channelAverage) {
+            m_NodeGraph = graphSnapshot;
+            MarkRenderDirty();
+            return false;
+        }
+        averageNodeIds[channelIndex] = channelAverage->id;
+    }
+
+    EditorNodeGraph::Node* combineNode = m_NodeGraph.AddChannelCombineNode(EditorNodeGraph::Vec2{
+        originalPos.x + 360.0f,
+        originalPos.y
+    });
+    if (!combineNode) {
+        m_NodeGraph = graphSnapshot;
+        MarkRenderDirty();
+        return false;
+    }
+    const int combineNodeId = combineNode->id;
+
+    std::string errorMessage;
+    bool ok = true;
+    for (std::size_t inputIndex = 0; ok && inputIndex < inputLinks.size(); ++inputIndex) {
+        const EditorNodeGraph::Link& input = inputLinks[inputIndex].link;
+        ok = m_NodeGraph.TryConnectSockets(
+            input.fromNodeId,
+            input.fromSocketId,
+            splitNodeIds[inputIndex],
+            EditorNodeGraph::kImageInputSocketId,
+            &errorMessage);
+    }
+    for (int channelIndex = 0; ok && channelIndex < 4; ++channelIndex) {
+        for (std::size_t inputIndex = 0; ok && inputIndex < splitNodeIds.size(); ++inputIndex) {
+            ok = m_NodeGraph.TryConnectSockets(
+                splitNodeIds[inputIndex],
+                kChannels[channelIndex],
+                averageNodeIds[channelIndex],
+                EditorNodeGraph::DataMathInputSocketId(static_cast<int>(inputIndex)),
+                &errorMessage);
+        }
+        if (ok) {
+            ok = m_NodeGraph.TryConnectSockets(
+                averageNodeIds[channelIndex],
+                EditorNodeGraph::kImageOutputSocketId,
+                combineNodeId,
+                kChannels[channelIndex],
+                &errorMessage);
+        }
+    }
+    for (const EditorNodeGraph::Link& outputLink : outputLinks) {
+        if (!ok) {
+            break;
+        }
+        ok = m_NodeGraph.TryConnectSockets(
+            combineNodeId,
+            EditorNodeGraph::kImageOutputSocketId,
+            outputLink.toNodeId,
+            outputLink.toSocketId,
+            &errorMessage);
+    }
+
+    if (!ok || !m_NodeGraph.RemoveNode(dataMathNodeId)) {
+        m_NodeGraph = graphSnapshot;
+        MarkRenderDirty();
+        return false;
+    }
+
+    SelectGraphNode(combineNodeId);
+    MarkRenderDirty(combineNodeId);
+    ValidateActiveRawWorkspaceManagedGraph(true);
+    return true;
+}
+
 bool EditorModule::ToggleOutputNodeEnabled(int outputNodeId) {
     EditorNodeGraph::Node* outputNode = m_NodeGraph.FindNode(outputNodeId);
     if (!outputNode || outputNode->kind != EditorNodeGraph::NodeKind::Output) {
@@ -1615,235 +1057,11 @@ bool EditorModule::ToggleOutputNodeEnabled(int outputNodeId) {
         m_CompositeOutputCompletedGenerations.erase(outputNodeId);
     }
     if (!m_NodeGraph.IsOutputConnected()) {
+        ClearViewportOutputTiles();
         m_Pipeline.ClearOutput();
     }
     EnsureCompositeSceneState(m_LastCompositeCanvasSize);
     MarkRenderDirty(outputNodeId);
-    return true;
-}
-
-bool EditorModule::RequestGraphImageChainImports(
-    const std::vector<std::string>& paths,
-    EditorNodeGraph::Vec2 sourcePosition) {
-    std::vector<std::string> validPaths;
-    validPaths.reserve(paths.size());
-    for (const std::string& path : paths) {
-        if (!path.empty()) {
-            validPaths.push_back(path);
-        }
-    }
-    if (validPaths.empty()) {
-        return false;
-    }
-    if (Async::IsBusy(m_GraphDropImportTaskState)) {
-        m_PendingGraphDropImports.push_back(PendingGraphDropImportRequest{ std::move(validPaths), sourcePosition });
-        return true;
-    }
-
-    return StartGraphImageChainImport(std::move(validPaths), sourcePosition);
-}
-
-bool EditorModule::StartGraphImageChainImport(
-    std::vector<std::string> validPaths,
-    EditorNodeGraph::Vec2 sourcePosition) {
-    if (validPaths.empty()) {
-        return false;
-    }
-
-    ++m_GraphDropImportGeneration;
-    const std::uint64_t generation = m_GraphDropImportGeneration;
-    m_GraphDropImportTaskState = Async::TaskState::Queued;
-    m_GraphDropImportStatusText = validPaths.size() > 1
-        ? "Loading dropped images into the graph..."
-        : "Loading dropped image into the graph...";
-
-    Async::TaskSystem::Get().Submit([this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
-        struct DecodedDropImage {
-            std::string path;
-            DecodedImageData decoded;
-        };
-
-        std::vector<DecodedDropImage> decodedImages;
-        decodedImages.reserve(validPaths.size());
-        std::vector<std::string> rawPaths;
-        for (const std::string& path : validPaths) {
-            if (Raw::RawLoader::IsRawPath(path)) {
-                rawPaths.push_back(path);
-                continue;
-            }
-            DecodedImageData decoded;
-            if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
-                continue;
-            }
-            decodedImages.push_back(DecodedDropImage{ path, std::move(decoded) });
-        }
-
-        Async::TaskSystem::Get().PostToMain([
-            this,
-            generation,
-            sourcePosition,
-            requestedCount = validPaths.size(),
-            decodedImages = std::move(decodedImages),
-            rawPaths = std::move(rawPaths)
-        ]() mutable {
-            if (generation != m_GraphDropImportGeneration) {
-                return;
-            }
-
-            const Raw::LibRawRuntimeStatus& rawRuntimeStatus = Raw::GetLibRawRuntimeStatus();
-            const bool rawRuntimeUnavailable = !rawPaths.empty() && !rawRuntimeStatus.runtimeAvailable;
-
-            if (decodedImages.empty() && rawPaths.empty()) {
-                m_GraphDropImportTaskState = Async::TaskState::Failed;
-                m_GraphDropImportStatusText = "Failed to import the dropped images.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to import the dropped images.", "editor-graph-drop-import");
-                if (!m_PendingGraphDropImports.empty()) {
-                    PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
-                    m_PendingGraphDropImports.erase(m_PendingGraphDropImports.begin());
-                    StartGraphImageChainImport(std::move(nextRequest.paths), nextRequest.sourcePosition);
-                }
-                return;
-            }
-
-            m_GraphDropImportTaskState = Async::TaskState::Applying;
-            m_GraphDropImportStatusText = "Creating image nodes...";
-
-            constexpr float kGraphDropRowSpacing = 190.0f;
-            const std::size_t totalNodes = decodedImages.size() + rawPaths.size();
-            const float startY = sourcePosition.y - (static_cast<float>(totalNodes - 1) * kGraphDropRowSpacing * 0.5f);
-            int importedCount = 0;
-            size_t outputIndex = 0;
-            for (size_t index = 0; index < decodedImages.size(); ++index, ++outputIndex) {
-                EditorNodeGraph::Vec2 nodePosition = sourcePosition;
-                nodePosition.y = startY + static_cast<float>(outputIndex) * kGraphDropRowSpacing;
-                if (AddGraphImageChainFromPayload(
-                    BuildImagePayloadFromDecoded(decodedImages[index].path, std::move(decodedImages[index].decoded)),
-                    nodePosition)) {
-                    ++importedCount;
-                }
-            }
-            if (rawRuntimeUnavailable) {
-                QueueUiNotification(UiNotificationSeverity::Error, rawRuntimeStatus.message, "editor-raw-runtime");
-                outputIndex += rawPaths.size();
-            } else {
-                for (const std::string& path : rawPaths) {
-                    EditorNodeGraph::Vec2 nodePosition = sourcePosition;
-                    nodePosition.y = startY + static_cast<float>(outputIndex++) * kGraphDropRowSpacing;
-                    if (AddGraphRawChainFromFile(path, nodePosition)) {
-                        ++importedCount;
-                    }
-                }
-            }
-
-            if (importedCount <= 0) {
-                m_GraphDropImportTaskState = Async::TaskState::Failed;
-                if (rawRuntimeUnavailable) {
-                    m_GraphDropImportStatusText = rawRuntimeStatus.message;
-                } else {
-                    m_GraphDropImportStatusText = "Failed to create graph nodes for the dropped images.";
-                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to create graph nodes for the dropped images.", "editor-graph-drop-import");
-                }
-                if (!m_PendingGraphDropImports.empty()) {
-                    PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
-                    m_PendingGraphDropImports.erase(m_PendingGraphDropImports.begin());
-                    StartGraphImageChainImport(std::move(nextRequest.paths), nextRequest.sourcePosition);
-                }
-                return;
-            }
-
-            m_GraphDropImportTaskState = Async::TaskState::Idle;
-            if (importedCount == static_cast<int>(requestedCount)) {
-                m_GraphDropImportStatusText = importedCount == 1
-                    ? "Imported 1 image into the graph."
-                    : "Imported " + std::to_string(importedCount) + " images into the graph.";
-            } else {
-                m_GraphDropImportStatusText =
-                    "Imported " + std::to_string(importedCount) + " of " + std::to_string(requestedCount) + " dropped images.";
-            }
-            QueueUiNotification(UiNotificationSeverity::Success, m_GraphDropImportStatusText, "editor-graph-drop-import");
-
-            if (!m_PendingGraphDropImports.empty()) {
-                PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
-                m_PendingGraphDropImports.erase(m_PendingGraphDropImports.begin());
-                StartGraphImageChainImport(std::move(nextRequest.paths), nextRequest.sourcePosition);
-            }
-        });
-    });
-
-    return true;
-}
-
-bool EditorModule::ConnectGraphImageNode(int nodeId) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    if (!node) {
-        return false;
-    }
-    bool sourceChanged = false;
-    if (node->kind == EditorNodeGraph::NodeKind::Image) {
-        if (node->image.pixels.empty()) {
-            return false;
-        }
-        LoadSourceFromPixels(node->image.pixels.data(), node->image.width, node->image.height, node->image.channels);
-        m_NodeGraph.SetActiveImageNodeId(nodeId);
-        sourceChanged = true;
-    } else if (node->kind != EditorNodeGraph::NodeKind::RawDevelop) {
-        return false;
-    }
-
-    m_NodeGraph.ConnectImageToOutput(nodeId);
-    if (sourceChanged) {
-        MarkNodeBrowserThumbnailSourceChanged();
-    }
-    SelectGraphNode(nodeId);
-    MarkRenderDirty();
-    return true;
-}
-
-bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
-    if (!node || node->kind != EditorNodeGraph::NodeKind::Image) {
-        return false;
-    }
-
-    const int normalizedTurns = NormalizeQuarterTurnsClockwise(quarterTurnsClockwise);
-    if (normalizedTurns == 0 || node->image.pixels.empty() || node->image.width <= 0 || node->image.height <= 0) {
-        return normalizedTurns == 0;
-    }
-
-    int rotatedWidth = node->image.width;
-    int rotatedHeight = node->image.height;
-    std::vector<unsigned char> rotatedPixels = RotateBottomLeftImagePixels(
-        node->image.pixels,
-        node->image.width,
-        node->image.height,
-        node->image.channels,
-        normalizedTurns,
-        rotatedWidth,
-        rotatedHeight);
-    if (rotatedPixels.empty()) {
-        return false;
-    }
-
-    node->image.width = rotatedWidth;
-    node->image.height = rotatedHeight;
-    node->image.pixels = std::move(rotatedPixels);
-    node->image.pngBytes = EncodePngBytesForImageStorage(
-        node->image.pixels,
-        node->image.width,
-        node->image.height,
-        node->image.channels);
-    EditorNodeGraph::InvalidateImagePayloadRuntime(node->image);
-
-    if (m_NodeGraph.GetActiveImageNodeId() == nodeId) {
-        LoadSourceFromPixels(
-            node->image.pixels.data(),
-            node->image.width,
-            node->image.height,
-            node->image.channels);
-        MarkNodeBrowserThumbnailSourceChanged();
-    }
-
-    MarkRenderDirty(nodeId);
     return true;
 }
 
@@ -2126,6 +1344,132 @@ bool EditorModule::SelectUpstreamDevelopForToneNode(int toneNodeId) {
     return true;
 }
 
+bool EditorModule::QueueManagedRawGraphMutationConfirmation(
+    ManagedRawGraphMutationConfirmAction action,
+    Stack::RawWorkspace::ManagedRawGraphMutationWarning warning,
+    int nodeId,
+    int fromNodeId,
+    const std::string& fromSocketId,
+    int toNodeId,
+    const std::string& toSocketId,
+    std::vector<int> nodeIds) {
+    if (m_ExecutingManagedRawGraphMutationConfirmation ||
+        !warning.requiresConfirmation ||
+        !IsRawWorkspaceProjectActive() ||
+        m_ActiveRawWorkspaceMode != Stack::RawWorkspace::RawProjectMode::ManagedDecomposed) {
+        return false;
+    }
+
+    if (m_ManagedRawGraphMutationConfirm.action != ManagedRawGraphMutationConfirmAction::None) {
+        return true;
+    }
+
+    m_ManagedRawGraphMutationConfirm = {};
+    m_ManagedRawGraphMutationConfirm.action = action;
+    m_ManagedRawGraphMutationConfirm.openPopup = true;
+    m_ManagedRawGraphMutationConfirm.nodeId = nodeId;
+    m_ManagedRawGraphMutationConfirm.fromNodeId = fromNodeId;
+    m_ManagedRawGraphMutationConfirm.fromSocketId = fromSocketId;
+    m_ManagedRawGraphMutationConfirm.toNodeId = toNodeId;
+    m_ManagedRawGraphMutationConfirm.toSocketId = toSocketId;
+    m_ManagedRawGraphMutationConfirm.nodeIds = std::move(nodeIds);
+    m_ManagedRawGraphMutationConfirm.warning = std::move(warning);
+    return true;
+}
+
+void EditorModule::ExecuteManagedRawGraphMutationConfirmation() {
+    ManagedRawGraphMutationConfirmState pending = std::move(m_ManagedRawGraphMutationConfirm);
+    m_ManagedRawGraphMutationConfirm = {};
+    if (pending.action == ManagedRawGraphMutationConfirmAction::None) {
+        return;
+    }
+
+    m_ExecutingManagedRawGraphMutationConfirmation = true;
+    switch (pending.action) {
+        case ManagedRawGraphMutationConfirmAction::Connect: {
+            std::string errorMessage;
+            if (!ConnectGraphSockets(
+                    pending.fromNodeId,
+                    pending.fromSocketId,
+                    pending.toNodeId,
+                    pending.toSocketId,
+                    &errorMessage) &&
+                !errorMessage.empty()) {
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    errorMessage,
+                    "raw-workspace-managed-confirm-connect");
+            }
+            break;
+        }
+        case ManagedRawGraphMutationConfirmAction::RemoveLink:
+            RemoveGraphLink(
+                pending.fromNodeId,
+                pending.fromSocketId,
+                pending.toNodeId,
+                pending.toSocketId);
+            break;
+        case ManagedRawGraphMutationConfirmAction::RemoveNode:
+            RemoveGraphNode(pending.nodeId);
+            break;
+        case ManagedRawGraphMutationConfirmAction::RemoveNodes: {
+            std::vector<int> nodeIds = std::move(pending.nodeIds);
+            std::sort(nodeIds.begin(), nodeIds.end(), [this](int a, int b) {
+                const EditorNodeGraph::Node* nodeA = m_NodeGraph.FindNode(a);
+                const EditorNodeGraph::Node* nodeB = m_NodeGraph.FindNode(b);
+                const int layerA = nodeA && nodeA->kind == EditorNodeGraph::NodeKind::Layer ? nodeA->layerIndex : -1;
+                const int layerB = nodeB && nodeB->kind == EditorNodeGraph::NodeKind::Layer ? nodeB->layerIndex : -1;
+                return layerA > layerB;
+            });
+            bool removedAny = false;
+            for (int id : nodeIds) {
+                removedAny = RemoveGraphNode(id) || removedAny;
+            }
+            m_NodeGraph.ClearSelection();
+            RefreshGraphLayerMetadata();
+            if (removedAny) {
+                MarkRenderDirty();
+            }
+            break;
+        }
+        case ManagedRawGraphMutationConfirmAction::None:
+            break;
+    }
+    m_ExecutingManagedRawGraphMutationConfirmation = false;
+}
+
+void EditorModule::RenderManagedRawGraphMutationConfirmPopup() {
+    constexpr const char* kPopupName = "Managed RAW Graph Change##Editor";
+    if (m_ManagedRawGraphMutationConfirm.openPopup) {
+        ImGui::OpenPopup(kPopupName);
+        m_ManagedRawGraphMutationConfirm.openPopup = false;
+    }
+
+    if (ImGui::BeginPopupModal(kPopupName, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        const std::string summary = m_ManagedRawGraphMutationConfirm.warning.summary.empty()
+            ? std::string("This graph change affects the managed RAW chain.")
+            : m_ManagedRawGraphMutationConfirm.warning.summary;
+        const std::string detail = m_ManagedRawGraphMutationConfirm.warning.detail.empty()
+            ? std::string("Continuing will switch this image to Custom Graph Mode. RAW tab editing will become read-only until the chain is repaired or re-adopted.")
+            : m_ManagedRawGraphMutationConfirm.warning.detail;
+
+        ImGui::TextWrapped("%s", summary.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", detail.c_str());
+        ImGui::Spacing();
+        if (ImGui::Button("Continue", ImVec2(120.0f, 0.0f))) {
+            ExecuteManagedRawGraphMutationConfirmation();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+            m_ManagedRawGraphMutationConfirm = {};
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage) {
     EditorNodeGraph::Node* from = m_NodeGraph.FindNode(fromNodeId);
     if (from && from->kind == EditorNodeGraph::NodeKind::Image) {
@@ -2133,6 +1477,22 @@ bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSo
             if (errorMessage) *errorMessage = "Image node has no embedded pixels.";
             return false;
         }
+    }
+
+    if (QueueManagedRawGraphMutationConfirmation(
+            ManagedRawGraphMutationConfirmAction::Connect,
+            Stack::RawWorkspace::BuildManagedRawGraphConnectionWarning(
+                m_ActiveManagedRawSection,
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                toSocketId),
+            0,
+            fromNodeId,
+            fromSocketId,
+            toNodeId,
+            toSocketId)) {
+        return false;
     }
 
     const EditorNodeGraph::Node* targetNode = m_NodeGraph.FindNode(toNodeId);
@@ -2164,8 +1524,69 @@ bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSo
             ApplyGraphLayerOrder();
             MarkRenderDirty();
             SelectGraphNode(viewNodeId);
+            ValidateActiveRawWorkspaceManagedGraph(true);
             return true;
         }
+    }
+
+    std::string extractorError;
+    if (m_NodeGraph.CanInsertImageToScalarExtractor(
+            fromNodeId,
+            fromSocketId,
+            toNodeId,
+            toSocketId,
+            &extractorError)) {
+        const EditorNodeGraph::Vec2 fromPosition = from ? from->position : EditorNodeGraph::Vec2{};
+        const EditorNodeGraph::Vec2 toPosition = targetNode ? targetNode->position : fromPosition;
+        EditorNodeGraph::Node* extractorNode = m_NodeGraph.AddImageToMaskNode(
+            EditorNodeGraph::ImageToMaskKind::Luminance,
+            EditorNodeGraph::Vec2{
+                (fromPosition.x + toPosition.x) * 0.5f,
+                (fromPosition.y + toPosition.y) * 0.5f
+            });
+        if (!extractorNode) {
+            if (errorMessage) *errorMessage = "Could not create Image To Mask extractor.";
+            return false;
+        }
+
+        const int extractorNodeId = extractorNode->id;
+        if (!m_NodeGraph.TryConnectSockets(
+                fromNodeId,
+                fromSocketId,
+                extractorNodeId,
+                EditorNodeGraph::kImageToMaskInputSocketId,
+                errorMessage)) {
+            m_NodeGraph.RemoveNode(extractorNodeId);
+            return false;
+        }
+        if (!m_NodeGraph.TryConnectSockets(
+                extractorNodeId,
+                EditorNodeGraph::kMaskOutputSocketId,
+                toNodeId,
+                toSocketId,
+                errorMessage)) {
+            m_NodeGraph.RemoveNode(extractorNodeId);
+            return false;
+        }
+
+        if (const EditorNodeGraph::Node* currentFrom = m_NodeGraph.FindNode(fromNodeId);
+            currentFrom && currentFrom->kind == EditorNodeGraph::NodeKind::Image &&
+            ConnectionUsesImageAsRenderSource(
+                m_NodeGraph,
+                fromNodeId,
+                fromSocketId,
+                extractorNodeId,
+                EditorNodeGraph::kImageToMaskInputSocketId)) {
+            LoadSourceFromPixels(currentFrom->image.pixels.data(), currentFrom->image.width, currentFrom->image.height, currentFrom->image.channels);
+            m_NodeGraph.SetActiveImageNodeId(fromNodeId);
+            MarkNodeBrowserThumbnailSourceChanged();
+        }
+
+        ApplyGraphLayerOrder();
+        MarkRenderDirty();
+        SelectGraphNode(extractorNodeId);
+        ValidateActiveRawWorkspaceManagedGraph(true);
+        return true;
     }
 
     if (!m_NodeGraph.TryConnectSockets(fromNodeId, fromSocketId, toNodeId, toSocketId, errorMessage)) {
@@ -2187,6 +1608,7 @@ bool EditorModule::ConnectGraphSockets(int fromNodeId, const std::string& fromSo
     } else if (from) {
         SelectGraphNode(fromNodeId);
     }
+    ValidateActiveRawWorkspaceManagedGraph(true);
     return true;
 }
 
@@ -2232,10 +1654,19 @@ bool EditorModule::SelectedLayerInputContainsViewTransform() const {
             return link ? inputContainsViewTransform(link->fromNodeId) : false;
         };
         bool found = false;
-        if (node->kind == EditorNodeGraph::NodeKind::Mix ||
-            node->kind == EditorNodeGraph::NodeKind::DataMath) {
+        if (node->kind == EditorNodeGraph::NodeKind::Mix) {
             found = checkInput(EditorNodeGraph::kMixInputASocketId) ||
                 checkInput(EditorNodeGraph::kMixInputBSocketId);
+        } else if (node->kind == EditorNodeGraph::NodeKind::DataMath) {
+            for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
+                if (checkInput(EditorNodeGraph::DataMathInputSocketId(inputIndex))) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                found = checkInput(EditorNodeGraph::kDataMathBaseInputSocketId);
+            }
         } else if (node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
             found = checkInput(EditorNodeGraph::kHdrMergeInput1SocketId) ||
                 checkInput(EditorNodeGraph::kHdrMergeInput2SocketId) ||
@@ -2290,37 +1721,97 @@ void EditorModule::MarkSelectedLayerRenderDirty() {
 }
 
 bool EditorModule::RemoveGraphLink(int fromNodeId, int toNodeId) {
+    const EditorNodeGraph::Node* from = m_NodeGraph.FindNode(fromNodeId);
+    const EditorNodeGraph::Node* to = m_NodeGraph.FindNode(toNodeId);
+    const std::string fromSocketId = from ? m_NodeGraph.DefaultOutputSocket(*from) : std::string();
+    const std::string toSocketId = to ? m_NodeGraph.DefaultInputSocket(*to) : std::string();
+    if (QueueManagedRawGraphMutationConfirmation(
+            ManagedRawGraphMutationConfirmAction::RemoveLink,
+            Stack::RawWorkspace::BuildManagedRawGraphLinkRemovalWarning(
+                m_ActiveManagedRawSection,
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                toSocketId),
+            0,
+            fromNodeId,
+            fromSocketId,
+            toNodeId,
+            toSocketId)) {
+        return false;
+    }
+
     const bool removed = m_NodeGraph.RemoveLink(fromNodeId, toNodeId);
     if (removed) {
         ApplyGraphLayerOrder();
         if (!m_NodeGraph.IsOutputConnected()) {
+            ClearViewportOutputTiles();
             m_Pipeline.ClearOutput();
         }
         MarkRenderDirty();
+        ValidateActiveRawWorkspaceManagedGraph(true);
     }
     return removed;
 }
 
 bool EditorModule::RemoveGraphLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
+    if (QueueManagedRawGraphMutationConfirmation(
+            ManagedRawGraphMutationConfirmAction::RemoveLink,
+            Stack::RawWorkspace::BuildManagedRawGraphLinkRemovalWarning(
+                m_ActiveManagedRawSection,
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                toSocketId),
+            0,
+            fromNodeId,
+            fromSocketId,
+            toNodeId,
+            toSocketId)) {
+        return false;
+    }
+
     const bool removed = m_NodeGraph.RemoveLink(fromNodeId, fromSocketId, toNodeId, toSocketId);
     if (removed) {
         ApplyGraphLayerOrder();
         if (!m_NodeGraph.IsOutputConnected()) {
+            ClearViewportOutputTiles();
             m_Pipeline.ClearOutput();
         }
         MarkRenderDirty();
+        ValidateActiveRawWorkspaceManagedGraph(true);
     }
     return removed;
 }
 
 bool EditorModule::DeleteSelectedGraphLink() {
+    if (const EditorNodeGraph::Link* selected = m_NodeGraph.GetSelectedLink()) {
+        if (QueueManagedRawGraphMutationConfirmation(
+                ManagedRawGraphMutationConfirmAction::RemoveLink,
+                Stack::RawWorkspace::BuildManagedRawGraphLinkRemovalWarning(
+                    m_ActiveManagedRawSection,
+                    selected->fromNodeId,
+                    selected->fromSocketId,
+                    selected->toNodeId,
+                    selected->toSocketId),
+                0,
+                selected->fromNodeId,
+                selected->fromSocketId,
+                selected->toNodeId,
+                selected->toSocketId)) {
+            return false;
+        }
+    }
+
     const bool removed = m_NodeGraph.RemoveSelectedLink();
     if (removed) {
         ApplyGraphLayerOrder();
         if (!m_NodeGraph.IsOutputConnected()) {
+            ClearViewportOutputTiles();
             m_Pipeline.ClearOutput();
         }
         MarkRenderDirty();
+        ValidateActiveRawWorkspaceManagedGraph(true);
     }
     return removed;
 }
@@ -2328,6 +1819,15 @@ bool EditorModule::DeleteSelectedGraphLink() {
 bool EditorModule::RemoveGraphNode(int nodeId) {
     EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
     if (!node) {
+        return false;
+    }
+
+    if (QueueManagedRawGraphMutationConfirmation(
+            ManagedRawGraphMutationConfirmAction::RemoveNode,
+            Stack::RawWorkspace::BuildManagedRawGraphNodeRemovalWarning(
+                m_ActiveManagedRawSection,
+                nodeId),
+            nodeId)) {
         return false;
     }
 
@@ -2349,11 +1849,13 @@ bool EditorModule::RemoveGraphNode(int nodeId) {
         if (layerIndex >= 0) {
             RefreshGraphLayerMetadata();
         }
+        ValidateActiveRawWorkspaceManagedGraph(true);
         return true;
     }
 
     const bool removed = m_NodeGraph.RemoveNode(nodeId);
     if (removed && !m_NodeGraph.IsOutputConnected()) {
+        ClearViewportOutputTiles();
         m_Pipeline.ClearOutput();
     }
     if (removed) {
@@ -2362,6 +1864,7 @@ bool EditorModule::RemoveGraphNode(int nodeId) {
             ConnectGraphSockets(plan.fromNodeId, plan.fromSocketId, plan.toNodeId, plan.toSocketId, &errorMessage);
         }
         MarkRenderDirty();
+        ValidateActiveRawWorkspaceManagedGraph(true);
     }
     return removed;
 }
@@ -2369,6 +1872,38 @@ bool EditorModule::RemoveGraphNode(int nodeId) {
 bool EditorModule::DeleteSelectedGraphNodes() {
     std::vector<int> nodeIds = m_NodeGraph.GetSelectedNodeIds();
     if (nodeIds.empty()) {
+        return false;
+    }
+
+    Stack::RawWorkspace::ManagedRawGraphMutationWarning warning;
+    int managedNodeCount = 0;
+    for (int nodeId : nodeIds) {
+        Stack::RawWorkspace::ManagedRawGraphMutationWarning candidate =
+            Stack::RawWorkspace::BuildManagedRawGraphNodeRemovalWarning(
+                m_ActiveManagedRawSection,
+                nodeId);
+        if (!candidate.requiresConfirmation) {
+            continue;
+        }
+        ++managedNodeCount;
+        if (!warning.requiresConfirmation) {
+            warning = std::move(candidate);
+        }
+    }
+    if (managedNodeCount > 1) {
+        warning.requiresConfirmation = true;
+        warning.summary = "Selected nodes include managed RAW chain nodes.";
+        warning.detail = "Removing them will switch this image to Custom Graph Mode and make RAW tab editing read-only until the chain is repaired or re-adopted.";
+    }
+    if (QueueManagedRawGraphMutationConfirmation(
+            ManagedRawGraphMutationConfirmAction::RemoveNodes,
+            std::move(warning),
+            0,
+            0,
+            {},
+            0,
+            {},
+            nodeIds)) {
         return false;
     }
 
@@ -2390,427 +1925,6 @@ bool EditorModule::DeleteSelectedGraphNodes() {
         MarkRenderDirty();
     }
     return removedAny;
-}
-
-void EditorModule::AddScopeNodeAt(EditorNodeGraph::ScopeKind scopeKind, EditorNodeGraph::Vec2 graphPosition) {
-    if (EditorNodeGraph::Node* node = m_NodeGraph.AddScopeNode(scopeKind, graphPosition)) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-}
-
-void EditorModule::AddMaskNodeAt(EditorNodeGraph::MaskGeneratorKind maskKind, EditorNodeGraph::Vec2 graphPosition) {
-    if (EditorNodeGraph::Node* node = m_NodeGraph.AddMaskGeneratorNode(maskKind, graphPosition)) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-}
-
-void EditorModule::AddMaskCombineNodeAt(EditorNodeGraph::MaskCombineMode combineMode, EditorNodeGraph::Vec2 graphPosition) {
-    if (EditorNodeGraph::Node* node = m_NodeGraph.AddMaskCombineNode(combineMode, graphPosition)) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-}
-
-void EditorModule::AddMaskUtilityNodeAt(EditorNodeGraph::MaskUtilityKind utilityKind, EditorNodeGraph::Vec2 graphPosition) {
-    if (EditorNodeGraph::Node* node = m_NodeGraph.AddMaskUtilityNode(utilityKind, graphPosition)) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-}
-
-void EditorModule::AddCustomMaskNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::CustomMaskPayload payload;
-    if (m_Pipeline.GetCanvasWidth() > 0 && m_Pipeline.GetCanvasHeight() > 0) {
-        payload.width = std::clamp(m_Pipeline.GetCanvasWidth(), 1, 4096);
-        payload.height = std::clamp(m_Pipeline.GetCanvasHeight(), 1, 4096);
-    }
-    payload.rasterLayer.assign(
-        static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height),
-        0.0f);
-
-    if (EditorNodeGraph::Node* node = m_NodeGraph.AddCustomMaskNode(std::move(payload), graphPosition)) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-        SwitchToComplexNodeSubWindow(node->id);
-    }
-}
-
-void EditorModule::AddImageToMaskNodeAt(EditorNodeGraph::ImageToMaskKind converterKind, EditorNodeGraph::Vec2 graphPosition) {
-    if (EditorNodeGraph::Node* node = m_NodeGraph.AddImageToMaskNode(converterKind, graphPosition)) {
-        SelectGraphNode(node->id);
-        MarkRenderDirty(node->id);
-    }
-}
-
-bool EditorModule::CreateToneCurveSelectionMask(
-    int toneCurveNodeId,
-    float low,
-    float high,
-    float softness,
-    const std::array<float, 4>& sampleRgba,
-    float sampleLuma,
-    float sampleU,
-    float sampleV,
-    float toneSimilarity,
-    float colorSimilarity,
-    float regionRadius,
-    float regionFeather,
-    float edgeSensitivity,
-    float localCoherence,
-    ToneCurveScopeMaskAction action) {
-    EditorNodeGraph::Node* toneCurveNode = m_NodeGraph.FindNode(toneCurveNodeId);
-    if (!toneCurveNode) {
-        return false;
-    }
-
-    int maskOwnerNodeId = toneCurveNodeId;
-    int sourceImageNodeId = -1;
-    std::string sourceImageSocketId;
-    const EditorNodeGraph::Link* maskInput = nullptr;
-    if (toneCurveNode->kind == EditorNodeGraph::NodeKind::Layer &&
-        toneCurveNode->layerType == LayerType::ToneCurve) {
-        const EditorNodeGraph::Link* imageInput = m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kImageInputSocketId);
-        if (!imageInput) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "Tone Curve needs an image input before a tone scope mask can be created.",
-                "tone-curve-mask-create");
-            return false;
-        }
-        sourceImageNodeId = imageInput->fromNodeId;
-        sourceImageSocketId = imageInput->fromSocketId;
-        maskInput = m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kMaskInputSocketId);
-    } else if (toneCurveNode->kind == EditorNodeGraph::NodeKind::RawDevelop) {
-        if (!toneCurveNode->rawDevelop.integratedToneEnabled) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "Develop needs its finish stage enabled before creating a tone scope mask.",
-                "tone-curve-mask-create");
-            return false;
-        }
-        if (!m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kRawInputSocketId)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "Develop needs a RAW input before a finish scope mask can be created.",
-                "tone-curve-mask-create");
-            return false;
-        }
-        sourceImageNodeId = toneCurveNodeId;
-        sourceImageSocketId = EditorNodeGraph::kPreFinishImageOutputSocketId;
-        maskInput = m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kMaskInputSocketId);
-    } else {
-        return false;
-    }
-
-    EditorNodeGraph::Node* maskNode = nullptr;
-    EditorNodeGraph::Node* combineNode = nullptr;
-    const bool hadExistingMaskInput = maskInput != nullptr;
-    const bool startNewScopedMask = action == ToneCurveScopeMaskAction::NewMask;
-    const EditorNodeGraph::MaskCombineMode requestedCombineMode = ToGraphMaskCombineMode(action);
-    bool reusedExistingToneScopeMask = false;
-    if (maskInput) {
-        combineNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
-        if (combineNode && combineNode->kind == EditorNodeGraph::NodeKind::MaskCombine) {
-            const EditorNodeGraph::Link* inputA = m_NodeGraph.FindInputLink(combineNode->id, EditorNodeGraph::kMaskCombineInputASocketId);
-            const EditorNodeGraph::Link* inputB = m_NodeGraph.FindInputLink(combineNode->id, EditorNodeGraph::kMaskCombineInputBSocketId);
-            for (const EditorNodeGraph::Link* input : { inputA, inputB }) {
-                if (!input) {
-                    continue;
-                }
-                EditorNodeGraph::Node* candidate = m_NodeGraph.FindNode(input->fromNodeId);
-                if (candidate &&
-                    candidate->kind == EditorNodeGraph::NodeKind::ImageToMask &&
-                    candidate->title == "Tone Scope Mask") {
-                    maskNode = candidate;
-                    reusedExistingToneScopeMask = true;
-                    break;
-                }
-            }
-        } else {
-            maskNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
-            if (!maskNode || maskNode->kind != EditorNodeGraph::NodeKind::ImageToMask || maskNode->title != "Tone Scope Mask") {
-                maskNode = nullptr;
-            } else {
-                reusedExistingToneScopeMask = true;
-            }
-        }
-    } else {
-        const EditorNodeGraph::Vec2 position{
-            toneCurveNode->position.x - 250.0f,
-            toneCurveNode->position.y + 135.0f
-        };
-        maskNode = m_NodeGraph.AddImageToMaskNode(EditorNodeGraph::ImageToMaskKind::Luminance, position);
-        if (!maskNode) {
-            return false;
-        }
-    }
-
-    if (!maskNode) {
-        const EditorNodeGraph::Vec2 position{
-            toneCurveNode->position.x - 250.0f,
-            toneCurveNode->position.y + 135.0f
-        };
-        maskNode = m_NodeGraph.AddImageToMaskNode(EditorNodeGraph::ImageToMaskKind::Luminance, position);
-        if (!maskNode) {
-            return false;
-        }
-        maskNode->title = "Tone Scope Mask";
-    } else if (maskNode->title.empty()) {
-        maskNode->title = "Tone Scope Mask";
-    }
-
-    const EditorNodeGraph::Link* maskImageInput = m_NodeGraph.FindInputLink(maskNode->id, EditorNodeGraph::kImageInputSocketId);
-    if (!maskImageInput ||
-        maskImageInput->fromNodeId != sourceImageNodeId ||
-        maskImageInput->fromSocketId != sourceImageSocketId) {
-        if (maskImageInput) {
-            RemoveGraphLink(maskImageInput->fromNodeId, maskImageInput->fromSocketId, maskNode->id, EditorNodeGraph::kImageInputSocketId);
-        }
-        std::string errorMessage;
-        if (!ConnectGraphSockets(
-                sourceImageNodeId,
-                sourceImageSocketId,
-                maskNode->id,
-                EditorNodeGraph::kImageInputSocketId,
-                &errorMessage)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                errorMessage.empty() ? "Failed to connect the tone scope mask to the finish-stage input." : errorMessage,
-                "tone-curve-mask-create");
-            return false;
-        }
-    }
-
-    if (startNewScopedMask && maskInput) {
-        RemoveGraphLink(maskInput->fromNodeId, maskInput->fromSocketId, maskOwnerNodeId, EditorNodeGraph::kMaskInputSocketId);
-        combineNode = nullptr;
-        maskInput = nullptr;
-    }
-
-    if (!maskInput) {
-        std::string errorMessage;
-        if (!ConnectGraphSockets(
-                maskNode->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                maskOwnerNodeId,
-                EditorNodeGraph::kMaskInputSocketId,
-                &errorMessage)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                errorMessage.empty() ? "Failed to connect the tone scope mask to the finish-stage target." : errorMessage,
-                "tone-curve-mask-create");
-            return false;
-        }
-    } else if (!combineNode && maskInput->fromNodeId != maskNode->id) {
-        const EditorNodeGraph::Node* existingMaskNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
-        const EditorNodeGraph::Vec2 combinePosition{
-            toneCurveNode->position.x - 125.0f,
-            toneCurveNode->position.y + 140.0f
-        };
-        combineNode = m_NodeGraph.AddMaskCombineNode(requestedCombineMode, combinePosition);
-        if (!combineNode) {
-            return false;
-        }
-        combineNode->title = "Tone Scope Combine";
-
-        RemoveGraphLink(maskInput->fromNodeId, maskInput->fromSocketId, maskOwnerNodeId, EditorNodeGraph::kMaskInputSocketId);
-
-        std::string errorMessage;
-        if (!ConnectGraphSockets(
-                existingMaskNode ? existingMaskNode->id : maskInput->fromNodeId,
-                maskInput->fromSocketId,
-                combineNode->id,
-                EditorNodeGraph::kMaskCombineInputASocketId,
-                &errorMessage) ||
-            !ConnectGraphSockets(
-                maskNode->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                combineNode->id,
-                EditorNodeGraph::kMaskCombineInputBSocketId,
-                &errorMessage) ||
-            !ConnectGraphSockets(
-                combineNode->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                maskOwnerNodeId,
-                EditorNodeGraph::kMaskInputSocketId,
-                &errorMessage)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                errorMessage.empty() ? "Failed to combine the existing mask with the new tone scope mask." : errorMessage,
-                "tone-curve-mask-create");
-            return false;
-        }
-    } else if (combineNode &&
-               (m_NodeGraph.HasLink(maskNode->id, EditorNodeGraph::kMaskOutputSocketId, combineNode->id, EditorNodeGraph::kMaskCombineInputASocketId) ||
-                m_NodeGraph.HasLink(maskNode->id, EditorNodeGraph::kMaskOutputSocketId, combineNode->id, EditorNodeGraph::kMaskCombineInputBSocketId))) {
-        combineNode->maskCombineMode = requestedCombineMode;
-    } else if (maskInput && maskInput->fromNodeId != maskNode->id) {
-        const EditorNodeGraph::Vec2 combinePosition{
-            toneCurveNode->position.x - 125.0f,
-            toneCurveNode->position.y + 140.0f
-        };
-        EditorNodeGraph::Node* nestedCombine = m_NodeGraph.AddMaskCombineNode(requestedCombineMode, combinePosition);
-        if (!nestedCombine) {
-            return false;
-        }
-        nestedCombine->title = "Tone Scope Combine";
-
-        RemoveGraphLink(maskInput->fromNodeId, maskInput->fromSocketId, maskOwnerNodeId, EditorNodeGraph::kMaskInputSocketId);
-
-        std::string errorMessage;
-        if (!ConnectGraphSockets(
-                maskInput->fromNodeId,
-                maskInput->fromSocketId,
-                nestedCombine->id,
-                EditorNodeGraph::kMaskCombineInputASocketId,
-                &errorMessage) ||
-            !ConnectGraphSockets(
-                maskNode->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                nestedCombine->id,
-                EditorNodeGraph::kMaskCombineInputBSocketId,
-                &errorMessage) ||
-            !ConnectGraphSockets(
-                nestedCombine->id,
-                EditorNodeGraph::kMaskOutputSocketId,
-                maskOwnerNodeId,
-                EditorNodeGraph::kMaskInputSocketId,
-                &errorMessage)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                errorMessage.empty() ? "Failed to refine the existing mask with a new tone scope component." : errorMessage,
-                "tone-curve-mask-create");
-            return false;
-        }
-        combineNode = nestedCombine;
-    }
-
-    const float clampedLow = std::clamp(std::min(low, high), 0.0f, 1.0f);
-    const float clampedHigh = std::clamp(std::max(low, high), 0.0f, 1.0f);
-    const float clampedSampleRgb[3] = {
-        std::clamp(sampleRgba[0], 0.0f, 16.0f),
-        std::clamp(sampleRgba[1], 0.0f, 16.0f),
-        std::clamp(sampleRgba[2], 0.0f, 16.0f)
-    };
-    const float clampedSampleLuma = std::clamp(sampleLuma, 0.0f, 16.0f);
-
-    maskNode->imageToMaskKind = EditorNodeGraph::ImageToMaskKind::SampledRange;
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(*maskNode);
-    maskNode->title = "Tone Scope Mask";
-    maskNode->imageToMaskSettings.low = clampedLow;
-    maskNode->imageToMaskSettings.high = std::max(clampedLow + 0.0001f, clampedHigh);
-    maskNode->imageToMaskSettings.softness = std::clamp(softness, 0.0f, 0.5f);
-    maskNode->imageToMaskSettings.invert = false;
-    maskNode->imageToMaskSettings.sampleU = std::clamp(sampleU, 0.0f, 1.0f);
-    maskNode->imageToMaskSettings.sampleV = std::clamp(sampleV, 0.0f, 1.0f);
-    maskNode->imageToMaskSettings.toneSimilarity = std::clamp(toneSimilarity, 0.02f, 0.35f);
-    maskNode->imageToMaskSettings.colorSimilarity = std::clamp(colorSimilarity, 0.02f, 0.50f);
-    maskNode->imageToMaskSettings.regionRadius = std::clamp(regionRadius, 0.05f, 1.0f);
-    maskNode->imageToMaskSettings.regionFeather = std::clamp(regionFeather, 0.0f, 1.0f);
-    maskNode->imageToMaskSettings.edgeSensitivity = std::clamp(edgeSensitivity, 0.0f, 1.0f);
-    maskNode->imageToMaskSettings.localCoherence = std::clamp(localCoherence, 0.0f, 1.0f);
-
-    auto clearExtraSamples = [&](EditorNodeGraph::ImageToMaskSettings& settings) {
-        for (int i = 0; i < 4; ++i) {
-            settings.extraSampleRgb[i][0] = 0.5f;
-            settings.extraSampleRgb[i][1] = 0.5f;
-            settings.extraSampleRgb[i][2] = 0.5f;
-            settings.extraSampleLuma[i] = 0.5f;
-        }
-    };
-    auto resetPrimarySample = [&](EditorNodeGraph::ImageToMaskSettings& settings) {
-        settings.sampleCount = 1;
-        settings.sampleRgb[0] = clampedSampleRgb[0];
-        settings.sampleRgb[1] = clampedSampleRgb[1];
-        settings.sampleRgb[2] = clampedSampleRgb[2];
-        settings.sampleLuma = clampedSampleLuma;
-        clearExtraSamples(settings);
-    };
-    auto sampleMatches = [&](const EditorNodeGraph::ImageToMaskSettings& settings, int sampleIndex) {
-        if (sampleIndex <= 0) {
-            return std::abs(settings.sampleRgb[0] - clampedSampleRgb[0]) < 0.0005f &&
-                std::abs(settings.sampleRgb[1] - clampedSampleRgb[1]) < 0.0005f &&
-                std::abs(settings.sampleRgb[2] - clampedSampleRgb[2]) < 0.0005f &&
-                std::abs(settings.sampleLuma - clampedSampleLuma) < 0.0005f;
-        }
-        const int extraIndex = sampleIndex - 1;
-        return std::abs(settings.extraSampleRgb[extraIndex][0] - clampedSampleRgb[0]) < 0.0005f &&
-            std::abs(settings.extraSampleRgb[extraIndex][1] - clampedSampleRgb[1]) < 0.0005f &&
-            std::abs(settings.extraSampleRgb[extraIndex][2] - clampedSampleRgb[2]) < 0.0005f &&
-            std::abs(settings.extraSampleLuma[extraIndex] - clampedSampleLuma) < 0.0005f;
-    };
-
-    bool appendedSample = false;
-    bool duplicateSample = false;
-    bool sampleCapacityReached = false;
-    const bool allowSampleAppend = !startNewScopedMask && reusedExistingToneScopeMask;
-    EditorNodeGraph::ImageToMaskSettings& imageToMaskSettings = maskNode->imageToMaskSettings;
-    if (imageToMaskSettings.sampleCount < 1 || imageToMaskSettings.sampleCount > 5) {
-        imageToMaskSettings.sampleCount = 1;
-    }
-    if (allowSampleAppend && imageToMaskSettings.sampleCount >= 1) {
-        for (int i = 0; i < imageToMaskSettings.sampleCount; ++i) {
-            if (sampleMatches(imageToMaskSettings, i)) {
-                duplicateSample = true;
-                break;
-            }
-        }
-        if (!duplicateSample) {
-            if (imageToMaskSettings.sampleCount < 5) {
-                const int extraIndex = imageToMaskSettings.sampleCount - 1;
-                imageToMaskSettings.extraSampleRgb[extraIndex][0] = clampedSampleRgb[0];
-                imageToMaskSettings.extraSampleRgb[extraIndex][1] = clampedSampleRgb[1];
-                imageToMaskSettings.extraSampleRgb[extraIndex][2] = clampedSampleRgb[2];
-                imageToMaskSettings.extraSampleLuma[extraIndex] = clampedSampleLuma;
-                imageToMaskSettings.sampleCount += 1;
-                appendedSample = true;
-            } else {
-                sampleCapacityReached = true;
-            }
-        }
-    } else {
-        resetPrimarySample(imageToMaskSettings);
-    }
-
-    if (!allowSampleAppend && !appendedSample) {
-        resetPrimarySample(imageToMaskSettings);
-    } else if (imageToMaskSettings.sampleCount <= 0) {
-        resetPrimarySample(imageToMaskSettings);
-    }
-    SelectGraphNode(
-        toneCurveNode->kind == EditorNodeGraph::NodeKind::RawDevelop
-            ? maskOwnerNodeId
-            : maskNode->id);
-    MarkRenderDirty(maskOwnerNodeId);
-    if (sampleCapacityReached) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
-            "Tone scope mask already has five samples. Refine settings were updated, but no additional sample was added.",
-            "tone-curve-mask-create");
-    } else if (duplicateSample) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
-            "That sampled tone is already present in the tone scope mask. Refine settings were updated.",
-            "tone-curve-mask-create");
-    } else {
-        QueueUiNotification(
-            UiNotificationSeverity::Success,
-            appendedSample
-                ? ("Tone scope mask refined with sample " + std::to_string(imageToMaskSettings.sampleCount) + " of 5.")
-                : (startNewScopedMask
-                    ? "Created a new scoped tone mask from the sampled tone and color range."
-                    : (!hadExistingMaskInput
-                        ? "Created a scoped tone mask from the sampled tone and color range."
-                        : (action == ToneCurveScopeMaskAction::Add
-                        ? "Added a sampled tone scope component to the existing mask."
-                        : (action == ToneCurveScopeMaskAction::Subtract
-                            ? "Subtracted a sampled tone scope component from the existing mask."
-                            : "Intersected the existing mask with a sampled tone scope component.")))),
-            "tone-curve-mask-create");
-    }
-    return true;
 }
 
 void EditorModule::AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind generatorKind, EditorNodeGraph::Vec2 graphPosition) {
@@ -2880,6 +1994,7 @@ void EditorModule::AutoLayoutGraph() {
 
 void EditorModule::DisconnectGraphOutput() {
     m_NodeGraph.DisconnectOutput();
+    ClearViewportOutputTiles();
     m_Pipeline.ClearOutput();
     MarkRenderDirty();
 }

@@ -1,0 +1,255 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+01 - Develop Philosophy, Auto Modes, and User Intent
+====================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide defines what Develop is supposed to be from the user's point of view and from the image-data point of view. It locks in the Auto modes, the meaning of user intent, and the difference between a solver and a preset.
+
+The most important distinction is this: Develop should not ask, "what preset should I apply?" It should ask, "what does this RAW data need in order to become a high-quality, believable image under the selected intent?" Those are very different questions.
+
+A preset begins with a fixed look. A solver begins with the image. A preset says, "apply these parameters." A solver says, "measure the image, generate possible paths, test them, remove bad candidates, converge, and expose the authored values." Stack's Develop node should be the second one.
+
+Current-state anchor
+====================
+The current Develop node is already conceptually close to this direction because it is not just a RAW decoder. It is the RAW-to-image boundary and already contains three linked responsibilities: RAW conversion, scene prep / pre-local exposure, and integrated finish tone. It currently outputs image-domain scene-linear RGB and is normally followed by View Transform and Output. It also already has Auto and Manual modes, where Auto writes settings across RAW exposure, scene prep, and integrated tone, and Manual exposes the authored result rather than switching to a different algorithm.
+
+That current shape is useful. The future work should not throw it away. The future work should make the idea more intentional, more truthful, more flexible, and more quality-focused.
+
+What Develop should feel like
+=============================
+Develop should feel like it takes difficult RAW data and makes it usable without forcing the user into a canned style. It should be able to produce a technically correct starting point, a flat editing base, a natural finished image, and more dramatic but still believable alternatives.
+
+The default should be Natural Finished. The user should be able to drop in a supported RAW, connect Develop, and immediately see something good enough to use. That first result should not feel like a raw technical dump. It should also not feel like Stack applied a trendy preset. It should feel like a strong, high-quality photographic rendering.
+
+This is not a contradiction with avoiding creative decisions. The boundary is:
+
+- Auto may make realism, quality, data-balancing, and mode-following decisions.
+- Auto should not invent a personal style without the user asking for that mode or bias.
+- Auto may decide that a night scene should stay dark, that a subject should be more readable, that noisy shadows should not be lifted too far, that highlights need rolloff, and that midtones need a better landing point.
+- Auto should not decide to make every image teal-orange, faded matte, crunchy HDR, fake film, or hyper-saturated unless the user selects a mode or downstream look that says so.
+
+The best wording is: Auto is allowed to make the image look very nice, but it should do so as an honest RAW-development solve, not as arbitrary style.
+
+The Auto mode family
+====================
+The starting Auto modes should be:
+
+1. Natural Finished
+-------------------
+Default mode. This should make the image look realistic, balanced, bright where it should be bright, dark where it should be dark, and finished enough to use as-is. It should keep good photographic endpoints: meaningful highlights, believable shadows, pleasing midtone placement, and natural color.
+
+Natural Finished should be restrained enough to avoid fake HDR, halos, washed-out flattening, plastic denoise, and preset color. It can still be strong. Restrained does not mean weak.
+
+2. Clean Base
+-------------
+This is a technically solid base for further editing. It should fix the image enough that downstream editing is not fighting bad RAW conversion, bad exposure placement, or obvious color/noise problems. Compared with Natural Finished, it should avoid committing as much final tone, contrast, color density, and punch.
+
+Clean Base is for users who want Stack to prepare the data but do more of the look-building manually.
+
+3. Flat Editing Base
+--------------------
+Flat Editing Base is not an ugly log-style dump. Its purpose is to bring useful mids and recoverable information into a visible, workable range so manual editing becomes easier.
+
+This mode should lift and place midtones more generously, compress obvious extremes where useful, reduce harsh contrast, and avoid baking in strong black/white endpoints. It should preserve possibility while still showing the user what is in the image. The output may look flatter than Natural Finished, but it should not be broken, gray, or lifeless.
+
+Important: flatness here is a workflow state, not a quality failure. The user chooses it because it makes later manual shaping easier.
+
+4. Bright Natural
+-----------------
+A realistic bright rendering. Useful for portraits, lifestyle, interiors, clean product work, soft daylight, and images where the intended feeling is open and approachable.
+
+Bright Natural should not simply add RAW exposure until highlights clip. It should use midtone placement, local exposure, highlight guard, tone shaping, and color density together.
+
+5. Dark Natural
+---------------
+A realistic dark rendering. Useful for night, concert, stage, silhouettes, moody portraits, black-background product shots, and intentionally low-key images.
+
+Dark Natural should not force shadows into gray visibility. It should preserve darkness when darkness is the image. It should still protect important midtone/subject readability if the user or solver indicates that readability matters.
+
+6. Punchy / High Contrast
+-------------------------
+A stronger rendering with deeper darks, brighter highlights, stronger separation, and more perceived pop. It should remain believable. Punchy must not mean fake HDR, oversharpened, over-saturated, or crushed without reason.
+
+This mode may allow more tone commitment and stronger local shaping than Natural Finished.
+
+7. Maximum Range / Detail
+-------------------------
+A mode that tries to fit more recoverable highlight and shadow information into visibility. It is allowed to be less naturally contrasty than Natural Finished because its purpose is information and range.
+
+The danger is flat HDR mush. This mode needs safeguards that preserve brightness hierarchy: bright things should still feel bright, dark things should still feel dark, and local range compression should not erase the lighting story.
+
+Human names, technical descriptions
+===================================
+The UI should use human names: Natural, Clean, Flat, Bright, Dark, Punchy, Maximum Range. These are understandable.
+
+Hover descriptions, documentation, and advanced panels should expose more technical meaning. For example:
+
+- Natural: "Balanced finished RAW solve: protects important data, builds realistic contrast and color, and targets a usable final-looking result."
+- Flat: "Editing base: places useful mids and recoverable range into visibility with reduced finish contrast."
+- Maximum Range: "Range-preserving solve: increases visible highlight/shadow information while guarding against halos and gray flattening."
+
+This lets Stack stay approachable without lying.
+
+Auto controls are solver controls
+=================================
+Auto controls should mostly influence the solve, not directly edit pixels like ordinary sliders. This matters a lot.
+
+A normal editing slider has a simple meaning: increase a value, change the image. A solver control should be different. It should tell the Auto system how to make decisions. A Dynamic Range control, for example, may change global exposure, local exposure strength, highlight compression, shadow-lift limits, tone curve shoulder, and candidate scoring all at once.
+
+This is not hidden trickery if the UI explains it. It becomes the actual advantage of Stack.
+
+Recommended Auto controls:
+
+- Auto Strength: how much the solver is allowed to intervene.
+- Mode: the broad destination, such as Natural Finished or Flat Editing Base.
+- Brightness / Exposure Intent: whether the final image should feel brighter or darker.
+- Dynamic Range Intent: whether to preserve contrast or reveal more range.
+- Highlight Behavior: how much important bright detail/rolloff should be protected.
+- Shadow Behavior: whether dark detail should be opened, preserved, or hidden for cleanliness.
+- Color Mood / Neutrality: whether white balance should be more neutral or mood-preserved.
+- Texture / Cleanliness: whether the solve should prefer visible texture/noise or cleaner smoothing.
+- Subject Importance: automatic + brush-guided weighting for what should matter most.
+
+Sliders versus graphs
+=====================
+Stack should lean into graph-style controls wherever a one-axis slider would collapse multiple meanings into one value.
+
+Sliders are still good for literal quantities:
+
+- RAW exposure EV.
+- Denoise strength.
+- Highlight reconstruction threshold.
+- Radius.
+- Iterations.
+- Manual RGB multipliers.
+
+Graphs are better for intent tradeoffs:
+
+- Natural <-> Flat <-> Finished <-> Punchy.
+- Neutral WB <-> Mood WB while also allowing warm/cool direction.
+- Preserve contrast <-> reveal range while also balancing highlight/shadow priority.
+- Clean <-> textured while also balancing detail protection/shadow cleanup.
+- Subject priority <-> global scene integrity while also balancing realism/readability.
+
+The graph should not merely be a fancy slider. It should map to multiple solver biases. Moving a point should tell Auto, "solve more like this," not "add exactly this one effect."
+
+A useful top-level Auto graph
+=============================
+A strong starting design is a two-axis Auto Intent Map:
+
+Horizontal axis:
+Technical Base  <---------------------------->  Finished Rendering
+
+Vertical axis:
+Preserve Range / Flat  <---------------------->  Preserve Contrast / Punch
+
+Mode positions could be:
+
+- Clean Base: slightly toward Technical Base, middle vertical.
+- Flat Editing Base: Technical Base + Preserve Range / Flat.
+- Natural Finished: Finished Rendering, near balanced center.
+- Bright Natural: Finished Rendering with brightness bias, not necessarily high contrast.
+- Dark Natural: Finished Rendering with darker midtone/endpoint bias.
+- Punchy: Finished Rendering + Preserve Contrast / Punch.
+- Maximum Range / Detail: Preserve Range / Flat, but with strong local/detail safeguards.
+
+This map would let the user understand mode relationships visually. The buttons can still exist, but the graph shows the space between them.
+
+A better way than fixed presets
+===============================
+The obvious way to build modes would be to make seven hard-coded presets. Stack should avoid that.
+
+A better way is to make modes into solver target profiles. A profile defines scoring weights, target ranges, and allowed strengths. The solver still measures the image and decides the actual operations.
+
+Natural Finished should not have one static curve. It should have a target: believable midtones, important highlights bright but controlled, shadows dark but not muddy, color realistic, no fake HDR, no plastic denoise. The actual values should depend on the file.
+
+Flat Editing Base should not use one static low-contrast curve. It should solve for visible mids and editable range. A dark high-contrast concert photo and a low-contrast fog photo need different flat strategies.
+
+Punchy should not simply increase contrast. It should decide where punch belongs: endpoints, midtone contrast, local separation, saturation density, texture clarity, or a combination.
+
+What each mode affects downstream
+=================================
+Mode decisions affect re-rendering, Manual handoff, candidate generation, and diagnostics.
+
+A mode change is a high-level solve change. It can require broad reanalysis because the same image statistics are judged differently. Natural may reject a heavy shadow lift as fake; Maximum Range may allow it if noise is acceptable. Dark Natural may preserve low midtones; Bright Natural may open them.
+
+When the user switches from Auto to Manual, Manual should reveal the actual authored values from the chosen mode and candidate. The user should not see only "Natural mode = 72%". They should be able to inspect RAW exposure, scene prep strength, denoise choices, local range mapping, tone curve decisions, and color decisions, with reasonable grouping.
+
+When the user returns from Manual to Auto, the selected mode should remain unless the user changes it. Manual edits should become biases. For example, if the user made the Natural result warmer, the solver should not neutralize it on the next Auto pass unless the user asks for recalibration from scratch.
+
+Candidate solving inside modes
+==============================
+Each mode can generate candidates. Candidates should not be fixed categories every time. The solver should generate what the image needs.
+
+For an extreme sunset portrait, candidates may differ by subject lift, sky protection, warmth preservation, and highlight rolloff. For a high-ISO night scene, candidates may differ by shadow openness, denoise strength, and black point. For a low-contrast fog scene, candidates may differ by contrast preservation and midtone placement.
+
+The candidate gallery should not fill the screen with nearly identical renders. Internally, Auto can test many possibilities. Externally, it should show only meaningfully different survivors.
+
+Candidate selection should become an authored state. It may also become a preference signal if learning is enabled.
+
+Rules that keep Auto honest
+===========================
+Auto must not call missing clipped data "recovered" unless real usable channel/neighbor data exists. It can reconstruct, estimate, blend, or roll off, but the language should distinguish those actions.
+
+Auto must not flatten every image into a bright gray middle. Realism often requires bright highlights and dark darks.
+
+Auto must not lift shadow regions simply because they are dark. Some shadows are content; some shadows are noise, empty background, or the intended mood.
+
+Auto must not treat Natural Finished as a creative grade. It is a high-quality realistic rendering.
+
+Auto must not turn safeguards into weakness. A safeguard should prevent a specific failure: halo, noise explosion, clipped skin, hue shift, gray wash, plastic texture, or false detail. It should not globally reduce every adjustment until the image looks timid.
+
+Research anchors for this guide
+===============================
+- Stack current Develop context: Develop is currently a merged RAW conversion, scene prep, and integrated finish tone node with Auto and Manual modes.
+- LibRaw About: LibRaw extracts RAW pixel data and metadata, while its basic conversion is not intended as production-quality rendering.
+- ACES and OpenColorIO docs: useful conceptual separation between camera/input transforms, scene-referred work, display/view transforms, and output rendering.
+- DaVinci Resolve and Adobe color grading references: established creative tools use wheels/graphs/curves because image intent is often multidimensional.
+
+Recommended document-level decisions
+====================================
+- Natural Finished is the default.
+- All seven starting Auto modes should exist conceptually.
+- Modes are target profiles, not static presets.
+- Auto controls guide the solver and may alter many authored settings at once.
+- Graph controls should be first-class for mode/intent spaces.
+- Manual exposes the actual authored result.
+- Returning to Auto preserves Manual edits as biases unless locked or reset.
+- The UI can use simple names while documentation and hover descriptions explain the real data behavior.
+
+Open experience-test questions
+==============================
+These should not block documentation or development planning, because they require real interactive testing:
+
+- How aggressive should Natural Finished feel before it crosses into style?
+- How flat can Flat Editing Base be while still feeling useful instead of dead?
+- How many candidates are enough before the gallery becomes clutter?
+- Which graph controls feel empowering versus confusing?
+- How much explanation should appear in the UI versus diagnostics?
+
+The way to answer those is not more theory. It is to build enough candidate solving and graph controls that the user can feel what is missing.

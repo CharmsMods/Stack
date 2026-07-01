@@ -1,0 +1,355 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+07 - Denoise, Demosaic, Texture, Detail, and Cleanup
+====================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide defines Stack's quality philosophy for denoise, demosaic, detail, texture, hot pixels, false color, defringe, chromatic aberration, sharpening, and cleanup.
+
+The core direction is: denoise should default on and happen in both pre-demosaic and post-demosaic roles where applicable, but natural texture matters more than plastic smoothness.
+
+Why this guide matters
+======================
+RAW quality is not only exposure and color. Detail reconstruction and noise handling are where automatic processing often becomes fake-looking. A file can have perfect tone and still feel low quality if it has zipper artifacts, false color, smeared hair, crunchy sharpening, chroma blotches, hot pixels, or lifted shadow noise.
+
+The current Develop context has important limitations: public demosaic is effectively bilinear only, mosaic denoise exists but defaults off in current RawMosaicDenoiseSettings, and many cleanup controls exist but are mosaic-specific. Future quality work needs to upgrade this area heavily.
+
+Demosaic is foundational
+========================
+A Bayer RAW does not contain full RGB at every pixel. Demosaicing reconstructs a full-color image from incomplete color samples. RawPedia's demosaicing documentation emphasizes that demosaic choices affect fine detail, maze-like artifacts, noise behavior, and false color.
+
+Current Stack being effectively bilinear-only is acceptable as a current-state limitation, not as a final quality target.
+
+Future Stack should treat demosaic as a quality decision system:
+
+- Clean low-ISO texture may use a detail-preserving method.
+- High-ISO/noisy data may prefer a noise-robust method.
+- High-frequency repeating patterns may need artifact suppression.
+- Edges need protection from zippering and false color.
+- Highlight edges need special care.
+- Phone DNGs and Sony ARWs may need different defaults, but actual data characteristics should matter more than source labels.
+
+A better way than one demosaic method
+=====================================
+The simple path is to add a dropdown of demosaic methods and let the user choose. Stack should eventually be smarter.
+
+Better path:
+
+- Provide quality levels: Preview, High Quality, Maximum Quality.
+- Use image-adaptive selection or blending where practical.
+- Analyze noise level, CFA pattern, ISO/source metadata, edge structure, and high-frequency patterns.
+- Use safer behavior in uncertain/noisy/highlight regions.
+- Use stronger detail reconstruction in clean textured regions.
+- Expose expert manual controls without requiring every user to know demosaic theory.
+
+Demosaic should not maximize sharpness at all costs. The best demosaic is the one that produces stable, natural detail with low artifacts.
+
+Pre-demosaic denoise
+====================
+Pre-demosaic denoise works on mosaic/sensor-domain data. It can target:
+
+- Hot pixels.
+- Impulse noise.
+- Chroma-like mosaic noise before it becomes colored artifacts.
+- Same-CFA neighborhood smoothing.
+- Noise that would otherwise confuse demosaic.
+
+Benefits:
+
+- Can prevent noise from being amplified or colorized by demosaic.
+- Can make high-ISO/phone RAW more stable.
+- Can improve downstream local exposure decisions.
+
+Risks:
+
+- Can remove real single-pixel detail.
+- Can damage stars, tiny lights, speculars, or fine texture.
+- Can reduce demosaic detail if too strong.
+- Can falsely classify real highlights as hot pixels.
+
+Therefore pre-demosaic denoise should default on in the future but be adaptive and separately controllable.
+
+Post-demosaic denoise
+=====================
+Post-demosaic denoise works on visible RGB/luminance/chroma image data. It can target:
+
+- Visible luminance noise.
+- Chroma blotches.
+- Shadow color noise.
+- Pattern noise after development.
+- Noise revealed by local exposure.
+
+Benefits:
+
+- Easier to judge visually.
+- Can be guided by luminance, chroma, edges, and texture maps.
+- Can be region-specific.
+- Can interact with tone decisions.
+
+Risks:
+
+- Can create plastic skin.
+- Can smear texture.
+- Can make images look artificial.
+- Can fight sharpening/detail.
+
+Post-demosaic denoise should be solved with local exposure and tone, not independently.
+
+Denoise should be adaptive
+==========================
+Denoise should not be one static value. The darktable denoise documentation notes that noise variance can depend on luminosity and that camera/ISO profiling can matter. Stack can use this idea without copying the module: noise should be modeled by region, brightness, source, ISO/metadata, and actual image evidence.
+
+Adaptive denoise should consider:
+
+- Luminance level.
+- Estimated signal-to-noise ratio.
+- ISO/source metadata if available.
+- Texture confidence.
+- Edge confidence.
+- Subject/skin importance.
+- Shadow lift amount.
+- Mode and graph intent.
+- Output size/viewing scale.
+
+The solver should ask: is this area noise, texture, or both?
+
+Noise can be hidden by tone
+===========================
+The user explicitly wants tone decisions to hide noise when that is better than denoise. This is essential.
+
+For a deep, low-signal shadow:
+
+- Option A: lift it and denoise heavily. Risk: gray, smeary shadows.
+- Option B: lift it less and keep it dark. Risk: less visible detail, but often more realistic.
+- Option C: local lift only meaningful shapes, leave background dark.
+- Option D: candidate alternatives.
+
+Natural Finished should often choose B or C when shadows are not meaningful or are noise-limited. Maximum Range may choose A or C if the user wants visibility. Flat Editing Base may open more shadows but still needs noise warnings.
+
+Texture protection
+==================
+Texture is not noise. Hair, fabric, grass, skin pores, product texture, tree bark, architecture, stars, and fine printed detail may all matter.
+
+The solver should protect texture by:
+
+- Detecting high-frequency structure versus random noise.
+- Using edge-aware and texture-aware denoise.
+- Reducing denoise in important marked regions when detail matters.
+- Avoiding local exposure maps that flatten texture.
+- Avoiding sharpening that turns texture crunchy.
+- Judging final quality at realistic viewing scale and 100% zoom, because both reveal different failures.
+
+A little noise is often better than plastic texture. This should be a design principle.
+
+Hot pixels and tiny bright details
+==================================
+Hot pixels should usually be corrected because they are sensor artifacts. But automatic hot-pixel correction can erase real tiny bright content:
+
+- Stars.
+- Distant lights.
+- Specular pinpoints.
+- Fine glitter/sparks.
+- Tiny reflections.
+
+A good hot-pixel system should use context:
+
+- Is the bright pixel isolated across one channel/pattern?
+- Does it match expected sensor defect behavior?
+- Is the image a night sky or low-light scene?
+- Are there neighboring similar points?
+- Is the point in a region marked important?
+
+Manual should allow hot-pixel suppression strength and threshold.
+
+False color and defringe
+========================
+False color can come from demosaic artifacts, high-frequency detail, chromatic aberration, clipped channels, or color transforms. Defringe and false-color suppression should be automatic but cautious.
+
+Future behavior:
+
+- Default gentle false-color suppression.
+- Stronger suppression only when detected.
+- Preserve real color detail.
+- Avoid desaturating legitimate fine color texture.
+- Use highlight-edge cleanup where bright edges produce color artifacts.
+- Separate lateral CA correction from demosaic false color and purple/green fringing.
+
+Manual should expose these separately because they are not the same problem.
+
+Sharpening and detail rendering
+===============================
+Develop should include capture/detail rendering, but should not necessarily be the final creative sharpening stage.
+
+Recommended separation:
+
+1. Demosaic/detail reconstruction
+---------------------------------
+Recover natural structure from RAW/CFA data.
+
+2. Capture sharpening / deblur compensation
+-------------------------------------------
+Gently compensate for sensor/optical/demosaic softness.
+
+3. Local contrast / texture enhancement
+---------------------------------------
+Increase perceived detail. This can easily create halos/noise.
+
+4. Output sharpening
+--------------------
+Depends on final size/display/print. This probably belongs downstream, not inside Develop.
+
+Natural Finished may include subtle capture/detail rendering. Punchy may allow more local detail. Flat/Clean should preserve detail without committing to strong crispness.
+
+Graph control: Texture / Cleanliness Map
+========================================
+A useful graph:
+
+Horizontal axis:
+Clean / Smooth  <-------------------------->  Natural Texture / Detail
+
+Vertical axis:
+Hide Noise in Tone  <---------------------->  Reveal Detail with Denoise Support
+
+This graph lets the user choose between:
+
+- Cleaner image with more smoothing.
+- More texture with some noise.
+- Darker shadows to hide noise.
+- Brighter detail with denoise support.
+
+It should influence:
+
+- Pre-demosaic denoise strength.
+- Post-demosaic denoise strength.
+- Shadow lift limits.
+- Local denoise maps.
+- Texture protection.
+- Capture sharpening/detail strength.
+- Candidate scoring.
+
+Mode-specific detail behavior
+=============================
+Natural Finished
+----------------
+Balanced texture, moderate denoise, no plastic smoothing, no crunchy sharpening.
+
+Clean Base
+----------
+Clean technical output but not smeared. May use stronger artifact cleanup.
+
+Flat Editing Base
+-----------------
+More shadow visibility may need more local denoise. Should preserve texture for later editing.
+
+Bright Natural
+--------------
+Open mids can reveal noise; denoise must adapt. Skin needs protection.
+
+Dark Natural
+------------
+Can hide noise by preserving darkness. Denoise should not overwork invisible shadows.
+
+Punchy / High Contrast
+----------------------
+Can exaggerate noise and texture. Needs strong safeguards against crunch.
+
+Maximum Range / Detail
+----------------------
+Likely needs the most careful denoise/local exposure coordination.
+
+Manual controls
+===============
+Manual should expose pre- and post-demosaic denoise separately, likely grouped under one Detail / Cleanup panel.
+
+Recommended Manual grouping:
+
+1. Mosaic / Sensor Cleanup
+--------------------------
+Pre-demosaic denoise on/off, hot pixel suppression, luma/chroma strength, radius, edge protection, iterations.
+
+2. Demosaic
+-----------
+Method/quality level, preview/final quality, false-color behavior, edge mode if available.
+
+3. RGB / Visible Denoise
+------------------------
+Luma noise, chroma noise, shadow noise, skin protection, texture protection, local denoise map.
+
+4. Optical / Color Cleanup
+--------------------------
+False color, defringe, highlight edge cleanup, lateral CA red/cyan and blue/yellow.
+
+5. Detail Rendering
+-------------------
+Capture sharpening, texture, local contrast, halo guard.
+
+6. Diagnostics
+--------------
+Noise map, hot pixel mask, denoise difference, false-color mask, texture map, detail risk map.
+
+The current UI already has some of these pieces. Future work should cleanly separate their meanings and fix current limitations such as bilinear-only demosaic and CA save-range mismatch.
+
+A better way than default heavy denoise
+=======================================
+The easy path is to denoise everything by default until it looks clean. That destroys texture.
+
+The better path:
+
+- Denoise defaults on, but adaptively.
+- Pre-demosaic denoise handles sensor/mosaic risks.
+- Post-demosaic denoise handles visible noise.
+- Tone may hide noise instead of lifting it.
+- Local exposure and denoise solve together.
+- Subject/texture maps protect important detail.
+- Candidate solving shows clean-versus-textured alternatives when the tradeoff is meaningful.
+
+Research anchors for this guide
+===============================
+- RawPedia demosaicing: demosaic is required for Bayer/X-Trans data and method choice affects detail, noise, and maze-like artifacts.
+- darktable denoise: noise variance can depend on luminosity and camera/ISO characteristics; denoise needs a detail-versus-cleanliness balance.
+- darktable process docs: local contrast/sharpening can exaggerate noise and should be judged at realistic viewing sizes.
+- Stack current context: current public demosaic is effectively bilinear-only; mosaic denoise and cleanup controls exist but require future quality refinement.
+
+Recommended document-level decisions
+====================================
+- Denoise should default on in future design, with pre-demosaic and post-demosaic roles.
+- Both pre- and post-demosaic denoise should be separately exposed in Manual.
+- Natural texture matters more than plastic smoothness.
+- Tone can hide noise by keeping low-value regions dark.
+- Demosaic must be upgraded beyond bilinear for final quality.
+- Demosaic/detail/denoise should be scene-adaptive and source-aware.
+- Hot-pixel correction must avoid deleting stars/tiny lights.
+- False color, defringe, CA, highlight-edge cleanup, denoise, and sharpening are separate problems and should not be duplicated under vague labels.
+- Texture/cleanliness should use graph-style intent control.
+
+Open experience-test questions
+==============================
+- How much natural noise is acceptable in Natural Finished?
+- Should Clean Base be cleaner than Natural Finished or just less stylized?
+- How should Stack show clean-versus-textured candidates?
+- Which demosaic quality levels are needed for preview versus final?
+- Should phone DNGs start with different denoise confidence than Sony ARW, or should the solver rely only on measured noise?

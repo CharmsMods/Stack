@@ -6,11 +6,14 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <functional>
 #include <iostream>
 
 namespace Raw {
 namespace {
+
+constexpr int kMaxRawGpuToneCurvePoints = 12;
 
 constexpr const char* kRawVertexShader = R"GLSL(
 #version 330 core
@@ -66,6 +69,29 @@ uniform float uMosaicChromaStrength;
 uniform int uMosaicRadius;
 uniform float uMosaicEdgeProtection;
 uniform int uMosaicIterations;
+uniform int uToneCurvePointCount;
+uniform vec2 uToneCurvePoints[12];
+
+float applyToneCurveChannel(float value) {
+    if (uToneCurvePointCount < 2 || value <= 0.0) {
+        return value;
+    }
+
+    vec2 previous = uToneCurvePoints[0];
+    for (int i = 1; i < 12; ++i) {
+        if (i >= uToneCurvePointCount) {
+            break;
+        }
+        vec2 current = uToneCurvePoints[i];
+        if (value <= current.x) {
+            float span = max(current.x - previous.x, 0.00001);
+            float t = clamp((value - previous.x) / span, 0.0, 1.0);
+            return mix(previous.y, current.y, t);
+        }
+        previous = current;
+    }
+    return value + (previous.y - previous.x);
+}
 
 int cfaAt(ivec2 visibleP) {
     int x = visibleP.x & 1;
@@ -584,6 +610,10 @@ void main() {
     }
 
     rgb *= uExposure;
+    rgb = vec3(
+        applyToneCurveChannel(rgb.r),
+        applyToneCurveChannel(rgb.g),
+        applyToneCurveChannel(rgb.b));
     FragColor = vec4(rgb, 1.0);
 }
 )GLSL";
@@ -603,6 +633,29 @@ uniform mat3 uCameraToWorking;
 uniform int uUseCameraTransform;
 uniform int uDebugView;
 uniform float uExposure;
+uniform int uToneCurvePointCount;
+uniform vec2 uToneCurvePoints[12];
+
+float applyToneCurveChannel(float value) {
+    if (uToneCurvePointCount < 2 || value <= 0.0) {
+        return value;
+    }
+
+    vec2 previous = uToneCurvePoints[0];
+    for (int i = 1; i < 12; ++i) {
+        if (i >= uToneCurvePointCount) {
+            break;
+        }
+        vec2 current = uToneCurvePoints[i];
+        if (value <= current.x) {
+            float span = max(current.x - previous.x, 0.00001);
+            float t = clamp((value - previous.x) / span, 0.0, 1.0);
+            return mix(previous.y, current.y, t);
+        }
+        previous = current;
+    }
+    return value + (previous.y - previous.x);
+}
 
 vec2 orientVisibleUv(vec2 uv) {
     vec2 q = clamp(uv, vec2(0.0), vec2(0.999999));
@@ -639,6 +692,10 @@ void main() {
         rgb = uCameraToWorking * rgb;
     }
     rgb *= uExposure;
+    rgb = vec3(
+        applyToneCurveChannel(rgb.r),
+        applyToneCurveChannel(rgb.g),
+        applyToneCurveChannel(rgb.b));
     FragColor = vec4(rgb, 1.0);
 }
 )GLSL";
@@ -668,6 +725,42 @@ std::size_t HashBuffer(const std::vector<T>& data) {
 
 void MixHash(std::size_t& hash, std::size_t value) {
     hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+}
+
+void MixFloatHash(std::size_t& hash, float value) {
+    MixHash(hash, std::hash<float>{}(value));
+}
+
+void MixDoubleHash(std::size_t& hash, double value) {
+    MixHash(hash, std::hash<double>{}(value));
+}
+
+void UploadToneCurveUniforms(unsigned int program, const RawDevelopSettings& settings) {
+    int count = 0;
+    std::array<float, kMaxRawGpuToneCurvePoints * 2> packed {};
+    for (const RawToneCurvePoint& point : settings.toneCurvePoints) {
+        if (count >= kMaxRawGpuToneCurvePoints) {
+            break;
+        }
+        if (!std::isfinite(point.input) || !std::isfinite(point.output)) {
+            continue;
+        }
+        packed[static_cast<std::size_t>(count) * 2] =
+            std::clamp(point.input, 0.0f, 1.0f);
+        packed[static_cast<std::size_t>(count) * 2 + 1] =
+            std::clamp(point.output, 0.0f, 1.0f);
+        ++count;
+    }
+
+    glUniform1i(glGetUniformLocation(program, "uToneCurvePointCount"), count);
+    for (int i = 0; i < count; ++i) {
+        char uniformName[48] = {};
+        snprintf(uniformName, sizeof(uniformName), "uToneCurvePoints[%d]", i);
+        glUniform2f(
+            glGetUniformLocation(program, uniformName),
+            packed[static_cast<std::size_t>(i) * 2],
+            packed[static_cast<std::size_t>(i) * 2 + 1]);
+    }
 }
 
 int PatternUniform(CfaPattern pattern) {
@@ -1017,6 +1110,8 @@ void RawGpuPipeline::Clear() {
     if (m_LinearTexture) glDeleteTextures(1, &m_LinearTexture);
     if (m_OutputTexture) glDeleteTextures(1, &m_OutputTexture);
     if (m_OutputFbo) glDeleteFramebuffers(1, &m_OutputFbo);
+    if (m_QuadVbo) glDeleteBuffers(1, &m_QuadVbo);
+    if (m_QuadVao) glDeleteVertexArrays(1, &m_QuadVao);
     m_Program = 0;
     m_LinearProgram = 0;
     m_RawTexture = 0;
@@ -1024,6 +1119,8 @@ void RawGpuPipeline::Clear() {
     m_LinearTexture = 0;
     m_OutputTexture = 0;
     m_OutputFbo = 0;
+    m_QuadVao = 0;
+    m_QuadVbo = 0;
     m_RawWidth = 0;
     m_RawHeight = 0;
     m_OutputWidth = 0;
@@ -1174,8 +1271,17 @@ std::size_t HashDngGainMaps(const std::vector<DngGainMapOpcode>& maps) {
         MixHash(hash, static_cast<std::size_t>(map.left));
         MixHash(hash, static_cast<std::size_t>(map.bottom));
         MixHash(hash, static_cast<std::size_t>(map.right));
+        MixHash(hash, static_cast<std::size_t>(map.plane));
+        MixHash(hash, static_cast<std::size_t>(map.planes));
         MixHash(hash, static_cast<std::size_t>(map.rowPitch));
         MixHash(hash, static_cast<std::size_t>(map.colPitch));
+        MixHash(hash, static_cast<std::size_t>(map.mapPointsV));
+        MixHash(hash, static_cast<std::size_t>(map.mapPointsH));
+        MixHash(hash, static_cast<std::size_t>(map.mapPlanes));
+        MixDoubleHash(hash, map.mapSpacingV);
+        MixDoubleHash(hash, map.mapSpacingH);
+        MixDoubleHash(hash, map.mapOriginV);
+        MixDoubleHash(hash, map.mapOriginH);
         MixHash(hash, HashBuffer(map.gains));
     }
     return hash;
@@ -1197,11 +1303,26 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
     }
 
     std::size_t fingerprint = HashRawBuffer(raw.rawBuffer);
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.rawWidth));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.rawHeight));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.visibleWidth));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.visibleHeight));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.leftMargin));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.topMargin));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.bitDepth));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.orientation));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.cfaPattern));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.pixelLayout));
+    MixFloatHash(fingerprint, metadata.blackLevel);
+    for (float value : metadata.perChannelBlack) {
+        MixFloatHash(fingerprint, value);
+    }
+    MixFloatHash(fingerprint, metadata.whiteLevel);
     MixHash(fingerprint, HashDngGainMaps(metadata.dngGainMaps));
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideBlackLevel));
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideWhiteLevel));
-    MixHash(fingerprint, std::hash<float>{}(settings.blackLevelOverride));
-    MixHash(fingerprint, std::hash<float>{}(settings.whiteLevelOverride));
+    MixFloatHash(fingerprint, settings.blackLevelOverride);
+    MixFloatHash(fingerprint, settings.whiteLevelOverride);
     if (m_CorrectedRawTexture != 0 && m_RawWidth == width && m_RawHeight == height && m_CorrectedRawFingerprint == fingerprint) {
         outHasCorrectedRaw = true;
         return true;
@@ -1286,6 +1407,20 @@ bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevel
     MixHash(fingerprint, static_cast<std::size_t>(width));
     MixHash(fingerprint, static_cast<std::size_t>(height));
     MixHash(fingerprint, static_cast<std::size_t>(channels));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.visibleWidth));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.visibleHeight));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.leftMargin));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.topMargin));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.bitDepth));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.orientation));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.pixelLayout));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.linearSampleFormat));
+    MixFloatHash(fingerprint, metadata.blackLevel);
+    MixFloatHash(fingerprint, metadata.whiteLevel);
+    MixHash(fingerprint, static_cast<std::size_t>(settings.overrideBlackLevel));
+    MixHash(fingerprint, static_cast<std::size_t>(settings.overrideWhiteLevel));
+    MixFloatHash(fingerprint, settings.blackLevelOverride);
+    MixFloatHash(fingerprint, settings.whiteLevelOverride);
     if (!raw.linearUInt16Buffer.empty()) {
         MixHash(fingerprint, HashBuffer(raw.linearUInt16Buffer));
     } else {
@@ -1383,6 +1518,56 @@ bool RawGpuPipeline::EnsureOutput(int width, int height) {
     return true;
 }
 
+bool RawGpuPipeline::EnsureFullscreenQuad() {
+    if (m_QuadVao != 0 && m_QuadVbo != 0) {
+        return true;
+    }
+
+    if (m_QuadVao != 0) {
+        glDeleteVertexArrays(1, &m_QuadVao);
+        m_QuadVao = 0;
+    }
+    if (m_QuadVbo != 0) {
+        glDeleteBuffers(1, &m_QuadVbo);
+        m_QuadVbo = 0;
+    }
+
+    const float vertices[] = {
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f
+    };
+
+    glGenVertexArrays(1, &m_QuadVao);
+    glGenBuffers(1, &m_QuadVbo);
+    if (m_QuadVao == 0 || m_QuadVbo == 0) {
+        m_LastError = "RAW render failed: fullscreen quad allocation returned 0.";
+        if (m_QuadVbo != 0) {
+            glDeleteBuffers(1, &m_QuadVbo);
+            m_QuadVbo = 0;
+        }
+        if (m_QuadVao != 0) {
+            glDeleteVertexArrays(1, &m_QuadVao);
+            m_QuadVao = 0;
+        }
+        return false;
+    }
+
+    glBindVertexArray(m_QuadVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_QuadVbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    return true;
+}
+
 unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSettings& settings, int previewMaxDimension) {
     m_LastError.clear();
     const RawMetadata& metadata = raw.metadata;
@@ -1472,29 +1657,16 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         glUniform1i(glGetUniformLocation(m_LinearProgram, "uUseCameraTransform"), settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
         glUniform1i(glGetUniformLocation(m_LinearProgram, "uDebugView"), DebugViewUniform(settings.debugView));
         glUniform1f(glGetUniformLocation(m_LinearProgram, "uExposure"), exposure);
+        UploadToneCurveUniforms(m_LinearProgram, settings);
 
-        static unsigned int vao = 0;
-        static unsigned int vbo = 0;
-        if (vao == 0) {
-            const float vertices[] = {
-                -1.0f, -1.0f, 0.0f, 0.0f,
-                 1.0f, -1.0f, 1.0f, 0.0f,
-                 1.0f,  1.0f, 1.0f, 1.0f,
-                -1.0f, -1.0f, 0.0f, 0.0f,
-                 1.0f,  1.0f, 1.0f, 1.0f,
-                -1.0f,  1.0f, 0.0f, 1.0f
-            };
-            glGenVertexArrays(1, &vao);
-            glGenBuffers(1, &vbo);
-            glBindVertexArray(vao);
-            glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-            glEnableVertexAttribArray(0);
-            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
-            glEnableVertexAttribArray(1);
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+        if (!EnsureFullscreenQuad()) {
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+            glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+            glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+            return 0;
         }
-        glBindVertexArray(vao);
+        glBindVertexArray(m_QuadVao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -1569,6 +1741,7 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glUniform1i(glGetUniformLocation(m_Program, "uUseCameraTransform"), settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uDebugView"), DebugViewUniform(settings.debugView));
     glUniform1f(glGetUniformLocation(m_Program, "uExposure"), exposure);
+    UploadToneCurveUniforms(m_Program, settings);
     glUniform1i(glGetUniformLocation(m_Program, "uHighlightMode"), static_cast<int>(settings.highlightMode));
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightStrength"), settings.highlightStrength);
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightThreshold"), settings.highlightThreshold);
@@ -1589,28 +1762,14 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glUniform1f(glGetUniformLocation(m_Program, "uMosaicEdgeProtection"), settings.mosaicDenoise.edgeProtection);
     glUniform1i(glGetUniformLocation(m_Program, "uMosaicIterations"), std::clamp(settings.mosaicDenoise.iterations, 1, 2));
 
-    static unsigned int vao = 0;
-    static unsigned int vbo = 0;
-    if (vao == 0) {
-        const float vertices[] = {
-            -1.0f, -1.0f, 0.0f, 0.0f,
-             1.0f, -1.0f, 1.0f, 0.0f,
-             1.0f,  1.0f, 1.0f, 1.0f,
-            -1.0f, -1.0f, 0.0f, 0.0f,
-             1.0f,  1.0f, 1.0f, 1.0f,
-            -1.0f,  1.0f, 0.0f, 1.0f
-        };
-        glGenVertexArrays(1, &vao);
-        glGenBuffers(1, &vbo);
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+    if (!EnsureFullscreenQuad()) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glUseProgram(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+        glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+        return 0;
     }
-    glBindVertexArray(vao);
+    glBindVertexArray(m_QuadVao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
     glBindTexture(GL_TEXTURE_2D, 0);

@@ -11,6 +11,48 @@ bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
 
+bool IsDataMathImageInputSocketId(const std::string& socketId) {
+    return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
+        socketId == EditorNodeGraph::kDataMathBaseInputSocketId;
+}
+
+bool IsScalarAverageNode(const EditorNodeGraph::Node& node) {
+    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
+        node.dataMathMode == EditorNodeGraph::DataMathMode::Average;
+}
+
+bool IsImageAverageNode(const EditorNodeGraph::Node& node) {
+    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
+        node.dataMathMode == EditorNodeGraph::DataMathMode::ImageAverage;
+}
+
+bool DataMathAllowsScalarTarget(const EditorNodeGraph::Node& node, const std::string& socketId) {
+    if (node.kind != EditorNodeGraph::NodeKind::DataMath || IsImageAverageNode(node)) {
+        return false;
+    }
+    if (IsScalarAverageNode(node)) {
+        return EditorNodeGraph::IsDataMathInputSocketId(socketId);
+    }
+    return socketId == EditorNodeGraph::kMaskInputSocketId;
+}
+
+bool DataMathAllowsScalarToImageTarget(const EditorNodeGraph::Node& node, const std::string& socketId) {
+    return node.kind == EditorNodeGraph::NodeKind::DataMath &&
+        !IsScalarAverageNode(node) &&
+        !IsImageAverageNode(node) &&
+        IsDataMathImageInputSocketId(socketId);
+}
+
+bool DataMathAllowsFullImageTarget(const EditorNodeGraph::Node& node, const std::string& socketId) {
+    if (node.kind != EditorNodeGraph::NodeKind::DataMath || IsScalarAverageNode(node)) {
+        return false;
+    }
+    if (IsImageAverageNode(node)) {
+        return EditorNodeGraph::IsDataMathInputSocketId(socketId);
+    }
+    return IsDataMathImageInputSocketId(socketId);
+}
+
 Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) {
     Link link;
     link.fromNodeId = fromNodeId;
@@ -18,6 +60,174 @@ Link MakeSocketLink(int fromNodeId, const std::string& fromSocketId, int toNodeI
     link.toNodeId = toNodeId;
     link.toSocketId = toSocketId;
     return link;
+}
+
+enum class MfsrGraphInputFamily {
+    Unknown,
+    RawDerived,
+    RasterDerived,
+    Mixed
+};
+
+MfsrGraphInputFamily MergeMfsrGraphInputFamily(MfsrGraphInputFamily a, MfsrGraphInputFamily b) {
+    if (a == MfsrGraphInputFamily::Mixed || b == MfsrGraphInputFamily::Mixed) {
+        return MfsrGraphInputFamily::Mixed;
+    }
+    if (a == MfsrGraphInputFamily::Unknown) {
+        return b;
+    }
+    if (b == MfsrGraphInputFamily::Unknown || a == b) {
+        return a;
+    }
+    return MfsrGraphInputFamily::Mixed;
+}
+
+MfsrGraphInputFamily ResolveMfsrGraphInputFamily(
+    const Graph& graph,
+    int nodeId,
+    const std::string& socketId) {
+    std::unordered_set<std::string> visiting;
+    std::function<MfsrGraphInputFamily(int, const std::string&)> resolve =
+        [&](int currentNodeId, const std::string& currentSocketId) -> MfsrGraphInputFamily {
+            const std::string key = std::to_string(currentNodeId) + ":" + currentSocketId;
+            if (!visiting.insert(key).second) {
+                return MfsrGraphInputFamily::Unknown;
+            }
+
+            auto finish = [&](MfsrGraphInputFamily family) {
+                visiting.erase(key);
+                return family;
+            };
+
+            const Node* node = graph.FindNode(currentNodeId);
+            if (!node) {
+                return finish(MfsrGraphInputFamily::Unknown);
+            }
+
+            auto inputFamily = [&](const std::string& inputSocketId) {
+                const Link* upstream = graph.FindInputLink(currentNodeId, inputSocketId);
+                return upstream
+                    ? resolve(upstream->fromNodeId, upstream->fromSocketId)
+                    : MfsrGraphInputFamily::Unknown;
+            };
+
+            auto mergeInputs = [&](const std::vector<std::string>& inputSocketIds) {
+                MfsrGraphInputFamily family = MfsrGraphInputFamily::Unknown;
+                for (const std::string& inputSocketId : inputSocketIds) {
+                    family = MergeMfsrGraphInputFamily(family, inputFamily(inputSocketId));
+                    if (family == MfsrGraphInputFamily::Mixed) {
+                        break;
+                    }
+                }
+                return family;
+            };
+
+            switch (node->kind) {
+                case NodeKind::RawSource:
+                case NodeKind::RawDevelopment:
+                case NodeKind::RawNeuralDenoise:
+                case NodeKind::RawDecode:
+                case NodeKind::RawDevelop:
+                    return finish(MfsrGraphInputFamily::RawDerived);
+                case NodeKind::Image:
+                case NodeKind::ImageGenerator:
+                    return finish(MfsrGraphInputFamily::RasterDerived);
+                case NodeKind::Layer:
+                case NodeKind::Lut:
+                case NodeKind::RawDetailAutoMask:
+                case NodeKind::RawDetailFusion:
+                case NodeKind::ChannelSplit:
+                case NodeKind::ImageToMask:
+                    return finish(inputFamily(kImageInputSocketId));
+                case NodeKind::HdrMerge:
+                    if (currentSocketId == kHdrMergeInput1SocketId ||
+                        currentSocketId == kHdrMergeInput2SocketId ||
+                        currentSocketId == kHdrMergeInput3SocketId) {
+                        return finish(inputFamily(currentSocketId));
+                    }
+                    return finish(mergeInputs({ kHdrMergeInput1SocketId, kHdrMergeInput2SocketId, kHdrMergeInput3SocketId }));
+                case NodeKind::Mfsr: {
+                    if (IsMfsrInputSocketId(currentSocketId)) {
+                        return finish(inputFamily(currentSocketId));
+                    }
+                    std::vector<std::string> inputSocketIds;
+                    inputSocketIds.reserve(kMaxMfsrInputCount);
+                    for (int inputIndex = 0; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
+                        inputSocketIds.push_back(MfsrInputSocketId(inputIndex));
+                    }
+                    return finish(mergeInputs(inputSocketIds));
+                }
+                case NodeKind::Mix:
+                    return finish(mergeInputs({ kMixInputASocketId, kMixInputBSocketId }));
+                case NodeKind::DataMath: {
+                    std::vector<std::string> inputSocketIds;
+                    inputSocketIds.reserve(kMaxDataMathInputCount + 1);
+                    for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                        inputSocketIds.push_back(DataMathInputSocketId(inputIndex));
+                    }
+                    inputSocketIds.push_back(kDataMathBaseInputSocketId);
+                    return finish(mergeInputs(inputSocketIds));
+                }
+                case NodeKind::ChannelCombine:
+                case NodeKind::Output:
+                    return finish(mergeInputs({ "r", "g", "b", "a", kImageInputSocketId }));
+                case NodeKind::MaskGenerator:
+                case NodeKind::MaskCombine:
+                case NodeKind::MaskUtility:
+                case NodeKind::CustomMask:
+                case NodeKind::Composite:
+                case NodeKind::Scope:
+                case NodeKind::Preview:
+                    return finish(MfsrGraphInputFamily::Unknown);
+            }
+            return finish(MfsrGraphInputFamily::Unknown);
+        };
+
+    return resolve(nodeId, socketId);
+}
+
+bool MfsrGraphInputFamiliesConflict(MfsrGraphInputFamily a, MfsrGraphInputFamily b) {
+    if (a == MfsrGraphInputFamily::Mixed || b == MfsrGraphInputFamily::Mixed) {
+        return true;
+    }
+    return a != MfsrGraphInputFamily::Unknown &&
+        b != MfsrGraphInputFamily::Unknown &&
+        a != b;
+}
+
+bool CanConnectMfsrInputFamily(
+    const Graph& graph,
+    int fromNodeId,
+    const std::string& fromSocketId,
+    int toNodeId,
+    const std::string& toSocketId,
+    std::string* errorMessage) {
+    const MfsrGraphInputFamily candidateFamily =
+        ResolveMfsrGraphInputFamily(graph, fromNodeId, fromSocketId);
+    if (candidateFamily == MfsrGraphInputFamily::Mixed) {
+        if (errorMessage) {
+            *errorMessage = "MFSR inputs cannot use an upstream stream that already mixes RAW-derived and raster-derived frames.";
+        }
+        return false;
+    }
+
+    for (const Link& link : graph.GetLinks()) {
+        if (link.toNodeId != toNodeId ||
+            link.toSocketId == toSocketId ||
+            !IsMfsrInputSocketId(link.toSocketId)) {
+            continue;
+        }
+        const MfsrGraphInputFamily existingFamily =
+            ResolveMfsrGraphInputFamily(graph, link.fromNodeId, link.fromSocketId);
+        if (MfsrGraphInputFamiliesConflict(candidateFamily, existingFamily)) {
+            if (errorMessage) {
+                *errorMessage = "MFSR inputs cannot mix RAW-derived and raster-derived frames.";
+            }
+            return false;
+        }
+    }
+
+    return true;
 }
 
 } // namespace
@@ -61,6 +271,7 @@ bool Graph::CanConnectSockets(
     }
     if (from->kind == NodeKind::Output || to->kind == NodeKind::Image ||
         to->kind == NodeKind::RawSource ||
+        to->kind == NodeKind::RawDevelopment ||
         from->kind == NodeKind::Composite ||
         to->kind == NodeKind::Composite) {
         if (errorMessage) *errorMessage = "That pin direction is not valid.";
@@ -136,20 +347,9 @@ bool Graph::CanConnectSockets(
         const bool isScalarToImage = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image;
 
         if (isScalarToScalar || isScalarImageToScalar) {
-            const bool validScalarTarget =
-                (to->kind == NodeKind::Layer && toSocketId == kMaskInputSocketId) ||
-                (to->kind == NodeKind::Lut && toSocketId == kMaskInputSocketId) ||
-                (to->kind == NodeKind::RawDevelop && toSocketId == kMaskInputSocketId) ||
-                (to->kind == NodeKind::RawDetailFusion && toSocketId == kMaskInputSocketId) ||
-                (to->kind == NodeKind::Mix && toSocketId == kMixFactorSocketId) ||
-                (to->kind == NodeKind::MaskCombine &&
-                    (toSocketId == kMaskCombineInputASocketId || toSocketId == kMaskCombineInputBSocketId)) ||
-                (to->kind == NodeKind::MaskUtility && toSocketId == kMaskUtilityInputSocketId) ||
-                (to->kind == NodeKind::Lut && IsChannelSocketId(toSocketId)) ||
-                (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(toSocketId)) ||
-                (to->kind == NodeKind::Output && IsChannelSocketId(toSocketId));
+            const bool validScalarTarget = IsScalarTargetSocket(toNodeId, toSocketId);
             if (!validScalarSource || !validScalarTarget) {
-                if (errorMessage) *errorMessage = "Scalar outputs can connect to layer masks, mix factors, scalar utilities, channels, or RGBA outputs.";
+                if (errorMessage) *errorMessage = "Scalar outputs can connect to masks, mix factors, scalar utilities, Data Math masks, channels, or RGBA outputs.";
                 return false;
             }
         } else if (isScalarToImage) {
@@ -162,9 +362,9 @@ bool Graph::CanConnectSockets(
                 (to->kind == NodeKind::Output && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::ImageToMask && toSocketId == kImageToMaskInputSocketId) ||
                 (to->kind == NodeKind::ChannelSplit && toSocketId == kImageInputSocketId) ||
-                (to->kind == NodeKind::DataMath && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId));
+                DataMathAllowsScalarToImageTarget(*to, toSocketId);
             if (!validScalarSource || !validImageTarget) {
-                if (errorMessage) *errorMessage = "Scalar outputs can connect to layer/image inputs, Blend Images, Data Math, scalar converters, split nodes, or the output node.";
+                if (errorMessage) *errorMessage = "Scalar outputs can connect to image inputs, Blend Images, Data Math, scalar converters, split nodes, or the output node.";
                 return false;
             }
         } else {
@@ -183,7 +383,16 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Only image sockets can be connected in the render chain in this pass.";
         return false;
     }
-    if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
+    if (to->kind == NodeKind::Mfsr && IsMfsrInputSocketId(toSocketId)) {
+        if (fromIsScalarStream) {
+            if (errorMessage) *errorMessage = "MFSR inputs require full image frames, not scalar streams.";
+            return false;
+        }
+        if (!CanConnectMfsrInputFamily(*this, fromNodeId, fromSocketId, toNodeId, toSocketId, errorMessage)) {
+            return false;
+        }
+    }
+    if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDevelopment || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
         if (errorMessage) *errorMessage = "Only image-producing nodes, layer, mix, and output nodes can be in the render chain.";
         return false;
     }
@@ -214,6 +423,10 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Image links must target an HDR Merge image input.";
         return false;
     }
+    if (to->kind == NodeKind::Mfsr && !IsMfsrInputSocketId(toSocketId)) {
+        if (errorMessage) *errorMessage = "Image links must target an MFSR frame input.";
+        return false;
+    }
     if (to->kind == NodeKind::Output && toSocketId != kImageInputSocketId) {
         if (errorMessage) *errorMessage = "Image links must target the output image input.";
         return false;
@@ -226,12 +439,18 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Image links must target the split image input.";
         return false;
     }
-    if (to->kind == NodeKind::DataMath && toSocketId != kMixInputASocketId && toSocketId != kMixInputBSocketId) {
-        if (errorMessage) *errorMessage = "Image links must target Data Math input A or B.";
+    if (to->kind == NodeKind::DataMath && IsImageAverageNode(*to) && fromIsScalarStream) {
+        if (errorMessage) *errorMessage = "Average Images inputs require full image streams.";
         return false;
     }
-    if (to->kind != NodeKind::Layer && to->kind != NodeKind::Lut && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath) {
-        if (errorMessage) *errorMessage = "Image links must target a layer, LUT, HDR Merge, blend node, data math node, split node, scalar converter, or the output.";
+    if (to->kind == NodeKind::DataMath && !DataMathAllowsFullImageTarget(*to, toSocketId)) {
+        if (errorMessage) *errorMessage = IsScalarAverageNode(*to)
+            ? "Average inputs require scalar masks or channel streams."
+            : "Image links must target a Data Math input or the masked Base input.";
+        return false;
+    }
+    if (to->kind != NodeKind::Layer && to->kind != NodeKind::Lut && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Mfsr && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath) {
+        if (errorMessage) *errorMessage = "Image links must target a layer, LUT, HDR Merge, MFSR, blend node, data math node, split node, scalar converter, or the output.";
         return false;
     }
     if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
@@ -240,6 +459,89 @@ bool Graph::CanConnectSockets(
     }
 
     return true;
+}
+
+bool Graph::IsScalarTargetSocket(int nodeId, const std::string& socketId) const {
+    const Node* to = FindNode(nodeId);
+    SocketDefinition toSocket;
+    if (!to ||
+        !FindSocket(nodeId, socketId, &toSocket) ||
+        toSocket.direction != SocketDirection::Input ||
+        toSocket.type != SocketType::Mask) {
+        return false;
+    }
+
+    return (to->kind == NodeKind::Layer && socketId == kMaskInputSocketId) ||
+        (to->kind == NodeKind::Lut && socketId == kMaskInputSocketId) ||
+        (to->kind == NodeKind::RawDevelop && socketId == kMaskInputSocketId) ||
+        (to->kind == NodeKind::RawDetailFusion && socketId == kMaskInputSocketId) ||
+        (to->kind == NodeKind::Mix && socketId == kMixFactorSocketId) ||
+        DataMathAllowsScalarTarget(*to, socketId) ||
+        (to->kind == NodeKind::MaskCombine &&
+            (socketId == kMaskCombineInputASocketId || socketId == kMaskCombineInputBSocketId)) ||
+        (to->kind == NodeKind::MaskUtility && socketId == kMaskUtilityInputSocketId) ||
+        (to->kind == NodeKind::Lut && IsChannelSocketId(socketId)) ||
+        (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(socketId)) ||
+        (to->kind == NodeKind::Output && IsChannelSocketId(socketId));
+}
+
+bool Graph::CanInsertImageToScalarExtractor(
+    int fromNodeId,
+    const std::string& fromSocketId,
+    int toNodeId,
+    const std::string& toSocketId,
+    std::string* errorMessage) const {
+    const Node* from = FindNode(fromNodeId);
+    const Node* to = FindNode(toNodeId);
+    SocketDefinition fromSocket;
+    SocketDefinition toSocket;
+    if (!from || !to || fromNodeId == toNodeId ||
+        !FindSocket(fromNodeId, fromSocketId, &fromSocket) ||
+        !FindSocket(toNodeId, toSocketId, &toSocket)) {
+        if (errorMessage) *errorMessage = "Invalid socket connection.";
+        return false;
+    }
+    if (fromSocket.direction != SocketDirection::Output || toSocket.direction != SocketDirection::Input) {
+        if (errorMessage) *errorMessage = "That pin direction is not valid.";
+        return false;
+    }
+    if (from->kind == NodeKind::Output || to->kind == NodeKind::Image ||
+        to->kind == NodeKind::RawSource ||
+        to->kind == NodeKind::RawDevelopment ||
+        from->kind == NodeKind::Composite ||
+        to->kind == NodeKind::Composite) {
+        if (errorMessage) *errorMessage = "That pin direction is not valid.";
+        return false;
+    }
+    if (fromSocket.type != SocketType::Image || IsScalarSocketStream(fromNodeId, fromSocketId)) {
+        if (errorMessage) *errorMessage = "Only full image outputs need a scalar extractor.";
+        return false;
+    }
+    if (!IsScalarTargetSocket(toNodeId, toSocketId)) {
+        if (errorMessage) *errorMessage = "That input does not accept scalar fields.";
+        return false;
+    }
+    if (!IsRenderChainNode(*from)) {
+        if (errorMessage) *errorMessage = "Only render-chain image outputs can be extracted to scalar fields.";
+        return false;
+    }
+    if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
+        if (errorMessage) *errorMessage = "That connection would create a cycle.";
+        return false;
+    }
+    return true;
+}
+
+bool Graph::CanConnectSocketsOrInsertExtractor(
+    int fromNodeId,
+    const std::string& fromSocketId,
+    int toNodeId,
+    const std::string& toSocketId) const {
+    std::string ignoredError;
+    if (CanConnectSockets(fromNodeId, fromSocketId, toNodeId, toSocketId, nullptr, &ignoredError)) {
+        return true;
+    }
+    return CanInsertImageToScalarExtractor(fromNodeId, fromSocketId, toNodeId, toSocketId);
 }
 
 bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage) {

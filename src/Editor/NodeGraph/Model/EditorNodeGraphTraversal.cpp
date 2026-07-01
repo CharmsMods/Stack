@@ -57,6 +57,7 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
             bool valid = false;
             switch (node->kind) {
                 case NodeKind::Image:
+                case NodeKind::RawDevelopment:
                 case NodeKind::RawSource:
                 case NodeKind::ImageGenerator:
                 case NodeKind::MaskGenerator:
@@ -131,6 +132,23 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     }
                     break;
                 }
+                case NodeKind::Mfsr: {
+                    const Link* reference = FindInputLink(nodeId, kMfsrReferenceInputSocketId);
+                    const Link* support = FindInputLink(nodeId, MfsrInputSocketId(1));
+                    valid = reference && support &&
+                        visit(reference->fromNodeId) &&
+                        visit(support->fromNodeId);
+                    if (valid) {
+                        for (int inputIndex = 2; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
+                            const Link* input = FindInputLink(nodeId, MfsrInputSocketId(inputIndex));
+                            if (input && !visit(input->fromNodeId)) {
+                                valid = false;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
                 case NodeKind::RawDetailAutoMask: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
                     valid = upstream ? visit(upstream->fromNodeId) : false;
@@ -145,11 +163,23 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     break;
                 }
                 case NodeKind::DataMath: {
-                    const Link* inputA = FindInputLink(nodeId, kMixInputASocketId);
-                    const Link* inputB = FindInputLink(nodeId, kMixInputBSocketId);
-                    valid = inputA && visit(inputA->fromNodeId);
-                    if (valid && inputB) {
-                        valid = visit(inputB->fromNodeId);
+                    bool hasInput = false;
+                    int inputCount = 0;
+                    valid = true;
+                    for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                        if (const Link* input = FindInputLink(nodeId, DataMathInputSocketId(inputIndex))) {
+                            hasInput = true;
+                            ++inputCount;
+                            valid = valid && visit(input->fromNodeId);
+                            if (!valid) {
+                                break;
+                            }
+                        }
+                    }
+                    if (node->dataMathMode == DataMathMode::ImageAverage) {
+                        valid = valid && inputCount >= 2;
+                    } else {
+                        valid = valid && hasInput;
                     }
                     break;
                 }
@@ -351,6 +381,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::RawDetailAutoMask:
             case NodeKind::RawDetailFusion:
             case NodeKind::HdrMerge:
+            case NodeKind::Mfsr:
             case NodeKind::Lut:
             case NodeKind::Layer:
             case NodeKind::Mix:
@@ -397,7 +428,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
 
     if (direction < 0) {
         std::vector<int> candidates;
-        auto addInputCandidate = [&](const char* socketId) {
+        auto addInputCandidate = [&](const std::string& socketId) {
             if (const Link* upstream = FindInputLink(nodeId, socketId)) {
                 if (const Node* upstreamNode = FindNode(upstream->fromNodeId)) {
                     if (isMainChainNodeKind(upstreamNode->kind)) {
@@ -432,15 +463,24 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
                 addInputCandidate(kHdrMergeInput2SocketId);
                 addInputCandidate(kHdrMergeInput3SocketId);
                 break;
+            case NodeKind::Mfsr:
+                for (int inputIndex = 0; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
+                    addInputCandidate(MfsrInputSocketId(inputIndex));
+                }
+                break;
             case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
             case NodeKind::RawNeuralDenoise:
                 addInputCandidate(kRawInputSocketId);
                 break;
             case NodeKind::Mix:
-            case NodeKind::DataMath:
                 addInputCandidate(kMixInputASocketId);
                 addInputCandidate(kMixInputBSocketId);
+                break;
+            case NodeKind::DataMath:
+                for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
+                    addInputCandidate(DataMathInputSocketId(inputIndex));
+                }
                 break;
             default:
                 break;

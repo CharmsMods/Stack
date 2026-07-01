@@ -71,7 +71,9 @@ private:
     ImVec2 m_StaticCompareSourceMin = ImVec2(0.0f, 0.0f);
     ImVec2 m_StaticCompareSourceMax = ImVec2(0.0f, 0.0f);
     unsigned int m_CheckerTex = 0;
+    unsigned int m_DetachedToggleTexture = 0;
     bool m_ShowCompositeAssetPicker = false;
+    bool m_PendingCompositeAddImageDialog = false;
     ExportHandleType m_ActiveExportHandle = ExportHandleType::None;
     float m_ExportDragStartX = 0.0f;
     float m_ExportDragStartY = 0.0f;
@@ -94,6 +96,12 @@ private:
     float m_SceneResizeAnchorY = 0.0f;
     float m_SceneStartMouseAngle = 0.0f;
     std::vector<SnapGuideLine> m_CompositeSnapGuides;
+    float m_DetachedToggleHoverAnim = 0.0f;
+    float m_DetachedTogglePressAnim = 0.0f;
+    float m_ViewportHudAnim = 0.0f;
+    float m_CompositeSelectionOutlineAnim = 0.0f;
+    float m_CompositeSelectionHandleAnim = 0.0f;
+    float m_CompositeHoverOutlineAnim = 0.0f;
     DevelopSubjectRegionHandle m_ActiveDevelopSubjectHandle = DevelopSubjectRegionHandle::None;
     int m_ActiveDevelopSubjectNodeId = -1;
     int m_ActiveDevelopSubjectRegionId = -1;

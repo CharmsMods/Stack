@@ -1,0 +1,305 @@
+Stack Develop Node Planning Guide
+Date: 2026-06-10
+Status: Authoritative planning document, not a claim of current implementation
+Source base: DEVELOP_NODE_CONTEXT.txt + user direction from the current conversation
+
+Important reading note
+======================
+These documents are organized around image-editing concepts and data behavior first. They are not implementation sprint tickets. Each guide asks what the image data is, what Stack might do to it, why that choice may be good or bad, and what the choice affects elsewhere in the pipeline.
+
+Stack's target Develop node should be a solver, not a preset stack. Auto controls should guide the solver. Manual controls should expose the authored result. Graph-style controls should be treated as a first-class design direction, not an afterthought.
+
+06 - Color, White Balance, Mood Preservation, Skin, and Memory Colors
+=====================================================================
+
+Core position locked from user direction
+=======================================
+- Develop Auto is a data-aware solver, not a preset and not just a pile of ordinary edit sliders.
+- Natural Finished is the default Auto mode because the first render should be genuinely usable.
+- Auto should support Clean Base, Flat Editing Base, Bright Natural, Dark Natural, Punchy / High Contrast, and Maximum Range / Detail.
+- Flat Editing Base should not mean an ugly log dump. It should bring useful midtones and image information into visible range, flatten difficulty, and make later manual editing easier.
+- Auto controls are allowed to change many hidden authored values at once across RAW exposure, local exposure, denoise, color, tone, and dynamic range. That is not a flaw; it is the purpose of the solver.
+- Candidate solving is a desired direction: Auto may render multiple candidate outputs, remove duplicates or damaged results, show the remaining best options, and let the user pick or possibly merge them.
+- Subject importance should be automatic and user-guided. A soft overlay brush should allow users to mark important regions before or after Auto passes.
+- Exposure and brightness must not be collapsed into one vague concept. The solver may control both true RAW/data exposure and visible rendered brightness, while Manual should expose the difference clearly.
+- Denoise should default on, happen both before and after demosaic where applicable, and be separately exposed in Manual. The solver should prefer natural texture over plastic smoothing.
+- Manual edits should become mathematical biases when returning to Auto unless the user chooses to lock them.
+- Stack should avoid fake HDR, halos, ugly color shifts, false recovery claims, washed-out flattening, and plastic denoise, but it does not need to preserve every tiny detail at all costs. Some detail can be crushed or softened if that fits the image, the mode, or the user's intent.
+
+Purpose of this guide
+=====================
+This guide defines Stack's color philosophy for Develop: white balance, camera profiles, mood preservation, neutral correction, skin protection, memory colors, and graph-style color intent controls.
+
+The main principle is that color should be realistic and controllable, not hard-coded into one universal answer.
+
+The color problem
+=================
+RAW color is not just "the colors from the sensor." Camera sensors have color filters, spectral sensitivities, white-balance metadata, camera matrices/profiles, possible DNG forward/color matrices, and working/display transform choices. There is no simple universal conversion that guarantees both physical accuracy and pleasing photographic color for every camera/scene.
+
+The current Develop context already reflects this reality. DNG files can prefer DNG metadata or LibRaw camera matrices depending on available metadata. Non-DNG files currently default to LibRaw rgb_cam. The code comments state that Stack does not yet have a full color-management module and that LibRaw camera-to-sRGB fallback is approximate for V1. Future docs should preserve that truth: current color is usable but not final professional color management.
+
+Color should be separated into stages
+=====================================
+Conceptually, color work should be separated into:
+
+1. RAW/channel interpretation
+-----------------------------
+Sensor normalization, channel clipping awareness, white balance multipliers, and camera-native values.
+
+2. Camera-to-working transform
+------------------------------
+Convert camera-native color into a working scene-linear RGB space using the best available profile/matrix behavior.
+
+3. Color correction / realism protection
+----------------------------------------
+Fix obvious casts, preserve plausible mood, protect skin/memory colors, manage out-of-gamut or unstable colors.
+
+4. Color rendering / density
+----------------------------
+Make color look natural, rich, restrained, bright, muted, etc., according to mode/user intent.
+
+5. Downstream look / grade
+--------------------------
+Creative styling beyond Develop's realistic base.
+
+These can be fused in code for performance, but the logic should remain separate.
+
+White balance is not one correct answer
+=======================================
+White balance can mean:
+
+- Use camera As Shot metadata.
+- Neutralize grays/whites.
+- Preserve warm/cool scene mood.
+- Estimate daylight/reference balance.
+- Correct obvious ugly casts but keep believable atmosphere.
+- Follow a user-selected mood.
+
+For Develop's default Natural Finished mode, the best target is probably:
+
+Correct obvious errors while preserving believable scene mood.
+
+This means golden hour stays warm, candlelight can stay warm, night can stay cool, snow should not become blue by accident, and indoor mixed light should not be over-neutralized into lifeless color.
+
+Auto should not force every image to neutral. Auto should also not blindly trust camera metadata. Metadata is a clue, not absolute truth.
+
+Graph control: White Balance / Mood Map
+=======================================
+A graph is much better than only Temperature/Tint sliders for Auto intent.
+
+Possible graph:
+
+Horizontal axis:
+Neutral Correction  <---------------------->  Mood Preservation
+
+Vertical axis:
+Cooler / Cleaner  <------------------------>  Warmer / More Atmospheric
+
+This lets the user communicate intent:
+
+- Neutral product shot: Neutral Correction + maybe Cleaner.
+- Sunset: Mood Preservation + Warmer.
+- Night city: Mood Preservation + Cooler.
+- Portrait indoors: moderate mood preservation but skin-protection active.
+
+The graph position should influence:
+
+- Whether camera As Shot is trusted.
+- Whether Auto WB correction is strong or subtle.
+- Candidate WB alternatives.
+- Skin/memory color protection strength.
+- Tone/color density interactions.
+- Manual handoff biases.
+
+Manual should still expose Temperature/Tint or RGB multipliers for precise control.
+
+White-balance candidates
+========================
+When WB confidence is low or the scene is mixed-light, Auto should generate candidates:
+
+- As Shot / camera mood.
+- Neutral correction.
+- Mood-preserved correction.
+- Warmer or cooler plausible variant if graph intent suggests it.
+
+The candidate labels should say what changed:
+
+- "Neutral WB"
+- "Mood Warmth Preserved"
+- "Cleaner Cool Balance"
+- "Skin-Protected Warm Balance"
+
+The system should avoid overpopulating the gallery with tiny color differences unless WB is a major uncertainty.
+
+Camera profiles and transforms
+==============================
+Camera profiles should not be treated as sacred, but they should be respected as the foundation. The goal is:
+
+- Use the best available camera transform/profile information.
+- Do not pretend approximate fallback is perfect.
+- Validate color behavior against image statistics and diagnostics.
+- Allow future camera-specific calibration improvements.
+- Separate technical transform from pleasing rendering.
+
+ACES and OCIO are useful conceptual anchors because they separate camera/input transforms, scene-linear working spaces, look/technical transforms, and output/display transforms. Stack does not need to copy ACES, but it should copy the discipline: do not mix display rendering, camera conversion, and creative look into one untraceable blob.
+
+Memory colors
+=============
+Memory colors are colors humans strongly expect to look plausible:
+
+- Skin.
+- Sky.
+- Foliage.
+- Snow.
+- Neutral walls/paper.
+- Sunsets/fire/warm lights.
+- Water.
+
+Develop should protect memory colors gently, not force them. The goal is believable color, not standardized color.
+
+Examples:
+
+- Sky should not become cyan-toxic or purple unless the scene really supports it.
+- Foliage should not become radioactive green.
+- Snow should not become dirty yellow or intense blue unless mood says so.
+- Skin should not become gray, green, oversaturated orange, waxy, or clipped.
+
+Memory color should be confidence-based and mode-aware.
+
+Skin protection
+===============
+Skin deserves special handling but not reckless handling.
+
+Skin protection should:
+
+- Prevent extreme hue/tint shifts when skin confidence is high.
+- Protect skin highlights from harsh clipping.
+- Avoid excessive saturation or orange/red drift.
+- Avoid plastic denoise.
+- Preserve natural texture.
+- Respect scene mood; warm light on skin can remain warm.
+
+Skin protection should not:
+
+- Assume every warm object is skin.
+- Force all skin to one color.
+- Desaturate or neutralize skin so much that it looks dead.
+- Override the user's mood/color graph.
+
+User brushing can increase confidence. If the user marks a face/skin region, Stack can protect it more strongly.
+
+Saturation versus color density
+===============================
+Saturation is not one simple operation. Saturating scene-linear RGB before tone can behave differently from saturating display-referred values after tone. Strong saturation can clip channels, exaggerate color noise, break skin, or make highlights ugly.
+
+Develop should distinguish:
+
+- Technical color correctness.
+- Colorfulness/color density in the realistic rendering.
+- Creative grading/saturation downstream.
+
+Natural Finished can add modest color density when the image is dull, but it should avoid preset-like saturation. Punchy can allow stronger color. Flat Editing Base should probably keep color workable and not over-committed.
+
+Graph control: Color Realism Map
+================================
+Another useful graph:
+
+Horizontal axis:
+Accurate / Neutral  <---------------------->  Pleasing / Memory-Color Rendered
+
+Vertical axis:
+Restrained Color  <------------------------>  Rich Color Density
+
+This graph differs from WB Mood. WB Mood controls the color temperature/scene cast direction. Color Realism controls how much color rendering Stack applies after the camera/profile base.
+
+For example:
+
+- Clean Base: Accurate/Neutral + Restrained.
+- Natural Finished: slightly toward Pleasing + moderate richness.
+- Punchy: Pleasing + Rich.
+- Flat Editing Base: perhaps accurate/moderate and restrained to preserve editability.
+
+Color and dynamic range interactions
+====================================
+Tone and exposure can change perceived color. Highlight compression can desaturate or shift bright colors. Shadow lift can reveal chroma noise. WB changes can affect clipping. Color density can make highlight rolloff less stable.
+
+Therefore color cannot be solved completely independently.
+
+Examples:
+
+- A warm sunset highlight should not be neutralized by highlight protection.
+- A blue shadow lift may reveal chroma noise; denoise/color cleanup may be needed.
+- A white dress under warm light may need texture protection without turning sterile white.
+- A saturated red flower may need gamut/hue protection before tone.
+
+The Auto solver should evaluate color after render candidates, not only before.
+
+Manual controls
+===============
+Manual should expose deep color control without duplicating the same control under different names.
+
+Recommended Manual grouping:
+
+1. RAW White Balance
+--------------------
+As Shot, Auto/Daylight, Neutral, Manual RGB multipliers, Temperature/Tint if available.
+
+2. Camera Transform
+-------------------
+Transform enabled, source selection, profile/matrix source, debug flags, future camera profile selection.
+
+3. Color Correction
+-------------------
+Neutrality/mood balance, tint correction, memory-color protection strength, skin protection strength.
+
+4. Color Rendering
+------------------
+Color density, vibrance-like behavior, saturation, hue protection, gamut compression if implemented.
+
+5. Diagnostics
+--------------
+Skin confidence map, WB confidence, clipped color channels, out-of-gamut risk, memory-color warnings.
+
+Returning to Auto
+=================
+If the user warms the image manually, Auto should preserve warmth as a bias unless the user resets/recalibrates. If the user neutralizes WB, Auto should treat that as a stronger neutrality preference. If the user reduces saturation, Auto should not immediately restore strong color density.
+
+Manual edits should become approximate intent vectors, not rigid locks, unless the user locks them.
+
+A better way than hard-coded color taste
+========================================
+The simple path would be to choose one "nice" camera-like rendering and make every image follow it. Stack should not do that.
+
+A better path:
+
+- Build the best possible technical color foundation.
+- Let mode and graph controls define how neutral, mood-preserved, rich, restrained, or memory-color-protected the result should be.
+- Generate WB/color candidates when uncertain.
+- Make diagnostics honest.
+- Preserve user manual color edits as biases.
+
+Research anchors for this guide
+===============================
+- Adobe DNG resources: DNG provides public RAW format/specification and profile/SDK resources.
+- LibRaw metadata docs: white balance, black levels, camera matrices, and other metadata are extracted but not equivalent to final rendering.
+- ACES docs: Input Transforms, scene-linear encodings, Look Transforms, and Output Transforms provide a useful conceptual separation.
+- OpenColorIO docs: scene-referred and display-referred spaces/view transforms should remain logically separated.
+- Adobe and DaVinci color controls: color wheels and global/midtone/shadow/highlight controls show the value of graph/wheel-style multidimensional controls.
+
+Recommended document-level decisions
+====================================
+- Natural Finished should correct obvious WB errors while preserving believable mood.
+- Camera metadata should be a clue, not truth.
+- Camera/profile transform should be separated from color rendering.
+- Skin and memory-color protection should be confidence-based and user-guidable.
+- Color richness should be mode/intent controlled, not hard-coded.
+- WB and color rendering should lean into graph controls.
+- Manual should expose RAW WB, camera transform, correction, rendering, and diagnostics separately.
+
+Open experience-test questions
+==============================
+- How strong should Natural Finished color density be by default?
+- Should WB candidates appear only when uncertain or always under "Alternatives"?
+- Which graph labels feel most natural: Neutral/Mood, Accurate/Pleasing, Clean/Warm?
+- How visible should skin protection diagnostics be?
+- Should Stack eventually support camera-specific custom profiles per camera/source family?

@@ -1,12 +1,18 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
+struct GLFWwindow;
+
 namespace FileDialogs {
 
+void SetOwnerWindow(GLFWwindow* window, std::function<void()> beforeDialog = {});
 std::string OpenImageFileDialog(const char* title = "Load Source Image");
+std::string OpenRasterImageFileDialog(const char* title = "Load Image");
 std::string OpenLutFileDialog(const char* title = "Load LUT");
+std::string SaveLutFileDialog(const char* title = "Save LUT", const char* defaultFileName = "generated_lut.cube");
 std::string SavePngFileDialog(const char* title = "Save PNG Image", const char* defaultFileName = "image.png");
 std::string OpenLibraryBundleFileDialog(const char* title = "Import Library Bundle");
 std::string SaveLibraryBundleFileDialog(const char* title = "Export Library Bundle", const char* defaultFileName = "modular_studio_library.stacklib");

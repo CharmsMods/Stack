@@ -36,7 +36,8 @@ namespace ImGuiExtras {
 
     enum class CursorCaptureMode {
         None,
-        LockedScrub
+        LockedScrub,
+        LockedPan
     };
 
     struct CursorCaptureRequest {
@@ -49,6 +50,7 @@ namespace ImGuiExtras {
     float EaseOutCubic(float value);
     void BeginFrameInputRouting();
     bool IsSliderWheelModifierActive();
+    bool IsSliderWheelConsumed();
     float GetSliderWheelDelta();
     void DrawSpinner(const char* label, float radius, int thickness, ImU32 color);
     void DrawSpinnerOnly(float radius, int thickness, ImU32 color);
