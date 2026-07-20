@@ -2,7 +2,9 @@
 
 #include "ThirdParty/json.hpp"
 #include "Raw/RawAutoBase.h"
+#include "Raw/RawAutoStartPoint.h"
 #include "Raw/RawImageAnalysis.h"
+#include "Raw/RawPreciseNativeRuntime.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Renderer/RenderPipeline.h"
@@ -12,6 +14,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -298,6 +301,7 @@ public:
 
     struct RawWorkspaceSnapshot {
         std::string sourceKey;
+        std::uint64_t sourceHash = 0;
         std::string localRangeOverlayMode;
         bool hasRecipe = false;
         Stack::RawRecipe::RawDevelopmentRecipe recipe;
@@ -305,6 +309,10 @@ public:
         float localRangeTargetSampleU = 0.0f;
         float localRangeTargetSampleV = 0.0f;
         bool analysisRequested = true;
+        std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>
+            startPointCandidateRenderRequests;
+        std::optional<Stack::PreciseIntegration::NativeSolveRequest>
+            preciseSolveRequest;
     };
 
     struct RawWorkspaceTargetSampleResult {
@@ -318,16 +326,29 @@ public:
         float v = 0.0f;
     };
 
+    using RawWorkspaceStartPointCandidateRenderResult =
+        Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderResult;
+
     struct RawWorkspaceResult {
         std::string sourceKey;
+        std::uint64_t sourceHash = 0;
         std::string localRangeOverlayMode;
         std::vector<unsigned char> localRangeOverlayPixels;
         int localRangeOverlayWidth = 0;
         int localRangeOverlayHeight = 0;
         RenderTextureStats viewTransformInputStats;
+        RenderTextureStats finalDisplayStats;
+        std::vector<RawDevelopmentStageStatsReadback> stageStatsReadbacks;
+        Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics startPointDiagnostics;
+        std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>
+            startPointCandidateRenderRequests;
+        std::vector<RawWorkspaceStartPointCandidateRenderResult>
+            startPointCandidateRenderResults;
         Stack::RawAnalysis::RawImageAnalysis analysis;
         Stack::RawAutoBase::AutoBaseRecommendations recommendations;
         RawWorkspaceTargetSampleResult localRangeTargetSample;
+        std::optional<Stack::PreciseIntegration::NativeSolveResult>
+            preciseSolveResult;
 
         bool HasSource() const { return !sourceKey.empty(); }
     };
@@ -371,6 +392,11 @@ public:
         float compositeRenderMs = 0.0f;
         int renderedPreviewCount = 0;
         int renderedCompositeCount = 0;
+        bool mainRegionPlanAvailable = false;
+        bool mainRegionPlanTileable = false;
+        int mainRegionPlanHaloX = 0;
+        int mainRegionPlanHaloY = 0;
+        std::string mainRegionPlanReason;
         GraphExecutionStats mainGraphStats;
     };
 
@@ -405,6 +431,12 @@ public:
     static float CompareDevelopCandidateRenderMetrics(
         const DevelopCandidateRenderMetrics& a,
         const DevelopCandidateRenderMetrics& b);
+    static std::vector<RawWorkspaceStartPointCandidateRenderResult>
+    RenderRawWorkspaceStartPointCandidateRequests(
+        RenderPipeline& pipeline,
+        const RenderGraphSnapshot& graph,
+        const std::string& sourceKey,
+        const std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>& requests);
     static bool ShouldAbortStaleSnapshotForValidation(
         std::uint64_t currentGeneration,
         bool stopRequested,

@@ -35,7 +35,10 @@ RenderPipeline::RenderPipeline()
       m_PingFBO(0), m_PongFBO(0), m_OutputTexture(0), m_ExternalOutputTexture(0), m_GraphSourceTexture(0),
       m_MaskProgram(0), m_MaskCombineProgram(0), m_MaskBlendProgram(0), m_MixProgram(0),
       m_MaskUtilityProgram(0), m_ImageToMaskProgram(0), m_ImageGeneratorProgram(0),
-      m_DataMathProgram(0), m_ChannelSplitProgram(0), m_ChannelCombineProgram(0), m_LutProgram(0),
+      m_DataMathProgram(0), m_TechnicalImageProgram(0), m_ReformatProgram(0),
+      m_SpectrumViewProgram(0), m_FrequencyMaskProgram(0), m_SpectrumMathProgram(0),
+      m_MagnitudePhaseProgram(0), m_FrequencyIfftProjectProgram(0),
+      m_ChannelSplitProgram(0), m_ChannelCombineProgram(0), m_LutProgram(0),
       m_HdrMergeProgram(0),
       m_RawDetailFusionAnalysisProgram(0), m_RawDetailFusionMetricsProgram(0), m_RawDetailFusionSmoothProgram(0), m_RawDetailFusionApplyProgram(0),
       m_AutoGainStatsProgram(0), m_RawDevelopmentToneCurveProgram(0), m_RawDevelopmentLocalRangeProgram(0),
@@ -45,6 +48,8 @@ RenderPipeline::RenderPipeline()
 RenderPipeline::~RenderPipeline() {
     CleanupFBOs();
     InvalidateGraphCaches();
+    DestroyGraphTransientTargets();
+    DestroyPointwiseProgramCache();
     if (m_SourceTexture) glDeleteTextures(1, &m_SourceTexture);
     if (m_ExternalOutputTexture) glDeleteTextures(1, &m_ExternalOutputTexture);
     if (m_MaskProgram) glDeleteProgram(m_MaskProgram);
@@ -55,6 +60,13 @@ RenderPipeline::~RenderPipeline() {
     if (m_ImageToMaskProgram) glDeleteProgram(m_ImageToMaskProgram);
     if (m_ImageGeneratorProgram) glDeleteProgram(m_ImageGeneratorProgram);
     if (m_DataMathProgram) glDeleteProgram(m_DataMathProgram);
+    if (m_TechnicalImageProgram) glDeleteProgram(m_TechnicalImageProgram);
+    if (m_ReformatProgram) glDeleteProgram(m_ReformatProgram);
+    if (m_SpectrumViewProgram) glDeleteProgram(m_SpectrumViewProgram);
+    if (m_FrequencyMaskProgram) glDeleteProgram(m_FrequencyMaskProgram);
+    if (m_SpectrumMathProgram) glDeleteProgram(m_SpectrumMathProgram);
+    if (m_MagnitudePhaseProgram) glDeleteProgram(m_MagnitudePhaseProgram);
+    if (m_FrequencyIfftProjectProgram) glDeleteProgram(m_FrequencyIfftProjectProgram);
     if (m_ChannelSplitProgram) glDeleteProgram(m_ChannelSplitProgram);
     if (m_ChannelCombineProgram) glDeleteProgram(m_ChannelCombineProgram);
     if (m_LutProgram) glDeleteProgram(m_LutProgram);
@@ -84,6 +96,7 @@ void RenderPipeline::CleanupFBOs() {
 void RenderPipeline::InvalidateGraphCaches() {
     DestroyGraphCache(m_GraphImageCache);
     DestroyGraphCache(m_GraphMaskCache);
+    m_GraphScalarCache.clear();
     DestroyGraphCache(m_LutTextureCache);
     DestroyRawDevelopStageCache();
     m_LastGraphImageCacheHits.clear();
@@ -96,6 +109,7 @@ void RenderPipeline::Resize(int width, int height) {
     m_Height = height;
 
     CleanupFBOs();
+    DestroyGraphTransientTargets();
 
     m_PingTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
     m_PongTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
@@ -227,15 +241,16 @@ void RenderPipeline::Clear() {
     m_Width = 0;
     m_Height = 0;
     CleanupFBOs();
+    DestroyGraphTransientTargets();
     InvalidateGraphCaches();
     m_RawPipelines.clear();
     m_RawDataCache.clear();
     m_RawDataCachePaths.clear();
     m_RawPreviewDataCache.clear();
     m_RawPreviewDataCacheKeys.clear();
+    ClearRawDevelopmentStageStatsReadbacks();
     ClearRawDevelopmentLocalRangeOverlay();
     ClearRawDevelopmentLocalRangeTargetSample();
-    m_RawDevelopmentViewTransformInputStats = {};
     m_RawDevelopmentLocalSuggestionImage = {};
 }
 
@@ -264,7 +279,7 @@ void RenderPipeline::ClearRawDevelopmentLocalRangeTargetSample() {
 }
 
 void RenderPipeline::ClearOutput() {
-    m_RawDevelopmentViewTransformInputStats = {};
+    ClearRawDevelopmentStageStatsReadbacks();
     m_RawDevelopmentLocalSuggestionImage = {};
     if (m_ExternalOutputTexture) {
         glDeleteTextures(1, &m_ExternalOutputTexture);

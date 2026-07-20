@@ -4,6 +4,9 @@
 #include "Editor/Layers/LayerBase.h"
 #include "MFSR/MFSRTypes.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
+#include "NodeMath/ContractTypes.h"
+#include "NodeMath/TechnicalImageMath.h"
+#include "NodeMath/GeometryMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
@@ -79,6 +82,7 @@ struct RenderMaskUtilitySettings {
     float gamma = 1.0f;
     float threshold = 0.5f;
     float softness = 0.0f;
+    bool enabled = true;
     bool invert = false;
 };
 
@@ -180,7 +184,17 @@ enum class RenderGraphNodeKind {
     ChannelSplit,
     ChannelCombine,
     CustomMask,
-    DataMath
+    DataMath,
+    TechnicalImage,
+    FrequencyFft,
+    FrequencyIfft,
+    SpectrumView,
+    FrequencyMask,
+    SpectrumMath,
+    MagnitudePhase,
+    SpectrumAnalyzer,
+    FieldMean,
+    Reformat
 };
 
 enum class RenderMixBlendMode {
@@ -189,7 +203,8 @@ enum class RenderMixBlendMode {
     Add,
     Multiply,
     Screen,
-    AlphaOver
+    StraightSourceOver,
+    PremultipliedSourceOver
 };
 
 enum class RenderDataMathMode {
@@ -215,11 +230,83 @@ struct RenderDataMathSettings {
     float outMax = 1.0f;
 };
 
+enum class RenderSpectrumViewLut {
+    Turbo,
+    Viridis,
+    Inferno,
+    Grayscale
+};
+
+enum class RenderFrequencyMaskShape {
+    LowPass,
+    HighPass,
+    BandPass,
+    BandStop,
+    Notch,
+    Gaussian,
+    Butterworth
+};
+
+enum class RenderSpectrumMathMode {
+    Multiply,
+    Add,
+    Subtract,
+    Difference
+};
+
+enum class RenderMagnitudePhaseMode {
+    Magnitude,
+    Phase,
+    Recombine
+};
+
+enum class RenderSpectrumAnalyzerMode {
+    RadialEnergy,
+    DominantFrequency
+};
+
+struct RenderFrequencyFftSettings {
+    bool luminanceOnly = true;
+};
+
+struct RenderSpectrumViewSettings {
+    RenderSpectrumViewLut lut = RenderSpectrumViewLut::Turbo;
+    float exposure = 1.0f;
+    float gamma = 1.0f;
+    bool centerDc = true;
+};
+
+struct RenderFrequencyMaskSettings {
+    RenderFrequencyMaskShape shape = RenderFrequencyMaskShape::LowPass;
+    float cutoff = 0.25f;
+    float width = 0.12f;
+    float feather = 0.08f;
+    float order = 2.0f;
+    float centerX = 0.5f;
+    float centerY = 0.5f;
+    bool invert = false;
+};
+
+struct RenderSpectrumMathSettings {
+    float amount = 1.0f;
+};
+
+struct RenderMagnitudePhaseSettings {
+    float exposure = 1.0f;
+    float gamma = 1.0f;
+};
+
+struct RenderSpectrumAnalyzerSettings {
+    float innerRadius = 0.0f;
+    float outerRadius = 1.0f;
+};
+
 struct RenderGraphImagePayload {
     SharedPixelBuffer pixels;
     int width = 0;
     int height = 0;
     int channels = 4;
+    Stack::NodeMath::ValueDescriptor sourceDescriptor;
 };
 
 struct RenderGraphRawSourcePayload {
@@ -297,6 +384,9 @@ struct ToneCurveAutoRewriteFeedback {
 struct RenderGraphNode {
     int nodeId = -1;
     std::uint64_t requestRevision = 0;
+    std::string definitionId;
+    std::string definitionVersion;
+    std::string definitionHash;
     RenderGraphNodeKind kind = RenderGraphNodeKind::Image;
     RenderGraphImagePayload image;
     RenderGraphRawSourcePayload rawSource;
@@ -324,6 +414,22 @@ struct RenderGraphNode {
     float mixFactor = 0.5f;
     RenderDataMathMode dataMathMode = RenderDataMathMode::Clamp;
     RenderDataMathSettings dataMathSettings;
+    Stack::NodeMath::TechnicalImageOperation technicalImageOperation =
+        Stack::NodeMath::TechnicalImageOperation::Exposure;
+    float technicalExposureValue = 0.0f;
+    Stack::NodeMath::ReformatSettings reformatSettings;
+    Stack::NodeMath::ValueDescriptor semanticDescriptor;
+    std::string semanticDescriptorIdentity;
+    RenderFrequencyFftSettings frequencyFftSettings;
+    RenderFrequencyFftSettings frequencyIfftSettings;
+    RenderSpectrumViewSettings spectrumViewSettings;
+    RenderFrequencyMaskSettings frequencyMaskSettings;
+    RenderSpectrumMathMode spectrumMathMode = RenderSpectrumMathMode::Multiply;
+    RenderSpectrumMathSettings spectrumMathSettings;
+    RenderMagnitudePhaseMode magnitudePhaseMode = RenderMagnitudePhaseMode::Magnitude;
+    RenderMagnitudePhaseSettings magnitudePhaseSettings;
+    RenderSpectrumAnalyzerMode spectrumAnalyzerMode = RenderSpectrumAnalyzerMode::RadialEnergy;
+    RenderSpectrumAnalyzerSettings spectrumAnalyzerSettings;
 };
 
 struct RenderGraphLink {
@@ -331,6 +437,8 @@ struct RenderGraphLink {
     std::string fromSocketId;
     int toNodeId = -1;
     std::string toSocketId;
+    Stack::NodeMath::ValueDescriptor semanticDescriptor;
+    std::string semanticDescriptorIdentity;
 };
 
 struct RenderGraphSnapshot {
@@ -339,8 +447,13 @@ struct RenderGraphSnapshot {
     bool autoGainMaskPreview = false;
     std::string rawWorkspaceLocalRangeOverlayMode;
     bool rawWorkspaceLocalRangeTargetSampleRequested = false;
+    bool executionInspectionEnabled = false;
     float rawWorkspaceLocalRangeTargetSampleU = 0.0f;
     float rawWorkspaceLocalRangeTargetSampleV = 0.0f;
     std::vector<RenderGraphNode> nodes;
     std::vector<RenderGraphLink> links;
+    Stack::NodeMath::ValueDescriptor outputDescriptor;
+    std::string outputDescriptorIdentity;
+    std::string semanticFingerprint;
+    std::vector<Stack::NodeMath::Diagnostic> semanticDiagnostics;
 };

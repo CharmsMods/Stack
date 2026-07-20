@@ -38,6 +38,7 @@ struct GraphSliderScrubState {
     ImVec2 restoreScreenPos = ImVec2(0.0f, 0.0f);
     float dragStartFloat = 0.0f;
     int dragStartInt = 0;
+    float accumulatedIntDelta = 0.0f;
 };
 
 struct GraphSliderEditState {
@@ -92,6 +93,12 @@ GraphSliderRangePolicy CurrentGraphSliderRangePolicy() {
 float GraphNodeSliderScrubSensitivity() {
     return g_GraphNodeControlScopeDepth > 0
         ? std::max(0.0001f, g_GraphNodeControlScopeConfig.scrubSensitivity)
+        : 1.0f;
+}
+
+float GraphNodeSliderInteractionScale() {
+    return g_GraphNodeControlScopeDepth > 0
+        ? std::max(0.0001f, g_GraphNodeControlScopeConfig.interactionScale)
         : 1.0f;
 }
 
@@ -612,8 +619,12 @@ bool RenderGraphNodeSliderFloatTextEditable(const char* label, float* v, float v
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 state.scrub.active = false;
             } else {
-                const float rectWidth = std::max(1.0f, itemRect.GetWidth());
-                float stepPerPixel = (std::abs(v_max - v_min) / rectWidth) * GraphNodeSliderScrubSensitivity();
+                float stepPerPixel = GraphSliderDragStepPerPixel(
+                    v_min,
+                    v_max,
+                    itemRect.GetWidth(),
+                    GraphNodeSliderInteractionScale(),
+                    GraphNodeSliderScrubSensitivity());
                 stepPerPixel = std::max(stepPerPixel, 0.000001f);
                 if (ImGui::GetIO().KeyShift) {
                     stepPerPixel *= 0.1f;
@@ -730,20 +741,33 @@ bool RenderGraphNodeSliderIntTextEditable(const char* label, int* v, int v_min, 
             state.scrub.anchorScreenPos = ImGui::GetIO().MousePos;
             state.scrub.restoreScreenPos = ImGui::GetIO().MousePos;
             state.scrub.dragStartInt = *v;
+            state.scrub.accumulatedIntDelta = 0.0f;
         }
         if (state.scrub.active) {
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 state.scrub.active = false;
             } else {
-                const float rectWidth = std::max(1.0f, itemRect.GetWidth());
-                float stepPerPixel = (static_cast<float>(std::abs(v_max - v_min)) / rectWidth) * GraphNodeSliderScrubSensitivity();
-                stepPerPixel = std::max(stepPerPixel, 1.0f / rectWidth);
+                float stepPerPixel = GraphSliderDragStepPerPixel(
+                    static_cast<float>(v_min),
+                    static_cast<float>(v_max),
+                    itemRect.GetWidth(),
+                    GraphNodeSliderInteractionScale(),
+                    GraphNodeSliderScrubSensitivity());
                 if (ImGui::GetIO().KeyShift) {
                     stepPerPixel *= 0.1f;
                 } else if (ImGui::GetIO().KeyCtrl) {
                     stepPerPixel *= 10.0f;
                 }
-                float nextValue = static_cast<float>(*v) + ((ImGui::GetIO().MousePos.x - state.scrub.anchorScreenPos.x) * stepPerPixel);
+                state.scrub.accumulatedIntDelta +=
+                    (ImGui::GetIO().MousePos.x - state.scrub.anchorScreenPos.x) * stepPerPixel;
+                if (rangePolicy == GraphSliderRangePolicy::Bounded) {
+                    state.scrub.accumulatedIntDelta = std::clamp(
+                        state.scrub.accumulatedIntDelta,
+                        static_cast<float>(std::min(v_min, v_max) - state.scrub.dragStartInt),
+                        static_cast<float>(std::max(v_min, v_max) - state.scrub.dragStartInt));
+                }
+                const float nextValue =
+                    static_cast<float>(state.scrub.dragStartInt) + state.scrub.accumulatedIntDelta;
                 int quantizedValue = static_cast<int>(std::lround(nextValue));
                 if (rangePolicy == GraphSliderRangePolicy::Bounded) {
                     quantizedValue = std::clamp(quantizedValue, std::min(v_min, v_max), std::max(v_min, v_max));

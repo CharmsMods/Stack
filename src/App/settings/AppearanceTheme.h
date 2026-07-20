@@ -11,6 +11,19 @@
 
 namespace StackAppearance {
 
+inline constexpr float kGraphNodeSliderDragSensitivityMin = 0.05f;
+inline constexpr float kGraphNodeSliderDragSensitivityMax = 2.0f;
+inline constexpr float kGraphNodeSliderDragSensitivityDefault = 1.0f;
+inline constexpr float kGraphConnectionTextSizeMin = 8.0f;
+inline constexpr float kGraphConnectionTextSizeMax = 20.0f;
+inline constexpr float kGraphConnectionTextSizeDefault = 11.0f;
+inline constexpr float kGraphNodeWidthScaleMin = 0.80f;
+inline constexpr float kGraphNodeWidthScaleMax = 1.60f;
+inline constexpr float kGraphNodeUiScaleMin = 0.85f;
+inline constexpr float kGraphNodeUiScaleMax = 1.30f;
+inline constexpr float kGraphNodeGrabAreaHeightMin = 28.0f;
+inline constexpr float kGraphNodeGrabAreaHeightMax = 64.0f;
+
 inline constexpr const char* kFactoryPresetId = "premium-dark-studio";
 inline constexpr const char* kDarkPresetId = "dark";
 inline constexpr const char* kLightPresetId = "light";
@@ -18,7 +31,7 @@ inline constexpr const char* kSolarizedPresetId = "solarized";
 inline constexpr const char* kSolarizedLightPresetId = "solarized-light";
 inline constexpr const char* kYellowDarkPresetId = "yellow-dark";
 inline constexpr const char* kYellowLightPresetId = "yellow-light";
-inline constexpr std::uint32_t kAppearanceSettingsVersion = 7;
+inline constexpr std::uint32_t kAppearanceSettingsVersion = 9;
 inline constexpr std::uint32_t kThemePresetFileVersion = 2;
 
 enum class GraphVisualMode {
@@ -26,6 +39,39 @@ enum class GraphVisualMode {
     BlackNodes,
     SpotlightPrototype
 };
+
+enum class GraphConnectionLabelVisibility {
+    Adaptive,
+    Always,
+    InteractionOnly,
+    Off
+};
+
+enum class GraphConnectionTextLayout {
+    Floating,
+    BreakLine
+};
+
+enum class GraphConnectionTextSizing {
+    ZoomAware,
+    Fixed
+};
+
+enum class GraphNodeSizePreset {
+    Compact,
+    Comfortable,
+    Spacious,
+    Custom
+};
+
+struct GraphNodeSizing {
+    GraphNodeSizePreset preset = GraphNodeSizePreset::Comfortable;
+    float widthScale = 1.12f;
+    float uiScale = 1.0f;
+    float grabAreaHeight = 38.0f;
+};
+
+GraphNodeSizing GraphNodeSizingForPreset(GraphNodeSizePreset preset);
 
 const char* GraphVisualModeLabel(GraphVisualMode mode);
 const char* GraphVisualModeDescription(GraphVisualMode mode);
@@ -80,7 +126,19 @@ struct AppearanceLibrary {
     GraphVisualMode graphVisualMode = GraphVisualMode::Classic;
     bool graphSpotlightHaloOutlines = false;
     bool graphDottedMaskLinks = false;
+    bool graphStraightLinks = false;
     float graphLineOpacity = 1.0f;
+    float graphPanSensitivity = 0.55f;
+    float graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
+    GraphConnectionLabelVisibility graphConnectionLabels =
+        GraphConnectionLabelVisibility::Adaptive;
+    GraphConnectionTextLayout graphConnectionTextLayout =
+        GraphConnectionTextLayout::Floating;
+    float graphConnectionTextSize = kGraphConnectionTextSizeDefault;
+    GraphConnectionTextSizing graphConnectionTextSizing =
+        GraphConnectionTextSizing::ZoomAware;
+    bool graphConnectionTextOutline = false;
+    GraphNodeSizing graphNodeSizing;
     ViewportTilingSettings viewportTiling;
     bool backgroundImageEnabled = false;
     std::string backgroundImagePath;
@@ -115,6 +173,7 @@ ThemeDefinition* FindPresetById(AppearanceLibrary& library, const std::string& p
 
 bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary);
 bool SaveAppearanceLibrary(const AppearanceLibrary& library);
+bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessage = nullptr);
 bool LoadThemePresetFile(const std::filesystem::path& path, ThemeDefinition& outTheme, std::string* errorMessage = nullptr);
 bool SaveThemePresetFile(const std::filesystem::path& path, const ThemeDefinition& theme, std::string* errorMessage = nullptr);
 bool UseDarkIconsForCurrentTheme(const class AppearanceManager* appearance);
@@ -140,7 +199,16 @@ public:
     GraphVisualMode GetGraphVisualMode() const;
     bool GetGraphSpotlightHaloOutlines() const;
     bool GetGraphDottedMaskLinks() const;
+    bool GetGraphStraightLinks() const;
     float GetGraphLineOpacity() const;
+    float GetGraphPanSensitivity() const;
+    float GetGraphNodeSliderDragSensitivity() const;
+    GraphConnectionLabelVisibility GetGraphConnectionLabels() const;
+    GraphConnectionTextLayout GetGraphConnectionTextLayout() const;
+    float GetGraphConnectionTextSize() const;
+    GraphConnectionTextSizing GetGraphConnectionTextSizing() const;
+    bool GetGraphConnectionTextOutline() const;
+    const GraphNodeSizing& GetGraphNodeSizing() const;
     const ViewportTilingSettings& GetViewportTilingSettings() const;
     bool GetBackgroundImageEnabled() const;
     bool GetSeamlessSurfaceStylingEnabled() const;
@@ -164,7 +232,20 @@ public:
     bool SetGraphVisualMode(GraphVisualMode mode);
     bool SetGraphSpotlightHaloOutlines(bool enabled);
     bool SetGraphDottedMaskLinks(bool enabled);
+    bool SetGraphStraightLinks(bool enabled);
     bool SetGraphLineOpacity(float opacity);
+    bool SetGraphPanSensitivity(float sensitivity);
+    bool SetGraphNodeSliderDragSensitivity(float sensitivity);
+    bool SetGraphConnectionLabels(GraphConnectionLabelVisibility visibility);
+    bool SetGraphConnectionTextLayout(GraphConnectionTextLayout layout);
+    bool SetGraphConnectionTextSize(float size);
+    bool SetGraphConnectionTextSizing(GraphConnectionTextSizing sizing);
+    bool SetGraphConnectionTextOutline(bool enabled);
+    bool SetGraphNodeSizePreset(GraphNodeSizePreset preset);
+    bool SetGraphNodeWidthScale(float scale);
+    bool SetGraphNodeUiScale(float scale);
+    bool SetGraphNodeGrabAreaHeight(float height);
+    bool ResetGraphNodeSizing();
     bool SetViewportTilingSettings(const ViewportTilingSettings& settings);
     bool SetBackgroundImageEnabled(bool enabled);
     bool SetBackgroundImageStrength(float strength);

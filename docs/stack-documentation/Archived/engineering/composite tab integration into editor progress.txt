@@ -1,0 +1,80 @@
+Composite tab integration into editor - progress
+
+Current chunk:
+- Chunk 0 complete
+- Chunk 1 mostly complete
+- Chunk 2 minimal shell complete
+- Chunk 3A foundation complete
+- Chunk 3B stabilization complete
+- Chunk 4A authoring complete
+- Chunk 5 export bounds/settings complete
+- Chunk 6 persistence complete
+- Chunk 7 mostly complete
+
+Landed behavior:
+- Added migration progress tracking file for the Editor/Composite merge.
+- Editor graph now supports adding multiple output nodes from the graph context menu.
+- Graph foundations now allow multiple output nodes and can enumerate connected outputs and completed chains.
+- Added placeholder graph-only node kinds for Composite and Export Bounds Settings so the graph schema can grow without format churn later.
+- Editor projects now serialize and deserialize multiple output nodes and the new graph-only node kinds.
+- Editor viewport now resolves between:
+  - single-output preview mode for exactly one completed chain
+  - composite canvas shell mode for two or more completed chains
+- Composite canvas shell disables the before/after preview path and shows a transparent checker-backed workspace placeholder.
+- Viewport-wide pane-resize dragging is disabled while the Editor is in composite viewport mode.
+- The top split handle now supports click-to-snap animation toward the nearest side over about 200ms.
+- The visible top-level Composite tab has been removed from the main tab bar, with tab-switch requests now routed to Editor.
+- Editor now maintains a runtime composite scene keyed by output node id for multi-chain graphs.
+- A real composite canvas now renders one image object per completed output chain inside the Editor viewport.
+- Multi-chain composite objects can be selected and moved, with middle-mouse pan and wheel zoom on the canvas.
+- The graph now auto-spawns a Composite node the first time a graph enters multi-chain composite mode.
+- The Composite node now acts as a reorderable z-order list for the current completed chains.
+- In composite mode, clicking the top split handle now fully snaps to graph-only or viewport-only, while drag still keeps partial-width limits.
+- Composite mode split-handle click snap now stays latched at the full graph-only or viewport-only edge until the user drags or clicks to switch sides again.
+- Per-output composite canvas objects now use cropped content bounds instead of the full render target rectangle, so differently sized images no longer inherit oversized hit boxes from other outputs.
+- Falling back from composite mode to a single completed chain now re-enters the normal single-output preview path with refreshed source selection, preview fit, hover fade reset, and corrected aspect behavior.
+- The Composite node now uses a custom expanded control layout with more internal space, no duplicated Composite kind label, and truncated reorder labels to prevent clipping.
+- Composite canvas right-click authoring is now available in Editor with:
+  - Add Image
+  - Add Library Asset
+  - Add Square
+  - Add Circle
+  - Add Text (visible deferred placeholder)
+- Add Image and Add Library Asset now create new image-node-plus-output chains in the Editor graph and place the resulting composite objects onto the Editor composite canvas.
+- Add Square and Add Circle now create generator-node-plus-output chains using new generator-backed square and circle image kinds instead of canvas-only object types.
+- Composite split-handle edge snap can now be reopened from a fully closed pane because the edge hit target lives on a dedicated overlay strip above the panes.
+- The graph now auto-spawns an Export Bounds Settings control node when composite mode first needs it.
+- Export Bounds Settings is now a real Editor-side control node for bounds mode, aspect, background, resolution, and PNG export.
+- Composite canvas export-boundary editing can now be toggled with F inside the Editor viewport.
+- Composite-mode PNG export now uses the Editor composite scene, including z-order, transforms, cropped object bounds, export bounds, output resolution, and background settings.
+- Editor project saves now persist composite scene transforms, z-order, and Export Bounds Settings state inside the normal Editor pipeline payload.
+- Multi-chain Editor project saves now generate their saved thumbnail/preview from the composed Editor composite scene instead of a single output chain.
+- Loading a saved multi-chain Editor project now restores composite scene layout and export settings by output node id, while older projects without composite data still load normally.
+- The Editor composite canvas now supports real transform handles for selected objects:
+  - corner resize handles
+  - edge resize handles
+  - a top rotation handle
+  - existing body drag for move
+- Composite canvas transforms are now viewport-owned end to end, so move / resize / rotate interactions no longer rely on the old Composite runtime path.
+- Aspect-preserving resize is now the default for current chain-backed composite objects.
+- Composite snapping now exists inside the merged Editor path with support for:
+  - object edge snaps
+  - object center snaps
+  - canvas-center snaps
+  - export-bounds snaps
+  - rotate step snap
+  - scale step snap
+- The Composite control node now exposes snap presets and advanced snap controls alongside the z-order list.
+- Dropped-file project import now rejects legacy standalone `.comp` projects instead of routing them into the hidden Composite workflow.
+- AppShell no longer tries to synchronize project state back and forth between a hidden Composite tab and the Editor tab.
+- Library asset cards now add selected assets into the merged Editor composite workflow instead of sending them into the old Composite tab path.
+- Library project and asset previews now mark legacy standalone composite projects as unsupported instead of trying to load them into a hidden Composite tab.
+
+Known temporary regressions / incomplete pieces:
+- Some old Composite-only save/load code still exists in LibraryManager and LibraryModule as dead-end compatibility scaffolding, even though the main app workflow no longer routes users into it.
+- Auto-layout still prioritizes the legacy primary output path and does not yet arrange multiple connected output chains intelligently.
+- Add Text remains intentionally deferred and non-functional in the Editor composite canvas menu.
+- Snap guides and transform feel should be click-tested in-app; this chunk was build- and startup-verified, but not exhaustively interaction-verified from the terminal.
+
+Next chunk:
+- Chunk 8: finish the remaining Composite cleanup in Library/open flows, improve multi-output auto-layout, and implement Add Text.

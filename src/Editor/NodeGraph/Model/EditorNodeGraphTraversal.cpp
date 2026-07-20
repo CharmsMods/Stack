@@ -24,6 +24,7 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
     }
 
     std::vector<CompletedChainInfo> chains;
+    std::string outputConnectionDiagnostic;
 
     auto collectChain = [&](int outputNodeId, auto&& collectChainRef) -> CompletedChainInfo {
         CompletedChainInfo chain;
@@ -39,15 +40,18 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
             return chain;
         }
 
-        std::unordered_set<int> visiting;
+        std::unordered_set<std::string> visiting;
         std::unordered_set<int> added;
-        std::function<bool(int)> visit = [&](int nodeId) -> bool {
-            if (!visiting.insert(nodeId).second) {
+        std::function<bool(int, const std::string&)> visit =
+            [&](int nodeId, const std::string& outputSocketId) -> bool {
+            const std::string visitKey =
+                std::to_string(nodeId) + "\x1f" + outputSocketId;
+            if (!visiting.insert(visitKey).second) {
                 return false;
             }
             const Node* node = FindNode(nodeId);
             if (!node) {
-                visiting.erase(nodeId);
+                visiting.erase(visitKey);
                 return false;
             }
             if (added.insert(nodeId).second) {
@@ -62,6 +66,7 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 case NodeKind::ImageGenerator:
                 case NodeKind::MaskGenerator:
                 case NodeKind::CustomMask:
+                case NodeKind::FrequencyMask:
                     if (chain.sourceNodeId <= 0) {
                         chain.sourceNodeId = nodeId;
                     }
@@ -70,22 +75,69 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 case NodeKind::RawDecode:
                 case NodeKind::RawDevelop: {
                     const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
                     break;
                 }
                 case NodeKind::RawNeuralDenoise: {
                     const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
                     break;
                 }
-                case NodeKind::Layer: {
+                case NodeKind::Layer:
+                case NodeKind::TechnicalImage:
+                case NodeKind::Reformat: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
+                    break;
+                }
+                case NodeKind::Compound: {
+                    std::vector<std::string> dependencies;
+                    std::string dependencyError;
+                    valid = ResolveCompoundOutputInputDependencies(
+                        nodeId, outputSocketId, dependencies, &dependencyError);
+                    if (!valid && !dependencyError.empty() && outputConnectionDiagnostic.empty()) {
+                        outputConnectionDiagnostic = "Compound node " + std::to_string(nodeId) +
+                            " cannot render: " + dependencyError;
+                    }
+                    std::unordered_set<std::string> validatedInputs;
+                    if (valid) {
+                        for (const std::string& inputSocketId : dependencies) {
+                            SocketDefinition inputSocket;
+                            if (!FindSocket(nodeId, inputSocketId, &inputSocket) ||
+                                inputSocket.direction != SocketDirection::Input) {
+                                valid = false;
+                                break;
+                            }
+                            const Link* upstream = FindInputLink(nodeId, inputSocketId);
+                            if (!upstream) {
+                                if (!inputSocket.optional) valid = false;
+                            } else if (!visit(upstream->fromNodeId, upstream->fromSocketId)) {
+                                valid = false;
+                            }
+                            validatedInputs.insert(inputSocketId);
+                            if (!valid) break;
+                        }
+                    }
+                    if (valid) {
+                        for (const SocketDefinition& inputSocket : GetSockets(*node, false)) {
+                            if (inputSocket.direction != SocketDirection::Input ||
+                                !inputSocket.optional ||
+                                validatedInputs.count(inputSocket.id) != 0) {
+                                continue;
+                            }
+                            if (const Link* upstream = FindInputLink(nodeId, inputSocket.id)) {
+                                if (!visit(upstream->fromNodeId, upstream->fromSocketId)) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     break;
                 }
                 case NodeKind::Lut: {
                     if (const Link* upstream = FindInputLink(nodeId, kImageInputSocketId)) {
-                        valid = visit(upstream->fromNodeId);
+                        valid = visit(upstream->fromNodeId, upstream->fromSocketId);
                         break;
                     }
 
@@ -97,38 +149,38 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     bool allValid = true;
                     if (upstreamR) {
                         hasConnection = true;
-                        if (!visit(upstreamR->fromNodeId)) allValid = false;
+                        if (!visit(upstreamR->fromNodeId, upstreamR->fromSocketId)) allValid = false;
                     }
                     if (upstreamG) {
                         hasConnection = true;
-                        if (!visit(upstreamG->fromNodeId)) allValid = false;
+                        if (!visit(upstreamG->fromNodeId, upstreamG->fromSocketId)) allValid = false;
                     }
                     if (upstreamB) {
                         hasConnection = true;
-                        if (!visit(upstreamB->fromNodeId)) allValid = false;
+                        if (!visit(upstreamB->fromNodeId, upstreamB->fromSocketId)) allValid = false;
                     }
                     if (upstreamA) {
                         hasConnection = true;
-                        if (!visit(upstreamA->fromNodeId)) allValid = false;
+                        if (!visit(upstreamA->fromNodeId, upstreamA->fromSocketId)) allValid = false;
                     }
                     valid = hasConnection && allValid;
                     break;
                 }
                 case NodeKind::RawDetailFusion: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
                     break;
                 }
                 case NodeKind::HdrMerge: {
                     const Link* input1 = FindInputLink(nodeId, kHdrMergeInput1SocketId);
                     const Link* input2 = FindInputLink(nodeId, kHdrMergeInput2SocketId);
                     const Link* input3 = FindInputLink(nodeId, kHdrMergeInput3SocketId);
-                    valid = input1 && input2 && visit(input1->fromNodeId);
+                    valid = input1 && input2 && visit(input1->fromNodeId, input1->fromSocketId);
                     if (valid && input2) {
-                        valid = visit(input2->fromNodeId);
+                        valid = visit(input2->fromNodeId, input2->fromSocketId);
                     }
                     if (valid && input3) {
-                        valid = visit(input3->fromNodeId);
+                        valid = visit(input3->fromNodeId, input3->fromSocketId);
                     }
                     break;
                 }
@@ -136,12 +188,12 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     const Link* reference = FindInputLink(nodeId, kMfsrReferenceInputSocketId);
                     const Link* support = FindInputLink(nodeId, MfsrInputSocketId(1));
                     valid = reference && support &&
-                        visit(reference->fromNodeId) &&
-                        visit(support->fromNodeId);
+                        visit(reference->fromNodeId, reference->fromSocketId) &&
+                        visit(support->fromNodeId, support->fromSocketId);
                     if (valid) {
                         for (int inputIndex = 2; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
                             const Link* input = FindInputLink(nodeId, MfsrInputSocketId(inputIndex));
-                            if (input && !visit(input->fromNodeId)) {
+                            if (input && !visit(input->fromNodeId, input->fromSocketId)) {
                                 valid = false;
                                 break;
                             }
@@ -151,15 +203,15 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 }
                 case NodeKind::RawDetailAutoMask: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
                     break;
                 }
                 case NodeKind::Mix: {
                     const Link* inputA = FindInputLink(nodeId, kMixInputASocketId);
                     const Link* inputB = FindInputLink(nodeId, kMixInputBSocketId);
                     valid = inputA && inputB &&
-                        visit(inputA->fromNodeId) &&
-                        visit(inputB->fromNodeId);
+                        visit(inputA->fromNodeId, inputA->fromSocketId) &&
+                        visit(inputB->fromNodeId, inputB->fromSocketId);
                     break;
                 }
                 case NodeKind::DataMath: {
@@ -170,7 +222,7 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                         if (const Link* input = FindInputLink(nodeId, DataMathInputSocketId(inputIndex))) {
                             hasInput = true;
                             ++inputCount;
-                            valid = valid && visit(input->fromNodeId);
+                            valid = valid && visit(input->fromNodeId, input->fromSocketId);
                             if (!valid) {
                                 break;
                             }
@@ -185,7 +237,43 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 }
                 case NodeKind::ChannelSplit: {
                     const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
+                    break;
+                }
+                case NodeKind::FrequencyFft:
+                case NodeKind::FrequencyIfft:
+                case NodeKind::SpectrumView:
+                case NodeKind::SpectrumAnalyzer: {
+                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
+                    break;
+                }
+                case NodeKind::SpectrumMath: {
+                    const Link* inputA = FindInputLink(nodeId, kMixInputASocketId);
+                    valid = inputA ? visit(inputA->fromNodeId, inputA->fromSocketId) : false;
+                    if (valid) {
+                        if (const Link* inputB = FindInputLink(nodeId, kMixInputBSocketId)) {
+                            valid = visit(inputB->fromNodeId, inputB->fromSocketId);
+                        }
+                    }
+                    if (valid) {
+                        if (const Link* filter = FindInputLink(nodeId, kMaskInputSocketId)) {
+                            valid = visit(filter->fromNodeId, filter->fromSocketId);
+                        }
+                    }
+                    break;
+                }
+                case NodeKind::MagnitudePhase: {
+                    if (node->magnitudePhaseMode == MagnitudePhaseMode::Recombine) {
+                        const Link* magnitude = FindInputLink(nodeId, "magnitude");
+                        const Link* phase = FindInputLink(nodeId, "phase");
+                        valid = magnitude && phase &&
+                            visit(magnitude->fromNodeId, magnitude->fromSocketId) &&
+                            visit(phase->fromNodeId, phase->fromSocketId);
+                    } else {
+                        const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
+                        valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
+                    }
                     break;
                 }
                 case NodeKind::ChannelCombine: {
@@ -199,19 +287,19 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
 
                     if (upstreamR) {
                         hasConnection = true;
-                        if (!visit(upstreamR->fromNodeId)) allValid = false;
+                        if (!visit(upstreamR->fromNodeId, upstreamR->fromSocketId)) allValid = false;
                     }
                     if (upstreamG) {
                         hasConnection = true;
-                        if (!visit(upstreamG->fromNodeId)) allValid = false;
+                        if (!visit(upstreamG->fromNodeId, upstreamG->fromSocketId)) allValid = false;
                     }
                     if (upstreamB) {
                         hasConnection = true;
-                        if (!visit(upstreamB->fromNodeId)) allValid = false;
+                        if (!visit(upstreamB->fromNodeId, upstreamB->fromSocketId)) allValid = false;
                     }
                     if (upstreamA) {
                         hasConnection = true;
-                        if (!visit(upstreamA->fromNodeId)) allValid = false;
+                        if (!visit(upstreamA->fromNodeId, upstreamA->fromSocketId)) allValid = false;
                     }
 
                     valid = hasConnection && allValid;
@@ -219,20 +307,20 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                 }
                 case NodeKind::ImageToMask: {
                     const Link* upstream = FindInputLink(nodeId, kImageToMaskInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
                     break;
                 }
                 case NodeKind::MaskCombine: {
                     const Link* inputA = FindInputLink(nodeId, kMaskCombineInputASocketId);
                     const Link* inputB = FindInputLink(nodeId, kMaskCombineInputBSocketId);
                     valid = inputA && inputB &&
-                        visit(inputA->fromNodeId) &&
-                        visit(inputB->fromNodeId);
+                        visit(inputA->fromNodeId, inputA->fromSocketId) &&
+                        visit(inputB->fromNodeId, inputB->fromSocketId);
                     break;
                 }
                 case NodeKind::MaskUtility: {
                     const Link* upstream = FindInputLink(nodeId, kMaskUtilityInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId) : false;
+                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
                     break;
                 }
                 case NodeKind::Output:
@@ -243,13 +331,13 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
                     break;
             }
 
-            visiting.erase(nodeId);
+            visiting.erase(visitKey);
             return valid;
         };
 
         if (outputInput) {
             chain.terminalNodeId = outputInput->fromNodeId;
-            if (!visit(chain.terminalNodeId)) {
+            if (!visit(chain.terminalNodeId, outputInput->fromSocketId)) {
                 chain.terminalNodeId = -1;
                 chain.sourceNodeId = -1;
                 chain.nodeIds.clear();
@@ -260,19 +348,19 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
 
             if (linkR) {
                 if (firstTerminalNodeId == -1) firstTerminalNodeId = linkR->fromNodeId;
-                if (!visit(linkR->fromNodeId)) allChannelsValid = false;
+                if (!visit(linkR->fromNodeId, linkR->fromSocketId)) allChannelsValid = false;
             }
             if (linkG) {
                 if (firstTerminalNodeId == -1) firstTerminalNodeId = linkG->fromNodeId;
-                if (!visit(linkG->fromNodeId)) allChannelsValid = false;
+                if (!visit(linkG->fromNodeId, linkG->fromSocketId)) allChannelsValid = false;
             }
             if (linkB) {
                 if (firstTerminalNodeId == -1) firstTerminalNodeId = linkB->fromNodeId;
-                if (!visit(linkB->fromNodeId)) allChannelsValid = false;
+                if (!visit(linkB->fromNodeId, linkB->fromSocketId)) allChannelsValid = false;
             }
             if (linkA) {
                 if (firstTerminalNodeId == -1) firstTerminalNodeId = linkA->fromNodeId;
-                if (!visit(linkA->fromNodeId)) allChannelsValid = false;
+                if (!visit(linkA->fromNodeId, linkA->fromSocketId)) allChannelsValid = false;
             }
 
             if (allChannelsValid && firstTerminalNodeId != -1) {
@@ -305,8 +393,14 @@ std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
         }
     }
     m_CompletedChainsCache = chains;
+    m_OutputConnectionDiagnosticCache = std::move(outputConnectionDiagnostic);
     m_CompletedChainsCacheRevision = m_StructureRevision;
     return m_CompletedChainsCache;
+}
+
+std::string Graph::GetOutputConnectionDiagnostic() const {
+    (void)GetCompletedChains();
+    return m_OutputConnectionDiagnosticCache;
 }
 
 std::vector<int> Graph::GetConnectedOutputNodeIds() const {
@@ -384,8 +478,10 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::Mfsr:
             case NodeKind::Lut:
             case NodeKind::Layer:
+            case NodeKind::TechnicalImage:
             case NodeKind::Mix:
             case NodeKind::DataMath:
+            case NodeKind::Compound:
             case NodeKind::ImageGenerator:
             case NodeKind::Output:
                 return true;
@@ -441,6 +537,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
         switch (node->kind) {
             case NodeKind::Layer:
             case NodeKind::Lut:
+            case NodeKind::TechnicalImage:
             case NodeKind::Output:
             case NodeKind::RawDetailAutoMask:
             case NodeKind::RawDetailFusion:

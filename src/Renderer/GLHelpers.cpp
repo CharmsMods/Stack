@@ -29,7 +29,7 @@ struct ScopedFramebufferState {
     }
 };
 
-unsigned int LinkProgram(const unsigned int* shaderIds, int shaderCount) {
+unsigned int LinkProgram(const unsigned int* shaderIds, int shaderCount, std::string* error = nullptr) {
     unsigned int program = glCreateProgram();
     for (int i = 0; i < shaderCount; ++i) {
         glAttachShader(program, shaderIds[i]);
@@ -51,6 +51,7 @@ unsigned int LinkProgram(const unsigned int* shaderIds, int shaderCount) {
     if (!success) {
         char infoLog[2048];
         glGetProgramInfoLog(program, 2048, nullptr, infoLog);
+        if (error != nullptr) *error = infoLog;
         std::cerr << "[GLHelpers] Program linking failed:\n" << infoLog << "\n";
         glDeleteProgram(program);
         return 0;
@@ -75,6 +76,10 @@ std::string ReadFile(const std::string& path) {
 }
 
 unsigned int CompileShader(unsigned int type, const char* source) {
+    return CompileShader(type, source, nullptr);
+}
+
+unsigned int CompileShader(unsigned int type, const char* source, std::string* error) {
     unsigned int id = glCreateShader(type);
     glShaderSource(id, 1, &source, nullptr);
     glCompileShader(id);
@@ -84,6 +89,7 @@ unsigned int CompileShader(unsigned int type, const char* source) {
     if (!success) {
         char infoLog[2048];
         glGetShaderInfoLog(id, 2048, nullptr, infoLog);
+        if (error != nullptr) *error = infoLog;
         std::cerr << "[GLHelpers] Shader compilation failed:\n" << infoLog << "\n";
         glDeleteShader(id);
         return 0;
@@ -92,8 +98,13 @@ unsigned int CompileShader(unsigned int type, const char* source) {
 }
 
 unsigned int CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc) {
-    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vertexSrc);
-    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fragmentSrc);
+    return CreateShaderProgram(vertexSrc, fragmentSrc, nullptr);
+}
+
+unsigned int CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc, std::string* error) {
+    if (error != nullptr) error->clear();
+    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vertexSrc, error);
+    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fragmentSrc, error);
 
     if (!vs || !fs) {
         if (vs) glDeleteShader(vs);
@@ -102,7 +113,7 @@ unsigned int CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc)
     }
 
     const unsigned int shaderIds[] = { vs, fs };
-    unsigned int program = LinkProgram(shaderIds, 2);
+    unsigned int program = LinkProgram(shaderIds, 2, error);
 
     glDeleteShader(vs);
     glDeleteShader(fs);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Editor/GraphCapture.h"
 #include "EditorNodeGraph.h"
 #include "ThirdParty/json.hpp"
 #include <imgui.h>
@@ -20,6 +21,15 @@ public:
     ~EditorNodeGraphUI();
     void Initialize();
     void Render(EditorModule* editor);
+    Stack::EditorGraphCapture::GraphViewportSnapshot GetGraphCaptureViewportSnapshot() const;
+    void RenderGraphCapture(
+        EditorModule* editor,
+        EditorNodeGraph::Graph& graph,
+        std::vector<std::shared_ptr<LayerBase>>* layers,
+        const ImVec2& canvasMin,
+        const ImVec2& canvasMax,
+        const Stack::EditorGraphCapture::Settings& settings,
+        const Stack::EditorGraphCapture::GraphViewportSnapshot& viewport);
     bool IsNodeBrowserOpen() const { return m_DrawerMode == DrawerMode::NodeBrowser; }
     bool HasDrawerOpen() const { return m_DrawerMode != DrawerMode::None; }
     bool IsGraphMiddlePanActive() const { return m_MiddlePanCaptureActive; }
@@ -30,6 +40,7 @@ public:
         float targetPanelWidth,
         float paneHeight,
         const ImVec2& workspacePos);
+    void WarmPresetPreviewCache(EditorModule* editor, double budgetMs = 0.5);
     void RenderPresetsPanel(EditorModule* editor, float availableWidth);
     void RenderPresetPreviewPane(EditorModule* editor, const ImVec2& availableSize);
     void SetPresetPreviewHoverTarget(const std::shared_ptr<PresetEntry>& preset);
@@ -109,6 +120,9 @@ private:
         bool showContextMenu = true;
         bool showNodeBrowser = true;
         bool showZoomDial = true;
+        bool showGrid = true;
+        Stack::EditorGraphCapture::Background background =
+            Stack::EditorGraphCapture::Background::CurrentAppearance;
     };
 
     struct PreviewGraphCacheEntry {
@@ -128,6 +142,9 @@ private:
     bool UsesFixedNodeViewport() const;
     float NodeContentScale() const;
     float NodePinRadius() const;
+    float NodeWidthScale() const;
+    float NodeUiScalePreference() const;
+    float NodeGrabAreaHeight() const;
     void ZoomAtMouse(float wheel);
     void ClampPanToContent(const EditorNodeGraph::Graph& graph);
     void StopMiddlePanCapture();
@@ -141,7 +158,6 @@ private:
     void RenderPendingInputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredOutput);
     void RenderInteraction(EditorModule* editor, const EditorNodeGraph::Graph& graph);
     void RenderNodeBrowser(EditorModule* editor);
-    void RenderValidationStatus(const EditorNodeGraph::Graph& graph);
     void RenderGraphZoomDial(
         EditorModule* editor,
         ImDrawList* drawList,
@@ -171,11 +187,17 @@ public:
     bool ResolveNodeUsesSidebarOnlyComplexEditor(const EditorModule* editor, const EditorNodeGraph::Node& node) const;
     bool ResolveNodeHasDedicatedComplexEditor(const EditorModule* editor, const EditorNodeGraph::Node& node) const;
     bool ResolveLayerUsesRichNodeSurface(const EditorModule* editor, int layerIndex) const;
+    unsigned int GetImagePreviewTextureForNode(const EditorNodeGraph::Node& node);
     void FitGraphPreviewToCanvas(EditorModule* editor, const EditorNodeGraph::Graph& graph, const ImVec2& canvasSize);
     PreviewGraphCacheEntry* GetPresetPreviewGraphCacheEntry(const std::string& presetId);
     const PreviewGraphCacheEntry* GetPresetPreviewGraphCacheEntry(const std::string& presetId) const;
     bool EnsurePresetPreviewGraphLoaded(const PresetEntry& preset);
 private:
+    void FitGraphCaptureToCanvas(
+        EditorModule* editor,
+        const EditorNodeGraph::Graph& graph,
+        const ImVec2& canvasSize,
+        float paddingPercent);
     bool IsGraphCanvasHovered() const;
     bool CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph& graph, int nodeId) const;
     void CancelChannelSplitConfirm();
@@ -218,6 +240,28 @@ private:
         const NodeLayoutCache& cache,
         const std::string& socketId,
         EditorNodeGraph::SocketDirection direction) const;
+    std::vector<EditorNodeGraph::SocketDefinition> PresentedSockets(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
+    bool IsSocketConnected(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::SocketDefinition& socket) const;
+    void BeginDetailCardFrame(bool interactionAllowed);
+    void EndDetailCardFrame();
+    void ResetDetailCardHover();
+    bool DetailCardDelayElapsed(const std::string& key);
+    void DrawSocketDetailCard(
+        EditorModule* editor,
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::SocketDefinition& socket,
+        const ImVec2& anchor);
+    void DrawAdvancedSocketRevealRows(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node,
+        const NodeLayoutCache& layout,
+        ImDrawList* drawList,
+        ImU32 textColor,
+        float uiScale);
     bool IsPointInNodeHeader(int nodeId, const ImVec2& point) const;
     bool IsPointInNodeDraggableRegion(int nodeId, const ImVec2& point) const;
     void DrawClippedText(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const char* text, ImU32 color) const;
@@ -260,7 +304,6 @@ private:
     EditorNodeGraph::Vec2 m_BoxSelectCurrent;
     EditorNodeGraph::Vec2 m_CanvasMin;
     EditorNodeGraph::Vec2 m_CanvasMax;
-    std::string m_StatusMessage;
     char m_SearchBuffer[128] = {};
     char m_NodeBrowserSearchBuffer[128] = {};
     DrawerMode m_DrawerMode = DrawerMode::None;
@@ -302,6 +345,13 @@ private:
     std::unordered_map<int, float> m_NodeSelectionAnim;
     std::unordered_map<int, float> m_NodeHoverAnim;
     std::unordered_map<std::string, float> m_LinkEmphasisAnim;
+    std::unordered_map<std::string, CachedRect> m_LinkLabelHitRects;
+    std::unordered_set<int> m_RevealedAdvancedInputNodes;
+    std::unordered_set<int> m_RevealedAdvancedOutputNodes;
+    std::string m_DetailCardHoverKey;
+    double m_DetailCardHoverStartedAt = -1.0;
+    bool m_DetailCardHoverSeenThisFrame = false;
+    bool m_DetailCardInteractionAllowed = false;
     std::unordered_map<int, float> m_GroupEmphasisAnim;
     std::map<int, std::uint64_t> m_NodeFrontOrder;
     std::map<int, NodeLayoutCache> m_NodeLayoutCache;
@@ -322,6 +372,7 @@ private:
     EditorNodeGraph::Graph* m_RenderGraphOverride = nullptr;
     std::vector<std::shared_ptr<LayerBase>>* m_RenderLayersOverride = nullptr;
     bool m_RenderPreviewOnly = false;
+    bool m_RenderCaptureOnly = false;
     EditorNodeGraph::Vec2 m_LastGraphMousePos {};
     bool m_HasLastGraphMousePos = false;
     EditorModule* m_ActiveEditor = nullptr;
@@ -345,6 +396,7 @@ private:
     std::string m_DisplayedPresetPreviewId;
     std::string m_PreviousPresetPreviewId;
     double m_PresetPreviewFadeStartedAt = 0.0;
+    std::size_t m_PresetPreviewWarmupCursor = 0;
 
     void CopySelectedNodes(EditorModule* editor, bool writeSystemClipboard = false);
     void PasteNodes(EditorModule* editor, bool preferSystemClipboard = false);

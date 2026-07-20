@@ -4,6 +4,7 @@
 #include "Raw/RawImageAnalysis.h"
 
 #include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -174,6 +175,8 @@ struct LocalSuggestionComponentReport {
     float shadowP25Ev = 0.0f;
 
     float brightTopAreaPercent = 0.0f;
+    float brightBorderAreaPercent = 0.0f;
+    float brightBorderMedianEv = 0.0f;
     float centerMedianEv = 0.0f;
     float backlitContrastEv = 0.0f;
 
@@ -287,6 +290,9 @@ std::vector<SuggestedLocalAdjustment> BuildSuggestedLocalAdjustments(
     const Stack::RawAnalysis::RawImageAnalysis& analysis,
     const LocalSuggestionAnalysisImage& image,
     LocalSuggestionComponentReport* outReport = nullptr);
+std::vector<SuggestedLocalAdjustment> SelectBalancedLocalRangeAdjustments(
+    const AutoBaseRecommendations& recommendations,
+    std::size_t maxAdjustments = 2);
 bool ApplySuggestedLocalAdjustment(
     const SuggestedLocalAdjustment& suggestion,
     Stack::RawRecipe::RawDevelopmentRecipe& recipe);

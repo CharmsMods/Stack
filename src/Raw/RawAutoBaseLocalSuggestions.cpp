@@ -14,6 +14,9 @@ namespace Stack::RawAutoBase {
 namespace {
 
 constexpr float kLumaEpsilon = 1.0e-8f;
+constexpr float kBalancedLocalMinConfidence = 0.70f;
+constexpr float kBalancedLocalMaxAbsDeltaEv = 1.0f;
+constexpr std::size_t kBalancedLocalMaxAdjustments = 2;
 
 float SafeChannel(float value) {
     return std::isfinite(value) ? std::max(0.0f, value) : 0.0f;
@@ -399,6 +402,31 @@ float BrightTopAreaPercent(
     return 100.0f * static_cast<float>(brightCount) / static_cast<float>(validCount);
 }
 
+ComponentSummary BrightBorderSummary(
+    const std::vector<PixelData>& pixels,
+    int width,
+    int height,
+    int validCount,
+    float brightThresholdEv) {
+    std::vector<bool> mask(pixels.size(), false);
+    const int borderX = std::max(1, static_cast<int>(std::round(static_cast<float>(width) * 0.18f)));
+    const int borderY = std::max(1, static_cast<int>(std::round(static_cast<float>(height) * 0.18f)));
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const bool inBorder =
+                x < borderX || x >= width - borderX ||
+                y < borderY || y >= height - borderY;
+            if (!inBorder) {
+                continue;
+            }
+            const std::size_t index = static_cast<std::size_t>(y * width + x);
+            mask[index] = pixels[index].valid && pixels[index].ev >= brightThresholdEv;
+        }
+    }
+    KeepConnectedComponents(mask, width, height, validCount, 3.0f, false);
+    return SummarizeMask(pixels, mask, validCount);
+}
+
 SuggestedLocalAdjustment MakeSuggestion(
     SuggestedLocalAdjustmentKind kind,
     float targetEv,
@@ -441,6 +469,14 @@ void AddSuggestion(std::vector<SuggestedLocalAdjustment>& suggestions, Suggested
     suggestions.push_back(std::move(suggestion));
 }
 
+bool SuggestionPassesBalancedLocalCaps(const SuggestedLocalAdjustment& suggestion) {
+    return suggestion.valid &&
+        std::isfinite(suggestion.targetEv) &&
+        std::isfinite(suggestion.deltaEv) &&
+        suggestion.confidence >= kBalancedLocalMinConfidence &&
+        std::abs(suggestion.deltaEv) <= kBalancedLocalMaxAbsDeltaEv;
+}
+
 } // namespace
 
 const char* SuggestedLocalAdjustmentKindLabel(SuggestedLocalAdjustmentKind kind) {
@@ -477,6 +513,7 @@ LocalSuggestionComponentReport AnalyzeLocalSuggestionComponents(
     }
 
     const float p50Ev = PercentileSorted(sortedEvs, 0.50f);
+    const float p90Ev = PercentileSorted(sortedEvs, 0.90f);
     const float p95Ev = PercentileSorted(sortedEvs, 0.95f);
     std::vector<float> variances;
     variances.reserve(pixels.size());
@@ -511,6 +548,12 @@ LocalSuggestionComponentReport AnalyzeLocalSuggestionComponents(
 
     const std::vector<bool> shadowMask = BuildShadowMask(pixels, p50Ev - 2.0f);
     const ComponentSummary shadow = SummarizeMask(pixels, shadowMask, validCount);
+    const ComponentSummary brightBorder = BrightBorderSummary(
+        pixels,
+        image.width,
+        image.height,
+        validCount,
+        p90Ev - 0.35f);
 
     report.valid = true;
     report.validPixelPercent =
@@ -546,7 +589,11 @@ LocalSuggestionComponentReport AnalyzeLocalSuggestionComponents(
         image.height,
         validCount,
         p95Ev);
-    const float brightBackgroundEv = sky.valid ? sky.medianEv : p95Ev;
+    report.brightBorderAreaPercent = brightBorder.areaPercent;
+    report.brightBorderMedianEv = brightBorder.medianEv;
+    const float brightBackgroundEv = std::max(
+        sky.valid ? sky.medianEv : p95Ev,
+        brightBorder.valid ? brightBorder.medianEv : p95Ev);
     report.backlitContrastEv = brightBackgroundEv - report.centerMedianEv;
     report.statusMessage = "Local component analysis ready.";
     return report;
@@ -577,7 +624,10 @@ std::vector<SuggestedLocalAdjustment> BuildSuggestedLocalAdjustments(
     const bool backlitByBrightTop =
         report.brightTopAreaPercent > 15.0f &&
         report.backlitContrastEv > 3.0f;
-    if (backlitBySky || backlitByBrightTop) {
+    const bool backlitByBrightBorder =
+        report.brightBorderAreaPercent > 8.0f &&
+        report.backlitContrastEv > 2.0f;
+    if (backlitBySky || backlitByBrightTop || backlitByBrightBorder) {
         const float contrast = report.backlitContrastEv;
         const float delta = std::min(
             1.0f,
@@ -590,10 +640,16 @@ std::vector<SuggestedLocalAdjustment> BuildSuggestedLocalAdjustments(
                 delta,
                 3.0f,
                 0.75f,
-                Remap01(contrast, 2.5f, 5.0f),
-                report.skyAreaPercent > 0.0f ? report.skyAreaPercent : report.brightTopAreaPercent,
+                std::max(
+                    Remap01(contrast, 2.5f, 5.0f),
+                    std::min(
+                        Remap01(contrast, 1.8f, 3.5f),
+                        Remap01(report.brightBorderAreaPercent, 8.0f, 22.0f))),
+                report.skyAreaPercent > 0.0f
+                    ? report.skyAreaPercent
+                    : std::max(report.brightTopAreaPercent, report.brightBorderAreaPercent),
                 "Open backlit subject",
-                "Creates a broad Local Range lift around the dark center/foreground EV. RAW Exposure stays unchanged to protect bright background detail."));
+                "Creates a broad Local Range lift around the dark center/foreground EV using orientation-agnostic bright-border evidence. RAW Exposure stays unchanged to protect bright background detail."));
     }
 
     if (report.skyAreaPercent > 8.0f && report.backlitContrastEv > 1.5f) {
@@ -697,6 +753,45 @@ std::vector<SuggestedLocalAdjustment> BuildSuggestedLocalAdjustments(
         suggestions.resize(4);
     }
     return suggestions;
+}
+
+std::vector<SuggestedLocalAdjustment> SelectBalancedLocalRangeAdjustments(
+    const AutoBaseRecommendations& recommendations,
+    std::size_t maxAdjustments) {
+    if (maxAdjustments == 0) {
+        return {};
+    }
+
+    const std::size_t cappedMax =
+        std::min(kBalancedLocalMaxAdjustments, maxAdjustments);
+    std::vector<SuggestedLocalAdjustment> selected;
+    selected.reserve(cappedMax);
+
+    for (const SuggestedLocalAdjustment& suggestion : recommendations.localAdjustments) {
+        if (!SuggestionPassesBalancedLocalCaps(suggestion)) {
+            continue;
+        }
+
+        const bool selectedHasColorQualifier = std::any_of(
+            selected.begin(),
+            selected.end(),
+            [](const SuggestedLocalAdjustment& item) {
+                return item.colorQualifierEnabled;
+            });
+        if (selectedHasColorQualifier) {
+            break;
+        }
+        if (suggestion.colorQualifierEnabled && !selected.empty()) {
+            continue;
+        }
+
+        selected.push_back(suggestion);
+        if (selected.size() >= cappedMax || suggestion.colorQualifierEnabled) {
+            break;
+        }
+    }
+
+    return selected;
 }
 
 bool ApplySuggestedLocalAdjustment(

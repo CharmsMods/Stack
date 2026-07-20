@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <vector>
 
 namespace Stack::RawAutoBase {
 namespace {
@@ -182,10 +183,10 @@ ViewFitDecision BuildAutoBaseViewFitDecision(
     decision.valid = decision.fit.valid;
     decision.canApply = decision.fit.valid;
     if (decision.canApply) {
-        decision.summary = "Auto Base applied: View fit from current frame. RAW Exposure unchanged.";
-        decision.reason = "View Transform Auto Fit is safe because it maps scene-linear values to display without changing RAW Exposure.";
+        decision.summary = "Fit Display applied: View Transform fit from current frame. RAW Exposure unchanged.";
+        decision.reason = "Display Fit / View Transform is safe because it maps scene-linear values to display without changing RAW Exposure.";
     } else {
-        decision.summary = "Auto Base pending: render preview to analyze the frame.";
+        decision.summary = "Display Fit pending: render preview to analyze the frame.";
         decision.reason = decision.fit.reason.empty()
             ? "Current-frame stats are unavailable."
             : decision.fit.reason;
@@ -342,6 +343,72 @@ WhiteBalanceCandidateEvidence BuildWhiteBalanceCandidateEvidence(
               << evidence.eligiblePixelPercent
               << "% eligible medium-luma, low-saturation pixels.";
     evidence.rationale = rationale.str();
+    return evidence;
+}
+
+WhiteBalanceCandidateEvidence BuildWhiteBalanceEvidenceFromLocalSuggestionImage(
+    const LocalSuggestionAnalysisImage& image) {
+    WhiteBalanceCandidateEvidence evidence;
+    evidence.method = WhiteBalanceRecommendation::Method::GrayWorld;
+    if (!image.valid || !image.sceneLinearBeforeLocalRange || image.width <= 0 || image.height <= 0) {
+        evidence.rationale =
+            "Alternate auto WB needs a scene-linear pre-Local-Range RGB readback before it can be suggested.";
+        return evidence;
+    }
+
+    const std::size_t expectedCount =
+        static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
+    if (image.pixels.size() < expectedCount) {
+        evidence.rationale =
+            "Alternate auto WB pre-Local-Range RGB readback is incomplete.";
+        return evidence;
+    }
+
+    std::vector<WhiteBalanceSample> samples;
+    std::vector<float> lumas;
+    samples.reserve(expectedCount);
+    lumas.reserve(expectedCount);
+    for (std::size_t index = 0; index < expectedCount; ++index) {
+        const LocalSuggestionPixel& pixel = image.pixels[index];
+        if (!pixel.valid ||
+            !std::isfinite(pixel.r) ||
+            !std::isfinite(pixel.g) ||
+            !std::isfinite(pixel.b)) {
+            continue;
+        }
+
+        WhiteBalanceSample sample;
+        sample.valid = true;
+        sample.r = SafeLuma(pixel.r);
+        sample.g = SafeLuma(pixel.g);
+        sample.b = SafeLuma(pixel.b);
+        sample.luma = SampleLuma(sample);
+        sample.clipped = false;
+        samples.push_back(sample);
+        lumas.push_back(sample.luma);
+    }
+
+    if (samples.empty()) {
+        evidence.rationale =
+            "Alternate auto WB pre-Local-Range RGB readback contained no valid pixels.";
+        return evidence;
+    }
+
+    const float validPixelPercent =
+        100.0f * static_cast<float>(samples.size()) / static_cast<float>(expectedCount);
+    Stack::RawAnalysis::PercentileStats stats =
+        Stack::RawAnalysis::BuildPercentileStatsFromLumas(
+            std::move(lumas),
+            validPixelPercent,
+            Stack::RawAnalysis::AnalysisStageStatus::Complete,
+            "Pre-Local-Range scene-linear RGB readback for alternate WB evidence.");
+    evidence = BuildWhiteBalanceCandidateEvidence(
+        samples,
+        stats,
+        WhiteBalanceRecommendation::Method::GrayWorld);
+    if (!evidence.rationale.empty()) {
+        evidence.rationale += " Source: pre-Local-Range scene-linear RGB readback.";
+    }
     return evidence;
 }
 
@@ -568,6 +635,12 @@ AutoBaseRecommendations BuildAutoBaseRecommendations(
     const LocalSuggestionAnalysisImage* localSuggestionImage) {
     AutoBaseRecommendations recommendations;
     recommendations.exposure = BuildRawExposureRecommendation(analysis, recipe);
+    WhiteBalanceCandidateEvidence generatedWhiteBalanceEvidence;
+    if (alternateWhiteBalanceEvidence == nullptr && localSuggestionImage != nullptr) {
+        generatedWhiteBalanceEvidence =
+            BuildWhiteBalanceEvidenceFromLocalSuggestionImage(*localSuggestionImage);
+        alternateWhiteBalanceEvidence = &generatedWhiteBalanceEvidence;
+    }
     recommendations.whiteBalance =
         BuildWhiteBalanceRecommendation(analysis, recipe, alternateWhiteBalanceEvidence);
     const ViewTransformFit fit = FitViewTransformFromAnalysis(analysis);

@@ -1,6 +1,7 @@
 #include "Editor/EditorModule.h"
 
 #include "Async/TaskSystem.h"
+#include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Library/LibraryManager.h"
 #include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
@@ -9,6 +10,7 @@
 #include "Utils/FileDialogs.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -42,6 +44,14 @@ bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
     outImage.pixels.assign(pixels, pixels + (width * height * 4));
     stbi_image_free(pixels);
     return true;
+}
+
+bool ReadImageInfoFromFile(const std::string& path, int& outWidth, int& outHeight, int& outChannels) {
+    outWidth = 0;
+    outHeight = 0;
+    outChannels = 0;
+    return stbi_info(path.c_str(), &outWidth, &outHeight, &outChannels) != 0 &&
+        outWidth > 0 && outHeight > 0;
 }
 
 void PngWriteCallback(void* context, void* data, int size) {
@@ -81,6 +91,25 @@ std::vector<unsigned char> EncodePngBytesForImageStorage(
     std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
     LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
     return EncodePngBytes(topLeftPixels, width, height, channels);
+}
+
+std::vector<unsigned char> EncodePngBytesForImageStorageOwned(
+    std::vector<unsigned char> bottomLeftPixels,
+    int width,
+    int height,
+    int channels) {
+    if (bottomLeftPixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
+        return {};
+    }
+
+    // This buffer belongs only to the background embed task, so flipping it in
+    // place avoids the second full-frame copy used by the non-owning helper.
+    LibraryManager::FlipImageRowsInPlace(bottomLeftPixels, width, height, std::max(1, channels));
+    return EncodePngBytes(bottomLeftPixels, width, height, channels);
+}
+
+double MillisecondsSince(const std::chrono::steady_clock::time_point& start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 int NormalizeQuarterTurnsClockwise(int quarterTurnsClockwise) {
@@ -146,7 +175,8 @@ std::vector<unsigned char> RotateBottomLeftImagePixels(
 
 EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
     const std::string& path,
-    DecodedImageData decoded) {
+    DecodedImageData decoded,
+    bool includeStoragePng = true) {
     EditorNodeGraph::ImagePayload payload;
     payload.label = FileNameFromPath(path);
     payload.sourcePath = path;
@@ -154,7 +184,20 @@ EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
     payload.height = decoded.height;
     payload.channels = decoded.channels;
     payload.originalChannels = decoded.originalChannels;
-    payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
+    payload.sourceColorMetadata = EditorNodeGraph::InspectImageFileColorMetadata(
+        path, decoded.width, decoded.height, decoded.originalChannels);
+    EditorNodeGraph::BuildImagePayloadPreview(
+        decoded.pixels,
+        decoded.width,
+        decoded.height,
+        decoded.channels,
+        payload.previewPixels,
+        payload.previewWidth,
+        payload.previewHeight,
+        payload.previewChannels);
+    if (includeStoragePng) {
+        payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
+    }
     payload.pixels = std::move(decoded.pixels);
     return payload;
 }
@@ -173,9 +216,9 @@ EditorNodeGraph::RawSourcePayload BuildRawPayloadFromMetadata(
 } // namespace
 
 void EditorModule::PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition) {
-    const std::string path = FileDialogs::OpenImageFileDialog("Add Image Node");
+    const std::string path = FileDialogs::OpenImageFileDialog("Import Slice");
     if (!path.empty()) {
-        AddImageNodeFromFile(path, graphPosition);
+        StartAsyncGraphImageNodeImport(path, graphPosition);
     }
 }
 
@@ -199,6 +242,154 @@ bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph
     }
 
     return AddImageNodeFromPayload(BuildImagePayloadFromDecoded(path, std::move(decoded)), graphPosition);
+}
+
+bool EditorModule::StartAsyncGraphImageNodeImport(
+    const std::string& path,
+    EditorNodeGraph::Vec2 graphPosition) {
+    if (path.empty()) {
+        return false;
+    }
+    if (Raw::RawLoader::IsRawPath(path)) {
+        return AddImageNodeFromFile(path, graphPosition);
+    }
+
+    const std::uint64_t requestId = m_NextGraphImageImportRequestId++;
+    EditorNodeGraph::ImagePayload pendingPayload;
+    pendingPayload.label = FileNameFromPath(path);
+    pendingPayload.sourcePath = path;
+    int sourceChannels = 0;
+    ReadImageInfoFromFile(path, pendingPayload.width, pendingPayload.height, sourceChannels);
+    pendingPayload.originalChannels = sourceChannels > 0 ? sourceChannels : pendingPayload.originalChannels;
+    pendingPayload.isLoading = true;
+    pendingPayload.importRequestId = requestId;
+
+    EditorNodeGraph::Node* pendingNode = m_NodeGraph.AddImageNode(std::move(pendingPayload), graphPosition);
+    if (!pendingNode) {
+        return false;
+    }
+    const int nodeId = pendingNode->id;
+    SelectGraphNode(nodeId);
+    MarkDirty();
+
+    const auto queuedAt = std::chrono::steady_clock::now();
+    Async::TaskSystem::Get().SubmitHighPriority([this, path, nodeId, requestId, queuedAt]() {
+        const double queueMs = MillisecondsSince(queuedAt);
+        const auto decodeBegin = std::chrono::steady_clock::now();
+        DecodedImageData decoded;
+        if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
+            Async::TaskSystem::Get().PostToMain([this, nodeId, requestId]() {
+                EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+                if (node && node->kind == EditorNodeGraph::NodeKind::Image &&
+                    node->image.isLoading && node->image.importRequestId == requestId) {
+                    m_NodeGraph.RemoveNode(nodeId);
+                    MarkDirty();
+                }
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    "Failed to load the selected slice.",
+                    "editor-graph-image-import");
+            });
+            return;
+        }
+        const double decodeMs = MillisecondsSince(decodeBegin);
+
+        const auto previewBegin = std::chrono::steady_clock::now();
+        EditorNodeGraph::ImagePayload payload =
+            BuildImagePayloadFromDecoded(path, std::move(decoded), false);
+        const double previewMs = MillisecondsSince(previewBegin);
+        payload.isEmbedding = true;
+        payload.importRequestId = requestId;
+        payload.embeddingRequestId = requestId;
+
+        // The storage encoder needs its own source buffer because renderable
+        // pixels are handed to the main thread immediately. This moves the old
+        // flip-and-encode work off the interaction path.
+        const auto storageCopyBegin = std::chrono::steady_clock::now();
+        std::vector<unsigned char> storagePixels = payload.pixels;
+        const double storageCopyMs = MillisecondsSince(storageCopyBegin);
+        const int width = payload.width;
+        const int height = payload.height;
+        const int channels = payload.channels;
+        const std::size_t pixelBytes = storagePixels.size();
+
+        Async::TaskSystem::Get().PostToMain([
+            this,
+            nodeId,
+            requestId,
+            queueMs,
+            decodeMs,
+            previewMs,
+            storageCopyMs,
+            pixelBytes,
+            payload = std::move(payload)
+        ]() mutable {
+            EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+            if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
+                !node->image.isLoading || node->image.importRequestId != requestId) {
+                return;
+            }
+
+            node->title = payload.label.empty() ? "Slice" : payload.label;
+            node->image = std::move(payload);
+            m_GraphPerformanceStats.lastSliceImportQueueMs = queueMs;
+            m_GraphPerformanceStats.lastSliceImportDecodeMs = decodeMs;
+            m_GraphPerformanceStats.lastSliceImportPreviewMs = previewMs;
+            m_GraphPerformanceStats.lastSliceImportStorageCopyMs = storageCopyMs;
+            m_GraphPerformanceStats.lastSliceImportWidth = node->image.width;
+            m_GraphPerformanceStats.lastSliceImportHeight = node->image.height;
+            m_GraphPerformanceStats.lastSliceImportPixelBytes = pixelBytes;
+            MarkDirty();
+        });
+
+        const auto embedBegin = std::chrono::steady_clock::now();
+        std::vector<unsigned char> pngBytes =
+            EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
+        const double embedMs = MillisecondsSince(embedBegin);
+        Async::TaskSystem::Get().PostToMain([
+            this,
+            nodeId,
+            requestId,
+            embedMs,
+            pngBytes = std::move(pngBytes)
+        ]() mutable {
+            m_GraphPerformanceStats.lastSliceImportEmbedMs = embedMs;
+            m_GraphPerformanceStats.lastSliceImportEmbeddedBytes = pngBytes.size();
+            EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+            if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
+                !node->image.isEmbedding || node->image.embeddingRequestId != requestId) {
+                return;
+            }
+
+            if (pngBytes.empty()) {
+                node->image.isEmbedding = false;
+                node->image.embeddingRequestId = 0;
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    "The slice loaded, but Stack could not embed it for project storage.",
+                    "editor-graph-image-embed");
+                MarkDirty();
+                return;
+            }
+
+            node->image.pngBytes = std::move(pngBytes);
+            node->image.isEmbedding = false;
+            node->image.embeddingRequestId = 0;
+            MarkDirty();
+        });
+    });
+
+    return true;
+}
+
+bool EditorModule::HasPendingGraphImageImports() const {
+    return std::any_of(
+        m_NodeGraph.GetNodes().begin(),
+        m_NodeGraph.GetNodes().end(),
+        [](const EditorNodeGraph::Node& node) {
+            return node.kind == EditorNodeGraph::NodeKind::Image &&
+                (node.image.isLoading || node.image.isEmbedding);
+        });
 }
 
 bool EditorModule::AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition) {
@@ -277,17 +468,12 @@ bool EditorModule::StartGraphImageChainImport(
     const std::uint64_t generation = m_GraphDropImportGeneration;
     m_GraphDropImportTaskState = Async::TaskState::Queued;
     m_GraphDropImportStatusText = validPaths.size() > 1
-        ? "Loading dropped images into the graph..."
-        : "Loading dropped image into the graph...";
+        ? "Loading dropped slices into the graph..."
+        : "Loading dropped slice into the graph...";
 
-    Async::TaskSystem::Get().Submit([this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
-        struct DecodedDropImage {
-            std::string path;
-            DecodedImageData decoded;
-        };
-
-        std::vector<DecodedDropImage> decodedImages;
-        decodedImages.reserve(validPaths.size());
+    Async::TaskSystem::Get().SubmitHighPriority([this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
+        std::vector<EditorNodeGraph::ImagePayload> importedImages;
+        importedImages.reserve(validPaths.size());
         std::vector<std::string> rawPaths;
         for (const std::string& path : validPaths) {
             if (Raw::RawLoader::IsRawPath(path)) {
@@ -298,7 +484,9 @@ bool EditorModule::StartGraphImageChainImport(
             if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
                 continue;
             }
-            decodedImages.push_back(DecodedDropImage{ path, std::move(decoded) });
+            // Keep PNG embedding on the worker. The former main-thread payload
+            // build made a successful drop appear to freeze after decoding.
+            importedImages.push_back(BuildImagePayloadFromDecoded(path, std::move(decoded)));
         }
 
         Async::TaskSystem::Get().PostToMain([
@@ -306,7 +494,7 @@ bool EditorModule::StartGraphImageChainImport(
             generation,
             sourcePosition,
             requestedCount = validPaths.size(),
-            decodedImages = std::move(decodedImages),
+            importedImages = std::move(importedImages),
             rawPaths = std::move(rawPaths)
         ]() mutable {
             if (generation != m_GraphDropImportGeneration) {
@@ -316,10 +504,10 @@ bool EditorModule::StartGraphImageChainImport(
             const Raw::LibRawRuntimeStatus& rawRuntimeStatus = Raw::GetLibRawRuntimeStatus();
             const bool rawRuntimeUnavailable = !rawPaths.empty() && !rawRuntimeStatus.runtimeAvailable;
 
-            if (decodedImages.empty() && rawPaths.empty()) {
+            if (importedImages.empty() && rawPaths.empty()) {
                 m_GraphDropImportTaskState = Async::TaskState::Failed;
-                m_GraphDropImportStatusText = "Failed to import the dropped images.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to import the dropped images.", "editor-graph-drop-import");
+                m_GraphDropImportStatusText = "Failed to import the dropped slices.";
+                QueueUiNotification(UiNotificationSeverity::Error, "Failed to import the dropped slices.", "editor-graph-drop-import");
                 if (!m_PendingGraphDropImports.empty()) {
                     PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
                     m_PendingGraphDropImports.erase(m_PendingGraphDropImports.begin());
@@ -329,18 +517,18 @@ bool EditorModule::StartGraphImageChainImport(
             }
 
             m_GraphDropImportTaskState = Async::TaskState::Applying;
-            m_GraphDropImportStatusText = "Creating image nodes...";
+            m_GraphDropImportStatusText = "Creating slice nodes...";
 
             constexpr float kGraphDropRowSpacing = 190.0f;
-            const std::size_t totalNodes = decodedImages.size() + rawPaths.size();
+            const std::size_t totalNodes = importedImages.size() + rawPaths.size();
             const float startY = sourcePosition.y - (static_cast<float>(totalNodes - 1) * kGraphDropRowSpacing * 0.5f);
             int importedCount = 0;
             size_t outputIndex = 0;
-            for (size_t index = 0; index < decodedImages.size(); ++index, ++outputIndex) {
+            for (size_t index = 0; index < importedImages.size(); ++index, ++outputIndex) {
                 EditorNodeGraph::Vec2 nodePosition = sourcePosition;
                 nodePosition.y = startY + static_cast<float>(outputIndex) * kGraphDropRowSpacing;
                 if (AddGraphImageChainFromPayload(
-                    BuildImagePayloadFromDecoded(decodedImages[index].path, std::move(decodedImages[index].decoded)),
+                    std::move(importedImages[index]),
                     nodePosition)) {
                     ++importedCount;
                 }
@@ -363,8 +551,8 @@ bool EditorModule::StartGraphImageChainImport(
                 if (rawRuntimeUnavailable) {
                     m_GraphDropImportStatusText = rawRuntimeStatus.message;
                 } else {
-                    m_GraphDropImportStatusText = "Failed to create graph nodes for the dropped images.";
-                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to create graph nodes for the dropped images.", "editor-graph-drop-import");
+                    m_GraphDropImportStatusText = "Failed to create graph nodes for the dropped slices.";
+                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to create graph nodes for the dropped slices.", "editor-graph-drop-import");
                 }
                 if (!m_PendingGraphDropImports.empty()) {
                     PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
@@ -377,11 +565,11 @@ bool EditorModule::StartGraphImageChainImport(
             m_GraphDropImportTaskState = Async::TaskState::Idle;
             if (importedCount == static_cast<int>(requestedCount)) {
                 m_GraphDropImportStatusText = importedCount == 1
-                    ? "Imported 1 image into the graph."
-                    : "Imported " + std::to_string(importedCount) + " images into the graph.";
+                    ? "Imported 1 slice into the graph."
+                    : "Imported " + std::to_string(importedCount) + " slices into the graph.";
             } else {
                 m_GraphDropImportStatusText =
-                    "Imported " + std::to_string(importedCount) + " of " + std::to_string(requestedCount) + " dropped images.";
+                    "Imported " + std::to_string(importedCount) + " of " + std::to_string(requestedCount) + " dropped slices.";
             }
             QueueUiNotification(UiNotificationSeverity::Success, m_GraphDropImportStatusText, "editor-graph-drop-import");
 
@@ -396,6 +584,20 @@ bool EditorModule::StartGraphImageChainImport(
     return true;
 }
 
+bool EditorModule::UseGraphImageNodeAsActiveSource(int nodeId) {
+    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    if (!node || node->kind != EditorNodeGraph::NodeKind::Image || node->image.pixels.empty()) {
+        return false;
+    }
+
+    LoadSourceFromImagePayload(node->image, true, false);
+    m_NodeGraph.SetActiveImageNodeId(nodeId);
+    MarkNodeBrowserThumbnailSourceChanged();
+    SelectGraphNode(nodeId);
+    MarkRenderDirty(nodeId);
+    return true;
+}
+
 bool EditorModule::ConnectGraphImageNode(int nodeId) {
     EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
     if (!node) {
@@ -406,7 +608,7 @@ bool EditorModule::ConnectGraphImageNode(int nodeId) {
         if (node->image.pixels.empty()) {
             return false;
         }
-        LoadSourceFromPixels(node->image.pixels.data(), node->image.width, node->image.height, node->image.channels);
+        LoadSourceFromImagePayload(node->image, true, false);
         m_NodeGraph.SetActiveImageNodeId(nodeId);
         sourceChanged = true;
     } else if (node->kind != EditorNodeGraph::NodeKind::RawDevelop) {
@@ -450,19 +652,23 @@ bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
     node->image.width = rotatedWidth;
     node->image.height = rotatedHeight;
     node->image.pixels = std::move(rotatedPixels);
-    node->image.pngBytes = EncodePngBytesForImageStorage(
+    // PNG compression can be expensive for large slices; rebuild storage bytes lazily on save/export.
+    node->image.pngBytes.clear();
+    node->image.isEmbedding = false;
+    node->image.embeddingRequestId = 0;
+    EditorNodeGraph::InvalidateImagePayloadRuntime(node->image);
+    EditorNodeGraph::BuildImagePayloadPreview(
         node->image.pixels,
         node->image.width,
         node->image.height,
-        node->image.channels);
-    EditorNodeGraph::InvalidateImagePayloadRuntime(node->image);
+        node->image.channels,
+        node->image.previewPixels,
+        node->image.previewWidth,
+        node->image.previewHeight,
+        node->image.previewChannels);
 
     if (m_NodeGraph.GetActiveImageNodeId() == nodeId) {
-        LoadSourceFromPixels(
-            node->image.pixels.data(),
-            node->image.width,
-            node->image.height,
-            node->image.channels);
+        LoadSourceFromImagePayload(node->image, true, false);
         MarkNodeBrowserThumbnailSourceChanged();
     }
 

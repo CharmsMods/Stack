@@ -360,12 +360,120 @@ if (WIN32)
     endif()
 endif()
 
+include(CTest)
+
+option(STACK_BUILD_NODE_MATH_TESTS "Build deterministic CPU/GPU node-math reference tests" ON)
+if (BUILD_TESTING AND STACK_BUILD_NODE_MATH_TESTS)
+    add_executable(StackNodeMathContractTests ${STACK_NODE_MATH_CONTRACT_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathContractTests PRIVATE src)
+
+    add_executable(StackNodeMathPhase2Tests ${STACK_NODE_MATH_PHASE2_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathPhase2Tests PRIVATE src)
+
+    add_executable(StackNodeMathPhase3Tests ${STACK_NODE_MATH_PHASE3_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathPhase3Tests PRIVATE src)
+
+    add_executable(StackNodeMathPhase4Tests ${STACK_NODE_MATH_PHASE4_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathPhase4Tests PRIVATE src)
+
+    add_executable(StackNodeMathPhase5Tests ${STACK_NODE_MATH_PHASE5_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathPhase5Tests PRIVATE src)
+
+    add_executable(StackNodeMathPhase6Tests ${STACK_NODE_MATH_PHASE6_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathPhase6Tests PRIVATE src)
+
+    add_executable(StackNodeMathReferenceTests ${STACK_NODE_MATH_REFERENCE_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathReferenceTests PRIVATE
+        src
+        tools
+    )
+    target_link_libraries(StackNodeMathReferenceTests PRIVATE glfw)
+    if (WIN32)
+        target_link_libraries(StackNodeMathReferenceTests PRIVATE opengl32)
+    elseif (APPLE)
+        target_link_libraries(StackNodeMathReferenceTests PRIVATE "-framework OpenGL")
+    elseif (UNIX)
+        target_link_libraries(StackNodeMathReferenceTests PRIVATE GL)
+    endif()
+
+    add_test(NAME StackNodeMathReference.Cpu
+        COMMAND StackNodeMathReferenceTests --cpu-only)
+    set_tests_properties(StackNodeMathReference.Cpu PROPERTIES
+        LABELS "node-math;cpu")
+
+    add_test(NAME StackNodeMathReference.Gpu
+        COMMAND StackNodeMathReferenceTests --gpu)
+    set_tests_properties(StackNodeMathReference.Gpu PROPERTIES
+        LABELS "node-math;gpu"
+        RUN_SERIAL TRUE)
+
+    add_test(NAME StackNodeMathContract.Phase1
+        COMMAND StackNodeMathContractTests)
+    set_tests_properties(StackNodeMathContract.Phase1 PROPERTIES
+        LABELS "node-math;contract;cpu")
+
+    add_test(NAME StackNodeMathSemantic.Phase2
+        COMMAND StackNodeMathPhase2Tests)
+    set_tests_properties(StackNodeMathSemantic.Phase2 PROPERTIES
+        LABELS "node-math;semantic;color;alpha;cpu")
+
+    add_test(NAME StackNodeMathValues.Phase3
+        COMMAND StackNodeMathPhase3Tests)
+    set_tests_properties(StackNodeMathValues.Phase3 PROPERTIES
+        LABELS "node-math;values;types;cpu")
+
+    add_test(NAME StackNodeMathPointwise.Phase4
+        COMMAND StackNodeMathPhase4Tests)
+    set_tests_properties(StackNodeMathPointwise.Phase4 PROPERTIES
+        LABELS "node-math;ir;fusion;planning;cpu")
+
+    add_test(NAME StackNodeMathCompounds.Phase5
+        COMMAND StackNodeMathPhase5Tests)
+    set_tests_properties(StackNodeMathCompounds.Phase5 PROPERTIES
+        LABELS "node-math;compound;definition;versioning;cpu")
+
+    add_test(NAME StackNodeMathRegions.Phase6
+        COMMAND StackNodeMathPhase6Tests)
+    set_tests_properties(StackNodeMathRegions.Phase6 PROPERTIES
+        LABELS "node-math;regions;roi;halo;planning;cpu")
+
+    add_test(NAME StackNodeMathReductions.Phase6B
+        COMMAND StackNodeMathPhase6Tests)
+    set_tests_properties(StackNodeMathReductions.Phase6B PROPERTIES
+        LABELS "node-math;reduction;scalar;planning;cpu")
+
+    add_test(NAME StackNodeMathPointwise.LiveGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-node-math-phase4)
+    set_tests_properties(StackNodeMathPointwise.LiveGpu PROPERTIES
+        LABELS "node-math;ir;fusion;gpu;integration"
+        RUN_SERIAL TRUE)
+
+    add_test(NAME StackNodeMathCompounds.LiveGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-node-math-phase5)
+    set_tests_properties(StackNodeMathCompounds.LiveGpu PROPERTIES
+        LABELS "node-math;compound;equivalence;gpu;integration"
+        RUN_SERIAL TRUE)
+
+    add_test(NAME StackNodeMathRegions.LiveGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-node-math-phase6)
+    set_tests_properties(StackNodeMathRegions.LiveGpu PROPERTIES
+        LABELS "node-math;regions;roi;halo;gpu;integration"
+        RUN_SERIAL TRUE)
+
+    add_test(NAME StackNodeMathReductions.LiveGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-node-math-phase6)
+    set_tests_properties(StackNodeMathReductions.LiveGpu PROPERTIES
+        LABELS "node-math;reduction;scalar;gpu;integration"
+        RUN_SERIAL TRUE)
+endif()
+
 option(STACK_BUILD_GRAPH_TESTS "Build focused node graph behavior tests" ON)
 if (STACK_BUILD_GRAPH_TESTS)
     add_executable(StackGraphBehaviorTests ${STACK_GRAPH_BEHAVIOR_TEST_SOURCE_FILES})
     target_include_directories(StackGraphBehaviorTests PRIVATE
         src
         src/ThirdParty
+        ${imgui_SOURCE_DIR}
     )
     if (STACK_ENABLE_LIBRAW)
         target_compile_definitions(StackGraphBehaviorTests PRIVATE STACK_ENABLE_LIBRAW=1)
@@ -375,4 +483,40 @@ if (STACK_BUILD_GRAPH_TESTS)
             target_link_libraries(StackGraphBehaviorTests PRIVATE delayimp)
         endif()
     endif()
+
+    add_executable(StackRawEvidenceTests ${STACK_RAW_EVIDENCE_TEST_SOURCE_FILES})
+    target_include_directories(StackRawEvidenceTests PRIVATE
+        src
+        src/ThirdParty
+    )
+
+    add_executable(StackRenderedFeatureTests ${STACK_RENDERED_FEATURE_TEST_SOURCE_FILES})
+    target_include_directories(StackRenderedFeatureTests PRIVATE
+        src
+        src/ThirdParty
+    )
+
+    add_executable(StackPreciseCandidateTests ${STACK_PRECISE_CANDIDATE_TEST_SOURCE_FILES})
+    target_include_directories(StackPreciseCandidateTests PRIVATE
+        src
+        src/ThirdParty
+    )
+
+    add_executable(StackOptimizerSelectionTests ${STACK_OPTIMIZER_SELECTION_TEST_SOURCE_FILES})
+    target_include_directories(StackOptimizerSelectionTests PRIVATE
+        src
+        src/ThirdParty
+    )
+
+    add_executable(StackPreciseDryRunTests ${STACK_PRECISE_DRY_RUN_TEST_SOURCE_FILES})
+    target_include_directories(StackPreciseDryRunTests PRIVATE
+        src
+        src/ThirdParty
+    )
+
+    add_executable(StackPreciseIntegrationTests ${STACK_PRECISE_INTEGRATION_TEST_SOURCE_FILES})
+    target_include_directories(StackPreciseIntegrationTests PRIVATE
+        src
+        src/ThirdParty
+    )
 endif()

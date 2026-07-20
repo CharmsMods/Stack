@@ -45,10 +45,10 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
 
             if (resolvedInputs.size() > 1) {
                 unsigned int runningTexture = resolvedInputs.front().texture;
-                bool runningOwned = false;
+                bool runningTransient = false;
                 for (std::size_t index = 1; index < resolvedInputs.size(); ++index) {
-                    unsigned int accumulated = CreateGraphRenderTargetTexture();
-                    RenderIntoGraphTargetTexture(accumulated, [&](unsigned int fbo) {
+                    unsigned int accumulated = AcquireGraphTransientTarget();
+                    const bool accumulatedRendered = RenderIntoGraphTargetTexture(accumulated, [&](unsigned int fbo) {
                         RenderDataMath(
                             runningTexture,
                             resolvedInputs[index].texture,
@@ -61,11 +61,14 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                             scalarOutput,
                             fbo);
                     });
-                    if (runningOwned && runningTexture != 0) {
-                        glDeleteTextures(1, &runningTexture);
+                    if (runningTransient && runningTexture != 0) {
+                        ReleaseGraphTransientTarget(runningTexture);
                     }
-                    runningTexture = accumulated;
-                    runningOwned = accumulated != 0;
+                    runningTexture = accumulatedRendered ? accumulated : 0;
+                    runningTransient = runningTexture != 0;
+                    if (!accumulatedRendered && accumulated != 0) {
+                        ReleaseGraphTransientTarget(accumulated);
+                    }
                     if (runningTexture == 0) {
                         break;
                     }
@@ -75,7 +78,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                     RenderDataMathSettings divideSettings = node.dataMathSettings;
                     divideSettings.constantB = static_cast<float>(resolvedInputs.size());
                     unsigned int divided = CreateGraphRenderTargetTexture();
-                    RenderIntoGraphTargetTexture(divided, [&](unsigned int fbo) {
+                    const bool dividedRendered = RenderIntoGraphTargetTexture(divided, [&](unsigned int fbo) {
                         RenderDataMath(
                             runningTexture,
                             0,
@@ -88,15 +91,14 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                             scalarOutput,
                             fbo);
                     });
-                    if (divided != 0) {
-                        if (runningOwned) {
-                            glDeleteTextures(1, &runningTexture);
-                        }
+                    if (divided != 0 && dividedRendered) {
+                        if (runningTransient) ReleaseGraphTransientTarget(runningTexture);
                         averagedTexture = divided;
                         averagedOwned = true;
                     } else {
+                        if (divided != 0) glDeleteTextures(1, &divided);
                         averagedTexture = runningTexture;
-                        averagedOwned = runningOwned;
+                        averagedOwned = runningTransient && PromoteGraphTransientTarget(runningTexture);
                     }
                 } else {
                     averagedTexture = 0;
@@ -109,14 +111,14 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                     const unsigned int maskTexture = evalMask(maskLink->fromNodeId, maskLink->fromSocketId);
                     if (maskTexture != 0) {
                         unsigned int baseTexture = 0;
-                        bool baseOwned = false;
+                        bool baseTransient = false;
                         if (const RenderGraphLink* baseLink = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kDataMathBaseInputSocketId)) {
                             const bool scalarBase = IsScalarRenderSocket(executionContext, baseLink->fromNodeId, baseLink->fromSocketId);
                             baseTexture = scalarBase
                                 ? evalMask(baseLink->fromNodeId, baseLink->fromSocketId)
                                 : evalImage(baseLink->fromNodeId, baseLink->fromSocketId);
                         } else {
-                            baseTexture = CreateGraphRenderTargetTexture();
+                            baseTexture = AcquireGraphTransientTarget();
                             RenderIntoGraphTargetTexture(baseTexture, [&](unsigned int) {
                                 GLfloat previousClearColor[4];
                                 glGetFloatv(GL_COLOR_CLEAR_VALUE, previousClearColor);
@@ -128,15 +130,15 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderDataMathGraphNode(
                                     previousClearColor[2],
                                     previousClearColor[3]);
                             });
-                            baseOwned = baseTexture != 0;
+                            baseTransient = baseTexture != 0;
                         }
                         if (baseTexture != 0) {
                             unsigned int blended = CreateGraphRenderTargetTexture();
                             RenderIntoGraphTargetTexture(blended, [&](unsigned int fbo) {
                                 RenderMaskBlend(baseTexture, averagedTexture, maskTexture, fbo);
                             });
-                            if (baseOwned) {
-                                glDeleteTextures(1, &baseTexture);
+                            if (baseTransient && baseTexture != 0) {
+                                ReleaseGraphTransientTarget(baseTexture);
                             }
                             if (blended != 0) {
                                 if (averagedOwned) {

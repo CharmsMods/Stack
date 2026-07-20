@@ -13,9 +13,12 @@ ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
 }
 
 using EditorNodeGraphUIMetrics::IsPointNearCubicBezier;
+using EditorNodeGraphUIMetrics::DistancePointToSegment;
 using EditorNodeGraphUIMetrics::LinkBezierHandle;
 using EditorNodeGraphUIMetrics::LinkHitRadiusForZoom;
 using Stack::Editor::NodeGraphUIVisuals::ChannelLaneOffset;
+using Stack::Editor::NodeGraphUIVisuals::GraphStraightLinksEnabled;
+using Stack::Editor::NodeGraphUIVisuals::LinkAnimationKey;
 using Stack::Editor::NodeGraphUIVisuals::ResolveLinkVisualStyle;
 
 } // namespace
@@ -52,7 +55,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
             continue;
         }
         const EditorNodeGraph::Node& node = *nodePtr;
-        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
+        for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
                 continue;
             }
@@ -77,7 +80,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
             continue;
         }
         const EditorNodeGraph::Node& node = *nodePtr;
-        for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
+        for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
                 continue;
             }
@@ -120,6 +123,11 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
     const auto& links = graph.GetLinks();
     for (auto it = links.rbegin(); it != links.rend(); ++it) {
         const EditorNodeGraph::Link& link = *it;
+        const auto labelRect = m_LinkLabelHitRects.find(LinkAnimationKey(link));
+        if (labelRect != m_LinkLabelHitRects.end() &&
+            labelRect->second.Contains(ToImVec2(screenPos))) {
+            return link;
+        }
         const EditorNodeGraph::Node* from = FindCachedNode(graph, link.fromNodeId);
         const EditorNodeGraph::Node* to = FindCachedNode(graph, link.toNodeId);
         if (!from || !to) {
@@ -143,6 +151,10 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
 bool EditorNodeGraphUI::IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const {
     const ImVec2 p0 = ToImVec2(a);
     const ImVec2 p3 = ToImVec2(b);
+    const bool straightLinks = GraphStraightLinksEnabled(m_ActiveEditor);
+    if (straightLinks) {
+        return DistancePointToSegment(ToImVec2(point), p0, p3) <= LinkHitRadiusForZoom(m_Zoom);
+    }
     const float handle = LinkBezierHandle(p0, p3);
     return IsPointNearCubicBezier(
         ToImVec2(point),

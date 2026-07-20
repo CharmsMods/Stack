@@ -120,7 +120,7 @@ NoiseDetailRecommendation BuildNoiseDetailRecommendation(
 
     if (!analysis.valid) {
         recommendation.rationale =
-            "Noise/detail suggestion needs Auto Base analysis before it can estimate ISO and shadow-lift risk.";
+            "Noise/detail suggestion needs Starting Point analysis before it can estimate ISO and shadow-lift risk.";
         return recommendation;
     }
 

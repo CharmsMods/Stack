@@ -299,6 +299,7 @@ GraphExecutionContext::GraphExecutionContext(const RenderGraphSnapshot& graphSna
     for (const RenderGraphLink& link : graph.links) {
         auto& socketLinks = inputLinks[link.toNodeId];
         socketLinks.emplace(std::string_view(link.toSocketId), &link);
+        ++outputUseCounts[MakeNodeSocketKey(link.fromNodeId, link.fromSocketId)];
     }
 }
 
@@ -313,6 +314,11 @@ const RenderGraphLink* GraphExecutionContext::FindInputLink(int nodeId, std::str
 
 bool GraphExecutionContext::IsActiveNode(int nodeId) const {
     return nodes.find(nodeId) != nodes.end();
+}
+
+int GraphExecutionContext::OutputUseCount(int nodeId, std::string_view socketId) const {
+    const auto found = outputUseCounts.find(MakeNodeSocketKey(nodeId, socketId));
+    return found == outputUseCounts.end() ? 0 : found->second;
 }
 
 } // namespace Stack::Renderer::GraphExecution

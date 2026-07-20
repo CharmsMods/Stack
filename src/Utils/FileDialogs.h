@@ -8,12 +8,29 @@ struct GLFWwindow;
 
 namespace FileDialogs {
 
+enum class RasterImageFormat {
+    Png = 0,
+    Bmp = 1
+};
+
+struct RasterImageSaveResult {
+    std::string path;
+    RasterImageFormat format = RasterImageFormat::Png;
+
+    explicit operator bool() const { return !path.empty(); }
+};
+
 void SetOwnerWindow(GLFWwindow* window, std::function<void()> beforeDialog = {});
 std::string OpenImageFileDialog(const char* title = "Load Source Image");
 std::string OpenRasterImageFileDialog(const char* title = "Load Image");
 std::string OpenLutFileDialog(const char* title = "Load LUT");
 std::string SaveLutFileDialog(const char* title = "Save LUT", const char* defaultFileName = "generated_lut.cube");
 std::string SavePngFileDialog(const char* title = "Save PNG Image", const char* defaultFileName = "image.png");
+RasterImageSaveResult SaveGraphImageFileDialog(
+    const char* title,
+    const char* defaultFileName,
+    RasterImageFormat preferredFormat,
+    bool allowBmp = true);
 std::string OpenLibraryBundleFileDialog(const char* title = "Import Library Bundle");
 std::string SaveLibraryBundleFileDialog(const char* title = "Export Library Bundle", const char* defaultFileName = "modular_studio_library.stacklib");
 std::string OpenRenderSceneFileDialog(const char* title = "Load Render Scene Snapshot");

@@ -1,0 +1,32 @@
+# Source Note: timeline video export foundation
+
+- Session ID: idea-20260706-0008-timeline-video-export-foundation
+- Received: 2026-07-06 00:08
+- Source Kind: pasted-text
+
+## Original Text
+
+The next thing I want to do is begin work on laying the foundations and the first steps for adding support and functionality for being able to export video from Stack instead of only being able to export images. This is going to be a very large-scale project and there's already some documentation on it in the docs folder, which I will provide you with a path to.
+
+What I'm wanting to do is use a timeline system that appears below the graph as a new window that can expand and contract on the bottom of the program screen. It will push up and down the graph editor and the right-side main viewport as it expands and contracts.
+
+Every connected chain: let me quickly define a connected chain for you just so that it's clear. A full chain is something that has an input somewhere that starts it. After that it connects, no matter what's in between, to an output of some sort. That is one chain. Multiple chains can be defined in a couple of different ways:
+- where we have multiple of just one chain
+- where we have one chain that is connected to two separate outputs at the end
+
+These can be two separate objects in the timeline. Each horizontal row in the timeline, each horizontal part of the timeline, should be its own object on the editor graph. The user should be able to scroll up and down to see the different chains that are on the graph.
+
+The timeline is where the user can keyframe any value on any chain for any object and interpolate it and then record that interpolation and set a frame rate and some video export settings and then export at whatever the current resolution of the main canvas is. 
+
+For now the timeline should toggle open and shut with Ctrl+Shift+Tab 
+
+Later along the line we will add better support for animating multiple things in the timeline and adding curves and supporting the composite mode of stack better so that we can create a lot of different animations for many objects and have them do a lot of different things. We really need to start with creating a new documentation implementation folder that we will use to document exactly what we want to implement. That way when we come to the implementation phase we implement things exactly as they need to be implemented 
+
+This is not an implementation code pass. This is going to be us beginning the documentation which is at "D:\Program Development\Stack\docs\stack-documentation" You must read the entire entry to this folder just so you understand how the documentation works and how to find things, because we're going to create a new folder. We're going to use that as our workspace to define all the things we're going to do in the implementation. 
+
+One of the first big questions we're going to have to ask is, based on the code,  our creativity, and design, what would be the best way to allow the user to animate or auto-keyframe pretty much literally anything in a full chain and have that show up as a keyframe mark in the timeline? Any node that's in a chain, any of that node's settings or values that can be changed, where do we want to do that visually?
+
+Do we want to do that in the node, or do we want to have a right-click at a specific spot on the timeline and then have that open up a menu with one of the options being "Add Keyframe"? Maybe the "Add Keyframe" will open up an expanding side menu on the left side of the program that could perhaps contain a vertical list of all the nodes. Actually, it would first contain a list of all the current full chains, which means we would also need to add a way to name our full chains and separate them. This would include edge cases for when one chain splits into two outputs at the end or even somewhere in the middle. When the user selects a chain in the vertical list, that vertical list could update to then show all of the different nodes in that chain. Maybe they could click on one of the nodes, or it may be that each of the nodes would just expand and all values for that node could then be adjusted. Go ahead and start setting up the documentation folder so that we can start looking into the code. When you're asking me questions about what I want, our answers can be written down in structured language that would be good for an implementation agent. That would be so that your answers have context about the actual current code and what would need to be changed or what directions would be good for this. There's a lot of other stuff we're going to have to worry about too, like setting up FFmpeg, ensuring that we're updating the stack-tools.cmd script in order to make sure that it's packaging the FFmpeg license with the program, we also need to make sure that we're not using FFmpeg in a way that would keep us from continuing with Stack's current license or getting us into any copyright trouble. We also need to sort out things like:
+- how video export is going to work and the technicalities of that
+- allowing the user to choose the settings for the video export
+- adding the necessary settings panels for this all of this will be covered in the documentation folder. That's why I'm having you set up the documentation folder first, so that we can cover all of this stuff and spend a lot of time getting everything perfect before the implementation. Other important things that we'll cover in the documentation are just making sure that the UI design is consistent with the rest of the program for anything new that we do add. Go ahead and get started with this. Remember that you are working with me and that I am just kind of having ideas as we go. I may change my mind about certain things from time to time. We need to not make the code that the agent writes in the future, when trying to implement this, something that is extremely difficult to update or add features to or expand. For this first pass, just get everything set up. Use the context and the prompt I've given you to get everything ready for you to actually start the process of researching the code as it currently is and then asking me questions about the implementation. That way we can start with the actual documentation rights. Try not to really assume anything other than what I've told you unless it's blatantly obvious, because I want to make sure that we're getting all of our details correct. Just go ahead and get everything base set up for us to start this process. 

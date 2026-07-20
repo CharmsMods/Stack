@@ -126,7 +126,7 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
                 m_AssetPreviewTransition = 0.0f;
                 m_AssetPreviewClosing = false;
                 m_CompareSplit = 0.5f;
-                m_ProjectPreviewMenuHover = 0.0f;
+                m_ProjectPreviewMenuHover = 1.0f;
                 m_ProjectPreviewLaunchRect.minX = motionRect.Min.x;
                 m_ProjectPreviewLaunchRect.minY = motionRect.Min.y;
                 m_ProjectPreviewLaunchRect.maxX = motionRect.Max.x;

@@ -4,10 +4,16 @@
 #include "Develop/DevelopTypes.h"
 #include "Editor/NodeGraph/NodeGraphTypes.h"
 #include "MFSR/MFSRTypes.h"
+#include "NodeMath/SourceColorMetadata.h"
+#include "NodeMath/FirstClassValue.h"
+#include "NodeMath/GeometryMath.h"
+#include "NodeMath/CompoundDefinition.h"
+#include "NodeMath/TechnicalImageMath.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageData.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,10 +25,25 @@ struct ImagePayload {
     std::string sourcePath;
     std::vector<unsigned char> pngBytes;
     std::vector<unsigned char> pixels;
+    // Runtime-only bounded preview used by the graph UI. Full pixels remain the
+    // render source and are the only pixels written to project storage.
+    std::vector<unsigned char> previewPixels;
     int width = 0;
     int height = 0;
     int channels = 4;
     int originalChannels = 4;
+    int previewWidth = 0;
+    int previewHeight = 0;
+    int previewChannels = 4;
+    // Describes the original encoded source. This never changes pixels and is
+    // serialized separately from the embedded storage PNG.
+    Stack::NodeMath::SourceColorMetadata sourceColorMetadata;
+    // These states are deliberately not serialized. A project is only saved
+    // once its imported image data has been made self-contained.
+    bool isLoading = false;
+    bool isEmbedding = false;
+    std::uint64_t importRequestId = 0;
+    std::uint64_t embeddingRequestId = 0;
     mutable std::shared_ptr<const std::vector<unsigned char>> sharedPixels;
     mutable std::size_t pixelsFingerprint = 0;
 };
@@ -30,6 +51,10 @@ struct ImagePayload {
 inline void InvalidateImagePayloadRuntime(ImagePayload& payload) {
     payload.sharedPixels.reset();
     payload.pixelsFingerprint = 0;
+    payload.previewPixels.clear();
+    payload.previewWidth = 0;
+    payload.previewHeight = 0;
+    payload.previewChannels = 4;
 }
 
 struct RawSourcePayload {
@@ -139,6 +164,8 @@ struct MaskUtilitySettings {
     float gamma = 1.0f;
     float threshold = 0.5f;
     float softness = 0.0f;
+    // The dedicated Invert Mask node can be bypassed without reconnecting it.
+    bool enabled = true;
     bool invert = false;
 };
 
@@ -222,6 +249,59 @@ struct DataMathSettings {
     float maxValue = 1.0f;
     float outMin = 0.0f;
     float outMax = 1.0f;
+};
+
+struct ValuePayload {
+    Stack::NodeMath::FirstClassValue value =
+        Stack::NodeMath::MakeUniformScalar(0.0);
+};
+
+struct TechnicalImageSettings {
+    Stack::NodeMath::TechnicalImageOperation operation =
+        Stack::NodeMath::TechnicalImageOperation::Exposure;
+    float exposureValue = 0.0f;
+};
+
+using ReformatSettings = Stack::NodeMath::ReformatSettings;
+
+struct CompoundPayload {
+    Stack::NodeMath::CompoundInstance instance;
+};
+
+struct FrequencyFftSettings {
+    bool luminanceOnly = true;
+};
+
+struct SpectrumViewSettings {
+    SpectrumViewLut lut = SpectrumViewLut::Turbo;
+    float exposure = 1.0f;
+    float gamma = 1.0f;
+    bool centerDc = true;
+};
+
+struct FrequencyMaskSettings {
+    FrequencyMaskShape shape = FrequencyMaskShape::LowPass;
+    float cutoff = 0.25f;
+    float width = 0.12f;
+    float feather = 0.08f;
+    float order = 2.0f;
+    float centerX = 0.5f;
+    float centerY = 0.5f;
+    bool invert = false;
+};
+
+struct SpectrumMathSettings {
+    float amount = 1.0f;
+};
+
+struct MagnitudePhaseSettings {
+    float exposure = 1.0f;
+    float gamma = 1.0f;
+};
+
+struct SpectrumAnalyzerSettings {
+    float innerRadius = 0.0f;
+    float outerRadius = 1.0f;
 };
 
 } // namespace EditorNodeGraph

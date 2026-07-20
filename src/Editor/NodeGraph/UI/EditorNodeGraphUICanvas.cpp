@@ -167,6 +167,45 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::DataMath:
             editor->AddDataMathNodeAt(static_cast<EditorNodeGraph::DataMathMode>(entry.value), graphPos);
             break;
+        case EditorNodeGraph::NodeKind::Value: {
+            EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
+            editor->AddValueNodeAt(std::move(prototype.value.value), graphPos);
+            break;
+        }
+        case EditorNodeGraph::NodeKind::FieldMean:
+            editor->AddFieldMeanNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::Reformat:
+            editor->AddReformatNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::TechnicalImage:
+            editor->AddTechnicalImageNodeAt(
+                static_cast<Stack::NodeMath::TechnicalImageOperation>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::Compound:
+            editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyFft:
+            editor->AddFrequencyFftNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyIfft:
+            editor->AddFrequencyIfftNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumView:
+            editor->AddSpectrumViewNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyMask:
+            editor->AddFrequencyMaskNodeAt(static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumMath:
+            editor->AddSpectrumMathNodeAt(static_cast<EditorNodeGraph::SpectrumMathMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::MagnitudePhase:
+            editor->AddMagnitudePhaseNodeAt(static_cast<EditorNodeGraph::MagnitudePhaseMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
+            editor->AddSpectrumAnalyzerNodeAt(static_cast<EditorNodeGraph::SpectrumAnalyzerMode>(entry.value), graphPos);
+            break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             editor->AddChannelSplitNodeAt(graphPos);
             break;
@@ -230,6 +269,16 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     RenderGraphCanvas(editor, graph, canvasMin, canvasMax, options);
 }
 
+Stack::EditorGraphCapture::GraphViewportSnapshot EditorNodeGraphUI::GetGraphCaptureViewportSnapshot() const {
+    Stack::EditorGraphCapture::GraphViewportSnapshot snapshot;
+    snapshot.logicalWidth = std::max(0.0f, m_CanvasMax.x - m_CanvasMin.x);
+    snapshot.logicalHeight = std::max(0.0f, m_CanvasMax.y - m_CanvasMin.y);
+    snapshot.panX = m_Pan.x;
+    snapshot.panY = m_Pan.y;
+    snapshot.zoom = m_Zoom;
+    return snapshot;
+}
+
 void EditorNodeGraphUI::RenderGraphCanvas(
     EditorModule* editor,
     EditorNodeGraph::Graph& graph,
@@ -244,6 +293,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             std::unordered_set<int> visited;
             std::string channel = GetUpstreamChannel(graph, m_DragOutputNodeId, m_DragOutputSocketId, visited);
             if (sock.type == EditorNodeGraph::SocketType::Mask ||
+                sock.type == EditorNodeGraph::SocketType::ScalarField ||
                 sock.id == "r" || sock.id == "g" || sock.id == "b" || sock.id == "a" ||
                 !channel.empty()) {
                 draggingMask = true;
@@ -257,6 +307,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             std::unordered_set<int> visited;
             std::string channel = GetUpstreamChannel(graph, m_DragInputNodeId, m_DragInputSocketId, visited);
             if (sock.type == EditorNodeGraph::SocketType::Mask ||
+                sock.type == EditorNodeGraph::SocketType::ScalarField ||
                 sock.id == "r" || sock.id == "g" || sock.id == "b" || sock.id == "a" ||
                 !channel.empty()) {
                 draggingMask = true;
@@ -324,6 +375,17 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             graphHovered = false;
         }
     }
+    const bool detailCardsAllowed =
+        options.interactive &&
+        graphHovered &&
+        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        !m_MiddlePanCaptureActive &&
+        m_DragOutputNodeId <= 0 &&
+        m_DragInputNodeId <= 0 &&
+        m_DragNodeId <= 0 &&
+        !HasDrawerOpen();
+    BeginDetailCardFrame(detailCardsAllowed);
     if (options.interactive && m_MiddlePanCaptureActive) {
         (void)UpdateMiddlePanCapture(editor, graphHovered, false);
     }
@@ -397,7 +459,9 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     drawList->PushClipRect(canvasMin, canvasMax, true);
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
-    const bool wallpaperSurfaces = appearance && appearance->GetSeamlessSurfaceStylingEnabled();
+    const bool wallpaperSurfaces =
+        options.background == Stack::EditorGraphCapture::Background::CurrentAppearance &&
+        appearance && appearance->GetSeamlessSurfaceStylingEnabled();
     const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
     const ImVec4 canvasBg = graphStyle.enabled ? graphStyle.canvas : workspaceBg;
     const ImVec2 fadeMin = canvasMin;
@@ -405,11 +469,14 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     const float wallpaperEdgeFadeDistance = wallpaperSurfaces
         ? std::min(144.0f, std::max(72.0f, std::min(canvasSize.x, canvasSize.y) * 0.14f))
         : 0.0f;
-    if (!wallpaperSurfaces) {
+    const bool drawCanvasBackground =
+        options.background == Stack::EditorGraphCapture::Background::SolidTheme ||
+        (options.background == Stack::EditorGraphCapture::Background::CurrentAppearance && !wallpaperSurfaces);
+    if (drawCanvasBackground) {
         drawList->AddRectFilled(canvasMin, canvasMax, ColorToU32(canvasBg));
     }
 
-    if (!graphStyle.spotlightSurface) {
+    if (options.showGrid && !graphStyle.spotlightSurface) {
         const float gridStep = std::max(8.0f, 32.0f * m_Zoom);
         const float luminance = 0.2126f * workspaceBg.x + 0.7152f * workspaceBg.y + 0.0722f * workspaceBg.z;
         const float gridOpacity = std::clamp(graphStyle.gridLineOpacity, 0.0f, 1.0f);
@@ -502,9 +569,6 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     }
 
     if (options.interactive) {
-        if (options.showValidation) {
-            RenderValidationStatus(graph);
-        }
         RenderChannelSplitConfirmPrompt(editor);
         const int debugHoveredNodeId = (!m_MiddlePanCaptureActive && IsGraphCanvasHovered())
             ? FindNodeAt(graph, ToGraphVec2(ImGui::GetMousePos()))
@@ -526,6 +590,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         editor->SetGraphViewTransform(canvasMin.x, canvasMin.y, m_Pan.x, m_Pan.y, m_Zoom);
     }
 
+    EndDetailCardFrame();
     drawList->PopClipRect();
 }
 
@@ -574,6 +639,119 @@ void EditorNodeGraphUI::FitGraphPreviewToCanvas(
     m_Pan.y = ((canvasSize.y - graphHeight * m_Zoom) * 0.5f) - (minY * m_Zoom);
 }
 
+void EditorNodeGraphUI::FitGraphCaptureToCanvas(
+    EditorModule* editor,
+    const EditorNodeGraph::Graph& graph,
+    const ImVec2& canvasSize,
+    float paddingPercent) {
+    (void)editor;
+    Stack::EditorGraphCapture::FloatBounds bounds;
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        const EditorNodeGraph::Vec2 size = NodeSize(node);
+        if (!bounds.valid) {
+            bounds.minX = node.position.x;
+            bounds.minY = node.position.y;
+            bounds.maxX = node.position.x + size.x;
+            bounds.maxY = node.position.y + size.y;
+            bounds.valid = true;
+        } else {
+            bounds.minX = std::min(bounds.minX, node.position.x);
+            bounds.minY = std::min(bounds.minY, node.position.y);
+            bounds.maxX = std::max(bounds.maxX, node.position.x + size.x);
+            bounds.maxY = std::max(bounds.maxY, node.position.y + size.y);
+        }
+    }
+    for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
+        if (!bounds.valid) {
+            bounds.minX = group.position.x;
+            bounds.minY = group.position.y;
+            bounds.maxX = group.position.x + group.size.x;
+            bounds.maxY = group.position.y + group.size.y;
+            bounds.valid = true;
+        } else {
+            bounds.minX = std::min(bounds.minX, group.position.x);
+            bounds.minY = std::min(bounds.minY, group.position.y);
+            bounds.maxX = std::max(bounds.maxX, group.position.x + group.size.x);
+            bounds.maxY = std::max(bounds.maxY, group.position.y + group.size.y);
+        }
+    }
+
+    const Stack::EditorGraphCapture::CameraTransform transform =
+        Stack::EditorGraphCapture::FitBoundsToCanvas(
+            bounds,
+            canvasSize.x,
+            canvasSize.y,
+            paddingPercent,
+            0.01f,
+            4.5f);
+    m_Pan = { transform.panX, transform.panY };
+    m_Zoom = transform.zoom;
+    m_ZoomTarget = m_Zoom;
+    m_SmoothZoomActive = false;
+}
+
+void EditorNodeGraphUI::RenderGraphCapture(
+    EditorModule* editor,
+    EditorNodeGraph::Graph& graph,
+    std::vector<std::shared_ptr<LayerBase>>* layers,
+    const ImVec2& canvasMin,
+    const ImVec2& canvasMax,
+    const Stack::EditorGraphCapture::Settings& settings,
+    const Stack::EditorGraphCapture::GraphViewportSnapshot& viewport) {
+    if (!editor || canvasMax.x <= canvasMin.x || canvasMax.y <= canvasMin.y) {
+        return;
+    }
+
+    EditorNodeGraph::Graph* previousGraphOverride = m_RenderGraphOverride;
+    std::vector<std::shared_ptr<LayerBase>>* previousLayersOverride = m_RenderLayersOverride;
+    const bool previousPreviewOnly = m_RenderPreviewOnly;
+    const bool previousCaptureOnly = m_RenderCaptureOnly;
+    EditorModule* previousEditor = m_ActiveEditor;
+
+    m_RenderGraphOverride = &graph;
+    m_RenderLayersOverride = layers;
+    m_RenderPreviewOnly = false;
+    m_RenderCaptureOnly = true;
+    m_ActiveEditor = editor;
+
+    const std::uint64_t structureRevision = graph.GetStructureRevision();
+    if (m_LastGraphStructureRevision == 0) {
+        m_LastGraphStructureRevision = structureRevision;
+    } else if (structureRevision != m_LastGraphStructureRevision) {
+        ResetPerGraphVisualCaches();
+        m_LastGraphStructureRevision = structureRevision;
+    }
+    SyncPerGraphVisualCaches(graph);
+
+    const ImVec2 canvasSize(canvasMax.x - canvasMin.x, canvasMax.y - canvasMin.y);
+    if (settings.scope == Stack::EditorGraphCapture::Scope::EntireGraph) {
+        FitGraphCaptureToCanvas(editor, graph, canvasSize, settings.paddingPercent);
+    } else {
+        m_Pan = { viewport.panX, viewport.panY };
+        m_Zoom = std::max(0.01f, viewport.zoom);
+        m_ZoomTarget = m_Zoom;
+        m_SmoothZoomActive = false;
+    }
+
+    GraphRenderOptions options;
+    options.interactive = false;
+    options.syncEditorViewTransform = false;
+    options.allowDropTarget = false;
+    options.showValidation = false;
+    options.showContextMenu = false;
+    options.showNodeBrowser = false;
+    options.showZoomDial = false;
+    options.showGrid = settings.showGrid;
+    options.background = settings.background;
+    RenderGraphCanvas(editor, graph, canvasMin, canvasMax, options);
+
+    m_RenderGraphOverride = previousGraphOverride;
+    m_RenderLayersOverride = previousLayersOverride;
+    m_RenderPreviewOnly = previousPreviewOnly;
+    m_RenderCaptureOnly = previousCaptureOnly;
+    m_ActiveEditor = previousEditor;
+}
+
 void EditorNodeGraphUI::RenderStaticGraphPreview(
     EditorModule* editor,
     EditorNodeGraph::Graph& graph,
@@ -588,11 +766,13 @@ void EditorNodeGraphUI::RenderStaticGraphPreview(
     EditorNodeGraph::Graph* previousGraphOverride = m_RenderGraphOverride;
     std::vector<std::shared_ptr<LayerBase>>* previousLayersOverride = m_RenderLayersOverride;
     const bool previousPreviewOnly = m_RenderPreviewOnly;
+    const bool previousCaptureOnly = m_RenderCaptureOnly;
     EditorModule* previousEditor = m_ActiveEditor;
 
     m_RenderGraphOverride = &graph;
     m_RenderLayersOverride = layers;
     m_RenderPreviewOnly = true;
+    m_RenderCaptureOnly = false;
     m_ActiveEditor = editor;
 
     const std::uint64_t structureRevision = graph.GetStructureRevision();
@@ -625,6 +805,7 @@ void EditorNodeGraphUI::RenderStaticGraphPreview(
     m_RenderGraphOverride = previousGraphOverride;
     m_RenderLayersOverride = previousLayersOverride;
     m_RenderPreviewOnly = previousPreviewOnly;
+    m_RenderCaptureOnly = previousCaptureOnly;
     m_ActiveEditor = previousEditor;
 }
 

@@ -70,6 +70,7 @@ private:
     void BeginRootTabBodyFade(int oldTab, int newTab);
     float ConsumeRootTabBodyFadeAlpha(int* outRenderTabId);
     void RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVec2& gearButtonMax, bool gearButtonHovered);
+    void ProcessGraphCaptureRequest();
     void InstallDetachedPreviewPlatformHooks();
     void UninstallDetachedPreviewPlatformHooks();
     void HandleDetachedPreviewPlatformCreateWindow(ImGuiViewport* viewport);

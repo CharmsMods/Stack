@@ -80,10 +80,22 @@ std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
 } // namespace
 
 SharedPixelBuffer EditorModule::EnsureSharedImagePixels(const EditorNodeGraph::ImagePayload& payload) const {
-    if (payload.pixels.empty() || payload.width <= 0 || payload.height <= 0) {
+    if (payload.width <= 0 || payload.height <= 0) {
         payload.sharedPixels.reset();
         payload.pixelsFingerprint = 0;
         return {};
+    }
+
+    if (payload.pixels.empty()) {
+        if (!payload.sharedPixels || payload.sharedPixels->empty()) {
+            payload.sharedPixels.reset();
+            payload.pixelsFingerprint = 0;
+            return {};
+        }
+        if (payload.pixelsFingerprint == 0) {
+            payload.pixelsFingerprint = StackHash::HashBytes(*payload.sharedPixels);
+        }
+        return MakeSharedPixelBufferAlias(payload.sharedPixels, payload.pixelsFingerprint);
     }
 
     if (!payload.sharedPixels || payload.sharedPixels->size() != payload.pixels.size()) {
@@ -102,6 +114,7 @@ RenderGraphImagePayload EditorModule::BuildRenderImagePayload(const EditorNodeGr
     renderImage.width = payload.width;
     renderImage.height = payload.height;
     renderImage.channels = payload.channels;
+    renderImage.sourceDescriptor = payload.sourceColorMetadata.descriptor;
     return renderImage;
 }
 

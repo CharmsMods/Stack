@@ -1,6 +1,8 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Renderer/RenderTiling.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "NodeMath/ReductionMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include <algorithm>
 #include <array>
@@ -19,12 +21,14 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
     m_GraphSourceTexture = 0;
     m_LastGraphImageCacheHits.clear();
     m_LastGraphExecutionStats = {};
+    m_LastGraphExecutionStats.persistentCacheBudgetBytes =
+        kGraphPersistentCacheSoftByteBudget;
     m_AutoGainSceneStatsCache.clear();
     m_PreLocalExposureSummaries.clear();
     m_ToneCurveAutoRewriteFeedback.clear();
+    ClearRawDevelopmentStageStatsReadbacks();
     ClearRawDevelopmentLocalRangeOverlay();
     ClearRawDevelopmentLocalRangeTargetSample();
-    m_RawDevelopmentViewTransformInputStats = {};
     m_RawDevelopmentLocalSuggestionImage = {};
     m_RawDevelopmentLocalRangeOverlayRequestMode = graph.rawWorkspaceLocalRangeOverlayMode;
     m_RawDevelopmentLocalRangeTargetSampleRequested =
@@ -35,6 +39,16 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
         std::clamp(graph.rawWorkspaceLocalRangeTargetSampleV, 0.0f, 1.0f);
     if (m_Width == 0 || m_Height == 0 || graph.outputNodeId <= 0) {
         m_OutputTexture = 0;
+        return;
+    }
+
+    const RenderGraphRegionPlan regionPlan =
+        RenderTiling::PlanGraphRegions(graph, m_Width, m_Height);
+    if (!regionPlan.valid) {
+        m_OutputTexture = 0;
+        m_LastGraphExecutionStats.lastSpecializedFailureNodeId = graph.outputNodeId;
+        m_LastGraphExecutionStats.lastSpecializedFailure =
+            "Graph planning failed: " + regionPlan.reason;
         return;
     }
 
@@ -69,6 +83,12 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
     auto& visitingMasks = executionContext.visitingMasks;
     auto& fingerprintingImages = executionContext.fingerprintingImages;
     auto& fingerprintingMasks = executionContext.fingerprintingMasks;
+    std::unordered_map<std::string, double> scalarCache;
+    std::unordered_map<std::string, std::pair<int, int>> localTextureExtents;
+    std::unordered_map<std::string, std::size_t> scalarSampleCounts;
+    std::unordered_map<std::string, std::size_t> scalarFingerprintCache;
+    std::set<std::string> visitingScalars;
+    std::set<std::string> fingerprintingScalars;
 
     auto findInputLink = [&](int nodeId, const std::string& socketId) -> const RenderGraphLink* {
         return executionContext.FindInputLink(nodeId, socketId);
@@ -84,8 +104,11 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
 
     std::function<unsigned int(int, const std::string&)> evalMask;
     std::function<unsigned int(int, const std::string&)> evalImage;
+    std::function<bool(int, const std::string&, double&)> evalScalar;
     std::function<std::size_t(int, const std::string&)> fingerprintMask;
     std::function<std::size_t(int, const std::string&)> fingerprintImage;
+    std::function<std::size_t(int, const std::string&)> fingerprintScalar;
+    std::unordered_set<int> pointwiseFusionDisabledNodes;
 
     fingerprintMask = [&](int nodeId, const std::string& socketId) -> std::size_t {
         std::string key = std::to_string(nodeId) + ":" + socketId;
@@ -117,7 +140,14 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             node.kind == RenderGraphNodeKind::Lut ||
             node.kind == RenderGraphNodeKind::Layer ||
             node.kind == RenderGraphNodeKind::Mix ||
+            node.kind == RenderGraphNodeKind::TechnicalImage ||
+            node.kind == RenderGraphNodeKind::Reformat ||
             (node.kind == RenderGraphNodeKind::DataMath && !IsScalarRenderSocket(executionContext, nodeId, socketId)) ||
+            node.kind == RenderGraphNodeKind::FrequencyFft ||
+            node.kind == RenderGraphNodeKind::FrequencyIfft ||
+            node.kind == RenderGraphNodeKind::SpectrumView ||
+            node.kind == RenderGraphNodeKind::SpectrumMath ||
+            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId != EditorNodeGraph::kMaskOutputSocketId) ||
             node.kind == RenderGraphNodeKind::ImageGenerator ||
             node.kind == RenderGraphNodeKind::ChannelCombine ||
             node.kind == RenderGraphNodeKind::Output) {
@@ -129,6 +159,7 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
         std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
         HashCombine(fingerprint, HashValue(node.nodeId));
         HashCombine(fingerprint, HashValue(socketId));
+        HashCombine(fingerprint, HashValue(node.semanticDescriptorIdentity));
 
         if (node.kind == RenderGraphNodeKind::MaskGenerator) {
             HashCombine(fingerprint, HashValue(static_cast<int>(node.maskKind)));
@@ -193,6 +224,7 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, HashValue(node.maskUtilitySettings.gamma));
             HashCombine(fingerprint, HashValue(node.maskUtilitySettings.threshold));
             HashCombine(fingerprint, HashValue(node.maskUtilitySettings.softness));
+            HashCombine(fingerprint, HashValue(node.maskUtilitySettings.enabled));
             HashCombine(fingerprint, HashValue(node.maskUtilitySettings.invert));
             HashCombine(fingerprint, HashValue(m_Width));
             HashCombine(fingerprint, HashValue(m_Height));
@@ -250,6 +282,26 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, HashValue(node.dataMathSettings.maxValue));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.outMin));
             HashCombine(fingerprint, HashValue(node.dataMathSettings.outMax));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::FrequencyMask) {
+            const RenderFrequencyMaskSettings& settings = node.frequencyMaskSettings;
+            HashCombine(fingerprint, HashValue(static_cast<int>(settings.shape)));
+            HashCombine(fingerprint, HashValue(settings.cutoff));
+            HashCombine(fingerprint, HashValue(settings.width));
+            HashCombine(fingerprint, HashValue(settings.feather));
+            HashCombine(fingerprint, HashValue(settings.order));
+            HashCombine(fingerprint, HashValue(settings.centerX));
+            HashCombine(fingerprint, HashValue(settings.centerY));
+            HashCombine(fingerprint, HashValue(settings.invert));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::MagnitudePhase) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.magnitudePhaseMode)));
+            HashCombine(fingerprint, HashValue(node.magnitudePhaseSettings.exposure));
+            HashCombine(fingerprint, HashValue(node.magnitudePhaseSettings.gamma));
             HashCombine(fingerprint, HashValue(m_Width));
             HashCombine(fingerprint, HashValue(m_Height));
         } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask) {
@@ -352,6 +404,40 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
         return fingerprint;
     };
 
+    fingerprintScalar = [&](int nodeId, const std::string& socketId) -> std::size_t {
+        const std::string key = MakeNodeSocketKey(nodeId, socketId);
+        if (const auto cached = scalarFingerprintCache.find(key);
+            cached != scalarFingerprintCache.end()) {
+            return cached->second;
+        }
+        if (!fingerprintingScalars.insert(key).second) return 0;
+        const auto nodeIt = nodes.find(nodeId);
+        if (nodeIt == nodes.end() || nodeIt->second == nullptr ||
+            nodeIt->second->kind != RenderGraphNodeKind::FieldMean ||
+            socketId != EditorNodeGraph::kValueOutputSocketId) {
+            fingerprintingScalars.erase(key);
+            return 0;
+        }
+        const RenderGraphNode& node = *nodeIt->second;
+        std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
+        HashCombine(fingerprint, HashValue(node.nodeId));
+        HashCombine(fingerprint, HashValue(node.definitionId));
+        HashCombine(fingerprint, HashValue(node.definitionVersion));
+        HashCombine(fingerprint, HashValue(node.definitionHash));
+        HashCombine(fingerprint, HashValue(socketId));
+        HashCombine(fingerprint, HashValue(Stack::NodeMath::kFieldMeanAlgorithmVersion));
+        HashCombine(fingerprint, HashValue(m_Width));
+        HashCombine(fingerprint, HashValue(m_Height));
+        const RenderGraphLink* input = findInputLink(
+            node.nodeId, EditorNodeGraph::kReductionFieldInputSocketId);
+        HashCombine(fingerprint, input
+            ? fingerprintMask(input->fromNodeId, input->fromSocketId)
+            : 0);
+        fingerprintingScalars.erase(key);
+        scalarFingerprintCache[key] = fingerprint;
+        return fingerprint;
+    };
+
     fingerprintImage = [&](int nodeId, const std::string& socketId) -> std::size_t {
         std::string key = std::to_string(nodeId) + ":" + socketId;
         auto cached = imageFingerprintCache.find(key);
@@ -376,6 +462,8 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             node.kind == RenderGraphNodeKind::CustomMask ||
             node.kind == RenderGraphNodeKind::ImageToMask ||
             node.kind == RenderGraphNodeKind::ChannelSplit ||
+            node.kind == RenderGraphNodeKind::FrequencyMask ||
+            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId == EditorNodeGraph::kMaskOutputSocketId) ||
             (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
             (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             std::size_t maskFp = fingerprintMask(nodeId, socketId);
@@ -386,6 +474,7 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
         std::size_t fingerprint = HashValue(static_cast<int>(node.kind));
         HashCombine(fingerprint, HashValue(node.nodeId));
         HashCombine(fingerprint, HashValue(socketId));
+        HashCombine(fingerprint, HashValue(node.semanticDescriptorIdentity));
         auto hashRawDevelopSettings = [&](const Raw::RawDevelopSettings& settings) {
             HashCombine(fingerprint, HashValue(settings.exposureStops));
             HashCombine(fingerprint, HashValue(static_cast<int>(settings.whiteBalanceMode)));
@@ -571,6 +660,7 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
         } else if (node.kind == RenderGraphNodeKind::RawDevelopment) {
             HashCombine(fingerprint, HashValue(Stack::RawRecipe::SerializeRecipe(node.rawDevelopment.recipe).dump()));
             HashCombine(fingerprint, HashValue(m_PreviewMaxDimension));
+            HashCombine(fingerprint, HashValue(m_RawDevelopmentStageImageReadbackMaxDimension));
         } else if (node.kind == RenderGraphNodeKind::RawNeuralDenoise) {
             const RenderGraphLink* rawInput = findInputLink(node.nodeId, "rawIn");
             HashCombine(fingerprint, rawInput ? fingerprintImage(rawInput->fromNodeId, rawInput->fromSocketId) : 0);
@@ -750,6 +840,27 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, HashJson(node.layerJson));
             HashCombine(fingerprint, HashValue(m_Width));
             HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::TechnicalImage) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.technicalImageOperation)));
+            const RenderGraphLink* exposureInput = findInputLink(
+                node.nodeId, EditorNodeGraph::kExposureValueInputSocketId);
+            HashCombine(fingerprint, exposureInput
+                ? fingerprintScalar(exposureInput->fromNodeId, exposureInput->fromSocketId)
+                : HashValue(node.technicalExposureValue));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::Reformat) {
+            const RenderGraphLink* input = findInputLink(
+                node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input
+                ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(Stack::NodeMath::kReformatAlgorithmVersion));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.width));
+            HashCombine(fingerprint, HashValue(node.reformatSettings.height));
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.reformatSettings.filter)));
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.reformatSettings.border)));
         } else if (node.kind == RenderGraphNodeKind::Mix) {
             const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
             const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
@@ -800,6 +911,62 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             HashCombine(fingerprint, HashValue(node.dataMathSettings.outMax));
             HashCombine(fingerprint, HashValue(m_Width));
             HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::FrequencyFft) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(node.frequencyFftSettings.luminanceOnly));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::FrequencyIfft) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(node.frequencyIfftSettings.luminanceOnly));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::SpectrumView) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumViewSettings.lut)));
+            HashCombine(fingerprint, HashValue(node.spectrumViewSettings.exposure));
+            HashCombine(fingerprint, HashValue(node.spectrumViewSettings.gamma));
+            HashCombine(fingerprint, HashValue(node.spectrumViewSettings.centerDc));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::SpectrumMath) {
+            const RenderGraphLink* inputA = findInputLink(node.nodeId, EditorNodeGraph::kMixInputASocketId);
+            const RenderGraphLink* inputB = findInputLink(node.nodeId, EditorNodeGraph::kMixInputBSocketId);
+            const RenderGraphLink* maskInput = findInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId);
+            HashCombine(fingerprint, inputA ? fingerprintImage(inputA->fromNodeId, inputA->fromSocketId) : 0);
+            HashCombine(fingerprint, inputB ? fingerprintImage(inputB->fromNodeId, inputB->fromSocketId) : 0);
+            HashCombine(fingerprint, maskInput ? fingerprintMask(maskInput->fromNodeId, maskInput->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumMathMode)));
+            HashCombine(fingerprint, HashValue(node.spectrumMathSettings.amount));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::MagnitudePhase) {
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.magnitudePhaseMode)));
+            HashCombine(fingerprint, HashValue(node.magnitudePhaseSettings.exposure));
+            HashCombine(fingerprint, HashValue(node.magnitudePhaseSettings.gamma));
+            if (node.magnitudePhaseMode == RenderMagnitudePhaseMode::Recombine &&
+                socketId == EditorNodeGraph::kImageOutputSocketId) {
+                const RenderGraphLink* magInput = findInputLink(node.nodeId, "magnitude");
+                const RenderGraphLink* phaseInput = findInputLink(node.nodeId, "phase");
+                HashCombine(fingerprint, magInput ? fingerprintMask(magInput->fromNodeId, magInput->fromSocketId) : 0);
+                HashCombine(fingerprint, phaseInput ? fingerprintMask(phaseInput->fromNodeId, phaseInput->fromSocketId) : 0);
+            } else {
+                const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+                HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            }
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
+        } else if (node.kind == RenderGraphNodeKind::SpectrumAnalyzer) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            HashCombine(fingerprint, input ? fingerprintImage(input->fromNodeId, input->fromSocketId) : 0);
+            HashCombine(fingerprint, HashValue(static_cast<int>(node.spectrumAnalyzerMode)));
+            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.innerRadius));
+            HashCombine(fingerprint, HashValue(node.spectrumAnalyzerSettings.outerRadius));
+            HashCombine(fingerprint, HashValue(m_Width));
+            HashCombine(fingerprint, HashValue(m_Height));
         } else if (node.kind == RenderGraphNodeKind::Output) {
             const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
             if (input) {
@@ -837,6 +1004,11 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
     evalMask = [&](int nodeId, const std::string& socketId) -> unsigned int {
         std::string key = std::to_string(nodeId) + ":" + socketId;
         if (maskCache.count(key)) {
+            if (const auto extent = localTextureExtents.find(key);
+                extent != localTextureExtents.end()) {
+                m_Width = extent->second.first;
+                m_Height = extent->second.second;
+            }
             return maskCache[key];
         }
         if (visitingMasks.count(key)) {
@@ -862,7 +1034,14 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             node.kind == RenderGraphNodeKind::Lut ||
             node.kind == RenderGraphNodeKind::Layer ||
             node.kind == RenderGraphNodeKind::Mix ||
+            node.kind == RenderGraphNodeKind::TechnicalImage ||
+            node.kind == RenderGraphNodeKind::Reformat ||
             (node.kind == RenderGraphNodeKind::DataMath && !IsScalarRenderSocket(executionContext, nodeId, socketId)) ||
+            node.kind == RenderGraphNodeKind::FrequencyFft ||
+            node.kind == RenderGraphNodeKind::FrequencyIfft ||
+            node.kind == RenderGraphNodeKind::SpectrumView ||
+            node.kind == RenderGraphNodeKind::SpectrumMath ||
+            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId != EditorNodeGraph::kMaskOutputSocketId) ||
             node.kind == RenderGraphNodeKind::ImageGenerator ||
             node.kind == RenderGraphNodeKind::ChannelCombine ||
             node.kind == RenderGraphNodeKind::Output) {
@@ -876,7 +1055,13 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             cached->second.fingerprint == fingerprint &&
             cached->second.texture != 0) {
             ++m_LastGraphExecutionStats.maskCacheHits;
+            TouchGraphCacheEntry(cached->second);
+            if (cached->second.width > 0 && cached->second.height > 0) {
+                m_Width = cached->second.width;
+                m_Height = cached->second.height;
+            }
             maskCache[key] = cached->second.texture;
+            localTextureExtents[key] = { m_Width, m_Height };
             visitingMasks.erase(key);
             return cached->second.texture;
         }
@@ -963,6 +1148,12 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
                 RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask);
             result = dataMathResult.texture;
             resultOwned = dataMathResult.owned;
+        } else if (node.kind == RenderGraphNodeKind::FrequencyMask ||
+                   node.kind == RenderGraphNodeKind::MagnitudePhase) {
+            const GraphNodeRenderResult frequencyResult =
+                RenderFrequencyGraphNode(executionContext, node, socketId, evalImage, evalMask);
+            result = frequencyResult.texture;
+            resultOwned = frequencyResult.owned;
         } else if (node.kind == RenderGraphNodeKind::RawDetailAutoMask ||
                    node.kind == RenderGraphNodeKind::RawDetailFusion) {
             const GraphNodeRenderResult rawDetailResult =
@@ -973,6 +1164,7 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
 
         if (result) {
             maskCache[key] = result;
+            localTextureExtents[key] = { m_Width, m_Height };
             StoreGraphCacheEntry(m_GraphMaskCache, key, result, fingerprint, resultOwned);
         } else {
             ReleaseGraphCacheEntry(m_GraphMaskCache, key);
@@ -981,9 +1173,123 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
         return result;
     };
 
+    evalScalar = [&](int nodeId, const std::string& socketId, double& value) -> bool {
+        const std::string key = MakeNodeSocketKey(nodeId, socketId);
+        if (const auto local = scalarCache.find(key); local != scalarCache.end()) {
+            value = local->second;
+            ++m_LastGraphExecutionStats.reductionCacheHits;
+            return true;
+        }
+        if (!visitingScalars.insert(key).second) {
+            m_LastGraphExecutionStats.lastReductionFailureNodeId = nodeId;
+            m_LastGraphExecutionStats.lastReductionFailure =
+                "Reduction dependency contains a cycle.";
+            return false;
+        }
+        const auto finishFailure = [&](std::string message) {
+            m_LastGraphExecutionStats.lastReductionFailureNodeId = nodeId;
+            m_LastGraphExecutionStats.lastReductionFailure = std::move(message);
+            visitingScalars.erase(key);
+            return false;
+        };
+        const auto nodeIt = nodes.find(nodeId);
+        if (nodeIt == nodes.end() || nodeIt->second == nullptr ||
+            nodeIt->second->kind != RenderGraphNodeKind::FieldMean ||
+            socketId != EditorNodeGraph::kValueOutputSocketId) {
+            return finishFailure("The connected uniform value is not an executable Field Mean output.");
+        }
+        const RenderGraphNode& node = *nodeIt->second;
+        const std::size_t fingerprint = fingerprintScalar(nodeId, socketId);
+        if (const auto persistent = m_GraphScalarCache.find(key);
+            persistent != m_GraphScalarCache.end() &&
+            persistent->second.fingerprint == fingerprint) {
+            persistent->second.lastUseSerial = ++m_GraphResourceUseSerial;
+            value = persistent->second.value;
+            scalarCache[key] = value;
+            scalarSampleCounts[key] = static_cast<std::size_t>(persistent->second.sampleCount);
+            ++m_LastGraphExecutionStats.reductionCacheHits;
+            m_LastGraphExecutionStats.reductions.push_back({
+                nodeId, value, persistent->second.sampleCount, true, node.definitionId });
+            visitingScalars.erase(key);
+            return true;
+        }
+        ++m_LastGraphExecutionStats.reductionCacheMisses;
+        const RenderGraphLink* input = findInputLink(
+            nodeId, EditorNodeGraph::kReductionFieldInputSocketId);
+        if (input == nullptr) {
+            m_GraphScalarCache.erase(key);
+            return finishFailure("Field Mean requires a connected scalar field.");
+        }
+        const unsigned int texture = evalMask(input->fromNodeId, input->fromSocketId);
+        if (texture == 0 || m_Width <= 0 || m_Height <= 0) {
+            m_GraphScalarCache.erase(key);
+            return finishFailure("Field Mean could not materialize its scalar-field input.");
+        }
+
+        const ScopedFramebufferState savedState(true);
+        const unsigned int fbo = GLHelpers::CreateFBO(texture);
+        if (fbo == 0) {
+            savedState.Restore(true);
+            return finishFailure("Field Mean could not create a readback target.");
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        while (glGetError() != GL_NO_ERROR) {}
+        constexpr int kReadbackRows = 64;
+        std::vector<float> samples(
+            static_cast<std::size_t>(m_Width) *
+            static_cast<std::size_t>(std::min(kReadbackRows, m_Height)));
+        Stack::NodeMath::FieldMeanAccumulator accumulator;
+        bool readbackOk = true;
+        for (int y = 0; y < m_Height && readbackOk; y += kReadbackRows) {
+            const int rows = std::min(kReadbackRows, m_Height - y);
+            glReadPixels(0, y, m_Width, rows, GL_RED, GL_FLOAT, samples.data());
+            if (glGetError() != GL_NO_ERROR) {
+                readbackOk = false;
+                break;
+            }
+            readbackOk = accumulator.Add(
+                samples.data(),
+                static_cast<std::size_t>(m_Width) * static_cast<std::size_t>(rows));
+        }
+        savedState.Restore(true);
+        glDeleteFramebuffers(1, &fbo);
+        if (!readbackOk) {
+            m_GraphScalarCache.erase(key);
+            const Stack::NodeMath::FieldMeanResult failed = accumulator.Finish();
+            return finishFailure(failed.error.empty()
+                ? "Field Mean texture readback failed." : failed.error);
+        }
+        const Stack::NodeMath::FieldMeanResult mean = accumulator.Finish();
+        if (!mean.valid) {
+            m_GraphScalarCache.erase(key);
+            return finishFailure(mean.error);
+        }
+
+        value = mean.value;
+        scalarCache[key] = value;
+        scalarSampleCounts[key] = mean.sampleCount;
+        CachedGraphScalar cached;
+        cached.fingerprint = fingerprint;
+        cached.value = mean.value;
+        cached.sampleCount = static_cast<std::uint64_t>(mean.sampleCount);
+        cached.lastUseSerial = ++m_GraphResourceUseSerial;
+        m_GraphScalarCache[key] = cached;
+        ++m_LastGraphExecutionStats.reductionPasses;
+        m_LastGraphExecutionStats.reductions.push_back({
+            nodeId, value, cached.sampleCount, false, node.definitionId });
+        visitingScalars.erase(key);
+        return true;
+    };
+
     evalImage = [&](int nodeId, const std::string& socketId) -> unsigned int {
         std::string key = std::to_string(nodeId) + ":" + socketId;
         if (imageCache.count(key)) {
+            if (const auto extent = localTextureExtents.find(key);
+                extent != localTextureExtents.end()) {
+                m_Width = extent->second.first;
+                m_Height = extent->second.second;
+            }
             return imageCache[key];
         }
         if (visitingImages.count(key)) {
@@ -1004,6 +1310,8 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             node.kind == RenderGraphNodeKind::CustomMask ||
             node.kind == RenderGraphNodeKind::ImageToMask ||
             node.kind == RenderGraphNodeKind::ChannelSplit ||
+            node.kind == RenderGraphNodeKind::FrequencyMask ||
+            (node.kind == RenderGraphNodeKind::MagnitudePhase && socketId == EditorNodeGraph::kMaskOutputSocketId) ||
             (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") ||
             (node.kind == RenderGraphNodeKind::RawDetailFusion && socketId == "maskOut")) {
             unsigned int maskTex = evalMask(nodeId, socketId);
@@ -1029,11 +1337,13 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
                 cached->second.fingerprint == fingerprint &&
                 cached->second.texture != 0) {
                 ++m_LastGraphExecutionStats.imageCacheHits;
+                TouchGraphCacheEntry(cached->second);
                 if (cached->second.width > 0 && cached->second.height > 0) {
                     m_Width = cached->second.width;
                     m_Height = cached->second.height;
                 }
                 imageCache[key] = cached->second.texture;
+                localTextureExtents[key] = { m_Width, m_Height };
                 m_LastGraphImageCacheHits.insert(key);
                 visitingImages.erase(key);
                 return cached->second.texture;
@@ -1043,8 +1353,64 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
 
         unsigned int result = 0;
         bool resultOwned = false;
-        if (node.kind == RenderGraphNodeKind::Image) {
+        bool pointwiseFused = false;
+        const bool hasDynamicExposureInput =
+            node.kind == RenderGraphNodeKind::TechnicalImage &&
+            node.technicalImageOperation == Stack::NodeMath::TechnicalImageOperation::Exposure &&
+            findInputLink(node.nodeId, EditorNodeGraph::kExposureValueInputSocketId) != nullptr;
+        if ((node.kind == RenderGraphNodeKind::DataMath ||
+             node.kind == RenderGraphNodeKind::TechnicalImage) &&
+            !hasDynamicExposureInput &&
+            pointwiseFusionDisabledNodes.find(node.nodeId) == pointwiseFusionDisabledNodes.end()) {
+            const PointwiseFusionPlan fusionPlan = BuildPointwiseFusionPlan(
+                executionContext,
+                node.nodeId,
+                socketId,
+                pointwiseFusionDisabledNodes);
+            if (!fusionPlan.failure.empty()) {
+                m_LastGraphExecutionStats.lastPointwiseFailure = fusionPlan.failure;
+                m_LastGraphExecutionStats.lastPointwiseFailureNodeIds = fusionPlan.failureNodeIds;
+                ++m_LastGraphExecutionStats.pointwiseFallbacks;
+                pointwiseFusionDisabledNodes.insert(
+                    fusionPlan.failureNodeIds.begin(), fusionPlan.failureNodeIds.end());
+            } else if (fusionPlan.valid) {
+                const unsigned int pointwiseInput = evalImage(
+                    fusionPlan.inputNodeId,
+                    fusionPlan.inputSocketId);
+                const GraphNodeRenderResult fused = RenderPointwiseFusionPlan(
+                    fusionPlan,
+                    pointwiseInput,
+                    graph.executionInspectionEnabled);
+                if (fused.texture != 0) {
+                    result = fused.texture;
+                    resultOwned = fused.owned;
+                    pointwiseFused = true;
+
+                    std::unordered_set<int> virtualNodeIds(
+                        fusionPlan.authoredNodeIds.begin(),
+                        fusionPlan.authoredNodeIds.end());
+                    virtualNodeIds.erase(node.nodeId);
+                    for (auto cacheIt = m_GraphImageCache.begin(); cacheIt != m_GraphImageCache.end(); ) {
+                        if (virtualNodeIds.find(ExtractNodeIdFromCacheKey(cacheIt->first)) != virtualNodeIds.end()) {
+                            DeleteGraphCacheEntry(cacheIt->second);
+                            cacheIt = m_GraphImageCache.erase(cacheIt);
+                        } else {
+                            ++cacheIt;
+                        }
+                    }
+                } else {
+                    ++m_LastGraphExecutionStats.pointwiseFallbacks;
+                    pointwiseFusionDisabledNodes.insert(
+                        fusionPlan.authoredNodeIds.begin(), fusionPlan.authoredNodeIds.end());
+                }
+            }
+        }
+        if (pointwiseFused) {
+            // The semantic chain was emitted as one physical pass above.
+        } else if (node.kind == RenderGraphNodeKind::Image) {
             if (!node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0) {
+                m_Width = node.image.width;
+                m_Height = node.image.height;
                 result = GLHelpers::CreateTextureFromPixels(
                     node.image.pixels.data(),
                     node.image.width,
@@ -1063,6 +1429,9 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             resultOwned = rawDevelopmentResult.owned;
         } else if (node.kind == RenderGraphNodeKind::RawNeuralDenoise) {
             result = 0;
+            m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+            m_LastGraphExecutionStats.lastSpecializedFailure =
+                "RAW Neural Denoise has no executable external provider for this request.";
         } else if (node.kind == RenderGraphNodeKind::RawDecode) {
             const std::string rawBaseKey = std::to_string(node.nodeId) + ":__rawDecodeBase";
             const std::size_t rawBaseFingerprint = fingerprintImage(node.nodeId, "__rawDecodeBase");
@@ -1141,6 +1510,60 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             const GraphNodeRenderResult layerResult = RenderLayerGraphNode(executionContext, node, evalImage, evalMask);
             result = layerResult.texture;
             resultOwned = layerResult.owned;
+        } else if (node.kind == RenderGraphNodeKind::TechnicalImage) {
+            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            const unsigned int inputTexture = input
+                ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
+            double exposureValue = static_cast<double>(node.technicalExposureValue);
+            const RenderGraphLink* exposureInput =
+                node.technicalImageOperation == Stack::NodeMath::TechnicalImageOperation::Exposure
+                    ? findInputLink(node.nodeId, EditorNodeGraph::kExposureValueInputSocketId)
+                    : nullptr;
+            const bool exposureReady = exposureInput == nullptr ||
+                evalScalar(exposureInput->fromNodeId, exposureInput->fromSocketId, exposureValue);
+            if (inputTexture && exposureReady) {
+                result = createTarget();
+                renderToTexture(result, [&](unsigned int fbo) {
+                    RenderTechnicalImage(
+                        inputTexture,
+                        node.technicalImageOperation,
+                        static_cast<float>(exposureValue),
+                        fbo);
+                });
+                resultOwned = result != 0;
+            }
+        } else if (node.kind == RenderGraphNodeKind::Reformat) {
+            const RenderGraphLink* input = findInputLink(
+                node.nodeId, EditorNodeGraph::kImageInputSocketId);
+            const unsigned int inputTexture = input
+                ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
+            const int inputWidth = m_Width;
+            const int inputHeight = m_Height;
+            if (inputTexture &&
+                Stack::NodeMath::ValidateReformatSettings(node.reformatSettings).empty()) {
+                m_Width = node.reformatSettings.width;
+                m_Height = node.reformatSettings.height;
+                result = createTarget();
+                bool reformatRendered = false;
+                const bool targetRendered = result != 0 && renderToTexture(result, [&](unsigned int fbo) {
+                    reformatRendered = RenderReformat(
+                        inputTexture, inputWidth, inputHeight,
+                        node.reformatSettings, fbo);
+                });
+                if (!targetRendered || !reformatRendered) {
+                    if (result != 0) glDeleteTextures(1, &result);
+                    result = 0;
+                    m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+                    m_LastGraphExecutionStats.lastSpecializedFailure =
+                        "Reformat could not execute its declared sampling stage.";
+                }
+                resultOwned = result != 0;
+            } else {
+                m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+                m_LastGraphExecutionStats.lastSpecializedFailure = inputTexture == 0
+                    ? "Reformat could not materialize its required image input."
+                    : "Reformat settings do not satisfy the declared geometry contract.";
+            }
         } else if (node.kind == RenderGraphNodeKind::Mix) {
             const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
             const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
@@ -1160,6 +1583,20 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
                 RenderDataMathGraphNode(executionContext, node, socketId, evalImage, evalMask);
             result = dataMathResult.texture;
             resultOwned = dataMathResult.owned;
+        } else if (node.kind == RenderGraphNodeKind::FrequencyFft ||
+                   node.kind == RenderGraphNodeKind::FrequencyIfft ||
+                   node.kind == RenderGraphNodeKind::SpectrumView ||
+                   node.kind == RenderGraphNodeKind::SpectrumMath ||
+                   node.kind == RenderGraphNodeKind::MagnitudePhase) {
+            const GraphNodeRenderResult frequencyResult =
+                RenderFrequencyGraphNode(executionContext, node, socketId, evalImage, evalMask);
+            result = frequencyResult.texture;
+            resultOwned = frequencyResult.owned;
+            if (result == 0) {
+                m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+                m_LastGraphExecutionStats.lastSpecializedFailure =
+                    "The frequency-domain stage did not produce its declared output.";
+            }
         } else if (node.kind == RenderGraphNodeKind::ChannelCombine) {
             const RenderGraphLink* linkR = findInputLink(node.nodeId, "r");
             const RenderGraphLink* linkG = findInputLink(node.nodeId, "g");
@@ -1217,6 +1654,7 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
                 }
             }
             imageCache[key] = result;
+            localTextureExtents[key] = { m_Width, m_Height };
             StoreGraphCacheEntry(m_GraphImageCache, key, result, fingerprint, resultOwned);
         } else {
             ReleaseGraphCacheEntry(m_GraphImageCache, key);
@@ -1234,13 +1672,17 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
          outputIt->second->kind == RenderGraphNodeKind::MaskCombine ||
          outputIt->second->kind == RenderGraphNodeKind::CustomMask ||
          outputIt->second->kind == RenderGraphNodeKind::ChannelSplit ||
+         outputIt->second->kind == RenderGraphNodeKind::FrequencyMask ||
          (outputIt->second->kind == RenderGraphNodeKind::DataMath && IsScalarRenderSocket(executionContext, graph.outputNodeId, graph.outputSocketId)) ||
+         (outputIt->second->kind == RenderGraphNodeKind::MagnitudePhase && graph.outputSocketId == EditorNodeGraph::kMaskOutputSocketId) ||
          (outputIt->second->kind == RenderGraphNodeKind::RawDetailAutoMask && graph.outputSocketId == "maskOut") ||
          (outputIt->second->kind == RenderGraphNodeKind::RawDetailFusion && graph.outputSocketId == "maskOut"))) {
         finalTexture = evalMask(graph.outputNodeId, graph.outputSocketId);
     } else {
         finalTexture = evalImage(graph.outputNodeId, graph.outputSocketId);
     }
+    const int finalWidth = m_Width;
+    const int finalHeight = m_Height;
     m_OutputTexture = finalTexture ? finalTexture : 0;
     m_GraphSourceTexture = 0;
     const int referenceSourceNodeId = FindReferenceSourceNode(executionContext, graph.outputNodeId);
@@ -1254,11 +1696,25 @@ void RenderPipeline::ExecuteGraphImpl(const RenderGraphSnapshot& graph) {
             m_GraphSourceTexture = evalImage(referenceSourceNodeId, "imageOut");
         }
     }
+    if (finalTexture != 0 && finalWidth > 0 && finalHeight > 0) {
+        m_Width = finalWidth;
+        m_Height = finalHeight;
+    }
 
     PruneInactiveGraphCache(m_GraphImageCache, executionContext);
     PruneInactiveGraphCache(m_GraphMaskCache, executionContext);
+    for (auto scalarIt = m_GraphScalarCache.begin(); scalarIt != m_GraphScalarCache.end(); ) {
+        if (!executionContext.IsActiveNode(ExtractNodeIdFromCacheKey(scalarIt->first))) {
+            scalarIt = m_GraphScalarCache.erase(scalarIt);
+        } else {
+            ++scalarIt;
+        }
+    }
     PruneInactiveLutTextureCache(executionContext);
     PruneInactiveRawDevelopStageCache(executionContext);
+    TrimGraphPersistentCachesToBudget();
+    m_LastGraphExecutionStats.persistentCacheBytes = GraphPersistentCacheBytes();
+    m_LastGraphExecutionStats.transientPoolBytes = GraphTransientTargetBytes();
 
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
     glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);

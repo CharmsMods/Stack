@@ -1,6 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
 #include <algorithm>
@@ -19,6 +20,14 @@ size_t HashImagePayload(const EditorNodeGraph::Node& node) {
     mix(static_cast<size_t>(node.image.width));
     mix(static_cast<size_t>(node.image.height));
     mix(static_cast<size_t>(std::max(1, node.image.channels)));
+    mix(static_cast<size_t>(node.image.previewWidth));
+    mix(static_cast<size_t>(node.image.previewHeight));
+    mix(node.image.previewPixels.size());
+    if (!node.image.previewPixels.empty()) {
+        mix(node.image.previewPixels.front());
+        mix(node.image.previewPixels[node.image.previewPixels.size() / 2]);
+        mix(node.image.previewPixels.back());
+    }
     mix(node.image.pixels.size());
     if (!node.image.pixels.empty()) {
         mix(node.image.pixels.front());
@@ -114,6 +123,7 @@ void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
     m_NodeContentOverflow.clear();
     m_NodeFrontOrder.clear();
     m_NodeFrontOrderCounter = 1;
+    ResetDetailCardHover();
 }
 
 void EditorNodeGraphUI::SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& graph) {
@@ -186,12 +196,47 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
     int uploadHeight = node.image.height;
     int uploadChannels = std::max(1, node.image.channels);
     std::vector<unsigned char> decodedPixels;
-    if (!node.image.pixels.empty()) {
+    std::vector<unsigned char> generatedPreviewPixels;
+    const std::vector<unsigned char>* previewSourcePixels = nullptr;
+    if (!node.image.previewPixels.empty() &&
+        node.image.previewWidth > 0 &&
+        node.image.previewHeight > 0) {
+        uploadPixels = node.image.previewPixels.data();
+        uploadWidth = node.image.previewWidth;
+        uploadHeight = node.image.previewHeight;
+        uploadChannels = std::max(1, node.image.previewChannels);
+    } else if (!node.image.pixels.empty()) {
         uploadPixels = node.image.pixels.data();
+        previewSourcePixels = &node.image.pixels;
     } else if (DecodeImagePreviewPixelsFromPng(node.image.pngBytes, decodedPixels, uploadWidth, uploadHeight, uploadChannels)) {
         uploadPixels = decodedPixels.data();
+        previewSourcePixels = &decodedPixels;
     } else {
         return 0;
+    }
+
+    // Older projects and non-import image payloads do not carry a runtime
+    // thumbnail. Downsample them here before any GL upload so a tiny node never
+    // allocates a full-resolution graph-preview texture.
+    if (previewSourcePixels && (uploadWidth > 768 || uploadHeight > 768)) {
+        int previewWidth = 0;
+        int previewHeight = 0;
+        int previewChannels = uploadChannels;
+        EditorNodeGraph::BuildImagePayloadPreview(
+            *previewSourcePixels,
+            uploadWidth,
+            uploadHeight,
+            uploadChannels,
+            generatedPreviewPixels,
+            previewWidth,
+            previewHeight,
+            previewChannels);
+        if (!generatedPreviewPixels.empty()) {
+            uploadPixels = generatedPreviewPixels.data();
+            uploadWidth = previewWidth;
+            uploadHeight = previewHeight;
+            uploadChannels = previewChannels;
+        }
     }
 
     const unsigned int texture = GLHelpers::CreateTextureFromPixels(

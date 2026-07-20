@@ -112,6 +112,49 @@ void RenderPipeline::RenderMixBlend(unsigned int textureA, unsigned int textureB
     glActiveTexture(GL_TEXTURE0);
 }
 
+void RenderPipeline::RenderTechnicalImage(
+    unsigned int texture,
+    Stack::NodeMath::TechnicalImageOperation operation,
+    float exposureValue,
+    unsigned int targetFBO) {
+    EnsureTechnicalImageProgram();
+    if (!m_TechnicalImageProgram || !texture) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_TechnicalImageProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glUniform1i(glGetUniformLocation(m_TechnicalImageProgram, "uImage"), 0);
+    glUniform1i(glGetUniformLocation(m_TechnicalImageProgram, "uOperation"), static_cast<int>(operation));
+    glUniform1f(glGetUniformLocation(m_TechnicalImageProgram, "uExposureValue"), exposureValue);
+    m_Quad.Draw();
+}
+
+bool RenderPipeline::RenderReformat(
+    unsigned int texture,
+    int inputWidth,
+    int inputHeight,
+    const Stack::NodeMath::ReformatSettings& settings,
+    unsigned int targetFBO) {
+    EnsureReformatProgram();
+    if (!m_ReformatProgram || !texture || inputWidth <= 0 || inputHeight <= 0 || targetFBO == 0) {
+        return false;
+    }
+    while (glGetError() != GL_NO_ERROR) {}
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_ReformatProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glUniform1i(glGetUniformLocation(m_ReformatProgram, "uImage"), 0);
+    glUniform2i(glGetUniformLocation(m_ReformatProgram, "uInputSize"), inputWidth, inputHeight);
+    glUniform1i(
+        glGetUniformLocation(m_ReformatProgram, "uFilter"),
+        settings.filter == Stack::NodeMath::ReconstructionFilter::Nearest ? 0 : 1);
+    m_Quad.Draw();
+    return glGetError() == GL_NO_ERROR;
+}
+
 void RenderPipeline::RenderDataMath(
     unsigned int textureA,
     unsigned int textureB,
@@ -176,6 +219,7 @@ void RenderPipeline::RenderMaskUtility(unsigned int inputMask, const RenderGraph
     glUniform1f(glGetUniformLocation(m_MaskUtilityProgram, "uGamma"), node.maskUtilitySettings.gamma);
     glUniform1f(glGetUniformLocation(m_MaskUtilityProgram, "uThreshold"), node.maskUtilitySettings.threshold);
     glUniform1f(glGetUniformLocation(m_MaskUtilityProgram, "uSoftness"), node.maskUtilitySettings.softness);
+    glUniform1i(glGetUniformLocation(m_MaskUtilityProgram, "uEnabled"), node.maskUtilitySettings.enabled ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_MaskUtilityProgram, "uInvert"), node.maskUtilitySettings.invert ? 1 : 0);
     m_Quad.Draw();
     glActiveTexture(GL_TEXTURE0);

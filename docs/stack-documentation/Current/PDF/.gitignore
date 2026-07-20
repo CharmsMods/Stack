@@ -1,0 +1,5 @@
+/.tools/
+/tmp/
+/output/pdf/*.pdf
+!/output/pdf/.gitkeep
+

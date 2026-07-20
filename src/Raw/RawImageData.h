@@ -119,6 +119,18 @@ struct DngGainMapOpcode {
     std::vector<float> gains;
 };
 
+struct RawSensorRect {
+    int top = 0;
+    int left = 0;
+    int bottom = 0;
+    int right = 0;
+};
+
+struct DngNoiseProfilePlane {
+    double shotScale = 0.0;
+    double readNoiseVariance = 0.0;
+};
+
 struct RawMosaicDenoiseSettings {
     bool enabled = false;
     bool hotPixelSuppression = true;
@@ -240,6 +252,8 @@ struct HdrMergeSettings {
 
 struct RawMetadata {
     std::string sourcePath;
+    std::string sourceContentSha256;
+    std::uint64_t sourceByteSize = 0;
     std::string cameraMake;
     std::string cameraModel;
     std::string dngUniqueCameraModel;
@@ -317,6 +331,20 @@ struct RawMetadata {
     std::array<int, 3> dngCfaPlaneColor { 0, 1, 2 };
     std::array<int, 2> dngBlackLevelRepeatDim { 0, 0 };
     std::array<float, 4> dngBlackLevelPattern { 0.0f, 0.0f, 0.0f, 0.0f };
+    std::vector<float> dngBlackLevelValues;
+    std::vector<float> dngBlackLevelDeltaH;
+    std::vector<float> dngBlackLevelDeltaV;
+    std::vector<std::uint16_t> dngLinearizationTable;
+    std::vector<float> dngWhiteLevelValues;
+    RawSensorRect dngActiveArea;
+    bool hasDngActiveArea = false;
+    std::vector<RawSensorRect> dngMaskedAreas;
+    float dngLinearResponseLimit = 1.0f;
+    bool hasDngLinearResponseLimit = false;
+    float dngBaselineNoise = 1.0f;
+    bool hasDngBaselineNoise = false;
+    std::vector<DngNoiseProfilePlane> dngNoiseProfile;
+    bool hasDngNoiseProfile = false;
     std::array<float, 3> dngAnalogBalance { 1.0f, 1.0f, 1.0f };
     bool hasDngAnalogBalance = false;
     std::array<float, 9> dngCameraCalibration1 {
@@ -335,6 +363,11 @@ struct RawMetadata {
     bool hasDngBaselineExposure = false;
     int dngGainMapCount = 0;
     int dngUnsupportedOpcodeCount = 0;
+    std::array<int, 3> dngOpcodeCount { 0, 0, 0 };
+    std::array<int, 3> dngUnsupportedOpcodeCountByList { 0, 0, 0 };
+    std::array<int, 3> dngAppliedOpcodeCountByList { 0, 0, 0 };
+    bool hasDngProfileGainTableMap = false;
+    bool hasDngProfileGainTableMap2 = false;
     std::vector<DngGainMapOpcode> dngGainMaps;
     std::string uploadFormat = "R16UI";
     std::string dngTypeStatus;

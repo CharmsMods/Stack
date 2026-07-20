@@ -184,11 +184,9 @@ void LibraryModule::RenderPreviewPopup(
         ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y),
         IM_COL32(255, 255, 255, 10),
         18.0f);
-    const bool anyPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
-    const bool detailsHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || anyPopupOpen;
     m_ProjectPreviewMenuHover = ImGuiExtras::AnimateTowards(
         m_ProjectPreviewMenuHover,
-        detailsHovered ? 1.0f : 0.0f,
+        1.0f,
         ImGui::GetIO().DeltaTime,
         11.0f);
     const bool detailsExpanded = m_ProjectPreviewMenuHover > 0.30f;

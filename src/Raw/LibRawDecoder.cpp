@@ -1,13 +1,16 @@
 #include "LibRawDecoder.h"
+#include "Raw/RawTechnicalEvidence.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -90,6 +93,7 @@ public:
         std::uint16_t type = 0;
         std::uint32_t count = 0;
         std::uint32_t valueOffset = 0;
+        std::size_t entryOffset = 0;
     };
 
     bool Valid() const { return m_Valid; }
@@ -154,9 +158,42 @@ public:
             entry.type = ReadU16(p + 2);
             entry.count = ReadU32(p + 4);
             entry.valueOffset = ReadU32(p + 8);
+            entry.entryOffset = p;
             entries.push_back(entry);
         }
         return entries;
+    }
+
+    std::uint32_t NextIfdOffset(std::uint32_t ifdOffset) const {
+        if (!m_Valid || ifdOffset == 0 || static_cast<std::size_t>(ifdOffset) + 2 > m_Bytes.size()) return 0;
+        const std::uint16_t count = ReadU16(ifdOffset);
+        const std::size_t offset = static_cast<std::size_t>(ifdOffset) + 2 + static_cast<std::size_t>(count) * 12;
+        return offset + 4 <= m_Bytes.size() ? ReadU32(offset) : 0;
+    }
+
+    std::vector<std::uint32_t> ReadIfdTree() const {
+        std::vector<std::uint32_t> result;
+        std::vector<std::uint32_t> pending;
+        if (m_FirstIfd != 0) pending.push_back(m_FirstIfd);
+        while (!pending.empty() && result.size() < 64) {
+            const std::uint32_t offset = pending.back();
+            pending.pop_back();
+            if (offset == 0 || std::find(result.begin(), result.end(), offset) != result.end()) continue;
+            const std::vector<Entry> entries = ReadEntries(offset);
+            if (entries.empty()) continue;
+            result.push_back(offset);
+            const std::uint32_t next = NextIfdOffset(offset);
+            if (next != 0) pending.push_back(next);
+            for (const Entry& entry : entries) {
+                if (entry.tag != 330) continue;
+                for (double value : NumberValues(entry)) {
+                    if (std::isfinite(value) && value > 0.0 && value <= std::numeric_limits<std::uint32_t>::max()) {
+                        pending.push_back(static_cast<std::uint32_t>(value));
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     std::vector<std::uint8_t> RawBytes(const Entry& entry) const {
@@ -234,20 +271,7 @@ public:
 
 private:
     std::size_t ValueInlineOffset(const Entry& entry) const {
-        const std::size_t valueField = EntryOffset(entry) + 8;
-        return valueField;
-    }
-
-    std::size_t EntryOffset(const Entry& target) const {
-        const std::uint16_t count = ReadU16(m_FirstIfd);
-        std::size_t p = static_cast<std::size_t>(m_FirstIfd) + 2;
-        for (std::uint16_t i = 0; i < count && p + 12 <= m_Bytes.size(); ++i, p += 12) {
-            if (ReadU16(p) == target.tag && ReadU16(p + 2) == target.type &&
-                ReadU32(p + 4) == target.count && ReadU32(p + 8) == target.valueOffset) {
-                return p;
-            }
-        }
-        return 0;
+        return entry.entryOffset + 8;
     }
 
     std::vector<std::uint8_t> m_Bytes;
@@ -300,8 +324,24 @@ float ReadBeFloat(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
     return value;
 }
 
+int CountDngOpcodes(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < 4) return 0;
+    const std::uint32_t declared = ReadBeU32(bytes, 0);
+    std::size_t p = 4;
+    int count = 0;
+    for (std::uint32_t i = 0; i < declared && p + 16 <= bytes.size(); ++i) {
+        const std::uint32_t byteCount = ReadBeU32(bytes, p + 12);
+        p += 16;
+        if (p + byteCount > bytes.size()) break;
+        ++count;
+        p += byteCount;
+    }
+    return count;
+}
+
 void ParseDngOpcodeList2(const std::vector<std::uint8_t>& bytes, RawMetadata& metadata) {
     if (bytes.size() < 4) return;
+    metadata.dngOpcodeCount[1] = CountDngOpcodes(bytes);
     const std::uint32_t count = ReadBeU32(bytes, 0);
     std::size_t p = 4;
     for (std::uint32_t i = 0; i < count && p + 16 <= bytes.size(); ++i) {
@@ -357,6 +397,9 @@ void ParseDngOpcodeList2(const std::vector<std::uint8_t>& bytes, RawMetadata& me
         p += byteCount;
     }
     metadata.dngGainMapCount = static_cast<int>(metadata.dngGainMaps.size());
+    metadata.dngAppliedOpcodeCountByList[1] = metadata.dngGainMapCount;
+    metadata.dngUnsupportedOpcodeCountByList[1] =
+        std::max(0, metadata.dngOpcodeCount[1] - metadata.dngAppliedOpcodeCountByList[1]);
     if (metadata.dngGainMapCount > 0) {
         metadata.uploadFormat = "R16UI + DNG GainMap R32F";
     }
@@ -387,87 +430,189 @@ void ApplyDngSupplement(const std::string& path, RawMetadata& metadata) {
         return;
     }
 
-    const auto entries = reader.ReadEntries(reader.FirstIfd());
-    for (const DngTiffReader::Entry& entry : entries) {
-        const std::vector<double> values = reader.NumberValues(entry);
-        switch (entry.tag) {
-            case 274:
-                if (!values.empty()) {
-                    const int orientation = static_cast<int>(std::lround(values[0]));
-                    if (orientation >= 1 && orientation <= 8) {
-                        metadata.orientation = orientation;
+    const std::vector<std::uint32_t> ifdOffsets = reader.ReadIfdTree();
+    std::uint32_t rawIfd = reader.FirstIfd();
+    int bestScore = std::numeric_limits<int>::min();
+    std::uint64_t bestArea = 0;
+    for (std::uint32_t offset : ifdOffsets) {
+        const std::vector<DngTiffReader::Entry> entries = reader.ReadEntries(offset);
+        int score = 0;
+        std::uint64_t width = 0;
+        std::uint64_t height = 0;
+        for (const DngTiffReader::Entry& entry : entries) {
+            const std::vector<double> values = reader.NumberValues(entry);
+            if (entry.tag == 262 && !values.empty() && static_cast<int>(values[0]) == 32803) score += 100;
+            if ((entry.tag == 50714 || entry.tag == 50717 || entry.tag == 50829) && !values.empty()) score += 20;
+            if (entry.tag == 254 && !values.empty() && static_cast<std::uint32_t>(values[0]) == 0) score += 10;
+            if (entry.tag == 256 && !values.empty()) width = static_cast<std::uint64_t>(values[0]);
+            if (entry.tag == 257 && !values.empty()) height = static_cast<std::uint64_t>(values[0]);
+        }
+        const std::uint64_t area = width * height;
+        if (score > bestScore || (score == bestScore && area > bestArea)) {
+            bestScore = score;
+            bestArea = area;
+            rawIfd = offset;
+        }
+    }
+
+    std::vector<std::uint32_t> selectedIfds { reader.FirstIfd() };
+    if (rawIfd != reader.FirstIfd()) selectedIfds.push_back(rawIfd);
+    for (std::uint32_t offset : selectedIfds) {
+        const std::vector<DngTiffReader::Entry> entries = reader.ReadEntries(offset);
+        for (const DngTiffReader::Entry& entry : entries) {
+            const std::vector<double> values = reader.NumberValues(entry);
+            switch (entry.tag) {
+                case 274:
+                    if (!values.empty()) {
+                        const int orientation = static_cast<int>(std::lround(values[0]));
+                        if (orientation >= 1 && orientation <= 8) metadata.orientation = orientation;
                     }
-                }
-                break;
-            case 259: if (!values.empty()) metadata.dngCompression = static_cast<int>(values[0]); break;
-            case 262: if (!values.empty()) metadata.dngPhotometricInterpretation = static_cast<int>(values[0]); break;
-            case 50706: {
-                if (values.size() >= 4) {
-                    metadata.isDng = true;
-                }
-                break;
-            }
-            case 50708: metadata.dngUniqueCameraModel = reader.StringValue(entry); break;
-            case 50710: CopyNumbers(values, metadata.dngCfaPlaneColor); break;
-            case 50711: if (!values.empty()) metadata.dngCfaLayout = static_cast<int>(values[0]); break;
-            case 50713: CopyNumbers(values, metadata.dngBlackLevelRepeatDim); break;
-            case 50714: {
-                CopyNumbers(values, metadata.dngBlackLevelPattern);
-                if (!values.empty()) {
-                    float sum = 0.0f;
-                    for (std::size_t i = 0; i < metadata.dngBlackLevelPattern.size(); ++i) {
-                        if (i < values.size()) sum += metadata.dngBlackLevelPattern[i];
+                    break;
+                case 259: if (!values.empty()) metadata.dngCompression = static_cast<int>(values[0]); break;
+                case 262: if (!values.empty()) metadata.dngPhotometricInterpretation = static_cast<int>(values[0]); break;
+                case 50706: if (values.size() >= 4) metadata.isDng = true; break;
+                case 50708: metadata.dngUniqueCameraModel = reader.StringValue(entry); break;
+                case 50710: CopyNumbers(values, metadata.dngCfaPlaneColor); break;
+                case 50711: if (!values.empty()) metadata.dngCfaLayout = static_cast<int>(values[0]); break;
+                case 50712:
+                    metadata.dngLinearizationTable.clear();
+                    metadata.dngLinearizationTable.reserve(values.size());
+                    for (double value : values) {
+                        metadata.dngLinearizationTable.push_back(static_cast<std::uint16_t>(
+                            std::clamp(std::lround(value), 0l, 65535l)));
                     }
-                    const float denom = static_cast<float>(std::min<std::size_t>(values.size(), metadata.dngBlackLevelPattern.size()));
-                    metadata.blackLevel = denom > 0.0f ? sum / denom : metadata.blackLevel;
-                    metadata.perChannelBlack = metadata.dngBlackLevelPattern;
-                    metadata.blackLevelSource = "DNG BlackLevel tag";
+                    break;
+                case 50713: CopyNumbers(values, metadata.dngBlackLevelRepeatDim); break;
+                case 50714: {
+                    CopyNumbers(values, metadata.dngBlackLevelPattern);
+                    metadata.dngBlackLevelValues.clear();
+                    metadata.dngBlackLevelValues.reserve(values.size());
+                    for (double value : values) metadata.dngBlackLevelValues.push_back(static_cast<float>(value));
+                    if (!values.empty()) {
+                        const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+                        metadata.blackLevel = static_cast<float>(sum / static_cast<double>(values.size()));
+                        metadata.perChannelBlack = metadata.dngBlackLevelPattern;
+                        metadata.blackLevelSource = "DNG BlackLevel tag";
+                    }
+                    break;
                 }
-                break;
+                case 50715:
+                    metadata.dngBlackLevelDeltaH.clear();
+                    for (double value : values) metadata.dngBlackLevelDeltaH.push_back(static_cast<float>(value));
+                    break;
+                case 50716:
+                    metadata.dngBlackLevelDeltaV.clear();
+                    for (double value : values) metadata.dngBlackLevelDeltaV.push_back(static_cast<float>(value));
+                    break;
+                case 50717:
+                    metadata.dngWhiteLevelValues.clear();
+                    for (double value : values) metadata.dngWhiteLevelValues.push_back(static_cast<float>(value));
+                    if (!values.empty()) {
+                        metadata.whiteLevel = static_cast<float>(values[0]);
+                        metadata.whiteLevelSource = "DNG WhiteLevel tag";
+                        metadata.bitDepth = EstimateBitDepth(metadata.whiteLevel);
+                    }
+                    break;
+                case 50721: CopyNumbers(values, metadata.dngColorMatrix1); metadata.hasDngColorMatrix1 = values.size() >= 9; break;
+                case 50722: CopyNumbers(values, metadata.dngColorMatrix2); metadata.hasDngColorMatrix2 = values.size() >= 9; break;
+                case 50723: CopyNumbers(values, metadata.dngCameraCalibration1); metadata.hasDngCameraCalibration1 = values.size() >= 9; break;
+                case 50724: CopyNumbers(values, metadata.dngCameraCalibration2); metadata.hasDngCameraCalibration2 = values.size() >= 9; break;
+                case 50727:
+                    CopyNumbers(values, metadata.dngAnalogBalance);
+                    metadata.hasDngAnalogBalance = values.size() >= 3;
+                    break;
+                case 50728:
+                    CopyNumbers(values, metadata.dngAsShotNeutral);
+                    metadata.hasDngAsShotNeutral = values.size() >= 3 &&
+                        metadata.dngAsShotNeutral[0] > 0.0001f &&
+                        metadata.dngAsShotNeutral[1] > 0.0001f &&
+                        metadata.dngAsShotNeutral[2] > 0.0001f;
+                    if (metadata.hasDngAsShotNeutral) {
+                        for (std::size_t plane = 0; plane < 3; ++plane) {
+                            const int mappedColor = metadata.dngCfaPlaneColor[plane];
+                            const std::size_t color = mappedColor >= 0 && mappedColor < 3
+                                ? static_cast<std::size_t>(mappedColor)
+                                : plane;
+                            metadata.cameraWhiteBalance[color] =
+                                1.0f / (metadata.dngAsShotNeutral[plane] * metadata.dngAnalogBalance[plane]);
+                        }
+                        metadata.cameraWhiteBalance[3] = metadata.cameraWhiteBalance[1];
+                        metadata.whiteBalanceSource = "DNG AsShotNeutral tag";
+                    }
+                    break;
+                case 50730:
+                    if (!values.empty()) {
+                        metadata.dngBaselineExposure = static_cast<float>(values[0]);
+                        metadata.hasDngBaselineExposure = true;
+                    }
+                    break;
+                case 50731:
+                    if (!values.empty() && std::isfinite(values[0]) && values[0] > 0.0) {
+                        metadata.dngBaselineNoise = static_cast<float>(values[0]);
+                        metadata.hasDngBaselineNoise = true;
+                    }
+                    break;
+                case 50734:
+                    if (!values.empty() && std::isfinite(values[0]) && values[0] > 0.0 && values[0] <= 1.0) {
+                        metadata.dngLinearResponseLimit = static_cast<float>(values[0]);
+                        metadata.hasDngLinearResponseLimit = true;
+                    }
+                    break;
+                case 50829:
+                    if (values.size() >= 4) {
+                        metadata.dngActiveArea = {
+                            static_cast<int>(values[0]), static_cast<int>(values[1]),
+                            static_cast<int>(values[2]), static_cast<int>(values[3])
+                        };
+                        metadata.hasDngActiveArea = true;
+                    }
+                    break;
+                case 50830:
+                    metadata.dngMaskedAreas.clear();
+                    for (std::size_t i = 0; i + 3 < values.size(); i += 4) {
+                        metadata.dngMaskedAreas.push_back({
+                            static_cast<int>(values[i]), static_cast<int>(values[i + 1]),
+                            static_cast<int>(values[i + 2]), static_cast<int>(values[i + 3])
+                        });
+                    }
+                    break;
+                case 50778: if (!values.empty()) metadata.dngIlluminant1 = static_cast<int>(values[0]); break;
+                case 50779: if (!values.empty()) metadata.dngIlluminant2 = static_cast<int>(values[0]); break;
+                case 50964: CopyNumbers(values, metadata.dngForwardMatrix1); metadata.hasDngForwardMatrix1 = values.size() >= 9; break;
+                case 50965: CopyNumbers(values, metadata.dngForwardMatrix2); metadata.hasDngForwardMatrix2 = values.size() >= 9; break;
+                case 51008: {
+                    const std::vector<std::uint8_t> bytes = reader.RawBytes(entry);
+                    metadata.dngOpcodeCount[0] = CountDngOpcodes(bytes);
+                    metadata.dngUnsupportedOpcodeCountByList[0] = metadata.dngOpcodeCount[0];
+                    break;
+                }
+                case 51009: ParseDngOpcodeList2(reader.RawBytes(entry), metadata); break;
+                case 51022: {
+                    const std::vector<std::uint8_t> bytes = reader.RawBytes(entry);
+                    metadata.dngOpcodeCount[2] = CountDngOpcodes(bytes);
+                    metadata.dngUnsupportedOpcodeCountByList[2] = metadata.dngOpcodeCount[2];
+                    break;
+                }
+                case 51041:
+                    metadata.dngNoiseProfile.clear();
+                    if (values.size() >= 2 && (values.size() == 2 || (values.size() % 2) == 0)) {
+                        for (std::size_t i = 0; i + 1 < values.size(); i += 2) {
+                            metadata.dngNoiseProfile.push_back({ values[i], values[i + 1] });
+                        }
+                        metadata.hasDngNoiseProfile = std::all_of(
+                            metadata.dngNoiseProfile.begin(), metadata.dngNoiseProfile.end(),
+                            [](const DngNoiseProfilePlane& plane) {
+                                return std::isfinite(plane.shotScale) && plane.shotScale > 0.0 &&
+                                    std::isfinite(plane.readNoiseVariance) && plane.readNoiseVariance >= 0.0;
+                            });
+                    }
+                    break;
+                case 52525: metadata.hasDngProfileGainTableMap = entry.count > 0; break;
+                case 52544: metadata.hasDngProfileGainTableMap2 = entry.count > 0; break;
+                case 33421: CopyNumbers(values, metadata.dngCfaRepeatPatternDim); break;
+                case 33422: CopyNumbers(values, metadata.dngCfaPattern); break;
+                default: break;
             }
-            case 50717:
-                if (!values.empty()) {
-                    metadata.whiteLevel = static_cast<float>(values[0]);
-                    metadata.whiteLevelSource = "DNG WhiteLevel tag";
-                    metadata.bitDepth = EstimateBitDepth(metadata.whiteLevel);
-                }
-                break;
-            case 50721: CopyNumbers(values, metadata.dngColorMatrix1); metadata.hasDngColorMatrix1 = values.size() >= 9; break;
-            case 50722: CopyNumbers(values, metadata.dngColorMatrix2); metadata.hasDngColorMatrix2 = values.size() >= 9; break;
-            case 50723: CopyNumbers(values, metadata.dngCameraCalibration1); metadata.hasDngCameraCalibration1 = values.size() >= 9; break;
-            case 50724: CopyNumbers(values, metadata.dngCameraCalibration2); metadata.hasDngCameraCalibration2 = values.size() >= 9; break;
-            case 50727:
-                CopyNumbers(values, metadata.dngAnalogBalance);
-                metadata.hasDngAnalogBalance = values.size() >= 3;
-                break;
-            case 50728:
-                CopyNumbers(values, metadata.dngAsShotNeutral);
-                metadata.hasDngAsShotNeutral = values.size() >= 3 &&
-                    metadata.dngAsShotNeutral[0] > 0.0001f &&
-                    metadata.dngAsShotNeutral[1] > 0.0001f &&
-                    metadata.dngAsShotNeutral[2] > 0.0001f;
-                if (metadata.hasDngAsShotNeutral) {
-                    metadata.cameraWhiteBalance[0] = 1.0f / (metadata.dngAsShotNeutral[0] * metadata.dngAnalogBalance[0]);
-                    metadata.cameraWhiteBalance[1] = 1.0f / (metadata.dngAsShotNeutral[1] * metadata.dngAnalogBalance[1]);
-                    metadata.cameraWhiteBalance[2] = 1.0f / (metadata.dngAsShotNeutral[2] * metadata.dngAnalogBalance[2]);
-                    metadata.cameraWhiteBalance[3] = metadata.cameraWhiteBalance[1];
-                    metadata.whiteBalanceSource = "DNG AsShotNeutral tag";
-                }
-                break;
-            case 50730:
-                if (!values.empty()) {
-                    metadata.dngBaselineExposure = static_cast<float>(values[0]);
-                    metadata.hasDngBaselineExposure = true;
-                }
-                break;
-            case 50778: if (!values.empty()) metadata.dngIlluminant1 = static_cast<int>(values[0]); break;
-            case 50779: if (!values.empty()) metadata.dngIlluminant2 = static_cast<int>(values[0]); break;
-            case 50964: CopyNumbers(values, metadata.dngForwardMatrix1); metadata.hasDngForwardMatrix1 = values.size() >= 9; break;
-            case 50965: CopyNumbers(values, metadata.dngForwardMatrix2); metadata.hasDngForwardMatrix2 = values.size() >= 9; break;
-            case 51009: ParseDngOpcodeList2(reader.RawBytes(entry), metadata); break;
-            case 33421: CopyNumbers(values, metadata.dngCfaRepeatPatternDim); break;
-            case 33422: CopyNumbers(values, metadata.dngCfaPattern); break;
-            default: break;
         }
     }
 
@@ -892,6 +1037,15 @@ bool DecodeWithLibRaw(
         MarkCancelled(outData);
         return false;
     }
+
+    const Stack::RawEvidence::SourceIdentity sourceIdentity =
+        Stack::RawEvidence::ComputeSourceIdentity(std::filesystem::path(path));
+    if (!sourceIdentity.valid) {
+        outData.metadata.error = "RAW source identity could not be computed: " + sourceIdentity.reason;
+        return false;
+    }
+    outData.metadata.sourceContentSha256 = sourceIdentity.sha256;
+    outData.metadata.sourceByteSize = sourceIdentity.byteSize;
 
     LibRaw processor;
     int status = processor.open_file(path.c_str());

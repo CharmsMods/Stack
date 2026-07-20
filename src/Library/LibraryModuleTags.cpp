@@ -53,7 +53,10 @@ void LibraryModule::RenderTagsDrawer(
 
     m_FilterPanelExpanded = hoveringTagsPanel;
 
-    const float tagsPanelTargetWidth = m_FilterPanelExpanded ? 220.0f : 0.0f;
+    // Keep the entire control column inside the opaque part of the drawer.
+    // The old 220 px width included the 60 px fade, which made combos and
+    // inputs look truncated as the library grid showed through their right edge.
+    const float tagsPanelTargetWidth = m_FilterPanelExpanded ? 280.0f : 0.0f;
     m_FilterPanelWidthAnim += (tagsPanelTargetWidth - m_FilterPanelWidthAnim) * dt * 10.0f;
     if (std::abs(m_FilterPanelWidthAnim - tagsPanelTargetWidth) < 0.1f) {
         m_FilterPanelWidthAnim = tagsPanelTargetWidth;

@@ -13,6 +13,17 @@
 
 namespace {
 
+void PostNodeGraphContextNotification(
+    EditorModule* editor,
+    UiNotificationSeverity severity,
+    const std::string& message,
+    const char* dedupeKey) {
+    if (!editor || message.empty()) {
+        return;
+    }
+    editor->ShowUiNotification(severity, message, dedupeKey ? dedupeKey : "");
+}
+
 std::string DefaultProjectExportFileName(const EditorModule* editor) {
     if (!editor) {
         return "project.stack";
@@ -118,7 +129,10 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             }
             const bool hasAdvancedEditor = editor->NodeHasDedicatedComplexEditor(node->id);
             if (hasAdvancedEditor) {
-                if (ImGui::MenuItem("Open Advanced Editor")) {
+                const char* openEditorLabel = node->kind == EditorNodeGraph::NodeKind::Image
+                    ? "Open Slice Settings"
+                    : "Open Advanced Editor";
+                if (ImGui::MenuItem(openEditorLabel)) {
                     editor->SwitchToComplexNodeSubWindow(node->id);
                 }
             }
@@ -160,6 +174,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
             }
             if (node->kind == EditorNodeGraph::NodeKind::RawDevelopment) {
+                if (ImGui::MenuItem("Load Current RAW System")) {
+                    editor->LoadActiveRawWorkspaceProjectInGraph();
+                }
                 if (ImGui::MenuItem("Edit In RAW Tab")) {
                     const std::string sourceKey = !node->rawDevelopment.recipe.source.relativePathKey.empty()
                         ? node->rawDevelopment.recipe.source.relativePathKey
@@ -171,6 +188,39 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 if (ImGui::MenuItem("Decompose To Nodes")) {
                     editor->DecomposeActiveRawWorkspaceProjectToManagedGraph();
+                }
+            }
+            if (node->kind == EditorNodeGraph::NodeKind::Compound) {
+                const int compoundNodeId = node->id;
+                ImGui::Separator();
+                if (ImGui::MenuItem("Make Unique")) {
+                    std::string error;
+                    if (!editor->MakeCompoundNodeUnique(compoundNodeId, &error)) {
+                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error,
+                            error, "compound-make-unique");
+                    }
+                }
+                if (ImGui::MenuItem("Unpack")) {
+                    std::string error;
+                    if (!editor->UnpackCompoundNode(compoundNodeId, &error)) {
+                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error,
+                            error, "compound-unpack");
+                    }
+                }
+                if (ImGui::MenuItem("Edit As Unique Graph")) {
+                    std::string error;
+                    if (!editor->MakeCompoundNodeUnique(compoundNodeId, &error) ||
+                        !editor->UnpackCompoundNode(compoundNodeId, &error)) {
+                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error,
+                            error, "compound-edit-unique");
+                    }
+                }
+                if (ImGui::MenuItem("Update To Newer Embedded Version")) {
+                    std::string error;
+                    if (!editor->UpdateCompoundNodeToLatestEmbeddedVersion(compoundNodeId, &error)) {
+                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Info,
+                            error, "compound-update");
+                    }
                 }
             }
         }
@@ -235,7 +285,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         ImGui::Separator();
 
         if (ImGui::BeginMenu("Add")) {
-            if (ImGui::MenuItem("Add Image")) {
+            if (ImGui::MenuItem("Import Slice")) {
                 editor->RequestPromptAddImageNodeAt(m_ContextGraphPos);
                 ImGui::CloseCurrentPopup();
             }
@@ -409,6 +459,13 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         if (ImGui::BeginMenu("Graph")) {
             const bool hasSelection = !editor->GetNodeGraph().GetSelectedNodeIds().empty();
             ImGui::BeginDisabled(!hasSelection);
+            if (ImGui::MenuItem("Create Compound From Selection")) {
+                std::string error;
+                if (!editor->CreateCompoundFromSelection("Custom Compound", &error)) {
+                    PostNodeGraphContextNotification(editor, UiNotificationSeverity::Error,
+                        error, "compound-create");
+                }
+            }
             if (ImGui::MenuItem("Save Selection As Preset")) {
                 const std::string defaultName = DefaultPresetName(editor);
                 strncpy_s(m_SavePresetNameBuffer, defaultName.c_str(), sizeof(m_SavePresetNameBuffer) - 1);
@@ -477,11 +534,15 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     boundarySockets,
                     exportResult.nodeCount,
                     &error)) {
-                m_StatusMessage = "Preset saved.";
+                PostNodeGraphContextNotification(editor, UiNotificationSeverity::Success, "Preset saved.", "editor-node-graph-preset");
                 editor->SwitchToSubWindow(EditorModule::EditorSubWindow::Presets);
                 ImGui::CloseCurrentPopup();
             } else {
-                m_StatusMessage = error.empty() ? "Preset save failed." : error;
+                PostNodeGraphContextNotification(
+                    editor,
+                    UiNotificationSeverity::Error,
+                    error.empty() ? "Preset save failed." : error,
+                    "editor-node-graph-preset");
             }
         }
         ImGui::EndDisabled();

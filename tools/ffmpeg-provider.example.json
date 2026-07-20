@@ -1,0 +1,22 @@
+{
+  "schema": "stack.ffmpegProvider",
+  "schemaVersion": 1,
+  "providerName": "REVIEWED PROVIDER NAME",
+  "ffmpegVersion": "REVIEWED FFMPEG VERSION",
+  "binaryFile": "ffmpeg.exe",
+  "license": "LGPL-2.1-or-later",
+  "approvedForRedistribution": false,
+  "configureLine": "",
+  "upstreamSourceUrl": "https://ffmpeg.org/download.html",
+  "binaryDistributionUrl": "",
+  "licenseFiles": [
+    "licenses/FFmpeg-LGPL-2.1.txt"
+  ],
+  "noticeFiles": [
+    "NOTICE.txt"
+  ],
+  "sourceReferenceFiles": [
+    "SOURCE.txt"
+  ],
+  "reviewNotes": "Set approvedForRedistribution to true only after the exact binary, source, license files, notices, and configure flags have been reviewed for Stack distribution."
+}

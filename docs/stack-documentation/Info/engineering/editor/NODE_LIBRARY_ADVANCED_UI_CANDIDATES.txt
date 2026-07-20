@@ -1,0 +1,207 @@
+NODE LIBRARY ADVANCED UI CANDIDATES
+Generated from current NodeSurfaceSpec, Complex Node, and layer UI patterns.
+
+Purpose
+This report identifies which nodes should remain compact, which should receive richer
+inline controls, and which should have dedicated Complex Node/sidebar editors. The
+goal is a professional workflow where simple operations stay fast and complex tools
+get enough room to be understandable.
+
+Current advanced UI system
+LayerBase exposes NodeSurfaceSpec and RenderExpandedNodeSurface.
+Background Remover and 3-Way Color Grade currently return RichExpandedSurface specs.
+The sidebar can render a Complex Node settings view for a selected layer node.
+The node graph, context menu, sidebar, and floating toolbar now use
+NodeSurfaceSpec.presentation == RichExpandedSurface as the generic eligibility rule
+for Complex Node access.
+The remaining type-specific pieces are display polish, such as icon choice and short
+labels for the two existing advanced nodes.
+
+Main issue
+The advanced-window system is now generic enough for new RichExpandedSurface layers
+to appear without adding new type-ID branches. The next issue is consistency and
+polish: icons, labels, tool ownership messaging, and advanced-node metadata should be
+centralized so every future advanced node feels first-class.
+
+Nodes that should stay compact
+These are quick one-parameter or few-parameter operations. Keeping them compact helps
+the graph stay readable.
+
+Brightness - Compact.
+Reason: One scalar adjustment.
+
+Contrast - Compact.
+Reason: One scalar adjustment.
+
+Saturation - Compact plus warning if used on channel streams.
+Reason: One scalar adjustment, but color semantics are channel-sensitive.
+
+Warmth - Compact plus warning if used on channel streams.
+Reason: One scalar adjustment, but color semantics are channel-sensitive.
+
+Box Blur - Compact.
+Reason: Simple blur strength/radius behavior.
+
+Gaussian Blur - Compact.
+Reason: Simple blur strength/radius behavior.
+
+Median Denoise - Compact.
+Reason: Simple cleanup operation.
+
+Mean Denoise - Compact.
+Reason: Simple cleanup operation.
+
+Invert Mask - Compact.
+Reason: Single-purpose scalar utility.
+
+Threshold Mask - Compact.
+Reason: Simple scalar cutoff, though a histogram preview could be useful later.
+
+Solid Mask - Compact.
+Reason: Simple scalar source.
+
+Linear Gradient Mask - Compact / Rich inline later.
+Reason: Current controls are manageable; a canvas handle could be added later.
+
+Radial Gradient Mask - Compact / Rich inline later.
+Reason: Current controls are manageable; a canvas handle could be added later.
+
+Noise Mask - Compact / Rich inline later.
+Reason: Useful as-is, but could later benefit from a preview thumbnail.
+
+Channel Split - Compact.
+Reason: Routing node; no rich controls needed.
+
+Channel Combine - Compact / Rich inline later.
+Reason: Routing node, but should eventually show reference canvas and missing-channel
+defaults in a small inline help area.
+
+Output - Compact / Rich inline later.
+Reason: Terminal node; could eventually show mode, reference canvas, and output size.
+
+Preview and Scope nodes - Compact / Existing expanded analysis.
+Reason: They already occupy graph space for visual feedback and should not need a
+separate settings page unless their controls grow.
+
+Nodes that should get richer inline controls
+These nodes do not necessarily need a full sidebar page, but they would benefit from
+better grouped controls, badges, mini-previews, or warnings.
+
+Sharpen - Rich inline candidate.
+Reason: Threshold plus strength are easy to misuse. Could show edge emphasis warning.
+
+Levels Mask - Rich inline candidate.
+Reason: Black point, white point, gamma, and histogram feedback belong together.
+
+Luminance Mask - Rich inline candidate.
+Reason: Low/high/softness controls would benefit from a compact ramp preview.
+
+Solid Color Image and Color Gradient Image - Rich inline candidate.
+Reason: Color swatches and gradient previews should be visible without opening a
+separate window.
+
+Square and Circle Image Generators - Rich inline candidate.
+Reason: Shape position/size/fill controls could benefit from a small visual preview.
+
+Text Image Generator - Advanced UI candidate if it becomes a serious text tool.
+Reason: Text entry, font, alignment, size, position, and color need more space than
+small graph controls.
+
+Mix / Blend - Rich inline candidate.
+Reason: Blend mode, factor, input labels, and optional factor mask should be visible
+and understandable at a glance.
+
+Crop, Rotate, Flip - Rich inline candidate.
+Reason: Current controls are manageable, but canvas handles would make them much
+more professional.
+
+Lens Distortion, Heatwave Distortion, Ripple Distortion - Rich inline candidate.
+Reason: Spatial effects benefit from grouped controls and maybe center/falloff
+visualization.
+
+Nodes that should have dedicated Complex Node/sidebar editors
+These nodes either already have advanced UI or have enough parameter density, visual
+workflow, or canvas interaction to justify a dedicated editing space.
+
+Background Remover - Dedicated editor now, keep and improve.
+Current state: Has RichExpandedSurface and canvas color-pick support.
+Why: Requires color sampling, tolerance/edge tuning, debug overlays, and eventually
+brush/flood mask workflows.
+Fixes needed: Remove or implement unused flood mask, brush mask, antialias, and patch
+controls. Consider outputting a mask/alpha channel as an option.
+
+3-Way Color Grade - Dedicated editor now, keep and improve.
+Current state: Has RichExpandedSurface and grade wheels.
+Why: Color wheels and tonal ranges need room. This is already the best example of a
+professional advanced node pattern in the app.
+Fixes needed: Continue improving wheel feedback, channel-mode warnings, and saved UI
+state. Generic Complex Node access is now in place.
+
+Palette Rebuild - Dedicated editor candidate.
+Why: Palette selection, palette count, preview swatches, remap strategy, and import/
+export palette behavior need more space than compact graph controls.
+Suggested advanced UI: Palette swatch strip, count controls, source sampling, lock
+colors, preview before/after.
+
+Text Overlay - Dedicated editor candidate after implementation.
+Current state: Registered but C++ text texture generation is placeholder.
+Why: Text content, font, size, alignment, transform, color, opacity, and canvas
+placement are naturally an editor workflow.
+Suggested action: Either finish it as a true text overlay/editor node or hide it until
+ready.
+
+Noise - Dedicated editor candidate if procedural texture tools grow.
+Why: Many noise modes and controls can become a powerful texture/mask generator.
+Suggested advanced UI: Mode preview, seed, scale, octaves, color/grayscale toggle,
+mask output preview.
+
+Block Shift - Dedicated editor candidate.
+Why: Slicing, offsets, randomness, bands, and direction controls are visual and easy
+to overdo. Advanced UI could show band guides and random seed controls.
+
+Analog Video (VHS/CRT) - Dedicated editor candidate.
+Why: Combines many artifact families such as scanlines, chroma drift, noise, wobble,
+and distortion. A dedicated page can organize these into sections.
+
+Tilt-Shift Blur - Dedicated editor candidate.
+Why: Focus region and falloff need visual placement controls. A canvas overlay would
+make the node far easier to use.
+
+Optional future dedicated editors
+Airy Bloom - Candidate if more optical controls are added.
+Glare Rays - Candidate if direction/threshold/ray preview controls expand.
+Chromatic Aberration - Candidate if it gains per-channel offset controls and visual
+guides.
+Halftone - Candidate if dot pattern, angle, color separation, and screen preview
+grow into a print-style workflow.
+Cell Shading - Candidate if lighting bands and color ramp editing are added.
+
+Advanced UI architecture recommendation
+Keep advanced editor eligibility metadata-driven:
+NodeSurfaceSpec.presentation == RichExpandedSurface is now enough to offer a Complex
+Node button and sidebar entry.
+NodeSurfaceSpec.usesCanvasTool should enable canvas-tool affordances and status text.
+LayerDescriptor now includes lifecycle/status and channel policy; advanced editor
+eligibility continues to come from the existing surface spec because it describes the
+actual UI presentation.
+
+Recommended behavior after generic advanced UI
+The node graph context menu should offer "Open Advanced Editor" for any layer with
+RichExpandedSurface.
+The floating toolbar should show dynamic buttons for all active advanced nodes, not
+only Background Remover and 3-Way Color Grade.
+EditorSidebar should render the selected node title generically, not with fallback
+strings hardcoded for BackgroundPatcher and ColorGrade.
+Graph node drawing should show a consistent advanced-node affordance on any rich
+surface node.
+
+Current implementation note: These behaviors are implemented. Remaining cleanup is
+mostly about replacing the last type-specific icon/short-label polish with registry
+metadata if more advanced nodes are added.
+
+Professional workflow notes
+Compact nodes should be fast, predictable, and easy to chain.
+Advanced nodes should be where users do careful visual work.
+Nodes with canvas tools should clearly claim ownership of the canvas interaction and
+release it when the node is deleted, deselected, or closed.
+Channel-mode warnings should be displayed near controls, not buried in docs.

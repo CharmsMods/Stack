@@ -1,5 +1,6 @@
 #include "PresetManager.h"
 
+#include "Async/TaskSystem.h"
 #include "App/AppPaths.h"
 #include "App/AppVersion.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
@@ -53,6 +54,51 @@ std::string SanitizeFileStem(const std::string& name) {
         stem.pop_back();
     }
     return stem.empty() ? "preset" : stem;
+}
+
+void ScrubPresetImageNodePayload(StackBinaryFormat::json& nodeValue) {
+    if (!nodeValue.is_object()) {
+        return;
+    }
+
+    const std::string kind = nodeValue.value("kind", std::string());
+    if (kind == "Image") {
+        nodeValue["sourcePath"] = "";
+        nodeValue["width"] = 0;
+        nodeValue["height"] = 0;
+        nodeValue["channels"] = 0;
+        nodeValue["originalChannels"] = 0;
+        nodeValue.erase("pngBytes");
+        return;
+    }
+
+    if (kind == "RawSource") {
+        nodeValue["sourcePath"] = "";
+        if (nodeValue.contains("rawMetadata") && nodeValue["rawMetadata"].is_object()) {
+            nodeValue["rawMetadata"]["sourcePath"] = "";
+        }
+    }
+}
+
+bool SanitizePresetGraphPayload(StackBinaryFormat::json& graphPayload) {
+    if (!graphPayload.is_object() || !graphPayload.contains("nodeGraph") || !graphPayload["nodeGraph"].is_object()) {
+        return false;
+    }
+
+    StackBinaryFormat::json& graphJson = graphPayload["nodeGraph"];
+    if (!graphJson.contains("nodes") || !graphJson["nodes"].is_array()) {
+        return false;
+    }
+
+    bool changed = false;
+    for (auto& nodeValue : graphJson["nodes"]) {
+        const StackBinaryFormat::json originalNodeValue = nodeValue;
+        ScrubPresetImageNodePayload(nodeValue);
+        if (!changed && nodeValue != originalNodeValue) {
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 } // namespace
@@ -179,6 +225,10 @@ void PresetManager::RefreshPresets() {
         m_LastPresetSignature = signature;
     }
 
+    for (const auto& preset : m_UserPresets) {
+        RequestBackgroundGraphPayloadPreload(preset);
+    }
+
     for (auto& preset : oldPresets) {
         ReleaseTexture(preset);
     }
@@ -186,6 +236,55 @@ void PresetManager::RefreshPresets() {
 
 void PresetManager::UploadPresetTextures(int budget) {
     (void)budget;
+}
+
+void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<PresetEntry>& entry) {
+    if (!entry || entry->builtIn || entry->fileName.empty() || entry->graphPayloadLoaded || entry->graphPayloadLoadRequested) {
+        return;
+    }
+
+    entry->graphPayloadLoadRequested = true;
+    entry->graphPayloadLoadError.clear();
+
+    const std::filesystem::path path = m_PresetsPath / entry->fileName;
+    const std::weak_ptr<PresetEntry> weakEntry = entry;
+    Async::TaskSystem::Get().Submit([path, weakEntry]() {
+        StackBinaryFormat::json graphPayload = StackBinaryFormat::json::object();
+        std::string error;
+        bool success = false;
+
+        StackBinaryFormat::NodePresetDocument document;
+        StackBinaryFormat::NodePresetLoadOptions options;
+        options.includeThumbnail = false;
+        options.includeGraphPayload = true;
+        options.includeBoundarySockets = true;
+        if (StackBinaryFormat::ReadNodePresetFile(path, document, options) && document.graphPayload.is_object()) {
+            graphPayload = std::move(document.graphPayload);
+            const bool payloadChanged = SanitizePresetGraphPayload(graphPayload);
+            if (payloadChanged) {
+                document.graphPayload = graphPayload;
+                StackBinaryFormat::WriteNodePresetFile(path, document);
+            }
+            success = true;
+        } else {
+            error = "Stack could not read the preset graph.";
+        }
+
+        Async::TaskSystem::Get().PostToMain([weakEntry, graphPayload = std::move(graphPayload), error = std::move(error), success]() mutable {
+            if (const std::shared_ptr<PresetEntry> entry = weakEntry.lock()) {
+                entry->graphPayloadLoadRequested = false;
+                if (success) {
+                    entry->graphPayload = std::move(graphPayload);
+                    entry->graphPayloadLoaded = true;
+                    entry->graphPayloadLoadError.clear();
+                } else {
+                    entry->graphPayload = StackBinaryFormat::json();
+                    entry->graphPayloadLoaded = false;
+                    entry->graphPayloadLoadError = error;
+                }
+            }
+        });
+    });
 }
 
 bool PresetManager::SaveUserPreset(
@@ -214,6 +313,7 @@ bool PresetManager::SaveUserPreset(
     document.metadata.outputCount = static_cast<std::uint32_t>(boundarySockets.size()) - document.metadata.inputCount;
     document.thumbnailBytes = thumbnailBytes;
     document.graphPayload = graphPayload;
+    SanitizePresetGraphPayload(document.graphPayload);
     document.boundarySockets = boundarySockets;
 
     const std::filesystem::path path = m_PresetsPath / fileName;
@@ -226,6 +326,15 @@ bool PresetManager::SaveUserPreset(
 
     m_LastPresetSignature = 0;
     RefreshPresets();
+    return true;
+}
+
+bool PresetManager::TryGetPreloadedPresetPayload(const PresetEntry& entry, StackBinaryFormat::json& outGraphPayload) const {
+    if (!entry.graphPayloadLoaded || !entry.graphPayload.is_object()) {
+        return false;
+    }
+
+    outGraphPayload = entry.graphPayload;
     return true;
 }
 
@@ -270,6 +379,10 @@ bool PresetManager::WriteUserPresetDocument(const PresetEntry& entry, const Stac
 }
 
 bool PresetManager::LoadPresetPayload(const PresetEntry& entry, StackBinaryFormat::json& outGraphPayload, std::string* outError) const {
+    if (TryGetPreloadedPresetPayload(entry, outGraphPayload)) {
+        return true;
+    }
+
     StackBinaryFormat::NodePresetDocument document;
     if (!ReadUserPresetDocument(entry, document, outError)) {
         return false;
@@ -278,6 +391,7 @@ bool PresetManager::LoadPresetPayload(const PresetEntry& entry, StackBinaryForma
         if (outError) *outError = "Preset does not contain graph data.";
         return false;
     }
+    SanitizePresetGraphPayload(document.graphPayload);
     outGraphPayload = document.graphPayload;
     return true;
 }
@@ -327,6 +441,7 @@ bool PresetManager::OverwriteUserPreset(
         [](const StackBinaryFormat::NodePresetBoundarySocket& socket) { return socket.direction == "input"; }));
     document.metadata.outputCount = static_cast<std::uint32_t>(boundarySockets.size()) - document.metadata.inputCount;
     document.graphPayload = graphPayload;
+    SanitizePresetGraphPayload(document.graphPayload);
     document.thumbnailBytes = thumbnailBytes;
     document.boundarySockets = boundarySockets;
     return WriteUserPresetDocument(entry, document, outError);

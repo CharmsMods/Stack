@@ -189,6 +189,24 @@ ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, 
         exportGraph.SelectNode(nodeIds.front());
     }
 
+    std::vector<Stack::NodeMath::DefinitionReference> compoundRoots;
+    for (const EditorNodeGraph::Node& node : exportGraph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::Compound && node.definitionResolved) {
+            compoundRoots.push_back(node.compound.instance.definition);
+        }
+    }
+    if (!compoundRoots.empty()) {
+        const std::vector<Stack::NodeMath::DefinitionReference> closure =
+            Stack::NodeMath::CollectCompoundDependencyClosure(
+                graph.GetCompoundDefinitions(), compoundRoots, nullptr);
+        for (const Stack::NodeMath::DefinitionReference& reference : closure) {
+            if (const Stack::NodeMath::CompoundDefinition* definition =
+                    graph.FindCompoundDefinition(reference)) {
+                exportGraph.GetCompoundDefinitions().push_back(*definition);
+            }
+        }
+    }
+
     result.nodeCount = static_cast<std::uint32_t>(exportGraph.GetNodes().size());
     result.clipboardPayload["payload"] = EditorNodeGraph::SerializeGraphPayload(layerArray, exportGraph);
     result.exportedGraph = exportGraph;

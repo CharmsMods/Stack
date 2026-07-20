@@ -43,10 +43,12 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::Output:
         case EditorNodeGraph::NodeKind::Composite:
+        case EditorNodeGraph::NodeKind::Reformat:
             return NodeFamily::Gray;
         case EditorNodeGraph::NodeKind::Layer:
             return NodeFamily::Layer;
         case EditorNodeGraph::NodeKind::Lut:
+        case EditorNodeGraph::NodeKind::Compound:
             return NodeFamily::Layer;
         case EditorNodeGraph::NodeKind::Preview:
             return NodeFamily::Preview;
@@ -56,17 +58,26 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::CustomMask:
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::DataMath:
+        case EditorNodeGraph::NodeKind::FrequencyMask:
         case EditorNodeGraph::NodeKind::RawDetailAutoMask:
             return NodeFamily::Mask;
         case EditorNodeGraph::NodeKind::Scope:
             return NodeFamily::Scope;
         case EditorNodeGraph::NodeKind::ImageGenerator:
+        case EditorNodeGraph::NodeKind::Value:
+        case EditorNodeGraph::NodeKind::FieldMean:
             return NodeFamily::Generator;
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::ChannelSplit:
         case EditorNodeGraph::NodeKind::ChannelCombine:
+        case EditorNodeGraph::NodeKind::FrequencyFft:
+        case EditorNodeGraph::NodeKind::FrequencyIfft:
+        case EditorNodeGraph::NodeKind::SpectrumView:
+        case EditorNodeGraph::NodeKind::SpectrumMath:
+        case EditorNodeGraph::NodeKind::MagnitudePhase:
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
             return NodeFamily::Merge;
     }
     return NodeFamily::Gray;
@@ -260,6 +271,11 @@ GraphZoomDialStyle BuildGraphZoomDialStyle(EditorModule* editor, const GraphStyl
 bool GraphDottedMaskLinksEnabled(EditorModule* editor) {
     const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
     return appearance ? appearance->GetGraphDottedMaskLinks() : true;
+}
+
+bool GraphStraightLinksEnabled(EditorModule* editor) {
+    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+    return appearance ? appearance->GetGraphStraightLinks() : false;
 }
 
 bool IsSummaryOnlyNode(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node) {
@@ -710,9 +726,24 @@ ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& 
     ImVec4 base = imageBase;
     switch (type) {
         case EditorNodeGraph::SocketType::Image: base = imageBase; break;
-        case EditorNodeGraph::SocketType::Mask: base = maskBase; break;
+        case EditorNodeGraph::SocketType::Mask:
+        case EditorNodeGraph::SocketType::ScalarField: base = maskBase; break;
         case EditorNodeGraph::SocketType::Analysis: base = analysisBase; break;
-        case EditorNodeGraph::SocketType::Value: base = valueBase; break;
+        case EditorNodeGraph::SocketType::Value:
+        case EditorNodeGraph::SocketType::Boolean:
+        case EditorNodeGraph::SocketType::Integer:
+        case EditorNodeGraph::SocketType::Scalar:
+        case EditorNodeGraph::SocketType::Vector2:
+        case EditorNodeGraph::SocketType::Vector3:
+        case EditorNodeGraph::SocketType::Vector4:
+        case EditorNodeGraph::SocketType::Matrix3:
+        case EditorNodeGraph::SocketType::Matrix4:
+        case EditorNodeGraph::SocketType::Curve:
+        case EditorNodeGraph::SocketType::Coordinate:
+        case EditorNodeGraph::SocketType::Histogram:
+        case EditorNodeGraph::SocketType::Statistics:
+        case EditorNodeGraph::SocketType::Metadata:
+        case EditorNodeGraph::SocketType::Handle: base = valueBase; break;
         case EditorNodeGraph::SocketType::Raw: base = rawBase; break;
     }
     return ColorToU32(BlendColor(base, familyStyle.accent, 0.38f));
@@ -746,6 +777,7 @@ LinkVisualStyle ResolveLinkVisualStyle(
         style.channel = toSocketId;
     }
     style.scalarStream = fromSocket.type == EditorNodeGraph::SocketType::Mask ||
+        fromSocket.type == EditorNodeGraph::SocketType::ScalarField ||
         graph.IsScalarSocketStream(fromNodeId, fromSocketId);
 
     const EditorNodeGraph::Link probeLink { fromNodeId, fromSocketId, toNodeId, toSocketId };
@@ -759,7 +791,9 @@ LinkVisualStyle ResolveLinkVisualStyle(
         return style;
     }
     if (fromSocket.type == EditorNodeGraph::SocketType::Mask ||
-        toSocket.type == EditorNodeGraph::SocketType::Mask) {
+        toSocket.type == EditorNodeGraph::SocketType::Mask ||
+        fromSocket.type == EditorNodeGraph::SocketType::ScalarField ||
+        toSocket.type == EditorNodeGraph::SocketType::ScalarField) {
         style.kind = LinkVisualKind::MaskEndpoint;
         style.dotted = true;
         return style;
@@ -798,7 +832,9 @@ LinkVisualStyle ResolvePendingLinkVisualStyle(
 
     style.channel = IsChannelSocketId(socketId) ? socketId : graph.ResolveSocketChannel(nodeId, socketId);
     style.scalarStream = direction == EditorNodeGraph::SocketDirection::Output &&
-        (socket.type == EditorNodeGraph::SocketType::Mask || graph.IsScalarSocketStream(nodeId, socketId));
+        (socket.type == EditorNodeGraph::SocketType::Mask ||
+         socket.type == EditorNodeGraph::SocketType::ScalarField ||
+         graph.IsScalarSocketStream(nodeId, socketId));
 
     if (socket.type == EditorNodeGraph::SocketType::Analysis) {
         style.kind = LinkVisualKind::Analysis;
@@ -808,7 +844,8 @@ LinkVisualStyle ResolvePendingLinkVisualStyle(
         style.kind = LinkVisualKind::Raw;
         return style;
     }
-    if (socket.type == EditorNodeGraph::SocketType::Mask) {
+    if (socket.type == EditorNodeGraph::SocketType::Mask ||
+        socket.type == EditorNodeGraph::SocketType::ScalarField) {
         style.kind = LinkVisualKind::MaskEndpoint;
         style.dotted = true;
         return style;
@@ -837,9 +874,24 @@ ImVec4 SocketColorVec(
     }
     switch (socket.type) {
         case EditorNodeGraph::SocketType::Image: return BlendColor(tokens.socketImage, familyStyle.accent, 0.16f);
-        case EditorNodeGraph::SocketType::Mask: return BlendColor(tokens.socketMask, familyStyle.accent, 0.12f);
+        case EditorNodeGraph::SocketType::Mask:
+        case EditorNodeGraph::SocketType::ScalarField: return BlendColor(tokens.socketMask, familyStyle.accent, 0.12f);
         case EditorNodeGraph::SocketType::Analysis: return BlendColor(tokens.socketAnalysis, familyStyle.accent, 0.10f);
-        case EditorNodeGraph::SocketType::Value: return BlendColor(tokens.socketValue, familyStyle.accent, 0.10f);
+        case EditorNodeGraph::SocketType::Value:
+        case EditorNodeGraph::SocketType::Boolean:
+        case EditorNodeGraph::SocketType::Integer:
+        case EditorNodeGraph::SocketType::Scalar:
+        case EditorNodeGraph::SocketType::Vector2:
+        case EditorNodeGraph::SocketType::Vector3:
+        case EditorNodeGraph::SocketType::Vector4:
+        case EditorNodeGraph::SocketType::Matrix3:
+        case EditorNodeGraph::SocketType::Matrix4:
+        case EditorNodeGraph::SocketType::Curve:
+        case EditorNodeGraph::SocketType::Coordinate:
+        case EditorNodeGraph::SocketType::Histogram:
+        case EditorNodeGraph::SocketType::Statistics:
+        case EditorNodeGraph::SocketType::Metadata:
+        case EditorNodeGraph::SocketType::Handle: return BlendColor(tokens.socketValue, familyStyle.accent, 0.10f);
         case EditorNodeGraph::SocketType::Raw: return BlendColor(tokens.socketRaw, familyStyle.accent, 0.12f);
     }
     return tokens.socketImage;
@@ -1239,6 +1291,24 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
                 return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
             }
             return headerBlock + sectionGap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::Value:
+            return headerBlock + sectionGap + row * 6.0f + gap * 5.0f + bottomPadding;
+        case EditorNodeGraph::NodeKind::FieldMean:
+            return headerBlock + sectionGap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::Reformat:
+            return headerBlock + sectionGap + row + gap + row + gap + row + gap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::FrequencyFft:
+        case EditorNodeGraph::NodeKind::FrequencyIfft:
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
+            return headerBlock + sectionGap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::SpectrumView:
+            return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::FrequencyMask:
+            return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
+        case EditorNodeGraph::NodeKind::SpectrumMath:
+            return headerBlock + sectionGap + row + gap + row + gap + sliderRow + bottomPadding;
+        case EditorNodeGraph::NodeKind::MagnitudePhase:
+            return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
         case EditorNodeGraph::NodeKind::ImageToMask:
             if (node.imageToMaskKind == EditorNodeGraph::ImageToMaskKind::SampledRange) {
                 const int extraSamples = std::max(0, std::clamp(node.imageToMaskSettings.sampleCount, 1, 5) - 1);
@@ -1297,6 +1367,16 @@ bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ImageToMask:
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::DataMath:
+        case EditorNodeGraph::NodeKind::Value:
+        case EditorNodeGraph::NodeKind::FieldMean:
+        case EditorNodeGraph::NodeKind::Reformat:
+        case EditorNodeGraph::NodeKind::FrequencyFft:
+        case EditorNodeGraph::NodeKind::FrequencyIfft:
+        case EditorNodeGraph::NodeKind::SpectrumView:
+        case EditorNodeGraph::NodeKind::FrequencyMask:
+        case EditorNodeGraph::NodeKind::SpectrumMath:
+        case EditorNodeGraph::NodeKind::MagnitudePhase:
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
             return false;
     }
     return false;
@@ -1329,7 +1409,7 @@ std::string EllipsizeLabel(const std::string& value, float maxWidth) {
 
 const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
     switch (kind) {
-        case EditorNodeGraph::NodeKind::Image: return "Image";
+        case EditorNodeGraph::NodeKind::Image: return "Slice";
         case EditorNodeGraph::NodeKind::RawSource: return "RAW";
         case EditorNodeGraph::NodeKind::RawDevelopment: return "RAW Development";
         case EditorNodeGraph::NodeKind::RawNeuralDenoise: return "RAW Denoise";
@@ -1353,6 +1433,18 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::ImageToMask: return "Image To Mask";
         case EditorNodeGraph::NodeKind::ImageGenerator: return "Generator";
         case EditorNodeGraph::NodeKind::DataMath: return "Math";
+        case EditorNodeGraph::NodeKind::Value: return "Value";
+        case EditorNodeGraph::NodeKind::FieldMean: return "Reduction";
+        case EditorNodeGraph::NodeKind::Reformat: return "Geometry";
+        case EditorNodeGraph::NodeKind::TechnicalImage: return "Technical Image";
+        case EditorNodeGraph::NodeKind::Compound: return "Compound";
+        case EditorNodeGraph::NodeKind::FrequencyFft: return "FFT";
+        case EditorNodeGraph::NodeKind::FrequencyIfft: return "Inverse FFT";
+        case EditorNodeGraph::NodeKind::SpectrumView: return "Spectrum View";
+        case EditorNodeGraph::NodeKind::FrequencyMask: return "Frequency Mask";
+        case EditorNodeGraph::NodeKind::SpectrumMath: return "Spectrum Math";
+        case EditorNodeGraph::NodeKind::MagnitudePhase: return "Magnitude / Phase";
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer: return "Spectrum Analyzer";
         case EditorNodeGraph::NodeKind::ChannelSplit: return "Channel Split";
         case EditorNodeGraph::NodeKind::ChannelCombine: return "Channel Combine";
     }
@@ -1432,7 +1524,8 @@ const char* MixBlendLabel(EditorNodeGraph::MixBlendMode mode) {
         case EditorNodeGraph::MixBlendMode::Add: return "Add";
         case EditorNodeGraph::MixBlendMode::Multiply: return "Multiply";
         case EditorNodeGraph::MixBlendMode::Screen: return "Screen";
-        case EditorNodeGraph::MixBlendMode::AlphaOver: return "Alpha Over";
+        case EditorNodeGraph::MixBlendMode::StraightSourceOver: return "Source Over (Straight)";
+        case EditorNodeGraph::MixBlendMode::PremultipliedSourceOver: return "Source Over (Premultiplied)";
     }
     return "Normal / Lerp";
 }

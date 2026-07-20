@@ -3,6 +3,7 @@
 #include "App/settings/AppearanceTheme.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 
 #include <algorithm>
 #include <cctype>
@@ -16,7 +17,7 @@ namespace {
 using NodeBrowserEntry = EditorNodeGraphDefinitions::NodeCatalogEntry;
 
 const std::vector<NodeBrowserEntry>& CachedNodeBrowserEntries() {
-    static const std::vector<NodeBrowserEntry> entries = EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
+    static const std::vector<NodeBrowserEntry> entries = EditorNodeGraphDefinitions::BuildRegisteredNodeCatalogEntries();
     return entries;
 }
 
@@ -237,7 +238,7 @@ bool PrototypeHasCompatibleInput(
         if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
             continue;
         }
-        if (compatibilityGraph.CanConnectSocketsOrInsertExtractor(fromNodeId, fromSocketId, testNode.id, socket.id)) {
+        if (compatibilityGraph.CanConnectSockets(fromNodeId, fromSocketId, testNode.id, socket.id)) {
             compatible = true;
             break;
         }
@@ -266,7 +267,7 @@ bool PrototypeHasCompatibleOutput(
         if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
             continue;
         }
-        if (compatibilityGraph.CanConnectSocketsOrInsertExtractor(testNode.id, socket.id, toNodeId, toSocketId)) {
+        if (compatibilityGraph.CanConnectSockets(testNode.id, socket.id, toNodeId, toSocketId)) {
             compatible = true;
             break;
         }
@@ -315,6 +316,45 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::DataMath:
             editor->AddDataMathNodeAt(static_cast<EditorNodeGraph::DataMathMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::Value: {
+            EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
+            editor->AddValueNodeAt(std::move(prototype.value.value), graphPos);
+            break;
+        }
+        case EditorNodeGraph::NodeKind::FieldMean:
+            editor->AddFieldMeanNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::Reformat:
+            editor->AddReformatNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::TechnicalImage:
+            editor->AddTechnicalImageNodeAt(
+                static_cast<Stack::NodeMath::TechnicalImageOperation>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::Compound:
+            editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyFft:
+            editor->AddFrequencyFftNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyIfft:
+            editor->AddFrequencyIfftNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumView:
+            editor->AddSpectrumViewNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyMask:
+            editor->AddFrequencyMaskNodeAt(static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumMath:
+            editor->AddSpectrumMathNodeAt(static_cast<EditorNodeGraph::SpectrumMathMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::MagnitudePhase:
+            editor->AddMagnitudePhaseNodeAt(static_cast<EditorNodeGraph::MagnitudePhaseMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
+            editor->AddSpectrumAnalyzerNodeAt(static_cast<EditorNodeGraph::SpectrumAnalyzerMode>(entry.value), graphPos);
             break;
         case EditorNodeGraph::NodeKind::ChannelSplit:
             editor->AddChannelSplitNodeAt(graphPos);
@@ -896,10 +936,17 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                 fadeOpaque);
         }
 
-        if (isOpen && !activatedEntry &&
-            (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) &&
-            !filtered.empty()) {
-            activatedEntry = filtered.front();
+        const bool submitPressed =
+            ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+        if (isOpen && !activatedEntry && submitPressed) {
+            if (!filtered.empty()) {
+                activatedEntry = filtered.front();
+            } else {
+                // Single-line inputs release their active focus on Enter. With
+                // nothing to activate, keep the user in the search workflow.
+                m_NodeBrowserFocusSearch = true;
+            }
         }
 
         if (isOpen && activatedEntry) {

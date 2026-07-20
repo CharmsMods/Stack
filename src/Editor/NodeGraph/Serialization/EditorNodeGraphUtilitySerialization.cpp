@@ -96,6 +96,7 @@ nlohmann::json SerializeMaskUtilitySettings(const MaskUtilitySettings& settings)
         { "gamma", settings.gamma },
         { "threshold", settings.threshold },
         { "softness", settings.softness },
+        { "enabled", settings.enabled },
         { "invert", settings.invert }
     };
 }
@@ -108,6 +109,7 @@ MaskUtilitySettings DeserializeMaskUtilitySettings(const nlohmann::json& value) 
     settings.gamma = value.value("gamma", settings.gamma);
     settings.threshold = value.value("threshold", settings.threshold);
     settings.softness = value.value("softness", settings.softness);
+    settings.enabled = value.value("enabled", settings.enabled);
     settings.invert = value.value("invert", settings.invert);
     return settings;
 }
@@ -250,7 +252,8 @@ std::string MixBlendModeToString(MixBlendMode mode) {
         case MixBlendMode::Add: return "Add";
         case MixBlendMode::Multiply: return "Multiply";
         case MixBlendMode::Screen: return "Screen";
-        case MixBlendMode::AlphaOver: return "AlphaOver";
+        case MixBlendMode::StraightSourceOver: return "StraightSourceOver";
+        case MixBlendMode::PremultipliedSourceOver: return "PremultipliedSourceOver";
     }
     return "Normal";
 }
@@ -260,7 +263,8 @@ MixBlendMode MixBlendModeFromString(const std::string& value) {
     if (value == "Add") return MixBlendMode::Add;
     if (value == "Multiply") return MixBlendMode::Multiply;
     if (value == "Screen") return MixBlendMode::Screen;
-    if (value == "AlphaOver" || value == "Alpha Over") return MixBlendMode::AlphaOver;
+    if (value == "StraightSourceOver" || value == "Source Over (Straight)") return MixBlendMode::StraightSourceOver;
+    if (value == "PremultipliedSourceOver" || value == "Source Over (Premultiplied)") return MixBlendMode::PremultipliedSourceOver;
     return MixBlendMode::Normal;
 }
 
@@ -317,6 +321,279 @@ DataMathSettings DeserializeDataMathSettings(const nlohmann::json& value) {
     settings.maxValue = value.value("maxValue", settings.maxValue);
     settings.outMin = value.value("outMin", settings.outMin);
     settings.outMax = value.value("outMax", settings.outMax);
+    return settings;
+}
+
+std::string TechnicalImageOperationToString(Stack::NodeMath::TechnicalImageOperation operation) {
+    using Operation = Stack::NodeMath::TechnicalImageOperation;
+    switch (operation) {
+        case Operation::AssignSrgb: return "AssignSrgb";
+        case Operation::AssignLinearSrgb: return "AssignLinearSrgb";
+        case Operation::AssignLinearDisplayP3: return "AssignLinearDisplayP3";
+        case Operation::SrgbDecode: return "SrgbDecode";
+        case Operation::SrgbEncode: return "SrgbEncode";
+        case Operation::LinearSrgbToDisplayP3: return "LinearSrgbToDisplayP3";
+        case Operation::LinearDisplayP3ToSrgb: return "LinearDisplayP3ToSrgb";
+        case Operation::Exposure: return "Exposure";
+        case Operation::Premultiply: return "Premultiply";
+        case Operation::Unpremultiply: return "Unpremultiply";
+    }
+    return "Exposure";
+}
+
+Stack::NodeMath::TechnicalImageOperation TechnicalImageOperationFromString(const std::string& value) {
+    using Operation = Stack::NodeMath::TechnicalImageOperation;
+    if (value == "AssignSrgb") return Operation::AssignSrgb;
+    if (value == "AssignLinearSrgb") return Operation::AssignLinearSrgb;
+    if (value == "AssignLinearDisplayP3") return Operation::AssignLinearDisplayP3;
+    if (value == "SrgbDecode") return Operation::SrgbDecode;
+    if (value == "SrgbEncode") return Operation::SrgbEncode;
+    if (value == "LinearSrgbToDisplayP3") return Operation::LinearSrgbToDisplayP3;
+    if (value == "LinearDisplayP3ToSrgb") return Operation::LinearDisplayP3ToSrgb;
+    if (value == "Premultiply") return Operation::Premultiply;
+    if (value == "Unpremultiply") return Operation::Unpremultiply;
+    return Operation::Exposure;
+}
+
+nlohmann::json SerializeTechnicalImageSettings(const TechnicalImageSettings& settings) {
+    return {
+        { "operation", TechnicalImageOperationToString(settings.operation) },
+        { "exposureValue", settings.exposureValue }
+    };
+}
+
+TechnicalImageSettings DeserializeTechnicalImageSettings(const nlohmann::json& value) {
+    TechnicalImageSettings settings;
+    if (!value.is_object()) return settings;
+    settings.operation = TechnicalImageOperationFromString(
+        value.value("operation", std::string("Exposure")));
+    settings.exposureValue = value.value("exposureValue", settings.exposureValue);
+    return settings;
+}
+
+std::string ReconstructionFilterToString(Stack::NodeMath::ReconstructionFilter filter) {
+    return filter == Stack::NodeMath::ReconstructionFilter::Nearest ? "Nearest" : "Linear";
+}
+
+Stack::NodeMath::ReconstructionFilter ReconstructionFilterFromString(const std::string& value) {
+    return value == "Nearest"
+        ? Stack::NodeMath::ReconstructionFilter::Nearest
+        : Stack::NodeMath::ReconstructionFilter::Linear;
+}
+
+nlohmann::json SerializeReformatSettings(const ReformatSettings& settings) {
+    return {
+        { "width", settings.width },
+        { "height", settings.height },
+        { "filter", ReconstructionFilterToString(settings.filter) },
+        { "border", "Clamp" }
+    };
+}
+
+ReformatSettings DeserializeReformatSettings(const nlohmann::json& value) {
+    ReformatSettings settings;
+    if (!value.is_object()) return settings;
+    settings.width = std::clamp(
+        value.value("width", settings.width), 1,
+        Stack::NodeMath::kMaximumReformatDimension);
+    settings.height = std::clamp(
+        value.value("height", settings.height), 1,
+        Stack::NodeMath::kMaximumReformatDimension);
+    settings.filter = ReconstructionFilterFromString(
+        value.value("filter", std::string("Linear")));
+    settings.border = Stack::NodeMath::BorderPolicy::Clamp;
+    return settings;
+}
+
+std::string SpectrumViewLutToString(SpectrumViewLut lut) {
+    switch (lut) {
+        case SpectrumViewLut::Turbo: return "Turbo";
+        case SpectrumViewLut::Viridis: return "Viridis";
+        case SpectrumViewLut::Inferno: return "Inferno";
+        case SpectrumViewLut::Grayscale: return "Grayscale";
+    }
+    return "Turbo";
+}
+
+SpectrumViewLut SpectrumViewLutFromString(const std::string& value) {
+    if (value == "Viridis") return SpectrumViewLut::Viridis;
+    if (value == "Inferno") return SpectrumViewLut::Inferno;
+    if (value == "Grayscale" || value == "Gray" || value == "Grey") return SpectrumViewLut::Grayscale;
+    return SpectrumViewLut::Turbo;
+}
+
+std::string FrequencyMaskShapeToString(FrequencyMaskShape shape) {
+    switch (shape) {
+        case FrequencyMaskShape::LowPass: return "LowPass";
+        case FrequencyMaskShape::HighPass: return "HighPass";
+        case FrequencyMaskShape::BandPass: return "BandPass";
+        case FrequencyMaskShape::BandStop: return "BandStop";
+        case FrequencyMaskShape::Notch: return "Notch";
+        case FrequencyMaskShape::Gaussian: return "Gaussian";
+        case FrequencyMaskShape::Butterworth: return "Butterworth";
+    }
+    return "LowPass";
+}
+
+FrequencyMaskShape FrequencyMaskShapeFromString(const std::string& value) {
+    if (value == "HighPass" || value == "High Pass") return FrequencyMaskShape::HighPass;
+    if (value == "BandPass" || value == "Band Pass") return FrequencyMaskShape::BandPass;
+    if (value == "BandStop" || value == "Band Stop") return FrequencyMaskShape::BandStop;
+    if (value == "Notch") return FrequencyMaskShape::Notch;
+    if (value == "Gaussian") return FrequencyMaskShape::Gaussian;
+    if (value == "Butterworth") return FrequencyMaskShape::Butterworth;
+    return FrequencyMaskShape::LowPass;
+}
+
+std::string SpectrumMathModeToString(SpectrumMathMode mode) {
+    switch (mode) {
+        case SpectrumMathMode::Multiply: return "Multiply";
+        case SpectrumMathMode::Add: return "Add";
+        case SpectrumMathMode::Subtract: return "Subtract";
+        case SpectrumMathMode::Difference: return "Difference";
+    }
+    return "Multiply";
+}
+
+SpectrumMathMode SpectrumMathModeFromString(const std::string& value) {
+    if (value == "Add") return SpectrumMathMode::Add;
+    if (value == "Subtract") return SpectrumMathMode::Subtract;
+    if (value == "Difference") return SpectrumMathMode::Difference;
+    return SpectrumMathMode::Multiply;
+}
+
+std::string MagnitudePhaseModeToString(MagnitudePhaseMode mode) {
+    switch (mode) {
+        case MagnitudePhaseMode::Magnitude: return "Magnitude";
+        case MagnitudePhaseMode::Phase: return "Phase";
+        case MagnitudePhaseMode::Recombine: return "Recombine";
+    }
+    return "Magnitude";
+}
+
+MagnitudePhaseMode MagnitudePhaseModeFromString(const std::string& value) {
+    if (value == "Phase") return MagnitudePhaseMode::Phase;
+    if (value == "Recombine") return MagnitudePhaseMode::Recombine;
+    return MagnitudePhaseMode::Magnitude;
+}
+
+std::string SpectrumAnalyzerModeToString(SpectrumAnalyzerMode mode) {
+    switch (mode) {
+        case SpectrumAnalyzerMode::RadialEnergy: return "RadialEnergy";
+        case SpectrumAnalyzerMode::DominantFrequency: return "DominantFrequency";
+    }
+    return "RadialEnergy";
+}
+
+SpectrumAnalyzerMode SpectrumAnalyzerModeFromString(const std::string& value) {
+    if (value == "DominantFrequency" || value == "Dominant Frequency") {
+        return SpectrumAnalyzerMode::DominantFrequency;
+    }
+    return SpectrumAnalyzerMode::RadialEnergy;
+}
+
+nlohmann::json SerializeFrequencyFftSettings(const FrequencyFftSettings& settings) {
+    return {
+        { "luminanceOnly", settings.luminanceOnly }
+    };
+}
+
+FrequencyFftSettings DeserializeFrequencyFftSettings(const nlohmann::json& value) {
+    FrequencyFftSettings settings;
+    if (!value.is_object()) return settings;
+    settings.luminanceOnly = value.value("luminanceOnly", settings.luminanceOnly);
+    return settings;
+}
+
+nlohmann::json SerializeSpectrumViewSettings(const SpectrumViewSettings& settings) {
+    return {
+        { "lut", SpectrumViewLutToString(settings.lut) },
+        { "exposure", settings.exposure },
+        { "gamma", settings.gamma },
+        { "centerDc", settings.centerDc }
+    };
+}
+
+SpectrumViewSettings DeserializeSpectrumViewSettings(const nlohmann::json& value) {
+    SpectrumViewSettings settings;
+    if (!value.is_object()) return settings;
+    settings.lut = SpectrumViewLutFromString(value.value("lut", SpectrumViewLutToString(settings.lut)));
+    settings.exposure = std::clamp(value.value("exposure", settings.exposure), 0.01f, 32.0f);
+    settings.gamma = std::clamp(value.value("gamma", settings.gamma), 0.1f, 4.0f);
+    settings.centerDc = value.value("centerDc", settings.centerDc);
+    return settings;
+}
+
+nlohmann::json SerializeFrequencyMaskSettings(const FrequencyMaskSettings& settings) {
+    return {
+        { "shape", FrequencyMaskShapeToString(settings.shape) },
+        { "cutoff", settings.cutoff },
+        { "width", settings.width },
+        { "feather", settings.feather },
+        { "order", settings.order },
+        { "centerX", settings.centerX },
+        { "centerY", settings.centerY },
+        { "invert", settings.invert }
+    };
+}
+
+FrequencyMaskSettings DeserializeFrequencyMaskSettings(const nlohmann::json& value) {
+    FrequencyMaskSettings settings;
+    if (!value.is_object()) return settings;
+    settings.shape = FrequencyMaskShapeFromString(value.value("shape", FrequencyMaskShapeToString(settings.shape)));
+    settings.cutoff = std::clamp(value.value("cutoff", settings.cutoff), 0.0f, 1.0f);
+    settings.width = std::clamp(value.value("width", settings.width), 0.0f, 1.0f);
+    settings.feather = std::clamp(value.value("feather", settings.feather), 0.0f, 1.0f);
+    settings.order = std::clamp(value.value("order", settings.order), 1.0f, 12.0f);
+    settings.centerX = std::clamp(value.value("centerX", settings.centerX), 0.0f, 1.0f);
+    settings.centerY = std::clamp(value.value("centerY", settings.centerY), 0.0f, 1.0f);
+    settings.invert = value.value("invert", settings.invert);
+    return settings;
+}
+
+nlohmann::json SerializeSpectrumMathSettings(const SpectrumMathSettings& settings) {
+    return {
+        { "amount", settings.amount }
+    };
+}
+
+SpectrumMathSettings DeserializeSpectrumMathSettings(const nlohmann::json& value) {
+    SpectrumMathSettings settings;
+    if (!value.is_object()) return settings;
+    settings.amount = std::clamp(value.value("amount", settings.amount), 0.0f, 4.0f);
+    return settings;
+}
+
+nlohmann::json SerializeMagnitudePhaseSettings(const MagnitudePhaseSettings& settings) {
+    return {
+        { "exposure", settings.exposure },
+        { "gamma", settings.gamma }
+    };
+}
+
+MagnitudePhaseSettings DeserializeMagnitudePhaseSettings(const nlohmann::json& value) {
+    MagnitudePhaseSettings settings;
+    if (!value.is_object()) return settings;
+    settings.exposure = std::clamp(value.value("exposure", settings.exposure), 0.01f, 32.0f);
+    settings.gamma = std::clamp(value.value("gamma", settings.gamma), 0.1f, 4.0f);
+    return settings;
+}
+
+nlohmann::json SerializeSpectrumAnalyzerSettings(const SpectrumAnalyzerSettings& settings) {
+    return {
+        { "innerRadius", settings.innerRadius },
+        { "outerRadius", settings.outerRadius }
+    };
+}
+
+SpectrumAnalyzerSettings DeserializeSpectrumAnalyzerSettings(const nlohmann::json& value) {
+    SpectrumAnalyzerSettings settings;
+    if (!value.is_object()) return settings;
+    settings.innerRadius = std::clamp(value.value("innerRadius", settings.innerRadius), 0.0f, 1.0f);
+    settings.outerRadius = std::clamp(value.value("outerRadius", settings.outerRadius), 0.0f, 1.0f);
+    if (settings.outerRadius < settings.innerRadius) {
+        std::swap(settings.innerRadius, settings.outerRadius);
+    }
     return settings;
 }
 

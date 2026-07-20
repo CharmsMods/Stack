@@ -1,0 +1,420 @@
+NODE LIBRARY AUDIT
+Generated from the current C++ node graph and layer registry.
+
+Purpose
+This report inventories the current node library, calls out stale or incomplete nodes,
+and records recommended status labels for cleanup and professionalization passes.
+The first source follow-up has added registry metadata and browser visibility policy,
+but this report still treats actual node deletion and legacy file removal as future
+work until saved-project compatibility is reviewed.
+
+Status labels used in this report
+Keep - The node is useful in the current workflow and should remain exposed.
+Needs Fix - The node is useful but has correctness, UX, or pipeline issues to fix.
+Rework - The node concept is useful, but the current implementation or semantics
+  should be redesigned before the node is treated as professional/stable.
+Hide/Remove Candidate - The node or file appears stale, redundant, or not suitable
+  for the current library without a compatibility/migration decision.
+Advanced UI Candidate - The node benefits from a dedicated Complex Node/sidebar
+  editor or richer surface beyond compact inline controls.
+
+Source files inspected
+src/Editor/LayerRegistry.cpp
+src/Editor/LayerRegistry.h
+src/Editor/NodeGraph/EditorNodeGraph.h
+src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp
+src/Editor/NodeGraph/EditorNodeGraphUI.cpp
+src/Editor/NodeGraph/UI/EditorNodeGraphUIContextMenu.cpp
+src/Editor/Layers/*.cpp
+src/Editor/Layers/*.h
+src/Editor/EditorModule.cpp
+src/Editor/UI/EditorSidebar.cpp
+src/Renderer/RenderPipeline.cpp
+
+High-level findings
+The registered layer library currently contains 49 layer descriptors.
+The layer descriptors now carry lifecycle status, channel policy, node-browser
+visibility, lifecycle notes, channel notes, and tags. Hidden/deprecated descriptors
+can still exist for saved-project compatibility while being omitted from the add-node
+browser.
+The layer descriptors are grouped into 6 categories:
+Blur / Focus: 9 nodes.
+Color: 16 nodes.
+Composite: 2 nodes.
+Effects / Damage: 16 nodes.
+Texture / Generate: 2 nodes.
+Transform / Canvas: 4 nodes.
+
+The graph-native node catalog includes:
+Output.
+Scopes: Histogram, Vectorscope, RGB Parade.
+Preview.
+Mask generators: Solid Mask, Linear Gradient Mask, Radial Gradient Mask, Noise Mask.
+Mask utilities: Invert Mask, Levels Mask, Threshold Mask.
+Image-to-mask converter: Luminance Mask.
+Image generators: Solid Color Image, Color Gradient Image, Square, Circle, Text.
+Mix / Blend.
+Channel Split.
+Channel Combine.
+
+Graph-native nodes
+Output - Keep.
+Current behavior: Accepts a full image input or channel-mode R/G/B/A inputs. The
+current channel system treats full-image and channel-mode output as mutually
+exclusive modes. Missing channel-mode RGB inputs default to black and missing alpha
+defaults to opaque.
+Recommendation: Keep and continue treating it as one of the two sanctioned recombine
+points, alongside Channel Combine.
+
+Preview - Keep.
+Current behavior: Analysis-style node for inspecting streams. It supports image and
+mask-like inputs. It is useful while debugging full-image and channel pipelines.
+Recommendation: Keep. Consider richer display labels later so channel previews say
+which channel lineage they represent.
+
+Histogram, Vectorscope, RGB Parade - Keep.
+Current behavior: Scope nodes inspect image or mask outputs. They are useful for
+professional workflows and channel debugging.
+Recommendation: Keep. Later, scopes should show whether they are analyzing a
+full-color image, a single-channel stream, or a mask.
+
+Solid Mask, Linear Gradient Mask, Radial Gradient Mask, Noise Mask - Keep.
+Current behavior: Procedural mask sources. These can feed layer masks, mix factors,
+mask utilities, channel combine pins, and output channel pins where allowed.
+Recommendation: Keep. These are foundational for compositing and channel work.
+
+Invert Mask, Levels Mask, Threshold Mask - Keep.
+Current behavior: Single-mask-in, single-mask-out utilities.
+Recommendation: Keep. These map cleanly to the current channel stream model because
+a single channel and a mask both behave as scalar fields.
+
+Luminance Mask - Keep / Needs Fix.
+Current behavior: Converts image input to a mask output by luminance.
+Risk: On channel-derived streams, the image may already be a single-channel field
+stored as RGB gray. This is acceptable but should be documented in UI text.
+Recommendation: Keep. Add clearer labels/help later.
+
+Solid Color Image, Color Gradient Image, Square, Circle, Text - Keep / Needs Fix.
+Current behavior: Procedural image sources generated in RenderPipeline.
+Risk: Reference canvas behavior for generators is less explicit than image-file
+sources. Generators currently depend on the active render canvas dimensions.
+Recommendation: Keep. Later, expose generator canvas/reference sizing explicitly.
+
+Mix / Blend - Keep / Needs Fix.
+Current behavior: Two image inputs plus optional factor mask. Supports blend modes,
+including alpha-over in renderer types.
+Risk: Mixing channel-derived image streams is possible, but semantics need clearer
+documentation. Factor masks and scalar channels are compatible, but UI should explain
+what is being mixed.
+Recommendation: Keep. Add channel-lineage display and test multi-source resolution
+behavior.
+
+Channel Split - Keep.
+Current behavior: Splits an image/full stream into R, G, B, and A outputs. If source
+image has no alpha, alpha is treated as generated/full opacity in the current model.
+Recommendation: Keep. This is core to the new professional channel workflow.
+
+Channel Combine - Keep.
+Current behavior: Recombines R, G, B, A scalar inputs into a full image. Missing RGB
+defaults to 0.0 and missing alpha defaults to 1.0. Uses the same rules as channel-mode
+Output.
+Recommendation: Keep. Later add UI text for reference canvas choice.
+
+Registered layer nodes by category
+
+Transform / Canvas
+Crop - Keep / Needs Fix.
+Type ID: Crop. Class: CropLayer.
+Notes: Crops by remapping/blanking within the current fixed canvas, not by changing
+document dimensions. Safe enough as an effect, but should be described as crop mask
+or crop-in-place until true reformat nodes exist.
+
+Rotate - Keep / Needs Fix.
+Type ID: Rotate. Class: RotateLayer.
+Notes: Rotates within the fixed canvas. It does not create a larger canvas to fit
+rotated bounds. Needs clear semantics in a professional node library.
+
+Flip - Keep.
+Type ID: Flip. Class: FlipLayer.
+Notes: Simple transform that maps well to the current pipeline and channel streams.
+
+Expand Canvas - Rework.
+Type ID: Expander. Class: ExpanderLayer.
+Notes: The shader simulates padding inside the current fixed-size render target.
+It does not truly resize or reformat the raster. This should become a real Reformat
+or Canvas Resize node later, or be hidden until the render graph supports dynamic
+canvas changes.
+Current registry metadata: Experimental plus ReworkBeforeExpose. It remains visible
+for now but is labeled as experimental in the node browser.
+
+Composite
+Background Remover - Needs Fix / Advanced UI Candidate.
+Type ID: BackgroundPatcher. Class: BackgroundPatcherLayer.
+Notes: Useful and already has an expanded node surface plus canvas color-pick tool.
+However, flood mask, brush mask, antialias, and patch controls are placeholders or
+unused state. Keep the concept, but mark as incomplete until those features are
+implemented or removed from the code.
+Current UI metadata: Advanced editor eligibility now comes from NodeSurfaceSpec
+RichExpandedSurface instead of being granted only by hardcoded type-ID checks.
+
+Alpha Protect - Rework / Hide/Remove Candidate.
+Type ID: AlphaHandling. Class: AlphaHandlingLayer.
+Notes: The layer depends on ExecuteWithSource and compares processed pixels against
+the original source alpha. That made sense as a website-style alpha preservation
+pass, but it is awkward now that alpha can be split, edited, and recombined directly.
+Recommendation: Rework into explicit alpha-channel tools or remove/hide from the
+node browser after migration review.
+Current registry metadata: Deprecated plus ReworkBeforeExpose. It is hidden from the
+add-node browser but the descriptor remains registered for project loading.
+
+Color
+Brightness - Keep.
+Type ID: Brightness. Class: BrightnessLayer.
+Notes: Scalar adjustment. Good fit for full-image and channel-derived streams.
+
+Contrast - Keep.
+Type ID: Contrast. Class: ContrastLayer.
+Notes: Scalar adjustment. Good fit for full-image and channel-derived streams.
+
+Saturation - Needs Fix.
+Type ID: Saturation. Class: SaturationLayer.
+Notes: Uses luminance/color relationships. On a single-channel stream this may become
+a no-op or misleading. Keep for full images, but document or guard channel behavior.
+
+Warmth - Needs Fix.
+Type ID: Warmth. Class: WarmthLayer.
+Notes: Changes red/blue balance. This is meaningful for full images but ambiguous
+for a single-channel stream. Needs explicit channel-mode semantics.
+
+Sharpen - Keep / Needs Fix.
+Type ID: Sharpen. Class: SharpenLayer.
+Notes: Neighbor-sampling detail operation. Useful for full images and channels, but
+should be tested on single-channel streams for edge artifacts.
+
+3-Way Color Grade - Keep / Advanced UI Candidate.
+Type ID: ColorGrade. Class: ColorGradeLayer.
+Notes: Already has a rich expanded surface and dedicated Complex Node/sidebar access.
+Good candidate for the professional advanced-node pattern.
+Current UI metadata: Uses the same generic NodeSurfaceSpec advanced editor path as
+other rich-surface layer nodes.
+
+HDR Compressor - Needs Fix.
+Type ID: HDR. Class: HDRLayer.
+Notes: Color/luma/highlight-oriented. Likely useful for full images, but channel-mode
+semantics should be tested and documented.
+
+Ordered Dither 8x8 - Keep / Needs Fix.
+Type ID: OrderedDither8x8. Class: OrderedDither8x8Layer.
+Notes: Useful for stylization and may work on scalar channels. Needs channel tests.
+
+Error Diffusion Dither - Keep / Needs Fix.
+Type ID: ErrorDiffusionDither. Class: ErrorDiffusionDitherLayer.
+Notes: Useful stylization. Needs channel tests and maybe clearer category placement.
+
+White Noise Dither - Keep / Needs Fix.
+Type ID: WhiteNoiseDither. Class: WhiteNoiseDitherLayer.
+Notes: Useful stylization. Single-channel behavior is likely acceptable but should
+be tested.
+
+Ordered Dither 4x4 - Keep / Needs Fix.
+Type ID: OrderedDither4x4. Class: OrderedDither4x4Layer.
+Notes: Same family as Ordered Dither 8x8.
+
+Ordered Dither 2x2 - Keep / Needs Fix.
+Type ID: OrderedDither2x2. Class: OrderedDither2x2Layer.
+Notes: Same family as Ordered Dither 8x8.
+
+Interleaved Gradient Dither - Keep / Needs Fix.
+Type ID: InterleavedGradientDither. Class: InterleavedGradientDitherLayer.
+Notes: Same family as dithering nodes; likely useful but should be channel tested.
+
+Halftone - Keep / Needs Fix.
+Type ID: Halftoning. Class: HalftoningLayer.
+Notes: Converts tone into dot patterns. Useful on full images and potentially useful
+on single-channel masks/channels, but UI should clarify.
+
+Cell Shading - Needs Fix.
+Type ID: CellShading. Class: CellShadingLayer.
+Notes: Luma and color stylization. May be full-image only unless channel semantics
+are explicitly defined.
+
+Palette Rebuild - Needs Fix / Advanced UI Candidate.
+Type ID: PaletteReconstructor. Class: PaletteReconstructorLayer.
+Notes: Palette operations are color-set operations, not simple scalar operations.
+This likely deserves richer UI and a full-image-only warning until channel behavior
+is designed.
+
+Blur / Focus
+Box Blur - Keep.
+Type ID: BoxBlur. Class: BoxBlurLayer.
+Notes: Neighbor-sampling blur. Good fit for full-image and channel-derived streams.
+
+Gaussian Blur - Keep.
+Type ID: GaussianBlur. Class: GaussianBlurLayer.
+Notes: Good fit for full-image and channel-derived streams.
+
+Non-Local Means Denoise - Keep / Needs Fix.
+Type ID: NonLocalMeansDenoise. Class: NonLocalMeansDenoiseLayer.
+Notes: Likely works on scalar channels, but should be tested for expected behavior.
+
+Median Denoise - Keep.
+Type ID: MedianDenoise. Class: MedianDenoiseLayer.
+Notes: Good fit for mask/channel cleanup and full-image denoise.
+
+Mean Denoise - Keep.
+Type ID: MeanDenoise. Class: MeanDenoiseLayer.
+Notes: Good fit for mask/channel cleanup and full-image denoise.
+
+Bilateral Filter - Keep / Needs Fix.
+Type ID: BilateralFilter. Class: BilateralFilterLayer.
+Notes: Edge-preserving filter. Useful, but color/luma behavior should be checked in
+single-channel mode.
+
+Tilt-Shift Blur - Needs Fix / Advanced UI Candidate.
+Type ID: TiltShiftBlur. Class: TiltShiftBlurLayer.
+Notes: Multi-parameter focus effect with intermediate texture handling. Keep, but
+consider richer UI for focus center, falloff, and visual guidance.
+
+Optical Blur - Keep / Needs Fix.
+Type ID: HankelBlur. Class: HankelBlurLayer.
+Notes: Specialized blur. Useful, but test channel streams and performance.
+
+Airy Bloom - Needs Fix.
+Type ID: AiryBloom. Class: AiryBloomLayer.
+Notes: Highlight/bloom effect. Mostly full-image semantics; channel behavior may be
+useful but should be explicit.
+
+Texture / Generate
+Noise - Keep / Advanced UI Candidate.
+Type ID: Noise. Class: NoiseLayer.
+Notes: Procedural noise/film grain with many controls. Useful for images and maybe
+mask/channel generation. Consider richer UI as it grows.
+
+Text Overlay - Needs Fix / Advanced UI Candidate.
+Type ID: TextOverlay. Class: TextOverlayLayer.
+Notes: Registered, but C++ text texture generation is still a placeholder. The UI
+says texture generation is not implemented. This should be completed or replaced by
+the graph-native Text image generator before it returns to the add-node browser.
+Current registry metadata: Hidden plus FullImageOnly. It is omitted from the add-node
+browser but the descriptor remains registered for compatibility.
+
+Effects / Damage
+Edge Overlay - Keep / Needs Fix.
+Type ID: EdgeOverlay. Class: EdgeOverlayLayer.
+Notes: Useful stylization. Needs channel tests because edge detection can be useful
+on channels but may need a mask-output variant later.
+
+Edge Saturation Mask - Needs Fix.
+Type ID: EdgeSaturationMask. Class: EdgeSaturationMaskLayer.
+Notes: Color saturation behavior is ambiguous on channel streams.
+
+DCT Compression - Keep / Needs Fix.
+Type ID: DctCompression. Class: DctCompressionLayer.
+Notes: Useful artifact node. Channel behavior likely acceptable but should be tested.
+
+Chroma Subsample Compression - Needs Fix.
+Type ID: ChromaSubsampleCompression. Class: ChromaSubsampleCompressionLayer.
+Notes: Chroma-specific behavior is full-color by nature. Needs full-image-only
+semantics or explicit channel behavior.
+
+Wavelet Compression - Keep / Needs Fix.
+Type ID: WaveletCompression. Class: WaveletCompressionLayer.
+Notes: Useful artifact node. Channel behavior should be tested.
+
+JPEG Blocks - Keep / Needs Fix.
+Type ID: JpegBlocks. Class: JpegBlocksLayer.
+Notes: Useful artifact node. Channel behavior likely acceptable but should be tested.
+
+Pixelation - Keep.
+Type ID: Pixelation. Class: PixelationLayer.
+Notes: Good fit for full-image and channel streams.
+
+Color Bleed - Needs Fix.
+Type ID: ColorBleed. Class: ColorBleedLayer.
+Notes: Channel/color offset behavior is full-color-oriented. On a channel stream it
+may be misleading unless defined as scalar smear.
+
+Block Shift - Keep / Needs Fix / Advanced UI Candidate.
+Type ID: ImageBreaks. Class: ImageBreaksLayer.
+Notes: Many controls and strong visual behavior. Useful, but may benefit from a
+richer window with preview guidance.
+
+Analog Video (VHS/CRT) - Needs Fix / Advanced UI Candidate.
+Type ID: AnalogVideo. Class: AnalogVideoLayer.
+Notes: Many visual artifact parameters. Useful, but likely full-image-first.
+
+Vignette - Keep / Needs Fix.
+Type ID: Vignette. Class: VignetteLayer.
+Notes: Full-image focus effect. On a channel stream it may act as a channel mask,
+which can be useful but should be documented.
+
+Glare Rays - Needs Fix.
+Type ID: GlareRays. Class: GlareRaysLayer.
+Notes: Highlight/glare effect. Full-image-oriented and should be channel tested.
+
+Chromatic Aberration - Needs Fix.
+Type ID: ChromaticAberration. Class: ChromaticAberrationLayer.
+Notes: Full-color channel-offset effect. Ambiguous on a single-channel stream.
+
+Lens Distortion - Keep / Needs Fix.
+Type ID: LensDistortion. Class: LensDistortionLayer.
+Notes: Spatial warp. Works conceptually on channels and full images, but edge fill
+and sampling rules should be documented.
+
+Heatwave Distortion - Keep / Needs Fix.
+Type ID: HeatwaveDistortion. Class: HeatwaveDistortionLayer.
+Notes: Spatial warp. Useful on full images and channels, but needs channel tests.
+
+Ripple Distortion - Keep / Needs Fix.
+Type ID: RippleDistortion. Class: RippleDistortionLayer.
+Notes: Spatial warp. Useful on full images and channels, but needs channel tests.
+
+Unregistered legacy aggregate layer files
+These files are tracked under src/Editor/Layers, but they are not directly registered
+in LayerRegistry and are not exposed in the node browser as current catalog entries.
+Current build status: CMake now excludes these legacy aggregate files from SRC_FILES,
+so they remain available as migration/reference material without being compiled into
+the application.
+
+AdjustmentsLayer.cpp / AdjustmentsLayer.h - Hide/Remove Candidate.
+Reason: Replaced in the visible library by split adjustment nodes such as Brightness,
+Contrast, Saturation, Warmth, and Sharpen.
+
+BlurLayer.cpp / BlurLayer.h - Hide/Remove Candidate.
+Reason: Replaced by Box Blur and Gaussian Blur split nodes.
+
+CompressionLayer.cpp / CompressionLayer.h - Hide/Remove Candidate.
+Reason: Replaced by DCT Compression, Chroma Subsample Compression, and Wavelet
+Compression split nodes.
+
+CorruptionLayer.cpp / CorruptionLayer.h - Hide/Remove Candidate.
+Reason: Replaced by JPEG Blocks, Pixelation, and Color Bleed split nodes.
+
+CropTransformLayer.cpp / CropTransformLayer.h - Hide/Remove Candidate.
+Reason: Replaced by Crop, Rotate, and Flip split transform nodes.
+
+DenoisingLayer.cpp / DenoisingLayer.h - Hide/Remove Candidate.
+Reason: Replaced by Non-Local Means Denoise, Median Denoise, and Mean Denoise.
+
+DitherLayer.cpp / DitherLayer.h - Hide/Remove Candidate.
+Reason: Replaced by explicit dither variants.
+
+EdgeEffectsLayer.cpp / EdgeEffectsLayer.h - Hide/Remove Candidate.
+Reason: Replaced by Edge Overlay and Edge Saturation Mask.
+
+HeatwaveLayer.cpp / HeatwaveLayer.h - Hide/Remove Candidate.
+Reason: Replaced by Heatwave Distortion and Ripple Distortion.
+
+Important note: Do not delete these yet without checking saved project compatibility.
+Some old saved JSON may still refer to their serialized type names.
+
+Immediate audit conclusions
+The library is powerful but uneven. The first metadata pass is now in place, so the
+best next move is not mass deletion; it is compatibility review, targeted rework,
+and test coverage around the newly labeled policies.
+The strongest keepers are the graph-native routing/combine/scope nodes, simple scalar
+adjustments, basic blur/denoise nodes, masks, and generators.
+The strongest rework/remove candidates are Alpha Protect, Expand Canvas, Text Overlay,
+and the unregistered aggregate layer files.
+The strongest advanced UI candidates are Background Remover, 3-Way Color Grade,
+Palette Rebuild, Text Overlay, Noise, Block Shift, Analog Video, and Tilt-Shift Blur.

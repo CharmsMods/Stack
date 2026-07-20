@@ -10,6 +10,7 @@ namespace EditorNodeGraph {
 
 struct Node {
     int id = 0;
+    std::string instanceUuid;
     NodeKind kind = NodeKind::Layer;
     int layerIndex = -1;
     LayerType layerType = LayerType::Brightness;
@@ -31,7 +32,27 @@ struct Node {
     float mixFactor = 0.5f;
     DataMathMode dataMathMode = DataMathMode::Clamp;
     DataMathSettings dataMathSettings;
+    ValuePayload value;
+    TechnicalImageSettings technicalImageSettings;
+    ReformatSettings reformatSettings;
+    CompoundPayload compound;
+    FrequencyFftSettings frequencyFftSettings;
+    FrequencyFftSettings frequencyIfftSettings;
+    SpectrumViewSettings spectrumViewSettings;
+    FrequencyMaskShape frequencyMaskShape = FrequencyMaskShape::LowPass;
+    FrequencyMaskSettings frequencyMaskSettings;
+    SpectrumMathMode spectrumMathMode = SpectrumMathMode::Multiply;
+    SpectrumMathSettings spectrumMathSettings;
+    MagnitudePhaseMode magnitudePhaseMode = MagnitudePhaseMode::Magnitude;
+    MagnitudePhaseSettings magnitudePhaseSettings;
+    SpectrumAnalyzerMode spectrumAnalyzerMode = SpectrumAnalyzerMode::RadialEnergy;
+    SpectrumAnalyzerSettings spectrumAnalyzerSettings;
     bool outputEnabled = true;
+    std::string definitionId;
+    std::string definitionVersion;
+    std::string definitionHash;
+    bool definitionResolved = false;
+    std::string definitionResolutionError;
     ImagePayload image;
     RawSourcePayload rawSource;
     RawDevelopmentPayload rawDevelopment;

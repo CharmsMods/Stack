@@ -24,6 +24,36 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
     std::unordered_set<int> visited;
     std::string channel = GetUpstreamChannel(graph, fromNodeId, fromSocketId, visited);
     const bool fromScalarStream = graph.IsScalarSocketStream(fromNodeId, fromSocketId);
+    const bool fromScalarImageStream =
+        fromScalarStream && fromSocket.type == EditorNodeGraph::SocketType::Image;
+
+    // A scalar image stream is already data being processed as an image (for example,
+    // Channel Split -> Average).  When it is dropped onto an un-fed layer, keep it on
+    // the layer's image input so image-safe operations such as Contrast continue to
+    // operate on the scalar field.  Routing it to the layer's optional Mask input
+    // instead leaves the layer's image path full-RGB and later causes an unnecessary
+    // Image To Mask extractor when the result is used as a mask.
+    const bool targetImageInputIsConnected =
+        graph.FindAnyInputLink(toNodeId, EditorNodeGraph::kImageInputSocketId) != nullptr;
+    if (fromScalarImageStream &&
+        to->kind == EditorNodeGraph::NodeKind::Layer &&
+        !targetImageInputIsConnected) {
+        std::string error;
+        if (graph.CanConnectSockets(
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                EditorNodeGraph::kImageInputSocketId) &&
+            editor->ConnectGraphSockets(
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                EditorNodeGraph::kImageInputSocketId,
+                &error)) {
+            return true;
+        }
+    }
+
     if (fromSocket.type == EditorNodeGraph::SocketType::Mask || fromScalarStream) {
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Input ||
@@ -31,7 +61,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
                 continue;
             }
             std::string error;
-            if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
                 editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
@@ -41,7 +71,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*to, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Input && socket.id == channel) {
                 std::string error;
-                if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+                if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
                     editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                     return true;
                 }
@@ -51,7 +81,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
 
     if (fromScalarStream && to->kind == EditorNodeGraph::NodeKind::Layer) {
         std::string error;
-        if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId) &&
+        if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId) &&
             editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, EditorNodeGraph::kImageInputSocketId, &error)) {
             return true;
         }
@@ -68,7 +98,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
                 editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
@@ -81,7 +111,7 @@ bool EditorNodeGraphUI::ConnectOutputToBestInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, fromSocketId, toNodeId, socket.id) &&
+            if (graph.CanConnectSockets(fromNodeId, fromSocketId, toNodeId, socket.id) &&
                 editor->ConnectGraphSockets(fromNodeId, fromSocketId, toNodeId, socket.id, &error)) {
                 return true;
             }
@@ -111,7 +141,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(*from, true)) {
             if (socket.direction == EditorNodeGraph::SocketDirection::Output && socket.id == toSocketId) {
                 std::string error;
-                if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, socket.id, toNodeId, toSocketId) &&
+                if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId) &&
                     editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                     return true;
                 }
@@ -130,7 +160,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type == preferredType) {
             std::string error;
-            if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, socket.id, toNodeId, toSocketId) &&
+            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId) &&
                 editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }
@@ -143,7 +173,7 @@ bool EditorNodeGraphUI::ConnectBestOutputToInput(EditorModule* editor, int fromN
         }
         if (socket.type != preferredType) {
             std::string error;
-            if (graph.CanConnectSocketsOrInsertExtractor(fromNodeId, socket.id, toNodeId, toSocketId) &&
+            if (graph.CanConnectSockets(fromNodeId, socket.id, toNodeId, toSocketId) &&
                 editor->ConnectGraphSockets(fromNodeId, socket.id, toNodeId, toSocketId, &error)) {
                 return true;
             }

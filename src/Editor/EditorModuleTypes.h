@@ -2,8 +2,8 @@
 
 #include "Editor/LoadedProjectData.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
-#include "Raw/RawAutoBase.h"
-#include "Raw/RawDevelopmentRecipe.h"
+#include "Editor/RawWorkspaceAutoBaseState.h"
+#include "Editor/Timeline/TimelineAnimation.h"
 #include "Raw/RawImageData.h"
 #include "Renderer/RenderPipeline.h"
 
@@ -150,6 +150,11 @@ struct GraphPerformanceStats {
     int lastRenderedCompositeCount = 0;
     bool lastMainOutputTiled = false;
     int lastMainOutputTileCount = 0;
+    bool lastMainRegionPlanAvailable = false;
+    bool lastMainRegionPlanTileable = false;
+    int lastMainRegionPlanHaloX = 0;
+    int lastMainRegionPlanHaloY = 0;
+    std::string lastMainRegionPlanReason;
     std::uint64_t lastSubmittedGeneration = 0;
     double lastSnapshotBuildMs = 0.0;
     double lastPreviewRequestBuildMs = 0.0;
@@ -157,6 +162,15 @@ struct GraphPerformanceStats {
     double lastMainRenderMs = 0.0;
     double lastPreviewRenderMs = 0.0;
     double lastCompositeRenderMs = 0.0;
+    double lastSliceImportDecodeMs = 0.0;
+    double lastSliceImportQueueMs = 0.0;
+    double lastSliceImportPreviewMs = 0.0;
+    double lastSliceImportStorageCopyMs = 0.0;
+    double lastSliceImportEmbedMs = 0.0;
+    int lastSliceImportWidth = 0;
+    int lastSliceImportHeight = 0;
+    std::size_t lastSliceImportPixelBytes = 0;
+    std::size_t lastSliceImportEmbeddedBytes = 0;
     GraphExecutionStats lastMainGraphStats;
 };
 
@@ -231,36 +245,29 @@ struct NodeBrowserThumbnailView {
     bool fallback = false;
 };
 
-enum class RawAutoValueOwner {
-    None,
-    AutoBase,
-    User
-};
-
-struct RawWorkspaceAutoBaseUiState {
-    bool hasAppliedViewFit = false;
-    bool hasRevertSnapshot = false;
-    bool suggestionsOpen = false;
-    Stack::RawRecipe::RawDevelopmentRecipe beforeAutoBase;
-    RawAutoValueOwner viewTransformOwner = RawAutoValueOwner::None;
-    std::uint64_t sourceHash = 0;
-    std::uint64_t appliedAnalysisHash = 0;
-    std::uint64_t appliedSuggestionSourceHash = 0;
-    std::uint64_t appliedSuggestionAnalysisHash = 0;
-    std::string appliedSuggestionKey;
-    std::string appliedSuggestionLabel;
-    std::string appliedSuggestionSection;
-    std::string sourceKey;
-    std::string summary;
-    bool hasMetadataSummary = false;
-    Stack::RawAnalysis::RawMetadataSummary metadataSummary;
-    Stack::RawAutoBase::AutoBaseRecommendations recommendations;
-};
-
 struct RawWorkspaceLayoutUiState {
     float controlsPanelWidth = 420.0f;
     bool diagnosticsOpen = false;
     bool diagnosticsOpenRequested = false;
+};
+
+struct TimelineUiState {
+    bool open = false;
+    float targetHeight = 220.0f;
+    float currentHeight = 0.0f;
+    int selectedOutputNodeId = -1;
+    Stack::Timeline::AnimatableParameterTarget selectedParameterTarget;
+    int currentFrame = 0;
+    int durationFrames = 120;
+    int framesPerSecond = 30;
+    bool playing = false;
+    bool loopPlayback = true;
+    bool settingsPopupOpen = false;
+    double playbackFrameAccumulator = 0.0;
+    int liveEditPreviewFrame = -1;
+    std::vector<Stack::Timeline::AnimatableParameterTarget> liveEditPreviewTargets;
+    std::vector<int> collapsedChainOutputNodeIds;
+    std::vector<int> collapsedNodeIds;
 };
 
 struct DevelopSubjectViewportRegion {

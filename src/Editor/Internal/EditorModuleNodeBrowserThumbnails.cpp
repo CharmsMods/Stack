@@ -3,6 +3,7 @@
 #include "Async/TaskSystem.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Library/LibraryManager.h"
 #include "ThirdParty/stb_image_write.h"
 
@@ -22,7 +23,7 @@ constexpr int kFallbackCardHeight = 160;
 
 const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>& CachedNodeBrowserEntries() {
     static const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> entries =
-        EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
+        EditorNodeGraphDefinitions::BuildRegisteredNodeCatalogEntries();
     return entries;
 }
 
@@ -478,6 +479,7 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
             renderNode.maskUtilitySettings.gamma = node.maskUtilitySettings.gamma;
             renderNode.maskUtilitySettings.threshold = node.maskUtilitySettings.threshold;
             renderNode.maskUtilitySettings.softness = node.maskUtilitySettings.softness;
+            renderNode.maskUtilitySettings.enabled = node.maskUtilitySettings.enabled;
             renderNode.maskUtilitySettings.invert = node.maskUtilitySettings.invert;
             break;
         case EditorNodeGraph::NodeKind::ImageToMask:
@@ -532,6 +534,11 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
             renderNode.dataMathSettings.maxValue = node.dataMathSettings.maxValue;
             renderNode.dataMathSettings.outMin = node.dataMathSettings.outMin;
             renderNode.dataMathSettings.outMax = node.dataMathSettings.outMax;
+            break;
+        case EditorNodeGraph::NodeKind::TechnicalImage:
+            renderNode.kind = RenderGraphNodeKind::TechnicalImage;
+            renderNode.technicalImageOperation = node.technicalImageSettings.operation;
+            renderNode.technicalExposureValue = node.technicalImageSettings.exposureValue;
             break;
         case EditorNodeGraph::NodeKind::Preview:
         case EditorNodeGraph::NodeKind::Scope:
@@ -998,6 +1005,22 @@ void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
                 RenderGraphNode node = BuildRenderNodeFromPrototype(prototype);
                 const int nodeId = addNode(std::move(node));
                 addLink(inputNodeId, EditorNodeGraph::kImageOutputSocketId, nodeId, EditorNodeGraph::kImageInputSocketId);
+                addRequest(entry, nodeId, EditorNodeGraph::kImageOutputSocketId, false);
+                renderable = true;
+                break;
+            }
+            case EditorNodeGraph::NodeKind::TechnicalImage: {
+                const int inputNodeId = resolveSharedImageInputNode();
+                if (inputNodeId <= 0) {
+                    break;
+                }
+                if (prototype.technicalImageSettings.operation ==
+                    Stack::NodeMath::TechnicalImageOperation::Exposure) {
+                    prototype.technicalImageSettings.exposureValue = 1.0f;
+                }
+                const int nodeId = addNode(BuildRenderNodeFromPrototype(prototype));
+                addLink(inputNodeId, EditorNodeGraph::kImageOutputSocketId,
+                    nodeId, EditorNodeGraph::kImageInputSocketId);
                 addRequest(entry, nodeId, EditorNodeGraph::kImageOutputSocketId, false);
                 renderable = true;
                 break;

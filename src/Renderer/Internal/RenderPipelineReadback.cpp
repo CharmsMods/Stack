@@ -164,10 +164,38 @@ std::vector<unsigned char> ReadTexturePixelsRgba8(
     return pixels;
 }
 } // namespace
+
+bool RenderPipeline::RecordConsumerBoundary(
+    Stack::NodeMath::SpecializedStageKind kind,
+    int maximumDimension) {
+    Stack::NodeMath::SpatialDescriptor input;
+    input.kind = Stack::NodeMath::SpatialExtentKind::Finite;
+    input.fullWindow = { 0, 0, m_Width, m_Height };
+    input.dataWindow = input.fullWindow;
+    input.rasterOrigin = Stack::NodeMath::RasterOrigin::BottomLeft;
+    input.pixelAspect = 1.0;
+    const Stack::NodeMath::ConsumerBoundaryPlan plan =
+        Stack::NodeMath::PlanConsumerBoundary(kind, input, maximumDimension);
+    if (!plan.valid) return false;
+    m_LastGraphExecutionStats.specializedBoundaries.push_back({
+        Stack::NodeMath::SpecializedStageKindName(kind),
+        static_cast<int>(plan.inputSpatial.fullWindow.width),
+        static_cast<int>(plan.inputSpatial.fullWindow.height),
+        static_cast<int>(plan.outputSpatial.fullWindow.width),
+        static_cast<int>(plan.outputSpatial.fullWindow.height),
+        plan.scalePolicy == Stack::NodeMath::RenderScalePolicy::FullQualityOnly,
+        plan.changesGraphResult
+    });
+    return true;
+}
+
 std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH) {
     outW = m_Width;
     outH = m_Height;
     if (m_OutputTexture == 0 || m_Width == 0 || m_Height == 0) return {};
+    if (!RecordConsumerBoundary(Stack::NodeMath::SpecializedStageKind::ExportReadback)) {
+        return {};
+    }
 
     std::vector<unsigned char> pixels(m_Width * m_Height * 4);
     const ScopedFramebufferState savedState;
@@ -231,6 +259,12 @@ std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH)
 std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH, int maxDimension) {
     if (maxDimension <= 0 || maxDimension >= std::max(m_Width, m_Height)) {
         return GetOutputPixels(outW, outH);
+    }
+    if (!RecordConsumerBoundary(
+            Stack::NodeMath::SpecializedStageKind::PreviewReadback,
+            maxDimension)) {
+        outW = outH = 0;
+        return {};
     }
     return ReadTexturePixelsRgba8(
         m_OutputTexture,
@@ -598,6 +632,117 @@ bool RenderPipeline::SampleOutputPixel(float u, float v, std::array<float, 4>& o
     return success;
 }
 
+void RenderPipeline::CaptureRawDevelopmentStageImageReadback(
+    Stack::RawAutoStartPoint::RawAutoStartPointStage stage,
+    Stack::RawAutoStartPoint::RawAutoStartPointStageStatus status,
+    unsigned int texture,
+    int width,
+    int height,
+    const std::string& measurementDomain,
+    bool sceneLinearBeforeViewTransform,
+    bool displayMappedLinearRgb) {
+    if (m_RawDevelopmentStageImageReadbackMaxDimension <= 0 ||
+        texture == 0 || width <= 0 || height <= 0) {
+        return;
+    }
+
+    RawDevelopmentStageImageReadback readback;
+    readback.stage = stage;
+    readback.status = status;
+    readback.stageId = Stack::RawAutoStartPoint::StageStableString(stage);
+    readback.measurementDomain = measurementDomain;
+    readback.sceneLinearBeforeViewTransform = sceneLinearBeforeViewTransform;
+    readback.displayMappedLinearRgb = displayMappedLinearRgb;
+    readback.sourceWidth = width;
+    readback.sourceHeight = height;
+
+    const int targetMax = std::max(1, m_RawDevelopmentStageImageReadbackMaxDimension);
+    const float scale = std::min(
+        1.0f,
+        static_cast<float>(targetMax) / static_cast<float>(std::max(width, height)));
+    readback.width = std::max(1, static_cast<int>(std::round(static_cast<float>(width) * scale)));
+    readback.height = std::max(1, static_cast<int>(std::round(static_cast<float>(height) * scale)));
+
+    const ScopedFramebufferState savedState(true);
+    unsigned int sourceFbo = GLHelpers::CreateFBO(texture);
+    unsigned int probeTexture = 0;
+    unsigned int probeFbo = 0;
+    bool targetReady = sourceFbo != 0;
+    if (targetReady && (readback.width != width || readback.height != height)) {
+        probeTexture = GLHelpers::CreateEmptyTexture(readback.width, readback.height);
+        probeFbo = GLHelpers::CreateFBO(probeTexture);
+        targetReady = probeTexture != 0 && probeFbo != 0;
+    }
+
+    std::vector<float> rgba;
+    if (targetReady) {
+        if (probeFbo != 0) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, probeFbo);
+            glBlitFramebuffer(
+                0, 0, width, height,
+                0, 0, readback.width, readback.height,
+                GL_COLOR_BUFFER_BIT,
+                GL_LINEAR);
+            glBindFramebuffer(GL_FRAMEBUFFER, probeFbo);
+        } else {
+            glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
+        }
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glViewport(0, 0, readback.width, readback.height);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            rgba.assign(
+                static_cast<std::size_t>(readback.width) *
+                    static_cast<std::size_t>(readback.height) * 4u,
+                0.0f);
+            while (glGetError() != GL_NO_ERROR) {}
+            glReadPixels(
+                0, 0, readback.width, readback.height,
+                GL_RGBA, GL_FLOAT, rgba.data());
+            if (glGetError() != GL_NO_ERROR) {
+                rgba.clear();
+            }
+        }
+    }
+
+    savedState.Restore(true);
+    if (probeFbo != 0) glDeleteFramebuffers(1, &probeFbo);
+    if (probeTexture != 0) glDeleteTextures(1, &probeTexture);
+    if (sourceFbo != 0) glDeleteFramebuffers(1, &sourceFbo);
+
+    if (!rgba.empty()) {
+        readback.pixels.assign(
+            static_cast<std::size_t>(readback.width) *
+                static_cast<std::size_t>(readback.height) * 3u,
+            0.0f);
+        for (int y = 0; y < readback.height; ++y) {
+            const int sourceY = readback.height - 1 - y;
+            for (int x = 0; x < readback.width; ++x) {
+                const std::size_t source =
+                    (static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(readback.width) +
+                        static_cast<std::size_t>(x)) * 4u;
+                const std::size_t destination =
+                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(readback.width) +
+                        static_cast<std::size_t>(x)) * 3u;
+                readback.pixels[destination] = rgba[source];
+                readback.pixels[destination + 1] = rgba[source + 1];
+                readback.pixels[destination + 2] = rgba[source + 2];
+            }
+        }
+        readback.valid = true;
+    }
+
+    const auto existing = std::find_if(
+        m_RawDevelopmentStageImageReadbacks.begin(),
+        m_RawDevelopmentStageImageReadbacks.end(),
+        [&](const RawDevelopmentStageImageReadback& item) { return item.stage == stage; });
+    if (existing == m_RawDevelopmentStageImageReadbacks.end()) {
+        m_RawDevelopmentStageImageReadbacks.push_back(std::move(readback));
+    } else {
+        *existing = std::move(readback);
+    }
+}
+
 RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int width, int height, const char* context) {
     RenderTextureStats stats;
     if (texture == 0 || width <= 0 || height <= 0) {
@@ -679,6 +824,8 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     float logLumaSum = 0.0f;
     int hdrPixels = 0;
     int displayEdgePixels = 0;
+    int displayHighEdgePixels = 0;
+    int displayLowEdgePixels = 0;
     int validPixels = 0;
     for (std::size_t i = 0; i + 3 < pixels.size(); i += 4) {
         float r = pixels[i + 0];
@@ -703,6 +850,12 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
         if (maxChannel >= 0.999f || minChannel <= 0.001f) {
             ++displayEdgePixels;
         }
+        if (maxChannel >= 0.999f) {
+            ++displayHighEdgePixels;
+        }
+        if (minChannel <= 0.001f) {
+            ++displayLowEdgePixels;
+        }
         ++validPixels;
     }
 
@@ -721,7 +874,11 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     stats.p001Luma = percentile(0.001f);
     stats.p01Luma = percentile(0.01f);
     stats.p05Luma = percentile(0.05f);
+    stats.p10Luma = percentile(0.10f);
+    stats.p25Luma = percentile(0.25f);
     stats.p50Luma = percentile(0.50f);
+    stats.p75Luma = percentile(0.75f);
+    stats.p90Luma = percentile(0.90f);
     stats.p95Luma = percentile(0.95f);
     stats.p99Luma = percentile(0.99f);
     stats.p999Luma = percentile(0.999f);
@@ -732,6 +889,10 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     stats.validPixelPercent = 100.0f;
     stats.hdrPixelPercent = 100.0f * static_cast<float>(hdrPixels) / static_cast<float>(validPixels);
     stats.displayClipPercent = 100.0f * static_cast<float>(displayEdgePixels) / static_cast<float>(validPixels);
+    stats.displayClipHighPercent =
+        100.0f * static_cast<float>(displayHighEdgePixels) / static_cast<float>(validPixels);
+    stats.displayClipLowPercent =
+        100.0f * static_cast<float>(displayLowEdgePixels) / static_cast<float>(validPixels);
     return stats;
 }
 
@@ -859,6 +1020,11 @@ RenderTextureStats RenderPipeline::GetOutputTextureStats() {
 
 std::vector<unsigned char> RenderPipeline::GetScopesPixels(int& outW, int& outH) {
     if (m_OutputTexture == 0 || m_Width == 0 || m_Height == 0) return {};
+    if (!RecordConsumerBoundary(
+            Stack::NodeMath::SpecializedStageKind::ScopeAnalysis,
+            256)) {
+        return {};
+    }
 
     // Target a small size for analysis efficiency
     outW = 256;
@@ -919,6 +1085,11 @@ std::vector<unsigned char> RenderPipeline::GetPreviewPixels(int& outW, int& outH
     if (m_OutputTexture == 0 || m_Width == 0 || m_Height == 0) {
         return {};
     }
+    if (!RecordConsumerBoundary(
+            Stack::NodeMath::SpecializedStageKind::PreviewReadback,
+            maxDimension)) {
+        return {};
+    }
 
     const int targetMax = std::max(1, maxDimension);
     const float scale = std::min(
@@ -975,7 +1146,8 @@ std::vector<unsigned char> RenderPipeline::GetPreviewPixels(int& outW, int& outH
 }
 
 std::vector<unsigned char> RenderPipeline::GetSourcePixels(int& outW, int& outH) {
-    if (m_SourceTexture == 0 || m_Width == 0 || m_Height == 0 || m_SourcePixels.empty()) {
+    const std::vector<unsigned char>& sourcePixels = GetSourcePixelsRaw();
+    if (m_SourceTexture == 0 || m_Width == 0 || m_Height == 0 || sourcePixels.empty()) {
         outW = outH = 0;
         return {};
     }
@@ -983,7 +1155,7 @@ std::vector<unsigned char> RenderPipeline::GetSourcePixels(int& outW, int& outH)
     outW = m_Width;
     outH = m_Height;
 
-    std::vector<unsigned char> pixels = m_SourcePixels;
+    std::vector<unsigned char> pixels = sourcePixels;
     const int rowSize = m_Width * std::max(1, m_SourceChannels);
     std::vector<unsigned char> tempRow(rowSize);
     for (int y = 0; y < m_Height / 2; ++y) {

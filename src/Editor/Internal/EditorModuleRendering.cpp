@@ -10,6 +10,7 @@
 #include <cmath>
 #include <functional>
 #include <imgui.h>
+#include <iterator>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -78,7 +79,9 @@ bool IsMaskOutputNode(EditorNodeGraph::NodeKind kind) {
            kind == EditorNodeGraph::NodeKind::MaskCombine ||
            kind == EditorNodeGraph::NodeKind::MaskUtility ||
            kind == EditorNodeGraph::NodeKind::CustomMask ||
-           kind == EditorNodeGraph::NodeKind::ImageToMask;
+           kind == EditorNodeGraph::NodeKind::ImageToMask ||
+           kind == EditorNodeGraph::NodeKind::FrequencyMask ||
+           kind == EditorNodeGraph::NodeKind::MagnitudePhase;
 }
 
 bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
@@ -91,6 +94,11 @@ bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
            kind == EditorNodeGraph::NodeKind::ImageGenerator ||
            kind == EditorNodeGraph::NodeKind::Mix ||
            kind == EditorNodeGraph::NodeKind::DataMath ||
+           kind == EditorNodeGraph::NodeKind::FrequencyFft ||
+           kind == EditorNodeGraph::NodeKind::FrequencyIfft ||
+           kind == EditorNodeGraph::NodeKind::SpectrumView ||
+           kind == EditorNodeGraph::NodeKind::SpectrumMath ||
+           kind == EditorNodeGraph::NodeKind::MagnitudePhase ||
            kind == EditorNodeGraph::NodeKind::ChannelCombine ||
            kind == EditorNodeGraph::NodeKind::Output;
 }
@@ -325,6 +333,14 @@ std::vector<unsigned char> EditorModule::GetPreviewPixelsForNode(int nodeId, int
 }
 
 bool EditorModule::BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) const {
+    return BuildSingleOutputTimelineFrameRaster(m_TimelineUi.currentFrame, outPixels, outW, outH);
+}
+
+bool EditorModule::BuildSingleOutputTimelineFrameRaster(
+    int timelineFrame,
+    std::vector<unsigned char>& outPixels,
+    int& outW,
+    int& outH) const {
     outW = 0;
     outH = 0;
     outPixels.clear();
@@ -333,7 +349,7 @@ bool EditorModule::BuildSingleOutputExportRaster(std::vector<unsigned char>& out
         return false;
     }
 
-    RenderGraphSnapshot snapshot = BuildGraphSnapshot();
+    RenderGraphSnapshot snapshot = BuildGraphSnapshotForTimelineFrame(timelineFrame);
 
     std::vector<unsigned char> sourcePixels;
     int sourceW = 0;
@@ -593,8 +609,39 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     snapshot.graph = BuildGraphSnapshot();
     if (IsRawWorkspaceProjectActive()) {
         snapshot.rawWorkspace.sourceKey = m_ActiveRawWorkspaceSourceKey;
+        const Stack::RawWorkspace::SourceRecord* activeRawSource =
+            FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+        snapshot.rawWorkspace.sourceHash =
+            activeRawSource == nullptr
+                ? 0
+                : BuildRawWorkspaceAutoBaseSourceHash(*activeRawSource);
         snapshot.rawWorkspace.hasRecipe = !m_ActiveRawWorkspaceSourceKey.empty();
         snapshot.rawWorkspace.recipe = m_ActiveRawWorkspaceRecipe;
+        Stack::PreciseIntegration::IntegrationState& preciseState =
+            m_RawWorkspaceAutoBaseUi.preciseStartingPoint;
+        if (m_RenderWorkerAvailable && preciseState.active &&
+            preciseState.mode == Stack::PreciseIntegration::ProductMode::Precise &&
+            Stack::PreciseIntegration::IsRunning(preciseState.state) &&
+            preciseState.identity.sourceKey == m_ActiveRawWorkspaceSourceKey &&
+            preciseState.identity.sourceHash == snapshot.rawWorkspace.sourceHash) {
+            Stack::PreciseIntegration::NativeSolveRequest preciseRequest;
+            preciseRequest.identity = preciseState.identity;
+            preciseRequest.identity.generation = generation;
+            preciseRequest.inputRecipe = preciseState.originalRecipe;
+            snapshot.rawWorkspace.preciseSolveRequest = std::move(preciseRequest);
+            Stack::PreciseIntegration::MarkRunning(preciseState, generation);
+        }
+        Stack::EditorModuleTypes::ClearRawStartingPointCandidateRenderQueueIfSourceMismatch(
+            m_RawWorkspaceStartPointCandidateRenderQueue,
+            m_ActiveRawWorkspaceSourceKey,
+            snapshot.rawWorkspace.sourceHash);
+        if (Stack::EditorModuleTypes::RawStartingPointCandidateRenderQueueMatchesSource(
+                m_RawWorkspaceStartPointCandidateRenderQueue,
+                m_ActiveRawWorkspaceSourceKey,
+                snapshot.rawWorkspace.sourceHash)) {
+            snapshot.rawWorkspace.startPointCandidateRenderRequests =
+                m_RawWorkspaceStartPointCandidateRenderQueue.requests;
+        }
         if (!m_RawWorkspaceLocalRangeOverlayMode.empty() &&
             m_RawWorkspaceLocalRangeOverlayMode != "none") {
             snapshot.rawWorkspace.localRangeOverlayMode = m_RawWorkspaceLocalRangeOverlayMode;
@@ -958,6 +1005,15 @@ void EditorModule::ConsumeRenderWorkerResults() {
             }
         }
         if (result.generation < m_RenderGeneration) {
+            if (result.rawWorkspace.preciseSolveResult.has_value() &&
+                result.rawWorkspace.preciseSolveResult->canceled) {
+                // A cancel request intentionally advances the live render
+                // generation. The isolated worker's image result is stale,
+                // but its cancellation acknowledgment is still required to
+                // queue the first normal RAW preview after that worker stops.
+                HandleRawWorkspacePreciseSolveResult(
+                    *result.rawWorkspace.preciseSolveResult);
+            }
             QueueViewportOutputTextureRelease(result.outputTexture);
             QueueViewportOutputTileSetRelease(result.outputTiles);
             continue;
@@ -969,6 +1025,20 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 : std::vector<int>{};
         m_RenderPending = m_RenderWorkerAvailable && m_RenderWorker.IsBusy();
         m_HdrMergeRenderingNodeIds.clear();
+        if (result.rawWorkspace.preciseSolveResult.has_value()) {
+            // A precise solve returns only an isolated verified-recipe record.
+            // Never let that worker result replace or clear the live viewport,
+            // analysis, readbacks, or diagnostics; the accepted recipe queues
+            // its own ordinary render after the one atomic main-thread apply.
+            HandleRawWorkspacePreciseSolveResult(
+                *result.rawWorkspace.preciseSolveResult);
+            QueueViewportOutputTextureRelease(result.outputTexture);
+            QueueViewportOutputTileSetRelease(result.outputTiles);
+            if (submittedIt != m_HdrMergeSubmittedNodesByGeneration.end()) {
+                m_HdrMergeSubmittedNodesByGeneration.erase(submittedIt);
+            }
+            continue;
+        }
         m_GraphPerformanceStats.lastMainRenderMs = result.mainRenderMs;
         m_GraphPerformanceStats.lastPreviewRenderMs = result.previewRenderMs;
         m_GraphPerformanceStats.lastCompositeRenderMs = result.compositeRenderMs;
@@ -980,7 +1050,26 @@ void EditorModule::ConsumeRenderWorkerResults() {
             m_GraphPerformanceStats.lastMainOutputTiled
                 ? static_cast<int>(result.outputTiles.tiles.size())
                 : 0;
+        m_GraphPerformanceStats.lastMainRegionPlanAvailable = result.mainRegionPlanAvailable;
+        m_GraphPerformanceStats.lastMainRegionPlanTileable = result.mainRegionPlanTileable;
+        m_GraphPerformanceStats.lastMainRegionPlanHaloX = result.mainRegionPlanHaloX;
+        m_GraphPerformanceStats.lastMainRegionPlanHaloY = result.mainRegionPlanHaloY;
+        m_GraphPerformanceStats.lastMainRegionPlanReason = result.mainRegionPlanReason;
         m_GraphPerformanceStats.lastMainGraphStats = result.mainGraphStats;
+        const Stack::RawWorkspace::SourceRecord* activeRawWorkspaceSource =
+            result.rawWorkspace.sourceKey.empty()
+                ? nullptr
+                : FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+        const std::uint64_t activeRawWorkspaceSourceHash =
+            activeRawWorkspaceSource == nullptr
+                ? 0
+                : BuildRawWorkspaceAutoBaseSourceHash(*activeRawWorkspaceSource);
+        const bool rawWorkspaceResultMatchesActive =
+            !result.rawWorkspace.sourceKey.empty() &&
+            result.rawWorkspace.sourceKey == m_ActiveRawWorkspaceSourceKey &&
+            Stack::EditorModuleTypes::RawStartingPointSourceHashesCompatible(
+                result.rawWorkspace.sourceHash,
+                activeRawWorkspaceSourceHash);
         auto markMainOutputAccepted = [&](RawWorkspacePreviewOutputKind outputKind) {
             m_RawWorkspacePreviewOutputKind = result.rawWorkspace.sourceKey.empty()
                 ? RawWorkspacePreviewOutputKind::None
@@ -990,6 +1079,17 @@ void EditorModule::ConsumeRenderWorkerResults() {
             m_ViewportOutputRenderGeneration = result.generation;
             if (!result.rawWorkspace.sourceKey.empty()) {
                 m_RawWorkspaceViewTransformInputStats = result.rawWorkspace.viewTransformInputStats;
+                m_RawWorkspaceFinalDisplayStats = result.rawWorkspace.finalDisplayStats;
+                m_RawWorkspaceStageStatsReadbacks = result.rawWorkspace.stageStatsReadbacks;
+                m_RawWorkspaceStartPointDiagnostics = result.rawWorkspace.startPointDiagnostics;
+                Stack::EditorModuleTypes::StoreRawStartingPointCandidateRenderQueue(
+                    m_RawWorkspaceStartPointCandidateRenderQueue,
+                    result.rawWorkspace.sourceKey,
+                    result.rawWorkspace.startPointCandidateRenderRequests,
+                    result.generation,
+                    result.rawWorkspace.sourceHash);
+                m_RawWorkspaceStartPointCandidateRenderResults =
+                    result.rawWorkspace.startPointCandidateRenderResults;
                 m_RawWorkspaceAnalysis = result.rawWorkspace.analysis;
                 if (result.rawWorkspace.recommendations.localReport.valid ||
                     !result.rawWorkspace.recommendations.localSuggestionRationale.empty() ||
@@ -998,9 +1098,17 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 }
                 AdoptRawWorkspaceLocalRangeTargetSampleFromResult(result);
                 AdoptRawWorkspaceLocalRangeOverlayFromResult(result);
-                TryApplyRawWorkspaceAutoBaseOnAnalysis();
+                AdoptRawWorkspacePreciseAppliedRender();
+                TryContinueRawWorkspaceStartingPointOnAnalysis();
             } else {
                 m_RawWorkspaceViewTransformInputStats = {};
+                m_RawWorkspaceFinalDisplayStats = {};
+                m_RawWorkspaceStageStatsReadbacks.clear();
+                m_RawWorkspaceStartPointDiagnostics =
+                    Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics();
+                Stack::EditorModuleTypes::ClearRawStartingPointCandidateRenderQueue(
+                    m_RawWorkspaceStartPointCandidateRenderQueue);
+                m_RawWorkspaceStartPointCandidateRenderResults.clear();
                 m_RawWorkspaceAnalysis = Stack::RawAnalysis::RawImageAnalysis();
                 ClearRawWorkspaceLocalRangeTargetState(true);
                 ClearRawWorkspaceLocalRangeOverlayState();
@@ -1020,14 +1128,35 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 m_HdrMergeFailureMessages.erase(nodeId);
             }
         };
-        const bool rawWorkspaceSourceMismatch =
+        const bool rawWorkspaceSourceKeyMismatch =
             !result.rawWorkspace.sourceKey.empty() &&
             result.rawWorkspace.sourceKey != m_ActiveRawWorkspaceSourceKey;
+        const bool rawWorkspaceSourceMismatch =
+            !result.rawWorkspace.sourceKey.empty() &&
+            !rawWorkspaceResultMatchesActive;
         if (rawWorkspaceSourceMismatch) {
-            if (m_ViewportOutputRawWorkspaceSourceKey == result.rawWorkspace.sourceKey) {
+            if (Stack::EditorModuleTypes::ShouldClearRawStartingPointCandidateRenderQueueForRejectedResult(
+                    m_RawWorkspaceStartPointCandidateRenderQueue,
+                    result.rawWorkspace.sourceKey,
+                    m_ActiveRawWorkspaceSourceKey,
+                    result.rawWorkspace.sourceHash,
+                    activeRawWorkspaceSourceHash)) {
+                Stack::EditorModuleTypes::ClearRawStartingPointCandidateRenderQueue(
+                    m_RawWorkspaceStartPointCandidateRenderQueue);
+                m_RawWorkspaceStartPointCandidateRenderResults.clear();
+            }
+            if (rawWorkspaceSourceKeyMismatch &&
+                m_ViewportOutputRawWorkspaceSourceKey == result.rawWorkspace.sourceKey) {
                 ClearViewportOutputTiles();
                 m_Pipeline.ClearOutput();
                 m_RawWorkspaceViewTransformInputStats = {};
+                m_RawWorkspaceFinalDisplayStats = {};
+                m_RawWorkspaceStageStatsReadbacks.clear();
+                m_RawWorkspaceStartPointDiagnostics =
+                    Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics();
+                Stack::EditorModuleTypes::ClearRawStartingPointCandidateRenderQueue(
+                    m_RawWorkspaceStartPointCandidateRenderQueue);
+                m_RawWorkspaceStartPointCandidateRenderResults.clear();
                 m_RawWorkspaceAnalysis = Stack::RawAnalysis::RawImageAnalysis();
             }
             QueueViewportOutputTextureRelease(result.outputTexture);
@@ -1066,6 +1195,26 @@ void EditorModule::ConsumeRenderWorkerResults() {
             m_ViewportOutputTiles = std::move(result.outputTiles);
             result.outputTiles = {};
             markMainOutputAccepted(RawWorkspacePreviewOutputKind::Tiled);
+        } else if (!result.success && !result.rawWorkspace.sourceKey.empty()) {
+            if (Stack::EditorModuleTypes::ShouldClearRawStartingPointCandidateRenderQueueForFailedResult(
+                    m_RawWorkspaceStartPointCandidateRenderQueue,
+                    result.rawWorkspace.sourceKey,
+                    m_ActiveRawWorkspaceSourceKey,
+                    result.rawWorkspace.sourceHash,
+                    activeRawWorkspaceSourceHash)) {
+                Stack::EditorModuleTypes::ClearRawStartingPointCandidateRenderQueue(
+                    m_RawWorkspaceStartPointCandidateRenderQueue);
+                m_RawWorkspaceStartPointCandidateRenderResults.clear();
+            }
+            if (rawWorkspaceResultMatchesActive &&
+                Stack::EditorModuleTypes::MarkRawStartingPointRenderFailure(
+                    m_RawWorkspaceAutoBaseUi,
+                    result.error)) {
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    m_RawWorkspaceAutoBaseUi.summary,
+                    "raw-workspace-starting-point-render-failed");
+            }
         } else if (!m_NodeGraph.IsOutputConnected()) {
             ClearViewportOutputTiles();
             m_Pipeline.ClearOutput();
@@ -1177,7 +1326,13 @@ void EditorModule::ConsumeRenderWorkerResults() {
 void EditorModule::SubmitRenderIfReady() {
     const bool compositeMode = GetViewportMode() == ViewportMode::CompositeCanvas;
     const bool rawWorkspaceActive = IsRawWorkspaceProjectActive();
-    const bool allowBackgroundRenderWorker = m_RenderWorkerAvailable && !rawWorkspaceActive;
+    const bool preciseRawSolveActive =
+        rawWorkspaceActive &&
+        m_RawWorkspaceAutoBaseUi.preciseStartingPoint.active &&
+        Stack::PreciseIntegration::IsRunning(
+            m_RawWorkspaceAutoBaseUi.preciseStartingPoint.state);
+    const bool allowBackgroundRenderWorker =
+        m_RenderWorkerAvailable && (!rawWorkspaceActive || preciseRawSolveActive);
     const double now = ImGui::GetTime();
     if (m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
         m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive()) {
@@ -1364,6 +1519,14 @@ void EditorModule::SubmitRenderIfReady() {
         return;
     }
     if (!m_NodeGraph.IsOutputConnected()) {
+        const std::string outputDiagnostic = m_NodeGraph.GetOutputConnectionDiagnostic();
+        if (!outputDiagnostic.empty() && outputDiagnostic != m_LastOutputConnectionDiagnostic) {
+            QueueUiNotification(
+                UiNotificationSeverity::Error,
+                outputDiagnostic,
+                "graph-output-compound-unresolved");
+        }
+        m_LastOutputConnectionDiagnostic = outputDiagnostic;
         m_RenderDirty = false;
         ClearViewportOutputTiles();
         m_Pipeline.ClearOutput();
@@ -1371,6 +1534,7 @@ void EditorModule::SubmitRenderIfReady() {
         m_HdrMergeRenderingNodeIds.clear();
         return;
     }
+    m_LastOutputConnectionDiagnostic.clear();
     if (m_RenderRevision <= m_LastSubmittedRenderRevision) {
         return;
     }
@@ -1421,6 +1585,10 @@ void EditorModule::SubmitRenderIfReady() {
         m_Pipeline.ExecuteGraph(snapshot.graph);
         if (rawWorkspaceActive) {
             m_RawWorkspaceViewTransformInputStats = m_Pipeline.GetRawDevelopmentViewTransformInputStats();
+            m_RawWorkspaceFinalDisplayStats = m_Pipeline.GetRawDevelopmentFinalDisplayStats();
+            m_RawWorkspaceStageStatsReadbacks = m_Pipeline.GetRawDevelopmentStageStatsReadbacks();
+            m_RawWorkspaceStartPointDiagnostics =
+                m_Pipeline.BuildRawDevelopmentStartPointDiagnostics(m_ActiveRawWorkspaceSourceKey);
             m_RawWorkspaceAnalysis =
                 Stack::RawAnalysis::BuildCurrentFrameAnalysisFromCurrentFrameStats(
                     ToRawCurrentFrameInputStats(m_RawWorkspaceViewTransformInputStats),
@@ -1433,9 +1601,81 @@ void EditorModule::SubmitRenderIfReady() {
                     m_ActiveRawWorkspaceRecipe,
                     nullptr,
                     &localImage);
-            TryApplyRawWorkspaceAutoBaseOnAnalysis();
+            m_RawWorkspaceStartPointDiagnostics =
+                Stack::RawAutoStartPoint::BuildDryRunCandidateDiagnostics(
+                    std::move(m_RawWorkspaceStartPointDiagnostics),
+                    m_ActiveRawWorkspaceRecipe,
+                    m_RawWorkspaceAnalysis,
+                    m_RawWorkspaceAutoBaseUi.recommendations);
+            std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>
+                startPointCandidateRenderRequests =
+                    Stack::RawAutoStartPoint::CollectCandidateRenderRequests(
+                        m_RawWorkspaceStartPointDiagnostics);
+            Stack::EditorModuleTypes::StoreRawStartingPointCandidateRenderQueue(
+                m_RawWorkspaceStartPointCandidateRenderQueue,
+                m_ActiveRawWorkspaceSourceKey,
+                startPointCandidateRenderRequests,
+                m_RenderGeneration,
+                snapshot.rawWorkspace.sourceHash);
+            m_RawWorkspaceStartPointCandidateRenderResults.clear();
+            if (!startPointCandidateRenderRequests.empty()) {
+                RenderPipeline candidatePipeline;
+                candidatePipeline.Initialize();
+                candidatePipeline.SetPreviewMaxDimension(snapshot.previewMaxDimension);
+                static constexpr int kMaxStartingPointCandidateRenderPasses = 4;
+                for (int passIndex = 0;
+                     passIndex < kMaxStartingPointCandidateRenderPasses &&
+                     !startPointCandidateRenderRequests.empty();
+                     ++passIndex) {
+                    std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderResult>
+                        passResults =
+                            EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+                                candidatePipeline,
+                                snapshot.graph,
+                                m_ActiveRawWorkspaceSourceKey,
+                                startPointCandidateRenderRequests);
+                    const bool anyPassSuccess = std::any_of(
+                        passResults.begin(),
+                        passResults.end(),
+                        [](const Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderResult& item) {
+                            return item.success;
+                        });
+                    m_RawWorkspaceStartPointDiagnostics =
+                        Stack::RawAutoStartPoint::MergeCandidateRenderResults(
+                            std::move(m_RawWorkspaceStartPointDiagnostics),
+                            passResults,
+                            m_ActiveRawWorkspaceRecipe,
+                            m_RawWorkspaceAnalysis,
+                            m_RawWorkspaceAutoBaseUi.recommendations);
+                    m_RawWorkspaceStartPointCandidateRenderResults.insert(
+                        m_RawWorkspaceStartPointCandidateRenderResults.end(),
+                        std::make_move_iterator(passResults.begin()),
+                        std::make_move_iterator(passResults.end()));
+                    startPointCandidateRenderRequests =
+                        Stack::RawAutoStartPoint::CollectCandidateRenderRequests(
+                            m_RawWorkspaceStartPointDiagnostics);
+                    if (!anyPassSuccess) {
+                        break;
+                    }
+                }
+                Stack::EditorModuleTypes::StoreRawStartingPointCandidateRenderQueue(
+                    m_RawWorkspaceStartPointCandidateRenderQueue,
+                    m_ActiveRawWorkspaceSourceKey,
+                    startPointCandidateRenderRequests,
+                    m_RenderGeneration,
+                    snapshot.rawWorkspace.sourceHash);
+            }
+            AdoptRawWorkspacePreciseAppliedRender();
+            TryContinueRawWorkspaceStartingPointOnAnalysis();
         } else {
             m_RawWorkspaceViewTransformInputStats = {};
+            m_RawWorkspaceFinalDisplayStats = {};
+            m_RawWorkspaceStageStatsReadbacks.clear();
+            m_RawWorkspaceStartPointDiagnostics =
+                Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics();
+            Stack::EditorModuleTypes::ClearRawStartingPointCandidateRenderQueue(
+                m_RawWorkspaceStartPointCandidateRenderQueue);
+            m_RawWorkspaceStartPointCandidateRenderResults.clear();
             m_RawWorkspaceAnalysis = Stack::RawAnalysis::RawImageAnalysis();
         }
         if (rawWorkspaceActive && snapshot.rawWorkspace.localRangeTargetSampleRequested) {
@@ -1478,6 +1718,11 @@ void EditorModule::SubmitRenderIfReady() {
         m_GraphPerformanceStats.lastRenderedCompositeCount = 0;
         m_GraphPerformanceStats.lastMainOutputTiled = false;
         m_GraphPerformanceStats.lastMainOutputTileCount = 0;
+        m_GraphPerformanceStats.lastMainRegionPlanAvailable = false;
+        m_GraphPerformanceStats.lastMainRegionPlanTileable = false;
+        m_GraphPerformanceStats.lastMainRegionPlanHaloX = 0;
+        m_GraphPerformanceStats.lastMainRegionPlanHaloY = 0;
+        m_GraphPerformanceStats.lastMainRegionPlanReason.clear();
         m_RenderPending = false;
         if (rawWorkspaceActive) {
             m_RawWorkspacePreviewOutputKind = m_Pipeline.GetOutputTexture() != 0

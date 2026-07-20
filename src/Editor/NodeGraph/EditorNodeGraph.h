@@ -10,6 +10,13 @@
 
 namespace EditorNodeGraph {
 
+struct CompoundExpansionResult {
+    bool success = false;
+    std::string error;
+    std::vector<int> expandedNodeIds;
+    std::vector<int> authoredCompoundNodeIds;
+};
+
 class Graph {
 public:
     void Clear();
@@ -37,6 +44,18 @@ public:
     Node* AddImageGeneratorNode(ImageGeneratorKind generatorKind, Vec2 position);
     Node* AddMixNode(Vec2 position);
     Node* AddDataMathNode(DataMathMode mode, Vec2 position);
+    Node* AddValueNode(Stack::NodeMath::FirstClassValue value, Vec2 position);
+    Node* AddFieldMeanNode(Vec2 position);
+    Node* AddReformatNode(Vec2 position);
+    Node* AddTechnicalImageNode(Stack::NodeMath::TechnicalImageOperation operation, Vec2 position);
+    Node* AddCompoundNode(const Stack::NodeMath::DefinitionReference& definition, Vec2 position);
+    Node* AddFrequencyFftNode(Vec2 position);
+    Node* AddFrequencyIfftNode(Vec2 position);
+    Node* AddSpectrumViewNode(Vec2 position);
+    Node* AddFrequencyMaskNode(FrequencyMaskShape shape, Vec2 position);
+    Node* AddSpectrumMathNode(SpectrumMathMode mode, Vec2 position);
+    Node* AddMagnitudePhaseNode(MagnitudePhaseMode mode, Vec2 position);
+    Node* AddSpectrumAnalyzerNode(SpectrumAnalyzerMode mode, Vec2 position);
     Node* AddPreviewNode(Vec2 position);
     Node* AddChannelSplitNode(Vec2 position);
     Node* AddChannelCombineNode(Vec2 position);
@@ -61,6 +80,27 @@ public:
     const NodeGroup* FindGroup(int groupId) const;
     std::vector<NodeGroup>& GetGroups() { return m_Groups; }
     const std::vector<NodeGroup>& GetGroups() const { return m_Groups; }
+
+    bool AddCompoundDefinition(Stack::NodeMath::CompoundDefinition definition, std::string* error = nullptr);
+    const Stack::NodeMath::CompoundDefinition* FindCompoundDefinition(
+        const Stack::NodeMath::DefinitionReference& reference) const;
+    Stack::NodeMath::CompoundDefinition* FindCompoundDefinition(
+        const Stack::NodeMath::DefinitionReference& reference);
+    std::vector<Stack::NodeMath::CompoundDefinition>& GetCompoundDefinitions() { return m_CompoundDefinitions; }
+    const std::vector<Stack::NodeMath::CompoundDefinition>& GetCompoundDefinitions() const { return m_CompoundDefinitions; }
+    bool ResolveCompoundNode(int nodeId);
+    bool MakeCompoundNodeUnique(int nodeId, std::string* error = nullptr);
+    bool UpdateCompoundNodeDefinition(
+        int nodeId,
+        const Stack::NodeMath::DefinitionReference& definition,
+        std::string* error = nullptr);
+    bool UnpackCompoundNode(int nodeId, std::vector<int>* unpackedNodeIds = nullptr, std::string* error = nullptr);
+    bool ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* result = nullptr) const;
+    bool CreateCompoundFromSelection(
+        const std::vector<int>& nodeIds,
+        const std::string& label,
+        int* compoundNodeId = nullptr,
+        std::string* error = nullptr);
 
     void SelectNode(int nodeId, bool additive = false);
     int GetSelectedNodeId() const { return m_SelectedNodeId; }
@@ -105,11 +145,6 @@ public:
         int toNodeId,
         const std::string& toSocketId,
         std::string* errorMessage = nullptr) const;
-    bool CanConnectSocketsOrInsertExtractor(
-        int fromNodeId,
-        const std::string& fromSocketId,
-        int toNodeId,
-        const std::string& toSocketId) const;
     bool TryConnectSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
     bool SetOutputNodeEnabled(int nodeId, bool enabled);
     bool RemoveNode(int nodeId);
@@ -121,6 +156,7 @@ public:
     int GetActiveImageNodeId() const { return m_ActiveImageNodeId; }
     void SetActiveImageNodeId(int nodeId) { m_ActiveImageNodeId = nodeId; }
     bool IsOutputConnected() const;
+    std::string GetOutputConnectionDiagnostic() const;
     std::vector<int> GetOutputNodeIds() const;
     std::vector<int> GetConnectedOutputNodeIds() const;
     std::vector<CompletedChainInfo> GetCompletedChains() const;
@@ -136,6 +172,8 @@ public:
     void SetNextNodeId(int nextNodeId) { m_NextNodeId = nextNodeId; }
     int GetNextGroupId() const { return m_NextGroupId; }
     void SetNextGroupId(int nextGroupId) { m_NextGroupId = nextGroupId; }
+    void SetAllowNoOutput(bool allow) { m_AllowNoOutput = allow; }
+    bool AllowsNoOutput() const { return m_AllowNoOutput; }
     void RebuildLinks();
     void AutoLayout();
     ValidationResult Validate() const;
@@ -151,6 +189,16 @@ public:
     std::string DefaultOutputSocket(const Node& node) const;
     std::string ResolveSocketChannel(int nodeId, const std::string& socketId) const;
     bool IsScalarSocketStream(int nodeId, const std::string& socketId) const;
+    bool TryResolveUniformScalarInput(
+        int nodeId,
+        const std::string& socketId,
+        double& value,
+        std::string* errorMessage = nullptr) const;
+    bool ResolveCompoundOutputInputDependencies(
+        int nodeId,
+        const std::string& outputSocketId,
+        std::vector<std::string>& inputSocketIds,
+        std::string* errorMessage = nullptr) const;
     int ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId) const;
     int ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const;
     const Link* FindInputLink(int nodeId, const std::string& socketId = kImageInputSocketId) const;
@@ -174,6 +222,7 @@ private:
     std::vector<Node> m_Nodes;
     std::vector<Link> m_Links;
     std::vector<NodeGroup> m_Groups;
+    std::vector<Stack::NodeMath::CompoundDefinition> m_CompoundDefinitions;
     int m_NextNodeId = 1;
     int m_NextGroupId = 1;
     int m_SelectedNodeId = -1;
@@ -183,11 +232,23 @@ private:
     int m_ActiveImageNodeId = -1;
     int m_OutputNodeId = -1;
     bool m_ForceOutputFourPins = false;
+    bool m_AllowNoOutput = false;
     int m_SocketPreviewNodeId = -1;
     SocketPreviewIntent m_SocketPreviewIntent = SocketPreviewIntent::None;
     mutable std::uint64_t m_StructureRevision = 1;
     mutable std::uint64_t m_CompletedChainsCacheRevision = 0;
     mutable std::vector<CompletedChainInfo> m_CompletedChainsCache;
+    mutable std::string m_OutputConnectionDiagnosticCache;
 };
+
+struct ScenePathInfo {
+    bool sceneReferred = false;
+    bool hasViewTransform = false;
+};
+
+// Determines whether the upstream path carries scene-linear/HDR image data and
+// whether it has already been mapped through a display transform. Image-editing
+// nodes such as Tone Curve inherit this state from their image input.
+ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId);
 
 } // namespace EditorNodeGraph

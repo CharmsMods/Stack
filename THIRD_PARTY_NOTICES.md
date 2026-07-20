@@ -45,3 +45,17 @@ LibRaw may include additional upstream notices in its source distribution. Relea
 Distribution assumption: Stack's current Windows production-readiness layout ships `libraw.dll` beside `Stack.exe`, plus this notices file and the LibRaw license/copyright files. This is a practical engineering note, not legal advice or legal certainty. Final legal review is still needed before public or commercial distribution.
 
 Optional acceleration/extra decoder note: RawSpeed, Adobe DNG SDK, and other optional LibRaw-adjacent acceleration/extra decoder components are not enabled in Stack RAW V1. Do not enable them without separately reviewing and documenting their licenses and notice requirements.
+
+## Optional FFmpeg Provider
+
+- Component: FFmpeg
+- Upstream: https://ffmpeg.org/
+- Planned integration boundary: app-local external `ffmpeg.exe`
+- Runtime path when packaged: `tools/ffmpeg/ffmpeg.exe`
+- Provider manifest: `tools/ffmpeg/ffmpeg-provider.json`
+
+Stack's initial video-export architecture treats FFmpeg as an optional external executable provider, not as linked FFmpeg DLLs or libraries. Stack must continue to launch and run when this provider is absent; direct video encoding can remain unavailable until an approved provider is present.
+
+Release packaging may include FFmpeg only from a reviewed provider folder whose `ffmpeg-provider.json` confirms the exact binary, version, license marker, configure line, redistribution approval, license files, and source-reference files. Do not package FFmpeg builds that use `--enable-gpl` or `--enable-nonfree` as Stack's approved provider unless the project makes a separate legal/license decision and updates this policy.
+
+When an approved FFmpeg provider is packaged, keep the exact provider manifest, license files, source-reference files, and notice files beside the provider under `tools/ffmpeg`. This note is an engineering distribution policy, not legal advice or legal certainty. Final legal review is still needed before public or commercial distribution.

@@ -290,7 +290,7 @@ void BackgroundPatcherLayer::RenderExpandedNodeSurface(EditorModule* editor, con
         if (isPicking) {
             editor->CancelCanvasTool();
         } else {
-            editor->BeginCanvasColorPick(context.nodeId, "Click canvas to sample removal color", [this](float r, float g, float b) {
+            editor->BeginCanvasColorPickFromNodeInput(context.nodeId, "Click canvas to sample the image entering this node", [this](float r, float g, float b) {
                 m_TargetColor[0] = r;
                 m_TargetColor[1] = g;
                 m_TargetColor[2] = b;

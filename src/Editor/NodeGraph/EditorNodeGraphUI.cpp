@@ -1,5 +1,6 @@
 #include "EditorNodeGraphUI.h"
 
+#include "Editor/NodeGraph/SocketPresentation.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 
 #include <algorithm>
@@ -52,6 +53,10 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     NodeLayoutMetrics adjustedMetrics = metrics;
     ApplyModernCompactMetrics(node, adjustedMetrics);
     ApplyLayerSurfaceMetrics(this, m_ActiveEditor, node, adjustedMetrics);
+    const float widthScale = NodeWidthScale();
+    adjustedMetrics.width *= widthScale;
+    adjustedMetrics.contentLaneWidth *= widthScale;
+    adjustedMetrics.previewWidth *= widthScale;
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(m_ActiveEditor);
     const NodePresentationProfile profile = BuildNodePresentationProfile(this, m_ActiveEditor, node, graphStyle);
     const float uiScale = NodeContentScale();
@@ -74,7 +79,9 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     const float kindLabelBlock = showKindLabel ? (adjustedMetrics.kindLabelHeight * uiScale) + (2.0f * uiScale) : 0.0f;
     const float titleBlock = profile.showTitle ? (adjustedMetrics.titleHeight * uiScale) : 0.0f;
     const float headerVisualHeight = headerInsetY + kindLabelBlock + titleBlock;
-    const float expandedHeaderHeight = headerVisualHeight + std::max(6.0f, sectionGap * 0.65f);
+    const float expandedHeaderHeight = std::max(
+        headerVisualHeight + std::max(6.0f, sectionGap * 0.65f),
+        NodeGrabAreaHeight() * uiScale);
     const float collapsedHeaderHeight = std::max(headerVisualHeight + (headerInsetY * 0.45f), frameMax.y - frameMin.y);
     const float headerBottom = std::min(
         frameMax.y - std::max(6.0f * uiScale, bodyInsetBottom * 0.35f),
@@ -104,10 +111,7 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
 
     std::vector<EditorNodeGraph::SocketDefinition> inputSockets;
     std::vector<EditorNodeGraph::SocketDefinition> outputSockets;
-    for (const EditorNodeGraph::SocketDefinition& socket : graph.GetSockets(node, true)) {
-        if (!socket.visible) {
-            continue;
-        }
+    for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
         if (socket.direction == EditorNodeGraph::SocketDirection::Input) {
             inputSockets.push_back(socket);
         } else {
@@ -142,6 +146,71 @@ EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
     distributeAnchors(inputSockets, EditorNodeGraph::SocketDirection::Input);
     distributeAnchors(outputSockets, EditorNodeGraph::SocketDirection::Output);
     return cache;
+}
+
+bool EditorNodeGraphUI::IsSocketConnected(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::SocketDefinition& socket) const {
+    for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
+        if (socket.direction == EditorNodeGraph::SocketDirection::Input) {
+            if (link.toNodeId == socket.nodeId && link.toSocketId == socket.id) return true;
+        } else if (link.fromNodeId == socket.nodeId && link.fromSocketId == socket.id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<EditorNodeGraph::SocketDefinition> EditorNodeGraphUI::PresentedSockets(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node) const {
+    std::vector<EditorNodeGraph::SocketDefinition> presented;
+    for (EditorNodeGraph::SocketDefinition socket : graph.GetSockets(node, false)) {
+        const bool revealed = socket.direction == EditorNodeGraph::SocketDirection::Input
+            ? m_RevealedAdvancedInputNodes.count(node.id) != 0
+            : m_RevealedAdvancedOutputNodes.count(node.id) != 0;
+        if (socket.visibilityTier != EditorNodeGraph::SocketVisibilityTier::Advanced ||
+            revealed || IsSocketConnected(graph, socket)) {
+            socket.visible = true;
+            presented.push_back(std::move(socket));
+        }
+    }
+    return presented;
+}
+
+void EditorNodeGraphUI::ResetDetailCardHover() {
+    m_DetailCardHoverKey.clear();
+    m_DetailCardHoverStartedAt = -1.0;
+    m_DetailCardHoverSeenThisFrame = false;
+}
+
+void EditorNodeGraphUI::BeginDetailCardFrame(bool interactionAllowed) {
+    m_DetailCardInteractionAllowed = interactionAllowed;
+    m_DetailCardHoverSeenThisFrame = false;
+    if (!interactionAllowed) {
+        ResetDetailCardHover();
+    }
+}
+
+void EditorNodeGraphUI::EndDetailCardFrame() {
+    if (!m_DetailCardInteractionAllowed || !m_DetailCardHoverSeenThisFrame) {
+        ResetDetailCardHover();
+    }
+}
+
+bool EditorNodeGraphUI::DetailCardDelayElapsed(const std::string& key) {
+    if (!m_DetailCardInteractionAllowed || key.empty()) {
+        return false;
+    }
+    m_DetailCardHoverSeenThisFrame = true;
+    const double now = ImGui::GetTime();
+    if (m_DetailCardHoverKey != key) {
+        m_DetailCardHoverKey = key;
+        m_DetailCardHoverStartedAt = now;
+        return false;
+    }
+    return m_DetailCardHoverStartedAt >= 0.0 &&
+        now - m_DetailCardHoverStartedAt >= 0.7;
 }
 
 void EditorNodeGraphUI::RefreshNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
@@ -302,18 +371,21 @@ const EditorNodeGraphUI::SocketAnchor* EditorNodeGraphUI::FindSocketAnchor(
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& node) const {
+    const float widthScale = NodeWidthScale();
+    const float uiPreference = NodeUiScalePreference();
     if (node.kind == EditorNodeGraph::NodeKind::ChannelSplit ||
         node.kind == EditorNodeGraph::NodeKind::ChannelCombine ||
         IsSummaryOnlyNode(this, m_ActiveEditor, node)) {
         if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
-            return EditorNodeGraph::Vec2{ 128.0f, 72.0f };
+            return EditorNodeGraph::Vec2{ 128.0f * widthScale * uiPreference, 72.0f * widthScale * uiPreference };
         }
-        return EditorNodeGraph::Vec2{ 90.0f, 90.0f };
+        return EditorNodeGraph::Vec2{ 90.0f * widthScale * uiPreference, 90.0f * widthScale * uiPreference };
     }
 
     NodeLayoutMetrics metrics = MetricsForNode(node);
     ApplyModernCompactMetrics(node, metrics);
     ApplyLayerSurfaceMetrics(this, m_ActiveEditor, node, metrics);
+    metrics.width *= widthScale;
     const float measuredLayerHeight = [&]() -> float {
         const auto it = m_NodeMeasuredBaseHeights.find(node.id);
         return it != m_NodeMeasuredBaseHeights.end() ? it->second : 0.0f;
@@ -325,8 +397,15 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& n
             (UsesMeasuredNodeHeight(node) && measuredLayerHeight > 0.0f)
                 ? measuredLayerHeight
                 : ExpandedContractHeight(node, metrics, measuredLayerHeight));
+    float logicalHeight = std::max(
+        metrics.collapsedHeight,
+        SanitizeFinite(expandedHeight, metrics.minExpandedHeight));
+    if (node.kind == EditorNodeGraph::NodeKind::Image ||
+        node.kind == EditorNodeGraph::NodeKind::Output) {
+        logicalHeight *= widthScale;
+    }
     return EditorNodeGraph::Vec2{
-        metrics.width,
-        std::max(metrics.collapsedHeight, SanitizeFinite(expandedHeight, metrics.minExpandedHeight))
+        metrics.width * uiPreference,
+        logicalHeight * uiPreference
     };
 }

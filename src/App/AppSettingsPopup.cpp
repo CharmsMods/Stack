@@ -421,6 +421,138 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
         ImGui::SetTooltip("Render links as dotted when either endpoint is a mask-typed graph socket.");
     }
 
+    bool straightLinks = appearance->GetGraphStraightLinks();
+    if (ImGui::Checkbox("Straight connection lines", &straightLinks)) {
+        appearance->SetGraphStraightLinks(straightLinks);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Render graph links as direct straight lines instead of curved connections.");
+    }
+
+    StackAppearance::GraphConnectionLabelVisibility connectionLabels =
+        appearance->GetGraphConnectionLabels();
+    const char* connectionLabelNames[] = {
+        "Adaptive", "Always", "Interaction Only", "Off"
+    };
+    int connectionLabelIndex = static_cast<int>(connectionLabels);
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::Combo(
+            "Connection labels",
+            &connectionLabelIndex,
+            connectionLabelNames,
+            IM_ARRAYSIZE(connectionLabelNames))) {
+        appearance->SetGraphConnectionLabels(
+            static_cast<StackAppearance::GraphConnectionLabelVisibility>(connectionLabelIndex));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Adaptive shows typed wire text when space permits; interaction always reveals the selected or hovered connection.");
+    }
+
+    StackAppearance::GraphConnectionTextLayout connectionTextLayout =
+        appearance->GetGraphConnectionTextLayout();
+    const char* connectionLayoutNames[] = { "Floating", "Break Line" };
+    int connectionLayoutIndex = static_cast<int>(connectionTextLayout);
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::Combo(
+            "Connection text layout",
+            &connectionLayoutIndex,
+            connectionLayoutNames,
+            IM_ARRAYSIZE(connectionLayoutNames))) {
+        appearance->SetGraphConnectionTextLayout(
+            static_cast<StackAppearance::GraphConnectionTextLayout>(connectionLayoutIndex));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Floating places plain text over the wire. Break Line opens a safe centered gap when the wire is long enough.");
+    }
+
+    float connectionTextSize = appearance->GetGraphConnectionTextSize();
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::SliderFloat(
+            "Connection text size",
+            &connectionTextSize,
+            StackAppearance::kGraphConnectionTextSizeMin,
+            StackAppearance::kGraphConnectionTextSizeMax,
+            "%.0f px")) {
+        appearance->SetGraphConnectionTextSize(connectionTextSize);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Set the base screen size for the text drawn above and below graph connections.");
+    }
+
+    StackAppearance::GraphConnectionTextSizing connectionTextSizing =
+        appearance->GetGraphConnectionTextSizing();
+    const char* connectionSizingNames[] = { "Zoom-Aware", "Fixed" };
+    int connectionSizingIndex = static_cast<int>(connectionTextSizing);
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::Combo(
+            "Connection text sizing",
+            &connectionSizingIndex,
+            connectionSizingNames,
+            IM_ARRAYSIZE(connectionSizingNames))) {
+        appearance->SetGraphConnectionTextSizing(
+            static_cast<StackAppearance::GraphConnectionTextSizing>(connectionSizingIndex));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Zoom-Aware scales text moderately with the graph. Fixed keeps the selected screen-pixel size.");
+    }
+
+    bool connectionTextOutline = appearance->GetGraphConnectionTextOutline();
+    if (ImGui::Checkbox("Connection text outline", &connectionTextOutline)) {
+        appearance->SetGraphConnectionTextOutline(connectionTextOutline);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draw a subtle dark readability edge around connection text.");
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::TextUnformatted("Node sizing");
+    StackAppearance::GraphNodeSizing nodeSizing = appearance->GetGraphNodeSizing();
+    const char* nodeSizePresetNames[] = { "Compact", "Comfortable", "Spacious", "Custom" };
+    int nodeSizePresetIndex = static_cast<int>(nodeSizing.preset);
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::Combo(
+            "Node size preset",
+            &nodeSizePresetIndex,
+            nodeSizePresetNames,
+            IM_ARRAYSIZE(nodeSizePresetNames))) {
+        appearance->SetGraphNodeSizePreset(
+            static_cast<StackAppearance::GraphNodeSizePreset>(nodeSizePresetIndex));
+        nodeSizing = appearance->GetGraphNodeSizing();
+    }
+
+    float nodeWidthPercent = nodeSizing.widthScale * 100.0f;
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::SliderFloat(
+            "Node width",
+            &nodeWidthPercent,
+            StackAppearance::kGraphNodeWidthScaleMin * 100.0f,
+            StackAppearance::kGraphNodeWidthScaleMax * 100.0f,
+            "%.0f%%")) {
+        appearance->SetGraphNodeWidthScale(nodeWidthPercent / 100.0f);
+    }
+    float nodeUiPercent = nodeSizing.uiScale * 100.0f;
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::SliderFloat(
+            "Node UI scale",
+            &nodeUiPercent,
+            StackAppearance::kGraphNodeUiScaleMin * 100.0f,
+            StackAppearance::kGraphNodeUiScaleMax * 100.0f,
+            "%.0f%%")) {
+        appearance->SetGraphNodeUiScale(nodeUiPercent / 100.0f);
+    }
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::SliderFloat(
+            "Node grab-area height",
+            &nodeSizing.grabAreaHeight,
+            StackAppearance::kGraphNodeGrabAreaHeightMin,
+            StackAppearance::kGraphNodeGrabAreaHeightMax,
+            "%.0f px")) {
+        appearance->SetGraphNodeGrabAreaHeight(nodeSizing.grabAreaHeight);
+    }
+    if (ImGui::Button("Reset node sizing")) {
+        appearance->ResetGraphNodeSizing();
+    }
+
     float graphLineOpacity = appearance->GetGraphLineOpacity();
     ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
     if (ImGui::SliderFloat("Graph Line Opacity", &graphLineOpacity, 0.0f, 1.0f, "%.2f")) {
@@ -428,6 +560,31 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Adjust the graph grid line intensity without changing node or pane opacity.");
+    }
+
+    float graphPanSensitivity = appearance->GetGraphPanSensitivity();
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::SliderFloat("Middle-Mouse Pan Sensitivity", &graphPanSensitivity, 0.10f, 1.0f, "%.2f")) {
+        appearance->SetGraphPanSensitivity(graphPanSensitivity);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Adjust how far the graph moves while panning with the middle mouse button.");
+    }
+
+    float nodeSliderDragSensitivity = appearance->GetGraphNodeSliderDragSensitivity();
+    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
+    if (ImGui::SliderFloat(
+            "Node Slider Drag Sensitivity",
+            &nodeSliderDragSensitivity,
+            StackAppearance::kGraphNodeSliderDragSensitivityMin,
+            StackAppearance::kGraphNodeSliderDragSensitivityMax,
+            "%.2f",
+            ImGuiSliderFlags_Logarithmic)) {
+        appearance->SetGraphNodeSliderDragSensitivity(nodeSliderDragSensitivity);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Adjust on-node slider drag speed. 1.00 is standard; lower values provide finer control. Graph zoom does not change this sensitivity.");
     }
 
     bool showGraphPerf = editor->GetGraphPerformancePopupEnabled();
@@ -484,12 +641,12 @@ void RenderViewportSection(StackAppearance::AppearanceManager* appearance, const
 
     int haloPixels = settings.haloPixels;
     ImGui::SetNextItemWidth(std::min(contentWidth, 220.0f));
-    if (ImGui::DragInt("Tile Halo", &haloPixels, 1.0f, 0, 256, "%d px")) {
+    if (ImGui::DragInt("Extra Tile Halo", &haloPixels, 1.0f, 0, 256, "%d px")) {
         settings.haloPixels = haloPixels;
         appearance->SetViewportTilingSettings(settings);
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Reserved overlap for future halo-aware blur/detail nodes. Basic tile-safe nodes use 0.");
+        ImGui::SetTooltip("Optional extra overlap. Stack now derives the required halo from supported graph operations automatically.");
     }
 
     int threshold = settings.autoPixelThresholdMegapixels;

@@ -13,6 +13,17 @@
 
 namespace {
 
+void PostNodeGraphNotification(
+    EditorModule* editor,
+    UiNotificationSeverity severity,
+    const std::string& message,
+    const char* dedupeKey) {
+    if (!editor || message.empty()) {
+        return;
+    }
+    editor->ShowUiNotification(severity, message, dedupeKey ? dedupeKey : "");
+}
+
 ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
     return ImVec2(value.x, value.y);
 }
@@ -162,37 +173,6 @@ bool EditorNodeGraphUI::IsPointInNodeDraggableRegion(int nodeId, const ImVec2& p
         return false;
     }
     return true;
-}
-
-void EditorNodeGraphUI::RenderValidationStatus(const EditorNodeGraph::Graph& graph) {
-    if (graph.GetNodes().empty()) {
-        return;
-    }
-    const EditorNodeGraph::ValidationResult validation = graph.Validate();
-    if (validation.valid && validation.outputConnected && m_StatusMessage.empty()) {
-        return;
-    }
-
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const ImVec2 pos(m_CanvasOrigin.x + 16.0f, m_CanvasOrigin.y + 16.0f);
-    const ImU32 color = validation.valid && validation.outputConnected
-        ? IM_COL32(170, 230, 180, 235)
-        : IM_COL32(255, 205, 135, 235);
-    std::string text = validation.outputConnected ? "Graph valid" : "Output disconnected";
-    if (!validation.messages.empty()) {
-        text = validation.messages.front();
-    }
-    if (!m_StatusMessage.empty()) {
-        text = m_StatusMessage;
-    }
-    const ImVec2 textSize = ImGui::CalcTextSize(text.c_str());
-    const ImVec2 pad(10.0f, 6.0f);
-    drawList->AddRectFilled(
-        ImVec2(pos.x - pad.x, pos.y - pad.y),
-        ImVec2(pos.x + textSize.x + pad.x, pos.y + textSize.y + pad.y),
-        IM_COL32(18, 20, 24, 170),
-        10.0f);
-    drawList->AddText(pos, color, text.c_str());
 }
 
 void EditorNodeGraphUI::RenderChannelSplitConfirmPrompt(EditorModule* editor) {
@@ -355,8 +335,10 @@ bool EditorNodeGraphUI::UpdateMiddlePanCapture(EditorModule* editor, bool graphH
             delta = ImGui::GetIO().MouseDelta;
         }
         if (std::isfinite(delta.x) && std::isfinite(delta.y)) {
-            m_Pan.x += delta.x;
-            m_Pan.y += delta.y;
+            const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
+            const float sensitivity = appearance ? appearance->GetGraphPanSensitivity() : 0.55f;
+            m_Pan.x += delta.x * sensitivity;
+            m_Pan.y += delta.y * sensitivity;
         }
         m_MiddlePanLastUpdateFrame = frame;
     }
@@ -455,13 +437,21 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 ? editor->SplitImageAverageNodeIntoChannelAverages(confirmNodeId)
                 : editor->SplitLayerNodeIntoChannels(confirmNodeId);
             if (splitOk) {
-                m_StatusMessage = splitImageAverage
-                    ? "Image average split into channel averages."
-                    : "Channel split created.";
+                PostNodeGraphNotification(
+                    editor,
+                    UiNotificationSeverity::Success,
+                    splitImageAverage
+                        ? "Image average split into channel averages."
+                        : "Channel split created.",
+                    "editor-node-graph-split");
             } else {
-                m_StatusMessage = splitImageAverage
-                    ? "Image average split failed."
-                    : "Channel split failed.";
+                PostNodeGraphNotification(
+                    editor,
+                    UiNotificationSeverity::Error,
+                    splitImageAverage
+                        ? "Image average split failed."
+                        : "Channel split failed.",
+                    "editor-node-graph-split");
             }
             return;
         }
@@ -649,15 +639,15 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             if (hoveredInput.IsValid()) {
                 std::string error;
                 if (!editor->ConnectGraphSockets(m_DragOutputNodeId, m_DragOutputSocketId, hoveredInput.nodeId, hoveredInput.socketId, &error)) {
-                    m_StatusMessage = error;
-                } else {
-                    m_StatusMessage.clear();
+                    PostNodeGraphNotification(editor, UiNotificationSeverity::Error, error, "editor-node-graph-connect");
                 }
             } else if (hoveredNodeId > 0) {
                 if (!EditorNodeGraphUI::ConnectOutputToBestInput(editor, m_DragOutputNodeId, m_DragOutputSocketId, hoveredNodeId)) {
-                    m_StatusMessage = "No compatible input socket found on target node.";
-                } else {
-                    m_StatusMessage.clear();
+                    PostNodeGraphNotification(
+                        editor,
+                        UiNotificationSeverity::Error,
+                        "No compatible input socket found on target node.",
+                        "editor-node-graph-connect");
                 }
             } else if (graphHovered) {
                 m_NodeBrowserDragFromNodeId = m_DragOutputNodeId;
@@ -677,15 +667,15 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             if (hoveredOutput.IsValid()) {
                 std::string error;
                 if (!editor->ConnectGraphSockets(hoveredOutput.nodeId, hoveredOutput.socketId, m_DragInputNodeId, m_DragInputSocketId, &error)) {
-                    m_StatusMessage = error;
-                } else {
-                    m_StatusMessage.clear();
+                    PostNodeGraphNotification(editor, UiNotificationSeverity::Error, error, "editor-node-graph-connect");
                 }
             } else if (hoveredNodeId > 0) {
                 if (!EditorNodeGraphUI::ConnectBestOutputToInput(editor, hoveredNodeId, m_DragInputNodeId, m_DragInputSocketId)) {
-                    m_StatusMessage = "No compatible output socket found on target node.";
-                } else {
-                    m_StatusMessage.clear();
+                    PostNodeGraphNotification(
+                        editor,
+                        UiNotificationSeverity::Error,
+                        "No compatible output socket found on target node.",
+                        "editor-node-graph-connect");
                 }
             } else if (graphHovered) {
                 m_NodeBrowserDragToNodeId = m_DragInputNodeId;
@@ -737,7 +727,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
 
     if (ownerIsLink && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         if (editor->RemoveGraphLink(hoveredLink.fromNodeId, hoveredLink.fromSocketId, hoveredLink.toNodeId, hoveredLink.toSocketId)) {
-            m_StatusMessage = "Link removed.";
+            PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Link removed.", "editor-node-graph-link");
         }
         return;
     }
@@ -847,7 +837,6 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     m_Pan.y,
                     m_Zoom);
             }
-            m_StatusMessage.clear();
         }
     }
 
@@ -859,16 +848,16 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
         if (m_HoveredGroupId > 0) {
             if (editor->GetNodeGraph().RemoveGroup(m_HoveredGroupId)) {
-                m_StatusMessage = "Group deleted.";
+                PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Group deleted.", "editor-node-graph-delete");
             }
             if (m_EditingGroupId == m_HoveredGroupId) m_EditingGroupId = -1;
             if (m_DragGroupId == m_HoveredGroupId) m_DragGroupId = -1;
             if (m_ResizingGroupId == m_HoveredGroupId) m_ResizingGroupId = -1;
             m_HoveredGroupId = -1;
         } else if (editor->DeleteSelectedGraphLink()) {
-            m_StatusMessage = "Link deleted.";
+            PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Link deleted.", "editor-node-graph-delete");
         } else if (editor->DeleteSelectedGraphNodes()) {
-            m_StatusMessage = "Node deleted.";
+            PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Node deleted.", "editor-node-graph-delete");
         }
     }
 

@@ -99,6 +99,8 @@ if (Test-Path -LiteralPath $windowsAppRuntimeBootstrapPath) {
         -DestinationPath (Join-Path $stageDir "Microsoft.WindowsAppRuntime.Bootstrap.dll")
 }
 
+Copy-OptionalFfmpegProvider -Paths $paths -StageDir $stageDir | Out-Null
+
 New-LicensePageFile -RootDir $Root -DestinationPath $licensePagePath
 
 if (-not $SkipPortableZip) {

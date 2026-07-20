@@ -58,6 +58,32 @@ Stack::RawAnalysis::CurrentFrameInputStats ToRawCurrentFrameInputStats(const Ren
     return rawStats;
 }
 
+float ElapsedMilliseconds(
+    std::chrono::steady_clock::time_point begin,
+    std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<float, std::milli>(end - begin).count();
+}
+
+std::size_t FindRawDevelopmentNodeForCandidate(
+    const RenderGraphSnapshot& graph,
+    const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
+    std::size_t firstRawDevelopment = graph.nodes.size();
+    for (std::size_t i = 0; i < graph.nodes.size(); ++i) {
+        const RenderGraphNode& node = graph.nodes[i];
+        if (node.kind != RenderGraphNodeKind::RawDevelopment) {
+            continue;
+        }
+        if (firstRawDevelopment == graph.nodes.size()) {
+            firstRawDevelopment = i;
+        }
+        if (!recipe.source.sourcePath.empty() &&
+            node.rawDevelopment.recipe.source.sourcePath == recipe.source.sourcePath) {
+            return i;
+        }
+    }
+    return firstRawDevelopment;
+}
+
 int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot& snapshot) {
     int steps = 0;
     if (!snapshot.compositeOutputs.empty()) {
@@ -67,6 +93,9 @@ int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot& snapshot
     }
     steps += static_cast<int>(snapshot.developCandidateRenders.size());
     steps += static_cast<int>(snapshot.previews.size());
+    if (snapshot.rawWorkspace.preciseSolveRequest.has_value()) {
+        steps += 52;
+    }
     return std::max(1, steps);
 }
 
@@ -254,11 +283,21 @@ void CaptureRawWorkspaceLocalRangeTargetSample(RenderPipeline& pipeline, EditorR
 void CaptureRawWorkspaceViewTransformInputStats(RenderPipeline& pipeline, EditorRenderWorker::Result& result) {
     if (result.rawWorkspace.sourceKey.empty()) {
         result.rawWorkspace.viewTransformInputStats = {};
+        result.rawWorkspace.finalDisplayStats = {};
+        result.rawWorkspace.stageStatsReadbacks.clear();
+        result.rawWorkspace.startPointCandidateRenderRequests.clear();
+        result.rawWorkspace.startPointCandidateRenderResults.clear();
+        result.rawWorkspace.startPointDiagnostics =
+            Stack::RawAutoStartPoint::MakeUnavailableDiagnostics({}, "No RAW workspace source is active.");
         result.rawWorkspace.analysis =
             Stack::RawAnalysis::BuildUnavailableAnalysis({}, "No RAW workspace source is active.");
         return;
     }
     result.rawWorkspace.viewTransformInputStats = pipeline.GetRawDevelopmentViewTransformInputStats();
+    result.rawWorkspace.finalDisplayStats = pipeline.GetRawDevelopmentFinalDisplayStats();
+    result.rawWorkspace.stageStatsReadbacks = pipeline.GetRawDevelopmentStageStatsReadbacks();
+    result.rawWorkspace.startPointDiagnostics =
+        pipeline.BuildRawDevelopmentStartPointDiagnostics(result.rawWorkspace.sourceKey);
     result.rawWorkspace.analysis =
         Stack::RawAnalysis::BuildCurrentFrameAnalysisFromCurrentFrameStats(
             ToRawCurrentFrameInputStats(result.rawWorkspace.viewTransformInputStats),
@@ -270,6 +309,8 @@ void CaptureRawWorkspaceAutoBaseRecommendations(
     const EditorRenderWorker::Snapshot& snapshot,
     EditorRenderWorker::Result& result) {
     result.rawWorkspace.recommendations = Stack::RawAutoBase::AutoBaseRecommendations();
+    result.rawWorkspace.startPointCandidateRenderRequests.clear();
+    result.rawWorkspace.startPointCandidateRenderResults.clear();
     if (result.rawWorkspace.sourceKey.empty() ||
         !snapshot.rawWorkspace.hasRecipe ||
         !result.rawWorkspace.analysis.currentFrameStats.valid) {
@@ -284,6 +325,50 @@ void CaptureRawWorkspaceAutoBaseRecommendations(
             snapshot.rawWorkspace.recipe,
             nullptr,
             &localImage);
+    result.rawWorkspace.startPointDiagnostics =
+        Stack::RawAutoStartPoint::BuildDryRunCandidateDiagnostics(
+            std::move(result.rawWorkspace.startPointDiagnostics),
+            snapshot.rawWorkspace.recipe,
+            result.rawWorkspace.analysis,
+            result.rawWorkspace.recommendations);
+    result.rawWorkspace.startPointCandidateRenderRequests =
+        Stack::RawAutoStartPoint::CollectCandidateRenderRequests(
+            result.rawWorkspace.startPointDiagnostics);
+    static constexpr int kMaxStartingPointCandidateRenderPasses = 4;
+    for (int passIndex = 0;
+         passIndex < kMaxStartingPointCandidateRenderPasses &&
+         !result.rawWorkspace.startPointCandidateRenderRequests.empty();
+         ++passIndex) {
+        std::vector<EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult> passResults =
+            EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+                pipeline,
+                snapshot.graph,
+                result.rawWorkspace.sourceKey,
+                result.rawWorkspace.startPointCandidateRenderRequests);
+        const bool anyPassSuccess = std::any_of(
+            passResults.begin(),
+            passResults.end(),
+            [](const EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult& item) {
+                return item.success;
+            });
+        result.rawWorkspace.startPointDiagnostics =
+            Stack::RawAutoStartPoint::MergeCandidateRenderResults(
+                std::move(result.rawWorkspace.startPointDiagnostics),
+                passResults,
+                snapshot.rawWorkspace.recipe,
+                result.rawWorkspace.analysis,
+                result.rawWorkspace.recommendations);
+        result.rawWorkspace.startPointCandidateRenderResults.insert(
+            result.rawWorkspace.startPointCandidateRenderResults.end(),
+            std::make_move_iterator(passResults.begin()),
+            std::make_move_iterator(passResults.end()));
+        result.rawWorkspace.startPointCandidateRenderRequests =
+            Stack::RawAutoStartPoint::CollectCandidateRenderRequests(
+                result.rawWorkspace.startPointDiagnostics);
+        if (!anyPassSuccess) {
+            break;
+        }
+    }
 }
 
 RenderGraphSnapshot BuildTileGraphSnapshot(
@@ -1285,6 +1370,134 @@ float EditorRenderWorker::CompareDevelopCandidateRenderMetrics(
         std::fabs(a.subjectMarkedLowPriorityPressure - b.subjectMarkedLowPriorityPressure) * 0.08f;
 }
 
+std::vector<EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult>
+EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+    RenderPipeline& pipeline,
+    const RenderGraphSnapshot& graph,
+    const std::string& sourceKey,
+    const std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>& requests) {
+    std::vector<RawWorkspaceStartPointCandidateRenderResult> results;
+    results.reserve(requests.size());
+    if (requests.empty()) {
+        return results;
+    }
+
+    int requestIndex = 0;
+    for (const Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest& request : requests) {
+        RawWorkspaceStartPointCandidateRenderResult result;
+        result.request = request;
+        result.attempted = true;
+        if (!request.valid || !request.hasRecipe) {
+            result.error = "Candidate render request did not include a valid visible recipe.";
+            results.push_back(std::move(result));
+            ++requestIndex;
+            continue;
+        }
+
+        RenderGraphSnapshot candidateGraph = graph;
+        candidateGraph.rawWorkspaceLocalRangeOverlayMode.clear();
+        candidateGraph.rawWorkspaceLocalRangeTargetSampleRequested = false;
+        const std::size_t rawDevelopmentIndex =
+            FindRawDevelopmentNodeForCandidate(candidateGraph, request.recipe);
+        if (rawDevelopmentIndex >= candidateGraph.nodes.size()) {
+            result.error = "No RAW Development node was present for the candidate render.";
+            results.push_back(std::move(result));
+            ++requestIndex;
+            continue;
+        }
+
+        RenderGraphNode& rawDevelopmentNode = candidateGraph.nodes[rawDevelopmentIndex];
+        rawDevelopmentNode.rawDevelopment.recipe = request.recipe;
+        rawDevelopmentNode.requestRevision =
+            std::max<std::uint64_t>(
+                rawDevelopmentNode.requestRevision + 1,
+                static_cast<std::uint64_t>(requestIndex + 1));
+
+        pipeline.SetRawDevelopmentStageImageReadbackMaxDimension(
+            request.featureReadbackMaxDimension);
+
+        auto executeCandidateGraph =
+            [&](std::vector<RawDevelopmentStageStatsReadback>& outReadbacks) {
+                const auto renderBegin = std::chrono::steady_clock::now();
+                pipeline.ExecuteGraph(candidateGraph);
+                result.renderMs +=
+                    ElapsedMilliseconds(renderBegin, std::chrono::steady_clock::now());
+                result.renderWidth = pipeline.GetCanvasWidth();
+                result.renderHeight = pipeline.GetCanvasHeight();
+                outReadbacks = pipeline.GetRawDevelopmentStageStatsReadbacks();
+                result.stageImageReadbacks = pipeline.GetRawDevelopmentStageImageReadbacks();
+                const GraphExecutionStats& graphStats = pipeline.GetLastGraphExecutionStats();
+                result.imageCacheHits += graphStats.imageCacheHits;
+                result.imageCacheMisses += graphStats.imageCacheMisses;
+                result.rawStageCacheHits += graphStats.rawStageCacheHits;
+                result.rawStageCacheMisses += graphStats.rawStageCacheMisses;
+                result.diagnostics = pipeline.BuildRawDevelopmentStartPointDiagnostics(sourceKey);
+            };
+        auto hasCompleteRequestedStage =
+            [&](const std::vector<RawDevelopmentStageStatsReadback>& readbacks) {
+                return std::any_of(
+                    readbacks.begin(),
+                    readbacks.end(),
+                    [&](const RawDevelopmentStageStatsReadback& readback) {
+                        return readback.valid &&
+                            readback.stage == request.stage &&
+                            readback.status ==
+                                Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete;
+                    });
+            };
+
+        std::vector<RawDevelopmentStageStatsReadback> stageStatsReadbacks;
+        executeCandidateGraph(stageStatsReadbacks);
+        if (request.stage == Stack::RawAutoStartPoint::RawAutoStartPointStage::DisplayCandidate) {
+            const RenderTextureStats viewTransformInputStats =
+                pipeline.GetRawDevelopmentViewTransformInputStats();
+            const Stack::RawAnalysis::RawImageAnalysis candidateAnalysis =
+                Stack::RawAnalysis::BuildCurrentFrameAnalysisFromCurrentFrameStats(
+                    ToRawCurrentFrameInputStats(viewTransformInputStats),
+                    sourceKey);
+            const Stack::RawAutoBase::ViewFitDecision fitDecision =
+                Stack::RawAutoBase::BuildAutoBaseViewFitDecision(
+                    candidateAnalysis,
+                    request.recipe);
+            if (!fitDecision.canApply) {
+                result.error = fitDecision.reason.empty()
+                    ? "Display Candidate render could not fit View Transform from the post-edit analysis."
+                    : fitDecision.reason;
+                pipeline.SetRawDevelopmentStageImageReadbackMaxDimension(0);
+                results.push_back(std::move(result));
+                ++requestIndex;
+                continue;
+            }
+
+            Stack::RawRecipe::RawDevelopmentRecipe fittedRecipe = request.recipe;
+            Stack::RawAutoBase::ApplyViewTransformFitToRecipe(fittedRecipe, fitDecision.fit);
+            result.hasRenderedRecipe = true;
+            result.renderedRecipe = fittedRecipe;
+            rawDevelopmentNode.rawDevelopment.recipe = std::move(fittedRecipe);
+            rawDevelopmentNode.requestRevision =
+                std::max<std::uint64_t>(
+                    rawDevelopmentNode.requestRevision + 1,
+                    static_cast<std::uint64_t>(requestIndex + 1001));
+            executeCandidateGraph(stageStatsReadbacks);
+        }
+
+        result.success =
+            result.diagnostics.valid &&
+            hasCompleteRequestedStage(stageStatsReadbacks);
+        if (!result.success) {
+            result.error =
+                "Candidate render completed without a complete readback for the requested Starting Point stage.";
+        } else if (!result.hasRenderedRecipe && request.hasRecipe) {
+            result.hasRenderedRecipe = true;
+            result.renderedRecipe = request.recipe;
+        }
+        pipeline.SetRawDevelopmentStageImageReadbackMaxDimension(0);
+        results.push_back(std::move(result));
+        ++requestIndex;
+    }
+    return results;
+}
+
 bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
     if (m_Thread.joinable()) {
         return true;
@@ -1564,7 +1777,10 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
     result.generation = snapshot.generation;
     result.previewMaxDimension = snapshot.previewMaxDimension;
     result.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
+    result.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
     result.rawWorkspace.localRangeOverlayMode = snapshot.rawWorkspace.localRangeOverlayMode;
+    result.rawWorkspace.startPointCandidateRenderRequests =
+        snapshot.rawWorkspace.startPointCandidateRenderRequests;
     result.rawWorkspace.localRangeTargetSample.u = snapshot.rawWorkspace.localRangeTargetSampleU;
     result.rawWorkspace.localRangeTargetSample.v = snapshot.rawWorkspace.localRangeTargetSampleV;
 
@@ -1724,6 +1940,35 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.previewRenderMs += MillisecondsBetween(previewBegin, std::chrono::steady_clock::now());
         };
 
+        // A precise RAW solve is an isolated job, not a background replacement
+        // for the live viewport render. Running the normal RAW graph first in
+        // this shared context can overlap the UI-owned RAW pipeline and has
+        // caused driver-level failures. Keep the current preview untouched,
+        // evaluate only isolated pipelines here, then return the verified
+        // recipe record to the main thread for its one atomic commit.
+        if (snapshot.rawWorkspace.preciseSolveRequest.has_value()) {
+            Stack::PreciseIntegration::NativeSolveCallbacks preciseCallbacks;
+            preciseCallbacks.shouldCancel = shouldAbortStaleWork;
+            preciseCallbacks.reportProgress =
+                [&](const std::string& label, int completed, int total) {
+                    SetProgress(completed, std::max(1, total), label);
+                };
+            result.rawWorkspace.preciseSolveResult =
+                Stack::PreciseIntegration::RunNativePreciseSolve(
+                    *snapshot.rawWorkspace.preciseSolveRequest,
+                    preciseCallbacks);
+            result.success = true;
+            SetProgress(
+                52,
+                52,
+                result.rawWorkspace.preciseSolveResult->canceled
+                    ? "Precise Starting Point canceled."
+                    : (result.rawWorkspace.preciseSolveResult->candidate.valid
+                        ? "Precise candidate verified."
+                        : "Precise solve failed safely."));
+            return result;
+        }
+
         if (!snapshot.compositeOutputs.empty()) {
             result.success = true;
             result.compositeOutputs.reserve(snapshot.compositeOutputs.size());
@@ -1816,15 +2061,26 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
             const ViewportTilingSettings tilingSettings =
                 RenderTiling::NormalizeSettings(snapshot.viewportTiling, maxTextureSize);
-            std::string tileSafetyReason;
+            const RenderGraphRegionPlan regionPlan = RenderTiling::PlanGraphRegions(
+                snapshot.graph, snapshot.width, snapshot.height);
+            result.mainRegionPlanAvailable = true;
+            result.mainRegionPlanTileable = regionPlan.tileable;
+            result.mainRegionPlanHaloX = regionPlan.requiredHaloX;
+            result.mainRegionPlanHaloY = regionPlan.requiredHaloY;
+            result.mainRegionPlanReason = regionPlan.reason;
             const bool rawWorkspaceMainOutput = !snapshot.rawWorkspace.sourceKey.empty();
             const bool canTileGraph =
                 !rawWorkspaceMainOutput &&
                 RenderTiling::ShouldUseTiling(tilingSettings, snapshot.width, snapshot.height, maxTextureSize) &&
-                RenderTiling::IsGraphTileSafe(snapshot.graph, snapshot.width, snapshot.height, &tileSafetyReason);
+                regionPlan.valid && regionPlan.tileable;
             if (canTileGraph) {
                 std::vector<RenderTileRect> tiles =
-                    RenderTiling::PlanTiles(snapshot.width, snapshot.height, tilingSettings);
+                    RenderTiling::PlanTiles(
+                        snapshot.width,
+                        snapshot.height,
+                        tilingSettings,
+                        regionPlan.requiredHaloX,
+                        regionPlan.requiredHaloY);
                 if (!tiles.empty()) {
                     reportProgress("Rendering tiled main output...");
                     const auto mainRenderBegin = std::chrono::steady_clock::now();
@@ -1833,7 +2089,6 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     result.outputTiles.tiled = true;
                     result.outputTiles.debugOverlay = tilingSettings.debugOverlay;
                     result.outputTiles.tiles.reserve(tiles.size());
-                    int tileIndex = 0;
                     auto releasePartialTiles = [&]() {
                         for (SharedTextureTile& partialTile : result.outputTiles.tiles) {
                             if (partialTile.texture != 0) {
@@ -1845,13 +2100,10 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         result.outputTiles.complete = false;
                         result.outputTiles.readyFence = nullptr;
                     };
-                    for (const RenderTileRect& tile : tiles) {
-                        if (shouldAbortStaleWork()) {
-                            reportSupersededWork();
-                            result.error = "Render superseded by a newer snapshot.";
-                            releasePartialTiles();
-                            return result;
-                        }
+                    const TileIterationResult tileIteration = RenderTiling::IterateTiles(
+                        tiles,
+                        shouldAbortStaleWork,
+                        [&](const RenderTileRect& tile, std::size_t tileIndex) {
                         reportProgress(
                             "Rendering tile " +
                             std::to_string(tileIndex + 1) +
@@ -1871,7 +2123,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                                 tile.haloHeight);
                             if (tileSource.empty()) {
                                 result.error = "Failed to crop source tile.";
-                                break;
+                                return false;
                             }
                         }
                         loadSourceBuffer(tileSource, tile.haloWidth, tile.haloHeight, snapshot.channels);
@@ -1887,7 +2139,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                                 glDeleteTextures(1, &tileTexture);
                             }
                             result.error = "Tiled render produced an empty tile.";
-                            break;
+                            return false;
                         }
                         SharedTextureTile sharedTile;
                         sharedTile.texture = tileTexture;
@@ -1900,11 +2152,18 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         sharedTile.haloWidth = tileTextureW;
                         sharedTile.haloHeight = tileTextureH;
                         result.outputTiles.tiles.push_back(sharedTile);
-                        ++tileIndex;
+                        return true;
+                    });
+                    if (tileIteration.status == TileIterationStatus::Canceled) {
+                        reportSupersededWork();
+                        result.error = "Render superseded by a newer snapshot.";
+                        releasePartialTiles();
+                        return result;
                     }
                     result.mainRenderMs = MillisecondsBetween(mainRenderBegin, std::chrono::steady_clock::now());
                     result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
                     result.outputTiles.complete =
+                        tileIteration.status == TileIterationStatus::Completed &&
                         result.outputTiles.tiles.size() == tiles.size() &&
                         result.error.empty();
                     result.success = result.outputTiles.complete && !result.outputTiles.tiles.empty();

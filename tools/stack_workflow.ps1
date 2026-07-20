@@ -48,6 +48,8 @@ function Get-StackPaths {
         LegacyReleaseDir = Join-Path $outputsRoot "release"
         LegacyReleaseTestDir = Join-Path $outputsRoot "release_test"
         ExtraBuildArchiveRoot = Join-Path $Root "_local_archive\build-folders"
+        FfmpegProviderSourceDir = Join-Path $Root "_workspace\ffmpeg-provider"
+        FfmpegProviderStageRelativeDir = "tools\ffmpeg"
     }
 }
 
@@ -308,6 +310,300 @@ function Copy-ReleaseDirectoryContents {
     Get-ChildItem -LiteralPath $SourceDir -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $DestinationDir -Recurse -Force
     }
+}
+
+function Test-StackRelativePathInsideDirectory {
+    param(
+        [string]$BaseDir,
+        [string]$RelativePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BaseDir) -or [string]::IsNullOrWhiteSpace($RelativePath)) {
+        return $false
+    }
+
+    if ([System.IO.Path]::IsPathRooted($RelativePath)) {
+        return $false
+    }
+
+    $baseFullPath = [System.IO.Path]::GetFullPath($BaseDir)
+    $candidateFullPath = [System.IO.Path]::GetFullPath((Join-Path $BaseDir $RelativePath))
+    if (-not $baseFullPath.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $baseFullPath = $baseFullPath + [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    return $candidateFullPath.StartsWith($baseFullPath, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-StackProviderRelativePath {
+    param(
+        [string]$ProviderDir,
+        [string]$RelativePath
+    )
+
+    if (-not (Test-StackRelativePathInsideDirectory -BaseDir $ProviderDir -RelativePath $RelativePath)) {
+        return $null
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $ProviderDir $RelativePath))
+}
+
+function Test-StackFfmpegLicenseMarkerApproved {
+    param([string]$License)
+
+    if ([string]::IsNullOrWhiteSpace($License)) {
+        return $false
+    }
+
+    $lowerLicense = $License.ToLowerInvariant()
+    if ($lowerLicense.Contains("nonfree") -or $lowerLicense.Contains("proprietary")) {
+        return $false
+    }
+
+    if ($lowerLicense.Contains("lgpl")) {
+        return $true
+    }
+
+    return -not $lowerLicense.Contains("gpl")
+}
+
+function Get-StackManifestStringArray {
+    param(
+        [object]$Manifest,
+        [string]$PropertyName
+    )
+
+    $property = $Manifest.PSObject.Properties[$PropertyName]
+    if (-not $property) {
+        return $null
+    }
+
+    if ($null -eq $property.Value) {
+        return $null
+    }
+
+    if ($property.Value -is [System.Array]) {
+        return @($property.Value | ForEach-Object { [string]$_ })
+    }
+
+    return @([string]$property.Value)
+}
+
+function Test-StackFfmpegProviderFileList {
+    param(
+        [object]$Status,
+        [object]$Manifest,
+        [string]$PropertyName,
+        [switch]$Required
+    )
+
+    $files = Get-StackManifestStringArray -Manifest $Manifest -PropertyName $PropertyName
+    if ($null -eq $files) {
+        if ($Required) {
+            [void]$Status.Errors.Add("FFmpeg provider manifest is missing required $PropertyName entries.")
+        }
+        return
+    }
+
+    $files = @($files)
+    if ($files.Count -eq 0) {
+        if ($Required) {
+            [void]$Status.Errors.Add("FFmpeg provider manifest is missing required $PropertyName entries.")
+        }
+        return
+    }
+
+    foreach ($file in $files) {
+        if ([string]::IsNullOrWhiteSpace($file)) {
+            [void]$Status.Errors.Add("FFmpeg provider manifest has an empty $PropertyName entry.")
+            continue
+        }
+
+        $resolvedPath = Resolve-StackProviderRelativePath -ProviderDir $Status.ProviderDirectory -RelativePath $file
+        if (-not $resolvedPath) {
+            [void]$Status.Errors.Add("FFmpeg provider $PropertyName entry must be a relative path inside the provider directory: $file")
+            continue
+        }
+
+        if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+            [void]$Status.Errors.Add("FFmpeg provider $PropertyName file is missing: $file")
+        }
+    }
+}
+
+function Get-StackFfmpegProviderStatus {
+    param([string]$ProviderDir)
+
+    $status = [pscustomobject]@{
+        ProviderDirectory = $ProviderDir
+        ManifestPath = Join-Path $ProviderDir "ffmpeg-provider.json"
+        ExecutablePath = ""
+        ProviderName = ""
+        FfmpegVersion = ""
+        License = ""
+        ConfigureLine = ""
+        ProviderDirectoryPresent = $false
+        ManifestPresent = $false
+        ExecutablePresent = $false
+        ApprovedForRedistribution = $false
+        Available = $false
+        UnsafeBuild = $false
+        Message = ""
+        Warnings = [System.Collections.Generic.List[string]]::new()
+        Errors = [System.Collections.Generic.List[string]]::new()
+    }
+
+    $status.ProviderDirectoryPresent = Test-Path -LiteralPath $status.ProviderDirectory -PathType Container
+    $status.ManifestPresent = Test-Path -LiteralPath $status.ManifestPath -PathType Leaf
+
+    if (-not $status.ProviderDirectoryPresent -and -not $status.ManifestPresent) {
+        $status.Message = "No optional FFmpeg provider found. Stack will package and run without packaged video encoding."
+        return $status
+    }
+
+    if (-not $status.ManifestPresent) {
+        [void]$status.Errors.Add("FFmpeg provider directory exists but ffmpeg-provider.json is missing.")
+        $status.Message = "An optional FFmpeg provider was found but is not packageable."
+        return $status
+    }
+
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $status.ManifestPath | ConvertFrom-Json
+    }
+    catch {
+        [void]$status.Errors.Add("FFmpeg provider manifest could not be parsed: $($_.Exception.Message)")
+        $status.Message = "An optional FFmpeg provider was found but is not packageable."
+        return $status
+    }
+
+    $status.ProviderName = [string]$manifest.providerName
+    $status.FfmpegVersion = [string]$manifest.ffmpegVersion
+    $status.License = [string]$manifest.license
+    $status.ConfigureLine = [string]$manifest.configureLine
+    $status.ApprovedForRedistribution = [bool]$manifest.approvedForRedistribution
+
+    if ($manifest.schema -ne "stack.ffmpegProvider") {
+        [void]$status.Errors.Add("FFmpeg provider manifest schema is not stack.ffmpegProvider.")
+    }
+
+    if ([int]$manifest.schemaVersion -ne 1) {
+        [void]$status.Errors.Add("FFmpeg provider manifest schemaVersion is not 1.")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($manifest.binaryFile)) {
+        [void]$status.Errors.Add("FFmpeg provider manifest is missing binaryFile.")
+    }
+    else {
+        $resolvedExecutablePath = Resolve-StackProviderRelativePath -ProviderDir $status.ProviderDirectory -RelativePath ([string]$manifest.binaryFile)
+        if (-not $resolvedExecutablePath) {
+            [void]$status.Errors.Add("FFmpeg provider binaryFile must be a relative path inside the provider directory.")
+        }
+        else {
+            $status.ExecutablePath = $resolvedExecutablePath
+            $status.ExecutablePresent = Test-Path -LiteralPath $status.ExecutablePath -PathType Leaf
+            if (-not $status.ExecutablePresent) {
+                [void]$status.Errors.Add("FFmpeg provider executable is missing.")
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($status.ProviderName)) {
+        [void]$status.Warnings.Add("FFmpeg provider manifest is missing providerName.")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($status.FfmpegVersion)) {
+        [void]$status.Warnings.Add("FFmpeg provider manifest is missing ffmpegVersion.")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($status.License)) {
+        [void]$status.Errors.Add("FFmpeg provider manifest is missing license.")
+    }
+    elseif (-not (Test-StackFfmpegLicenseMarkerApproved -License $status.License)) {
+        $status.UnsafeBuild = $true
+        [void]$status.Errors.Add("FFmpeg provider license marker is not approved for Stack packaging.")
+    }
+
+    $lowerConfigureLine = $status.ConfigureLine.ToLowerInvariant()
+    if ($lowerConfigureLine.Contains("--enable-nonfree")) {
+        $status.UnsafeBuild = $true
+        [void]$status.Errors.Add("FFmpeg provider configure line includes --enable-nonfree.")
+    }
+
+    if ($lowerConfigureLine.Contains("--enable-gpl")) {
+        $status.UnsafeBuild = $true
+        [void]$status.Errors.Add("FFmpeg provider configure line includes --enable-gpl.")
+    }
+
+    if (-not $status.ApprovedForRedistribution) {
+        [void]$status.Errors.Add("FFmpeg provider manifest is not approved for redistribution.")
+    }
+
+    Test-StackFfmpegProviderFileList -Status $status -Manifest $manifest -PropertyName "licenseFiles" -Required
+    Test-StackFfmpegProviderFileList -Status $status -Manifest $manifest -PropertyName "sourceReferenceFiles" -Required
+    Test-StackFfmpegProviderFileList -Status $status -Manifest $manifest -PropertyName "noticeFiles"
+
+    if ($status.Errors.Count -eq 0) {
+        $status.Available = $true
+        $status.Message = "Approved optional FFmpeg provider is ready for packaging."
+    }
+    else {
+        $status.Message = "An optional FFmpeg provider was found but is not packageable."
+    }
+
+    return $status
+}
+
+function Show-StackFfmpegProviderStatus {
+    param([object]$Status)
+
+    Write-Host $Status.Message
+    Write-Host "Provider folder: $($Status.ProviderDirectory)"
+    if ($Status.ExecutablePath) {
+        Write-Host "Executable:      $($Status.ExecutablePath)"
+    }
+    if ($Status.ProviderName) {
+        Write-Host "Provider:        $($Status.ProviderName)"
+    }
+    if ($Status.FfmpegVersion) {
+        Write-Host "FFmpeg version:  $($Status.FfmpegVersion)"
+    }
+    if ($Status.License) {
+        Write-Host "License marker:  $($Status.License)"
+    }
+    foreach ($warning in $Status.Warnings) {
+        Write-Host "Warning: $warning"
+    }
+    foreach ($error in $Status.Errors) {
+        Write-Host "Error: $error"
+    }
+}
+
+function Copy-OptionalFfmpegProvider {
+    param(
+        [object]$Paths,
+        [string]$StageDir
+    )
+
+    $status = Get-StackFfmpegProviderStatus -ProviderDir $Paths.FfmpegProviderSourceDir
+    Show-StackFfmpegProviderStatus -Status $status
+
+    if (-not $status.ProviderDirectoryPresent -and -not $status.ManifestPresent) {
+        return $false
+    }
+
+    if ($status.Errors.Count -gt 0) {
+        $message = "Optional FFmpeg provider failed packaging validation."
+        foreach ($error in $status.Errors) {
+            $message += "`n - $error"
+        }
+        throw $message
+    }
+
+    $destinationDir = Join-Path $StageDir $Paths.FfmpegProviderStageRelativeDir
+    Ensure-StackDirectory -Path $destinationDir
+    Copy-ReleaseDirectoryContents -SourceDir $Paths.FfmpegProviderSourceDir -DestinationDir $destinationDir
+    Write-Host "Copied optional FFmpeg provider to: $destinationDir"
+    return $true
 }
 
 function New-LicensePageFile {

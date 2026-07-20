@@ -31,7 +31,19 @@ constexpr const char* kLegacyThemeKey = "themePreset";
 constexpr const char* kGraphVisualModeKey = "graphVisualMode";
 constexpr const char* kGraphSpotlightHaloOutlinesKey = "graphSpotlightHaloOutlines";
 constexpr const char* kGraphDottedMaskLinksKey = "graphDottedMaskLinks";
+constexpr const char* kGraphStraightLinksKey = "graphStraightLinks";
 constexpr const char* kGraphLineOpacityKey = "graphLineOpacity";
+constexpr const char* kGraphPanSensitivityKey = "graphPanSensitivity";
+constexpr const char* kGraphNodeSliderDragSensitivityKey = "graphNodeSliderDragSensitivity";
+constexpr const char* kGraphConnectionLabelsKey = "graphConnectionLabels";
+constexpr const char* kGraphConnectionTextLayoutKey = "graphConnectionTextLayout";
+constexpr const char* kGraphConnectionTextSizeKey = "graphConnectionTextSize";
+constexpr const char* kGraphConnectionTextSizingKey = "graphConnectionTextSizing";
+constexpr const char* kGraphConnectionTextOutlineKey = "graphConnectionTextOutline";
+constexpr const char* kGraphNodeSizePresetKey = "graphNodeSizePreset";
+constexpr const char* kGraphNodeWidthScaleKey = "graphNodeWidthScale";
+constexpr const char* kGraphNodeUiScaleKey = "graphNodeUiScale";
+constexpr const char* kGraphNodeGrabAreaHeightKey = "graphNodeGrabAreaHeight";
 constexpr const char* kViewportTilingKey = "viewportTiling";
 constexpr const char* kViewportTilingModeKey = "mode";
 constexpr const char* kViewportTilingTileSizeKey = "tileSize";
@@ -79,12 +91,105 @@ float Luminance(const ImVec4& color) {
     return (0.2126f * color.x) + (0.7152f * color.y) + (0.0722f * color.z);
 }
 
-float ComputeSurfaceAlphaMultiplier(float transparency) {
+float ClampGraphNodeSliderDragSensitivity(float sensitivity) {
+    return std::clamp(
+        sensitivity,
+        kGraphNodeSliderDragSensitivityMin,
+        kGraphNodeSliderDragSensitivityMax);
+}
+
+float ClampGraphConnectionTextSize(float value) {
+    return std::clamp(value, kGraphConnectionTextSizeMin, kGraphConnectionTextSizeMax);
+}
+
+float ClampGraphNodeWidthScale(float value) {
+    return std::clamp(value, kGraphNodeWidthScaleMin, kGraphNodeWidthScaleMax);
+}
+
+float ClampGraphNodeUiScale(float value) {
+    return std::clamp(value, kGraphNodeUiScaleMin, kGraphNodeUiScaleMax);
+}
+
+float ClampGraphNodeGrabAreaHeight(float value) {
+    return std::clamp(value, kGraphNodeGrabAreaHeightMin, kGraphNodeGrabAreaHeightMax);
+}
+
+const char* GraphConnectionLabelsToString(GraphConnectionLabelVisibility value) {
+    switch (value) {
+        case GraphConnectionLabelVisibility::Adaptive: return "Adaptive";
+        case GraphConnectionLabelVisibility::Always: return "Always";
+        case GraphConnectionLabelVisibility::InteractionOnly: return "Interaction Only";
+        case GraphConnectionLabelVisibility::Off: return "Off";
+    }
+    return "Adaptive";
+}
+
+GraphConnectionLabelVisibility GraphConnectionLabelsFromString(const std::string& value) {
+    if (value == "Always") return GraphConnectionLabelVisibility::Always;
+    if (value == "Interaction Only") return GraphConnectionLabelVisibility::InteractionOnly;
+    if (value == "Off") return GraphConnectionLabelVisibility::Off;
+    return GraphConnectionLabelVisibility::Adaptive;
+}
+
+const char* GraphConnectionTextLayoutToString(GraphConnectionTextLayout value) {
+    return value == GraphConnectionTextLayout::BreakLine ? "Break Line" : "Floating";
+}
+
+GraphConnectionTextLayout GraphConnectionTextLayoutFromString(const std::string& value) {
+    return value == "Break Line"
+        ? GraphConnectionTextLayout::BreakLine
+        : GraphConnectionTextLayout::Floating;
+}
+
+const char* GraphConnectionTextSizingToString(GraphConnectionTextSizing value) {
+    return value == GraphConnectionTextSizing::Fixed ? "Fixed" : "Zoom-Aware";
+}
+
+GraphConnectionTextSizing GraphConnectionTextSizingFromString(const std::string& value) {
+    return value == "Fixed"
+        ? GraphConnectionTextSizing::Fixed
+        : GraphConnectionTextSizing::ZoomAware;
+}
+
+const char* GraphNodeSizePresetToString(GraphNodeSizePreset value) {
+    switch (value) {
+        case GraphNodeSizePreset::Compact: return "Compact";
+        case GraphNodeSizePreset::Comfortable: return "Comfortable";
+        case GraphNodeSizePreset::Spacious: return "Spacious";
+        case GraphNodeSizePreset::Custom: return "Custom";
+    }
+    return "Comfortable";
+}
+
+GraphNodeSizePreset GraphNodeSizePresetFromString(const std::string& value) {
+    if (value == "Compact") return GraphNodeSizePreset::Compact;
+    if (value == "Spacious") return GraphNodeSizePreset::Spacious;
+    if (value == "Custom") return GraphNodeSizePreset::Custom;
+    return GraphNodeSizePreset::Comfortable;
+}
+
+float ComputeLegacySurfaceAlphaMultiplier(float transparency) {
     return std::clamp(0.18f + ((1.0f - ClampUnit(transparency)) * 0.28f), 0.18f, 0.46f);
 }
 
+float ComputeSurfaceAlphaMultiplier(float transparency) {
+    const float clampedTransparency = ClampUnit(transparency);
+    constexpr float kOpaqueThreshold = 0.15f;
+
+    // Preserve the existing "glass" range through most of the slider, but
+    // reserve the low end so users can fade all the way to fully opaque UI.
+    if (clampedTransparency <= kOpaqueThreshold) {
+        const float t = kOpaqueThreshold > 0.0f ? (clampedTransparency / kOpaqueThreshold) : 1.0f;
+        return std::clamp(1.0f + ((0.46f - 1.0f) * t), 0.46f, 1.0f);
+    }
+
+    const float legacyTransparency =
+        (clampedTransparency - kOpaqueThreshold) / (1.0f - kOpaqueThreshold);
+    return ComputeLegacySurfaceAlphaMultiplier(legacyTransparency);
+}
+
 float ComputePopupAlphaMultiplier(float transparency) {
-    return std::clamp(ComputeSurfaceAlphaMultiplier(transparency) + 0.14f, 0.28f, 0.62f);
+    return std::clamp(ComputeSurfaceAlphaMultiplier(transparency) + 0.14f, 0.28f, 1.0f);
 }
 
 RuntimeSurfacePalette BuildRuntimeSurfacePalette(const ThemeDefinition& theme, float transparency, bool seamlessSurfaceStylingEnabled) {
@@ -1231,7 +1336,29 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
     root[kAppearanceKey][kGraphVisualModeKey] = GraphVisualModeToString(library.graphVisualMode);
     root[kAppearanceKey][kGraphSpotlightHaloOutlinesKey] = library.graphSpotlightHaloOutlines;
     root[kAppearanceKey][kGraphDottedMaskLinksKey] = library.graphDottedMaskLinks;
+    root[kAppearanceKey][kGraphStraightLinksKey] = library.graphStraightLinks;
     root[kAppearanceKey][kGraphLineOpacityKey] = ClampUnit(library.graphLineOpacity);
+    root[kAppearanceKey][kGraphPanSensitivityKey] = ClampUnit(library.graphPanSensitivity);
+    root[kAppearanceKey][kGraphNodeSliderDragSensitivityKey] =
+        ClampGraphNodeSliderDragSensitivity(library.graphNodeSliderDragSensitivity);
+    root[kAppearanceKey][kGraphConnectionLabelsKey] =
+        GraphConnectionLabelsToString(library.graphConnectionLabels);
+    root[kAppearanceKey][kGraphConnectionTextLayoutKey] =
+        GraphConnectionTextLayoutToString(library.graphConnectionTextLayout);
+    root[kAppearanceKey][kGraphConnectionTextSizeKey] =
+        ClampGraphConnectionTextSize(library.graphConnectionTextSize);
+    root[kAppearanceKey][kGraphConnectionTextSizingKey] =
+        GraphConnectionTextSizingToString(library.graphConnectionTextSizing);
+    root[kAppearanceKey][kGraphConnectionTextOutlineKey] =
+        library.graphConnectionTextOutline;
+    root[kAppearanceKey][kGraphNodeSizePresetKey] =
+        GraphNodeSizePresetToString(library.graphNodeSizing.preset);
+    root[kAppearanceKey][kGraphNodeWidthScaleKey] =
+        ClampGraphNodeWidthScale(library.graphNodeSizing.widthScale);
+    root[kAppearanceKey][kGraphNodeUiScaleKey] =
+        ClampGraphNodeUiScale(library.graphNodeSizing.uiScale);
+    root[kAppearanceKey][kGraphNodeGrabAreaHeightKey] =
+        ClampGraphNodeGrabAreaHeight(library.graphNodeSizing.grabAreaHeight);
     root[kAppearanceKey][kViewportTilingKey] = json::object();
     root[kAppearanceKey][kViewportTilingKey][kViewportTilingModeKey] =
         RenderTiling::ViewportTilingModeToString(viewportTiling.mode);
@@ -1264,7 +1391,16 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
     outLibrary.graphVisualMode = GraphVisualMode::Classic;
     outLibrary.graphSpotlightHaloOutlines = false;
     outLibrary.graphDottedMaskLinks = false;
+    outLibrary.graphStraightLinks = false;
     outLibrary.graphLineOpacity = 1.0f;
+    outLibrary.graphPanSensitivity = 0.55f;
+    outLibrary.graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
+    outLibrary.graphConnectionLabels = GraphConnectionLabelVisibility::Adaptive;
+    outLibrary.graphConnectionTextLayout = GraphConnectionTextLayout::Floating;
+    outLibrary.graphConnectionTextSize = kGraphConnectionTextSizeDefault;
+    outLibrary.graphConnectionTextSizing = GraphConnectionTextSizing::ZoomAware;
+    outLibrary.graphConnectionTextOutline = false;
+    outLibrary.graphNodeSizing = GraphNodeSizingForPreset(GraphNodeSizePreset::Comfortable);
     outLibrary.viewportTiling = RenderTiling::NormalizeSettings({});
     outLibrary.backgroundImageEnabled = false;
     outLibrary.backgroundImagePath.clear();
@@ -1291,7 +1427,16 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         outLibrary.graphVisualMode = GraphVisualMode::Classic;
         outLibrary.graphSpotlightHaloOutlines = false;
         outLibrary.graphDottedMaskLinks = false;
+        outLibrary.graphStraightLinks = false;
         outLibrary.graphLineOpacity = 1.0f;
+        outLibrary.graphPanSensitivity = 0.55f;
+        outLibrary.graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
+        outLibrary.graphConnectionLabels = GraphConnectionLabelVisibility::Adaptive;
+        outLibrary.graphConnectionTextLayout = GraphConnectionTextLayout::Floating;
+        outLibrary.graphConnectionTextSize = kGraphConnectionTextSizeDefault;
+        outLibrary.graphConnectionTextSizing = GraphConnectionTextSizing::ZoomAware;
+        outLibrary.graphConnectionTextOutline = false;
+        outLibrary.graphNodeSizing = GraphNodeSizingForPreset(GraphNodeSizePreset::Comfortable);
         outLibrary.viewportTiling = RenderTiling::NormalizeSettings({});
         return true;
     }
@@ -1301,6 +1446,8 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         version != 4 &&
         version != 5 &&
         version != 6 &&
+        version != 7 &&
+        version != 8 &&
         version != static_cast<int>(kAppearanceSettingsVersion)) {
         return false;
     }
@@ -1314,12 +1461,35 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::Classic))));
     outLibrary.graphSpotlightHaloOutlines = appearance.value(kGraphSpotlightHaloOutlinesKey, false);
     outLibrary.graphDottedMaskLinks = appearance.value(kGraphDottedMaskLinksKey, false);
+    outLibrary.graphStraightLinks = appearance.value(kGraphStraightLinksKey, false);
     outLibrary.graphLineOpacity = ClampUnit(appearance.value(kGraphLineOpacityKey, 1.0f));
+    outLibrary.graphPanSensitivity = ClampUnit(appearance.value(kGraphPanSensitivityKey, 0.55f));
+    outLibrary.graphNodeSliderDragSensitivity = ClampGraphNodeSliderDragSensitivity(
+        appearance.value(
+            kGraphNodeSliderDragSensitivityKey,
+            kGraphNodeSliderDragSensitivityDefault));
+    outLibrary.graphConnectionLabels = GraphConnectionLabelsFromString(
+        appearance.value(kGraphConnectionLabelsKey, std::string("Adaptive")));
+    outLibrary.graphConnectionTextLayout = GraphConnectionTextLayoutFromString(
+        appearance.value(kGraphConnectionTextLayoutKey, std::string("Floating")));
+    outLibrary.graphConnectionTextSize = ClampGraphConnectionTextSize(
+        appearance.value(kGraphConnectionTextSizeKey, kGraphConnectionTextSizeDefault));
+    outLibrary.graphConnectionTextSizing = GraphConnectionTextSizingFromString(
+        appearance.value(kGraphConnectionTextSizingKey, std::string("Zoom-Aware")));
+    outLibrary.graphConnectionTextOutline = appearance.value(kGraphConnectionTextOutlineKey, false);
+    outLibrary.graphNodeSizing.preset = GraphNodeSizePresetFromString(
+        appearance.value(kGraphNodeSizePresetKey, std::string("Comfortable")));
+    outLibrary.graphNodeSizing.widthScale = ClampGraphNodeWidthScale(
+        appearance.value(kGraphNodeWidthScaleKey, 1.12f));
+    outLibrary.graphNodeSizing.uiScale = ClampGraphNodeUiScale(
+        appearance.value(kGraphNodeUiScaleKey, 1.0f));
+    outLibrary.graphNodeSizing.grabAreaHeight = ClampGraphNodeGrabAreaHeight(
+        appearance.value(kGraphNodeGrabAreaHeightKey, 38.0f));
     ViewportTilingSettings viewportTiling;
     const json viewportTilingJson = appearance.value(kViewportTilingKey, json::object());
     if (viewportTilingJson.is_object()) {
         viewportTiling.mode = RenderTiling::ViewportTilingModeFromString(
-            viewportTilingJson.value(kViewportTilingModeKey, std::string("Auto")));
+            viewportTilingJson.value(kViewportTilingModeKey, std::string("Off")));
         viewportTiling.tileSize = viewportTilingJson.value(kViewportTilingTileSizeKey, viewportTiling.tileSize);
         viewportTiling.haloPixels = viewportTilingJson.value(kViewportTilingHaloPixelsKey, viewportTiling.haloPixels);
         viewportTiling.autoPixelThresholdMegapixels =
@@ -1434,6 +1604,92 @@ std::string GetSettingsFileToken() {
 }
 
 } // namespace
+
+GraphNodeSizing GraphNodeSizingForPreset(GraphNodeSizePreset preset) {
+    switch (preset) {
+        case GraphNodeSizePreset::Compact:
+            return GraphNodeSizing{ preset, 1.0f, 1.0f, 30.0f };
+        case GraphNodeSizePreset::Spacious:
+            return GraphNodeSizing{ preset, 1.25f, 1.08f, 48.0f };
+        case GraphNodeSizePreset::Custom:
+            return GraphNodeSizing{ preset, 1.12f, 1.0f, 38.0f };
+        case GraphNodeSizePreset::Comfortable:
+        default:
+            return GraphNodeSizing{ GraphNodeSizePreset::Comfortable, 1.12f, 1.0f, 38.0f };
+    }
+}
+
+bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessage) {
+    AppearanceLibrary original;
+    original.graphConnectionLabels = GraphConnectionLabelVisibility::Always;
+    original.graphConnectionTextLayout = GraphConnectionTextLayout::BreakLine;
+    original.graphConnectionTextSize = 15.0f;
+    original.graphConnectionTextSizing = GraphConnectionTextSizing::Fixed;
+    original.graphConnectionTextOutline = true;
+    original.graphNodeSizing = GraphNodeSizingForPreset(GraphNodeSizePreset::Spacious);
+    const json encoded = AppearanceLibraryToJson(original);
+    if (encoded.value(kVersionKey, 0) != static_cast<int>(kAppearanceSettingsVersion)) {
+        if (errorMessage) *errorMessage = "Appearance serialization did not advance to version 9.";
+        return false;
+    }
+
+    AppearanceLibrary decoded;
+    bool needsMigration = false;
+    if (!LoadAppearanceLibraryFromJson(encoded, decoded, &needsMigration) ||
+        needsMigration ||
+        decoded.graphConnectionLabels != GraphConnectionLabelVisibility::Always ||
+        decoded.graphConnectionTextLayout != GraphConnectionTextLayout::BreakLine ||
+        std::abs(decoded.graphConnectionTextSize - 15.0f) > 0.0005f ||
+        decoded.graphConnectionTextSizing != GraphConnectionTextSizing::Fixed ||
+        !decoded.graphConnectionTextOutline ||
+        decoded.graphNodeSizing.preset != GraphNodeSizePreset::Spacious ||
+        std::abs(decoded.graphNodeSizing.widthScale - 1.25f) > 0.0005f ||
+        std::abs(decoded.graphNodeSizing.uiScale - 1.08f) > 0.0005f ||
+        std::abs(decoded.graphNodeSizing.grabAreaHeight - 48.0f) > 0.0005f) {
+        if (errorMessage) *errorMessage = "Connection label appearance settings did not round-trip.";
+        return false;
+    }
+
+    json versionSeven = encoded;
+    versionSeven[kVersionKey] = 7;
+    versionSeven[kAppearanceKey].erase(kGraphConnectionLabelsKey);
+    versionSeven[kAppearanceKey].erase(kGraphConnectionTextLayoutKey);
+    AppearanceLibrary migrated;
+    needsMigration = false;
+    if (!LoadAppearanceLibraryFromJson(versionSeven, migrated, &needsMigration) ||
+        !needsMigration ||
+        migrated.graphConnectionLabels != GraphConnectionLabelVisibility::Adaptive ||
+        migrated.graphConnectionTextLayout != GraphConnectionTextLayout::Floating) {
+        if (errorMessage) *errorMessage = "Version 7 appearance settings did not migrate to Adaptive/Floating defaults.";
+        return false;
+    }
+
+    json versionEight = encoded;
+    versionEight[kVersionKey] = 8;
+    versionEight[kAppearanceKey].erase(kGraphConnectionTextSizeKey);
+    versionEight[kAppearanceKey].erase(kGraphConnectionTextSizingKey);
+    versionEight[kAppearanceKey].erase(kGraphConnectionTextOutlineKey);
+    versionEight[kAppearanceKey].erase(kGraphNodeSizePresetKey);
+    versionEight[kAppearanceKey].erase(kGraphNodeWidthScaleKey);
+    versionEight[kAppearanceKey].erase(kGraphNodeUiScaleKey);
+    versionEight[kAppearanceKey].erase(kGraphNodeGrabAreaHeightKey);
+    migrated = {};
+    needsMigration = false;
+    if (!LoadAppearanceLibraryFromJson(versionEight, migrated, &needsMigration) ||
+        !needsMigration ||
+        std::abs(migrated.graphConnectionTextSize - kGraphConnectionTextSizeDefault) > 0.0005f ||
+        migrated.graphConnectionTextSizing != GraphConnectionTextSizing::ZoomAware ||
+        migrated.graphConnectionTextOutline ||
+        migrated.graphNodeSizing.preset != GraphNodeSizePreset::Comfortable ||
+        std::abs(migrated.graphNodeSizing.widthScale - 1.12f) > 0.0005f ||
+        std::abs(migrated.graphNodeSizing.uiScale - 1.0f) > 0.0005f ||
+        std::abs(migrated.graphNodeSizing.grabAreaHeight - 38.0f) > 0.0005f) {
+        if (errorMessage) *errorMessage = "Version 8 appearance settings did not migrate to the Phase 5B-C defaults.";
+        return false;
+    }
+    if (errorMessage) errorMessage->clear();
+    return true;
+}
 
 ThemeDefinition MakeFactoryPremiumDarkStudioTheme() {
     return BuildFactoryTheme();
@@ -1783,8 +2039,44 @@ bool AppearanceManager::GetGraphDottedMaskLinks() const {
     return m_Library.graphDottedMaskLinks;
 }
 
+bool AppearanceManager::GetGraphStraightLinks() const {
+    return m_Library.graphStraightLinks;
+}
+
 float AppearanceManager::GetGraphLineOpacity() const {
     return ClampUnit(m_Library.graphLineOpacity);
+}
+
+float AppearanceManager::GetGraphPanSensitivity() const {
+    return ClampUnit(m_Library.graphPanSensitivity);
+}
+
+float AppearanceManager::GetGraphNodeSliderDragSensitivity() const {
+    return ClampGraphNodeSliderDragSensitivity(m_Library.graphNodeSliderDragSensitivity);
+}
+
+GraphConnectionLabelVisibility AppearanceManager::GetGraphConnectionLabels() const {
+    return m_Library.graphConnectionLabels;
+}
+
+GraphConnectionTextLayout AppearanceManager::GetGraphConnectionTextLayout() const {
+    return m_Library.graphConnectionTextLayout;
+}
+
+float AppearanceManager::GetGraphConnectionTextSize() const {
+    return ClampGraphConnectionTextSize(m_Library.graphConnectionTextSize);
+}
+
+GraphConnectionTextSizing AppearanceManager::GetGraphConnectionTextSizing() const {
+    return m_Library.graphConnectionTextSizing;
+}
+
+bool AppearanceManager::GetGraphConnectionTextOutline() const {
+    return m_Library.graphConnectionTextOutline;
+}
+
+const GraphNodeSizing& AppearanceManager::GetGraphNodeSizing() const {
+    return m_Library.graphNodeSizing;
 }
 
 const ViewportTilingSettings& AppearanceManager::GetViewportTilingSettings() const {
@@ -1911,6 +2203,15 @@ bool AppearanceManager::SetGraphDottedMaskLinks(bool enabled) {
     return Save();
 }
 
+bool AppearanceManager::SetGraphStraightLinks(bool enabled) {
+    if (m_Library.graphStraightLinks == enabled) {
+        return true;
+    }
+    m_Library.graphStraightLinks = enabled;
+    TouchRevision();
+    return Save();
+}
+
 bool AppearanceManager::SetGraphLineOpacity(float opacity) {
     const float clamped = ClampUnit(opacity);
     if (std::abs(m_Library.graphLineOpacity - clamped) < 0.0005f) {
@@ -1919,6 +2220,133 @@ bool AppearanceManager::SetGraphLineOpacity(float opacity) {
     m_Library.graphLineOpacity = clamped;
     TouchRevision();
     return Save();
+}
+
+bool AppearanceManager::SetGraphPanSensitivity(float sensitivity) {
+    const float clamped = ClampUnit(sensitivity);
+    if (std::abs(m_Library.graphPanSensitivity - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphPanSensitivity = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphNodeSliderDragSensitivity(float sensitivity) {
+    const float clamped = ClampGraphNodeSliderDragSensitivity(sensitivity);
+    if (std::abs(m_Library.graphNodeSliderDragSensitivity - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphNodeSliderDragSensitivity = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphConnectionLabels(GraphConnectionLabelVisibility visibility) {
+    if (m_Library.graphConnectionLabels == visibility) {
+        return true;
+    }
+    m_Library.graphConnectionLabels = visibility;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphConnectionTextLayout(GraphConnectionTextLayout layout) {
+    if (m_Library.graphConnectionTextLayout == layout) {
+        return true;
+    }
+    m_Library.graphConnectionTextLayout = layout;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphConnectionTextSize(float size) {
+    const float clamped = ClampGraphConnectionTextSize(size);
+    if (std::abs(m_Library.graphConnectionTextSize - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphConnectionTextSize = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphConnectionTextSizing(GraphConnectionTextSizing sizing) {
+    if (m_Library.graphConnectionTextSizing == sizing) {
+        return true;
+    }
+    m_Library.graphConnectionTextSizing = sizing;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphConnectionTextOutline(bool enabled) {
+    if (m_Library.graphConnectionTextOutline == enabled) {
+        return true;
+    }
+    m_Library.graphConnectionTextOutline = enabled;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphNodeSizePreset(GraphNodeSizePreset preset) {
+    if (preset == GraphNodeSizePreset::Custom) {
+        if (m_Library.graphNodeSizing.preset == GraphNodeSizePreset::Custom) {
+            return true;
+        }
+        m_Library.graphNodeSizing.preset = GraphNodeSizePreset::Custom;
+        TouchRevision();
+        return Save();
+    }
+    const GraphNodeSizing next = GraphNodeSizingForPreset(preset);
+    if (m_Library.graphNodeSizing.preset == next.preset &&
+        std::abs(m_Library.graphNodeSizing.widthScale - next.widthScale) < 0.0005f &&
+        std::abs(m_Library.graphNodeSizing.uiScale - next.uiScale) < 0.0005f &&
+        std::abs(m_Library.graphNodeSizing.grabAreaHeight - next.grabAreaHeight) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphNodeSizing = next;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphNodeWidthScale(float scale) {
+    const float clamped = ClampGraphNodeWidthScale(scale);
+    if (m_Library.graphNodeSizing.preset == GraphNodeSizePreset::Custom &&
+        std::abs(m_Library.graphNodeSizing.widthScale - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphNodeSizing.preset = GraphNodeSizePreset::Custom;
+    m_Library.graphNodeSizing.widthScale = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphNodeUiScale(float scale) {
+    const float clamped = ClampGraphNodeUiScale(scale);
+    if (m_Library.graphNodeSizing.preset == GraphNodeSizePreset::Custom &&
+        std::abs(m_Library.graphNodeSizing.uiScale - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphNodeSizing.preset = GraphNodeSizePreset::Custom;
+    m_Library.graphNodeSizing.uiScale = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::SetGraphNodeGrabAreaHeight(float height) {
+    const float clamped = ClampGraphNodeGrabAreaHeight(height);
+    if (m_Library.graphNodeSizing.preset == GraphNodeSizePreset::Custom &&
+        std::abs(m_Library.graphNodeSizing.grabAreaHeight - clamped) < 0.0005f) {
+        return true;
+    }
+    m_Library.graphNodeSizing.preset = GraphNodeSizePreset::Custom;
+    m_Library.graphNodeSizing.grabAreaHeight = clamped;
+    TouchRevision();
+    return Save();
+}
+
+bool AppearanceManager::ResetGraphNodeSizing() {
+    return SetGraphNodeSizePreset(GraphNodeSizePreset::Comfortable);
 }
 
 bool AppearanceManager::SetViewportTilingSettings(const ViewportTilingSettings& settings) {

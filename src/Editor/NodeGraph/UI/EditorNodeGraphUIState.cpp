@@ -47,6 +47,7 @@ bool EditorNodeGraphUI::ResolveNodeHasDedicatedComplexEditor(
         return true;
     }
     switch (node.kind) {
+        case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawDevelopment:
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
@@ -67,6 +68,10 @@ bool EditorNodeGraphUI::ResolveLayerUsesRichNodeSurface(const EditorModule* edit
         return false;
     }
     return editor && editor->LayerUsesRichNodeSurface(layerIndex);
+}
+
+unsigned int EditorNodeGraphUI::GetImagePreviewTextureForNode(const EditorNodeGraph::Node& node) {
+    return GetImagePreviewTexture(node);
 }
 
 EditorNodeGraphUI::PreviewGraphCacheEntry* EditorNodeGraphUI::GetPresetPreviewGraphCacheEntry(const std::string& presetId) {

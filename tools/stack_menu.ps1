@@ -46,7 +46,8 @@ function Show-StackMenuHeader {
     Write-Host "7. Open the current release folder"
     Write-Host "8. Open the release archive folder"
     Write-Host "9. Archive extra old build folders"
-    Write-Host "10. Show the important paths again"
+    Write-Host "10. Show optional FFmpeg provider status"
+    Write-Host "11. Show the important paths again"
     Write-Host "Q. Quit"
     Write-Host ""
 }
@@ -61,13 +62,33 @@ function Invoke-StackValidation {
         return
     }
 
+    $allPassed = $true
+
     & $exePath --validate-layer-registry
-    if ($LASTEXITCODE -eq 0) {
+    if ($LASTEXITCODE -ne 0) {
+        $allPassed = $false
+        Write-Host "Layer registry validation failed with exit code $LASTEXITCODE."
+    }
+
+    & $exePath --validate-ffmpeg-provider
+    if ($LASTEXITCODE -ne 0) {
+        $allPassed = $false
+        Write-Host "FFmpeg provider validation failed with exit code $LASTEXITCODE."
+    }
+
+    if ($allPassed) {
         Write-Host "Validation passed."
     }
     else {
-        Write-Host "Validation failed with exit code $LASTEXITCODE."
+        Write-Host "Validation failed."
     }
+}
+
+function Show-OptionalFfmpegProviderStatus {
+    param([object]$Paths)
+
+    $status = Get-StackFfmpegProviderStatus -ProviderDir $Paths.FfmpegProviderSourceDir
+    Show-StackFfmpegProviderStatus -Status $status
 }
 
 function Invoke-ExtraBuildFolderArchive {
@@ -226,6 +247,10 @@ while ($true) {
                 Pause-StackMenu
             }
             "10" {
+                Show-OptionalFfmpegProviderStatus -Paths $paths
+                Pause-StackMenu
+            }
+            "11" {
                 $versionInfo = Get-StackVersionInfo -VersionFile $paths.VersionFile
                 $suggestedVersion = Get-NextStackPatchVersion -Version $versionInfo.Version
                 Write-Host ""
@@ -237,6 +262,8 @@ while ($true) {
                 Write-Host "Current release:       $($paths.CurrentReleaseDir)"
                 Write-Host "Release archive:       $($paths.ReleaseArchiveDir)"
                 Write-Host "Extra build archive:   $($paths.ExtraBuildArchiveRoot)"
+                Write-Host "FFmpeg provider source: $($paths.FfmpegProviderSourceDir)"
+                Write-Host "FFmpeg package path:   $($paths.FfmpegProviderStageRelativeDir)"
                 Pause-StackMenu
             }
             "Q" {

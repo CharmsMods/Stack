@@ -1,0 +1,543 @@
+This is Stack. It's a C++/OpenGL GUI image editing and compositing application that is written to be extremely visually pleasing and graphically performant using background threads and GPU acceleration.
+It has a graph where you edit kinds of nodes that I want to add right now, one of them being frequency nodes. I'm curious if you could help me plan out what's possible with fourier transforms or finding the frequencies in images and how exactly we would display that visually.
+Because we have a couple of different path flows for connections between nodes, we have:
+- full image streams
+- single-channel streams, which we generally use as masks
+- math nodes that let us do different things with both the full image streams and the masks
+There's probably a lot of different flexibility we can have with adding frequency math in several nodes,  because you'll notice that each node does basically one thing in order to have nodes be separated in functionality
+One other important thing is that documentation in this repository is very detailed and strict and planned out. If you do anything with documentation, this is not to say that you need to, but if you do happen to do anything with documentation, make sure that you can follow the rules here "D:\Program Development\Stack\docs\stack-documentation"
+Worked for 17m 15s
+This is a great design question — frequency-domain processing maps onto a node graph beautifully, and your three-stream model (full image / single-channel mask / math) actually fits the math almost perfectly. Let me ground my answer in how Stack actually structures nodes before I lay out the design space. Let me take a quick look at the node system.
+
+SubAgent
+Explore
+·
+Map Stack's node architecture
+continue
+Worked for 1m 44s
+Great — I now have a solid map of the system, and the news is good: frequency-domain work fits Stack's architecture almost suspiciously well. Let me lay out the design space, then flag the real decision points.
+
+Why this fits your three-stream model so well
+Here's the core insight that shapes everything else:
+
+A mask drawn in the frequency domain is a filter. That's literally what frequency-domain filtering is — multiply the spectrum by a 2D function. Your existing single-channel mask stream is, by definition, a 2D function over the image plane. If that plane is reinterpreted as frequency space, every mask tool you already have becomes a filter-design tool.
+
+So the three streams map onto frequency work cleanly:
+
+Stream	Spatial meaning	Frequency meaning
+Image (RGBA16F)	color pixels	complex spectrum (needs a packing decision — see below)
+Mask (single-channel)	region/spatial weight	transfer function / filter shape
+Math	pixel arithmetic	spectrum arithmetic, filter synthesis
+This means a huge amount of frequency processing can be built without new stream types — by reusing your mask infrastructure to draw filters. That's the elegant payoff.
+
+Node taxonomy (respecting "one node, one job")
+Following the DataMath template (one NodeKind + Mode enum + one shader file), here's a clean decomposition:
+
+Core transform pair
+
+FFT (forward) — spatial image → complex spectrum. One job: transform.
+IFFT (inverse) — complex spectrum → spatial image. One job: inverse transform.
+Visualization (you specifically asked about this)
+
+SpectrumView — complex spectrum → viewable image. Applies fftshift (DC to center), log(1+|F|) dynamic-range compression, and a false-color LUT. This is the node that makes the invisible visible. Output is a normal Image stream so it can be viewed/saved/blended.
+Filter-shape generators (output Masks, in frequency space)
+
+FrequencyMask — one node, Mode enum: LowPass / HighPass / BandPass / BandStop / Notch / Gaussian / Butterworth, with cutoff/radius/order params. Outputs a single-channel mask representing the filter shape. This is the natural home for "design a filter."
+Optional later: NotchMask as its own node when interactive notch placement wants dedicated UI.
+Spectrum arithmetic (mirrors DataMath)
+
+SpectrumMath — multiply spectrum by mask (the fundamental filtering op), or by another spectrum; add/subtract spectrums (frequency separation). Same shape as DataMath, complex-aware.
+MagnitudePhase — split a spectrum into magnitude (mask) + phase (mask), or recombine. Enables the classic "phase-only reconstruction" demo and independent band editing.
+Analysis (uses your existing Analysis socket type)
+
+SpectrumAnalyzer — radial average / band energy / dominant frequencies. Feeds numeric readouts and your analysis stream.
+That's ~7 nodes for a complete, composable frequency toolset — each doing one thing, all following existing conventions.
+
+How to display it visually
+This matters because Stack's identity is "extremely visually pleasing," and the frequency domain is genuinely gorgeous when rendered well.
+
+Magnitude spectrum (the workhorse view)
+
+fftshift — move DC from corner to center so frequencies increase radially outward
+log(1 + |F(u,v)|) — dynamic range of a raw spectrum is ~6 orders of magnitude; log is mandatory or you see one bright dot
+False-color LUT — viridis/turbo/inferno look stunning and read well; a custom Stack-branded LUT would be on-brand. Grayscale is the textbook default but wastes the visual identity.
+Optional gamma/contrast controls on the view node.
+Natural images produce a characteristic bright-cross-along-axes pattern that's immediately recognizable — and periodic noise (moiré, scan lines, sensor fixed-pattern noise) shows up as discrete bright spikes off-center, which a user can then paint out.
+
+Phase spectrum
+
+Less visually intuitive; map [-π, π] to grayscale. Rarely edited directly but useful for diagnostics.
+The flagship interaction (later phase)
+
+Paint directly on the SpectrumView to suppress frequencies — each brush stroke becomes a notch filter. Removing periodic noise by clicking bright spikes is the pro technique and feels magical. This is a natural extension once the core nodes exist.
+The real architectural decisions
+These are genuine forks — your call drives the implementation heavily. I'd want your input before planning any code:
+
+Compute shader vs. fragment-shader ping-pong. Your GL context is already 4.3 core, glDispatchCompute is loaded, and CreateComputeProgram() exists at GLHelpers.cpp:112 — but is called nowhere. An FFT is the textbook first citizen for compute (Cooley-Tukey butterfly with shared memory). The alternative is multi-pass fragment shaders into ping-pong textures (Stockham auto-sort), which matches how smoothFragSrc and RawDetailFusion already work. Compute is faster and cleaner; fragment ping-pong is lower-risk and consistent with the codebase.
+What flows on the wire for a spectrum. Three options, ranked by plumbing cost:
+(C) Decompose into two Mask streams — magnitude + phase. Maximally reuses your existing mask infra; filtering becomes ordinary mask math. Can't do true complex arithmetic, but amplitude filtering (the 95% case) works perfectly. My lean for Stack specifically.
+(A) New SocketType::Spectrum — cleanest type safety, most plumbing (new pin type, type-checking, ~2 extra switch statements).
+(B) Pack complex into RG channels of an Image-stream texture — least new plumbing, but breaks type safety (a spectrum could connect to a regular blur and produce garbage).
+Precision / texture format. FFTs accumulate numerical error badly. RGBA16F (your pipeline default) is risky for large transforms; RG32F/RGBA32F is safer but is a new working format for the codebase (CreateStorageTexture(w,h,internalFormat) already supports it). Probably want 32F internally for the transform, down-convert for view/output.
+Power-of-two vs. arbitrary sizes. Classic radix-2 FFT needs Po2 dims; real images aren't. Options: zero-pad to next Po2 and crop (simple, slight cost), or Bluestein/chirp-z for arbitrary sizes (more code). For an image editor, padding is usually fine.
+Color handling. FFT each RGB channel independently (3× cost, full color frequency info), or luminance-only (faster, loses chroma frequency). Many pro tools do luminance for the heavy work; a per-channel mode is a nice option.
+The strategic opportunity
+Worth calling out separately: a frequency node is the most natural possible catalyst for turning on compute shaders in Stack. The infrastructure is loaded, context is compatible, the helper is written — it's just waiting for a first user. If you ever want GPU compute for anything else (deconvolution, simulations, big convolutions), enabling it via FFT is the cleanest entry point. That said, it's also a commitment — first compute user writes the conventions everyone else follows.
+
+A pragmatic MVP
+If I were scoping a first deliverable, I'd suggest:
+
+FFT + IFFT + SpectrumView + FrequencyMask (LowPass/HighPass/BandPass/Notch) + SpectrumMath (multiply).
+
+That's enough to: see a spectrum, design a filter visually or by parameter, apply it, and reconstruct. It validates the whole pipeline and the precision/stream decisions before you build the fancier nodes (magnitude/phase split, analyzer, interactive painting). Implementation as fragment-shader ping-pong first (matches codebase), with compute as a later optimization once the math and UX are proven.
+
+Before I turn any of this into a real implementation plan, I'd like your steer on a couple of the forks above — especially compute vs. fragment, stream-type strategy (C is my recommendation but it's your call), and whether you want MVP scope or the full 7-node toolset. Want me to dig deeper into any one of these, or shall I start mapping the MVP onto the DataMath-style file checklist in detail?
+
+So I'm not a developer so I need you to simplify some of the questions you've asked me in order for us to get an accurate representation of what I want for the program and this implementation. The options you gave me for implementing all this stuff, I think I'd really like to just implement everything as long as we can keep it organized and ensure it's of high quality and performant and especially flexible because my program has the call of being able to plug pretty much anything in anywhere. I want to keep that as far as we can take it, inside common sense. It's just difficult for me to understand some of the complex wording you're using for the questions you're asking.
+Worked for 49m 45s
+
+Thought
+for a few seconds
+That helps a lot — thank you. Let me make this much simpler and not put engineering choices on you that I can just decide well myself.
+
+Here's what I'll just decide on my own because your goals (high quality, performant, max flexibility) point to a clear best answer — I'll mention these so you know they're handled, but they don't need your input:
+
+Precision: use high-precision math internally where it matters (so results stay clean and accurate), and the normal format for display. Pure engineering call.
+Image sizes: support any image size, not just square/power-of-two. Flexibility wins.
+Color: let each node work either on the full color image or just brightness, as a toggle. That gives you both speed and full flexibility.
+Scope: the full ~7-node toolset, since you want it all — built in a sensible order.
+That leaves only three questions that are genuinely yours to answer — because they're about your product's feel and identity, not engineering. I've written them in plain language:
+
+Asked
+3 questions
+Those are great answers — let me confirm I've got them right:
+
+Connections: "freely mixable everywhere." Frequency results plug into any image or mask input, no conversion nodes needed. Maximum flexibility. I'll make sure raw frequency data that gets fed somewhere weird doesn't crash — it'll just look like noise until you transform it back, which is the right tradeoff for your philosophy.
+GPU method: the modern, faster one. The frequency nodes will be the first feature in Stack to use compute shaders. Your app is already set up for this — it just needs someone to switch it on. That's a bigger commitment (I'm setting the pattern every future GPU-heavy feature will follow), but it's the right call for performance and it's what you're paying for.
+Spectrum look: "all of them." Yes — this is actually the easy part. The view node will just have a dropdown letting you switch between Turbo, Viridis, Inferno, and Grayscale whenever you want. No extra cost, and it's more fun.
+One thing worth flagging on answer #1, just so you're not surprised: "freely mixable everywhere" means frequency data has to disguise itself as a normal image to ride your existing wires. The cleanest way is to tuck the complex math (real + imaginary parts) into the color channels of a texture. Most of the time you won't notice — but it's the reason a raw spectrum fed into a regular blur looks odd. The view node and the inverse-transform node are what make it look right again.
+
+This is a substantial feature (around 7 new nodes, touching roughly a dozen files each, plus turning on a whole new GPU capability Stack has never used). That's exactly the kind of thing that deserves a real plan before I write a line of code, so you can see the full shape and sign off. Let me put that together for you.
+
+Entered plan mode
+I have a strong map from the first exploration. Before designing the concrete plan, I need to fill two gaps: (1) exactly how ready the compute-shader infrastructure is and how shader programs are managed, and (2) the complete end-to-end checklist of every file/switch touched when adding a node kind, including how parameter UIs (dropdowns/sliders) are drawn. Let me run these in parallel.
+
+SubAgent
+Explore
+·
+Compute shader readiness audit
+Failed
+SubAgent
+Explore
+·
+New node wiring checklist
+Failed
+Both exploration agents failed to run. Let me retry them — these are important for the plan's accuracy.
+
+SubAgent
+Explore
+·
+Compute shader readiness audit
+Failed
+SubAgent
+Explore
+·
+New node wiring checklist
+Failed
+The subagents are erroring. Let me investigate the codebase directly myself instead of relying on the parallel agents.
+
+Explore
+·
+1 search, 1 list
+Compute infra is loaded. Let me read the key files directly to nail down the patterns I need to mirror.
+
+Explore
+·
+2 files
+I have the cook pattern. Now let me look at the node type enums, the socket system, the catalog, the UI drawing, and the serialization — the remaining critical touchpoints.
+
+Explore
+·
+2 files
+Now the catalog, the socket builder, and the parameter UI. These are the most important to mirror exactly.
+
+Explore
+·
+1 file
+I have the editor-side enum/payload/socket/catalog/prototype patterns nailed. Now the two pieces I still need: the parameter UI drawing (where sliders/dropdowns per node kind live) and the serialization dispatch. Let me find them, plus the renderer-side mirror enum and snapshot conversion.
+
+Explore
+·
+1 search, 1 list
+Now I understand the full surface area. The DataMath node touches: enum, payloads, sockets, metadata, catalog, prototype, UI panel (EditorNodeGraphUINodes.cpp:1084), context menu, browser, visuals/labels, serialization, plus the renderer mirror. Let me read the param UI panel and the serialization, then the renderer-side dispatch + fingerprint to close the loop.
+
+Explore
+·
+2 files
+Excellent — serialization is straightforward (per-kind To/FromString + settings serialize functions). Now the renderer-side dispatch (where editor Node becomes RenderGraphNode), the eval case, and the fingerprint. Let me also confirm the RenderGraphNodeKind mirror and the EnsureDataMathProgram shape in one pass.
+
+Explore
+·
+2 searches
+Now let me read the critical dispatch regions: the snapshot conversion (where editor Node → RenderGraphNode), the evalImage case + fingerprint, the RenderGraphNodeKind enum, and the RenderPipeline.h method list. Also the EnsureDataMathProgram. Let me read them in parallel.
+
+Explore
+·
+2 files
+I see the evalMask path at line 961. There's a parallel evalImage path. Let me find the evalImage DataMath case and the snapshot conversion (editor → RenderGraphNode). Let me also grab the RenderPipeline.h method declarations and the EnsureDataMathProgram.
+
+Explore
+·
+2 searches
+I have nearly everything. The snapshot conversion is in EditorNodeGraphSerializer.cpp. Let me read the serializer's snapshot/convert function and the program cache pattern, plus confirm the worker-thread context. Then I have enough to write the full plan.
+
+Explore
+·
+2 files
+I have the complete picture now. The program cache pattern is a lazy member-variable compile (if (!m_XxxProgram) m_XxxProgram = Create...). The serializer writes flat fields per node kind. Let me do two final confirmations: the worker-thread GL context setup (to verify compute dispatch is safe there) and the evalImage fingerprint branch, then check the build system so the plan accounts for new files.
+
+Explore
+·
+2 searches
+I now have a complete, line-verified picture. The build uses GLOB_RECURSE over src/*.cpp — so new files are picked up automatically (no CMake edits needed). Context is 4.3 core on the worker thread (compute-capable). Let me read the snapshot conversion function (editor Node → RenderGraphNode) to confirm the last piece, then check the fingerprint DataMath branch to mirror it.
+
+Explore
+·
+1 search, 1 file
+I have the complete, verified picture now. The snapshot conversion lives at EditorModuleGraphSnapshot.cpp:359. I've confirmed every touchpoint with line references. I have everything needed to write a precise, executable plan.
+
+Let me record the key findings on the todo list and then present the plan.
+
+I have everything I need. The architecture is fully mapped, every touchpoint is line-verified, and your three decisions are locked in. Here's the plan.
+
+Plan
+Frequency / Fourier Node System — Implementation Plan
+What we're building
+A complete, composable frequency-domain toolset for Stack's node graph — 7 new node kinds, each doing one job, all matching existing conventions exactly. This is also the first feature in Stack to use compute shaders (GPU compute), switching on infrastructure that's already loaded but unused.
+
+Your three decisions, locked in:
+
+Connections: freely mixable — frequency data rides the existing Image wires (complex numbers packed into texture channels). Plugs anywhere; raw spectrum fed to a normal node just looks like noise until transformed back.
+GPU method: compute shaders (GL 4.3, already loaded: glDispatchCompute, glMemoryBarrier, glBindImageTexture, glBindBufferBase, CreateComputeProgram at GLHelpers.cpp:112).
+Spectrum look: all four (Turbo / Viridis / Inferno / Grayscale) via a dropdown on the view node.
+Plus my engineering calls: high-precision (RG32F) math internally, arbitrary image sizes (zero-pad + crop), per-node luminance-or-RGB toggle.
+
+The 7 nodes
+#	Node	Purpose	Input → Output
+1	FFT	Forward transform: spatial image → complex spectrum	Image → Image (complex-packed)
+2	IFFT	Inverse transform: spectrum → spatial image	Image → Image
+3	Spectrum View	Visualization: spectrum → viewable false-color image (LUT dropdown, log scaling, fftshift)	Image → Image
+4	Frequency Mask	Filter-shape generator (LowPass/HighPass/BandPass/BandStop/Notch/Gaussian/Butterworth)	(params) → Mask
+5	Spectrum Math	Multiply spectrum by mask (= filtering), or spectrum±spectrum	Image + Mask → Image
+6	Magnitude / Phase	Split a spectrum into magnitude (Mask) + phase (Mask), or recombine	Image → Mask, Mask (and inverse)
+7	Spectrum Analyzer	Numeric readouts: radial average, band energy, dominant frequencies	Image → Analysis
+MVP ordering: nodes 1,2,3,4,5 first (proves the whole pipeline); 6,7 second.
+
+The compute-shader FFT design
+Algorithm: Cooley-Tukey radix-2 butterfly. Because real images aren't power-of-two, the FFT node zero-pads to the next power of two (in a padded RG32F texture), transforms, and the IFFT node crops back to the original size.
+
+Two-phase, separable (rows then columns): 2D FFT = FFT every row, then FFT every column. Each phase is log₂(N) butterfly passes. Each pass is one compute dispatch writing into a ping-pong texture pair via image2D load/store + glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT) between passes.
+
+Complex packing: RG32F texture — .r = real, .g = imaginary. For 3-channel color, pack one channel per texture layer or run the pipeline 3×. Luminance mode (default) runs once on luma.
+
+Why compute, not fragment ping-pong: the butterfly needs scattered reads (Stockham auto-sort avoids in-place permutation but still benefits from shared memory). Compute with image2D is the clean fit. The existing CreateComputeProgram (GLHelpers.cpp:112) and glDispatchCompute loader (GLLoader.cpp:138) are ready.
+
+New shared infrastructure (written once, reused forever):
+
+src/Renderer/Frequency/GpuFft.h/.cpp — the FFT engine class: Forward(), Inverse(), owns butterfly compute programs, padded textures, ping-pong pair. This becomes the template every future compute-shader feature in Stack copies.
+File-by-file checklist (mirroring DataMath exactly)
+Each new node kind touches the same ~16 sites. Below is the verified map (every line reference confirmed against current source). New files marked (new).
+
+Editor layer
+1. src/Editor/NodeGraph/NodeGraphTypes.h
+
+NodeKind enum (line 135): add FrequencyFft, FrequencyIfft, SpectrumView, FrequencyMask, SpectrumMath, MagnitudePhase, SpectrumAnalyzer after DataMath (line 161).
+Add mode enums mirroring DataMathMode (line 241): enum class SpectrumViewLut { Turbo, Viridis, Inferno, Grayscale }; and enum class FrequencyMaskShape { LowPass, HighPass, BandPass, BandStop, Notch, Gaussian, Butterworth }; and enum class SpectrumMathMode { Multiply, Add, Subtract, Difference };.
+2. src/Editor/NodeGraph/NodeGraphPayloads.h — add settings structs mirroring DataMathSettings: FftSettings (luminanceOnly bool, padding mode), SpectrumViewSettings (lut enum, logScale, gamma, exposure), FrequencyMaskSettings (shape, cutoff, radius, order, centerXY, notchRadius), SpectrumMathSettings (mode), MagnitudePhaseSettings (mode: split/recombine).
+
+3. src/Editor/NodeGraph/NodeGraphModelTypes.h — struct Node (line 11): add fields for each new settings struct + mode, mirroring dataMathMode/dataMathSettings at lines 32-33.
+
+4. src/Editor/NodeGraph/EditorNodeGraphDefinitions.cpp
+
+ApplyNodeMetadata (line 191): add a case per new kind setting node.title (mirror line 274).
+BuildSockets (line 280): add a case per kind declaring pins (mirror DataMath at line 393).
+DefaultInputSocket (line 417) + DefaultOutputSocket (line 462): add cases.
+BuildNodeCatalogEntries (line 499): push entries, category "Frequency" (mirror line 571).
+BuildPrototypeNode (line 594): add case per kind applying the mode (mirror line 619).
+5. src/Editor/NodeGraph/UI/EditorNodeGraphUINodes.cpp — parameter panel (mirror DataMath UI at line 1082): add else if (node.kind == ...) blocks with ImGuiExtras::NodeCombo for mode/LUT dropdowns and renderSlider for cutoff/radius/order/gamma. Call editor->MarkRenderDirty(node.id) on change.
+
+6. src/Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.cpp/.h — add FrequencyMaskLabel/SpectrumMathLabel/etc. label functions (mirror DataMathLabel at line 1445) and any node-body extra rendering (mirror lines 1240-1243).
+
+7. src/Editor/NodeGraph/UI/EditorNodeGraphUINodes.cpp:600 — node title fallback (mirror DataMath line).
+
+8. src/Editor/NodeGraph/UI/EditorNodeGraphUIContextMenu.cpp + EditorNodeGraphUINodeBrowser.cpp — add context-menu items and browser-dispatch (mirror lines 314-335 and 317).
+
+9. Serialization — EditorNodeGraphUtilitySerialization.cpp/.h — add XxxModeToString/FromString + SerializeXxxSettings/DeserializeXxxSettings per kind (mirror DataMathModeToString at line 267 and SerializeDataMathSettings at line 300).
+
+10. src/Editor/NodeGraph/EditorNodeGraphSerializer.cpp — add per-kind write/read (mirror lines 155-156) plus NodeKindToString/FromString entries.
+
+11. Snapshot conversion — src/Editor/Internal/EditorModuleGraphSnapshot.cpp:359 — add case per kind copying editor mode+settings into the render node (mirror renderNode.dataMathMode = static_cast<RenderDataMathMode>(node.dataMathMode);).
+
+12. src/Editor/Internal/EditorModuleComposite.cpp:~284 — add fingerprint branches mirroring the DataMath block.
+
+Renderer layer
+13. src/Renderer/MaskRenderTypes.h
+
+RenderGraphNodeKind (line 160): add the 7 mirror kinds after DataMath (line 183).
+Add RenderSpectrumViewLut, RenderFrequencyMaskShape, RenderSpectrumMathMode enums (mirror RenderDataMathMode at line 195) + settings structs (mirror RenderDataMathSettings at line 209).
+RenderGraphNode (line 297): add fields (mirror lines 325-326).
+14. src/Renderer/Internal/RenderPipelineGraphExecution.cpp — 4 sites per kind block (mirror DataMath at lines 120, 233-254, 764, 865, 961, 1158, 1237):
+
+fingerprintMask (line ~90): kind branch + settings hash (mirror 233-254).
+fingerprintImage (line ~984 region): same.
+evalMask (line 961): dispatch to RenderXxxGraphNode.
+evalImage (line ~1158): dispatch to RenderXxxGraphNode.
+The IsScalarRenderSocket-style image/mask delegation checks (lines 120, 865, 1237) — FrequencyMask outputs Mask; others output Image.
+15. src/Renderer/RenderPipeline.h
+
+Member program variables (mirror m_DataMathProgram at line 258): m_SpectrumViewProgram, m_FrequencyMaskProgram, m_SpectrumMathProgram, m_MagnitudePhaseProgram (FFT programs live in the GpuFft engine class).
+EnsureXxxProgram() declarations (mirror line 402).
+RenderXxxGraphNode() method declarations (mirror line 391).
+16. (new) src/Renderer/Internal/RenderPipelineGraphFrequencyNodes.cpp — the "cook" functions, one per node, mirroring RenderPipelineGraphDataMathNode.cpp structure: pull input textures via evalImage/evalMask, allocate target via CreateGraphRenderTargetTexture, dispatch compute or fragment draw via RenderIntoGraphTargetTexture, return GraphNodeRenderResult.
+
+17. src/Renderer/Internal/RenderPipelinePrograms.cpp — EnsureSpectrumViewProgram, EnsureFrequencyMaskProgram, EnsureSpectrumMathProgram, EnsureMagnitudePhaseProgram (mirror EnsureDataMathProgram at line 372). FFT butterfly compute shaders live in GpuFft.
+
+18. (new) src/Renderer/Frequency/GpuFft.h/.cpp — the shared compute FFT engine: loads/pads input to RG32F, runs log₂N row-butterfly passes + log₂N column passes with ping-pong image2D textures + memory barriers, returns the complex texture. Inverse() reverses and crops. This is the reusable compute-shader template for Stack's future.
+
+19. src/Renderer/Internal/RenderPipelineHdrMerge.cpp:111 + RenderPipelineGraphAnalysis.cpp:89 — two more switch (kind) sites that enumerate node kinds (found via grep); add cases so they don't fall through.
+
+Build
+20. cmake/StackSources.cmake — uses GLOB_RECURSE src/*.cpp (line 4), so new .cpp files are picked up automatically — no CMake edit needed. (Will verify after adding files.)
+
+Implementation phases (buildable & testable at each step)
+Phase A — Compute foundation (no UI yet): Build GpuFft engine + a hidden validation path. Verify with a known test image (impulse → constant spectrum; constant → DC spike). .\build.cmd passes. Exit criterion: round-trip FFT→IFFT reconstructs the input to within numerical tolerance.
+
+Phase B — Core transform nodes (FFT, IFFT): Wire the two node kinds through all ~16 editor+renderer sites. Add to catalog under "Frequency". Nodes appear, transform runs, output flows on the wire. Exit criterion: connect Image → FFT → IFFT → Output, image reconstructs.
+
+Phase C — Spectrum View node: The visualization with the 4-LUT dropdown, log scaling, fftshift. This is the "wow" node — the moment you can see a spectrum. Exit criterion: a real photo shows the characteristic cross + bright DC center, switchable LUTs.
+
+Phase D — Frequency Mask + Spectrum Math (the payoff): Design filters parametrically, multiply into a spectrum, reconstruct. Low-pass = blur, high-pass = sharpen, notch = kill periodic noise. Exit criterion: notch a moiré/photo scan-line artifact and watch it vanish on reconstruction.
+
+Phase E — Magnitude/Phase + Spectrum Analyzer (advanced): Split/recombine, numeric band readouts into the existing Analysis stream. Exit criterion: phase-only reconstruction demo works; analyzer reports sensible band energies.
+
+Phase F — Polish: tooltips, sensible parameter ranges, default values, node-body preview where applicable, and (per your docs rules) any documentation routed through docs/stack-documentation protocols.
+
+Documentation note (per your rules)
+Per AGENTS.md, if I touch docs I'll read the entry file first (IDEA_INTAKE_PROTOCOL.md for notes, or the relevant develop/raw protocol) and follow Stack's strict documentation conventions. Documentation is optional here — I'll only create it if you want it, and I'll flag it before writing.
+
+Verification
+.\build.cmd clean compile after each phase.
+Each phase has a concrete in-graph test (the exit criteria above).
+No regressions: existing nodes untouched except mechanical switch-statement additions (each new kind gets its own case, never modifies an existing case's behavior).
+Ready to start with Phase A (the compute FFT engine) on your approval.
+
+Plan approved. Let me set up a proper todo list for the phases and start with Phase A — the compute FFT engine.
+
+Before writing code I need to verify a few critical details: the exact glBindImageTexture signature/usage, whether GL_RG32F is defined, the RenderPipeline.h structure (where members/methods go), and the CreateGraphRenderTargetTexture/RenderIntoGraphTargetTexture helpers I'll depend on. Let me read these.
+
+Explore
+·
+1 search, 1 file
+GL_RGBA32F is defined but GL_RG32F may not be. Let me confirm the full set of GL format defines available and check the CreateGraphRenderTargetTexture/RenderIntoGraphTargetTexture implementations (the helpers the cook functions depend on), plus how m_Width/m_Height are set.
+
+Explore
+·
+2 searches
+continue with your plan implementation from where you left off
+Worked for 9m 36s
+
+Thought
+for a few seconds
+Let me find the remaining critical helpers before writing code: the CreateGraphRenderTargetTexture/RenderIntoGraphTargetTexture implementations, the RenderPipeline constructor (where members get initialized), and how FullscreenQuad is drawn.
+
+Explore
+·
+2 searches, 2 files
+I have everything I need. CreateGraphRenderTargetTexture uses m_Width/m_Height and hardcodes RGBA16F. For the FFT I'll need my own RG32F textures (custom allocation) since precision matters. Let me look at one existing cook file to confirm the #include pattern and how GetQuad().Draw() + glUseProgram + uniforms are wired, then write the GpuFft engine.
+
+Explore
+·
+3 searches
+continue with your plan implementation from where you left off
+Worked for 8m 16s
+Let me look at how RenderDataMath is actually called (the lower-level shader dispatch that takes the FBO), since that's the pattern the cook functions use to bind textures + uniforms + draw.
+
+Explore
+·
+1 file
+I now have the complete, verified pattern for the entire renderer layer:
+
+Fragment-shader node: EnsureXxxProgram() → CreateEmptyTexture + CreateFBO → glUseProgram → glActiveTexture/glBindTexture/glUniform1i → m_Quad.Draw() → cleanup.
+Cook function: pulls input textures via evalImage/evalMask, calls RenderXxx(...), returns GraphNodeRenderResult{ texture, owned }.
+Program cache: lazy member-variable compile in EnsureXxxProgram().
+For FFT I'll use compute shaders via CreateComputeProgram + glBindImageTexture + glDispatchCompute + glMemoryBarrier. I have everything. Let me write the GpuFft engine now.
+
+First, the header:
+
+Wrote
+
+GpuFft.h
+src/Renderer/Frequency/
++
+1
+0
+3
+#pragma once
+ 
+#include <cstddef>
+ 
+namespace Stack::Renderer::Frequency {
+ 
+// GpuFft is Stack's first compute-shader subsystem: a radix-2 Cooley-Tukey
+// FFT implemented as GL 4.3 compute passes over RG32F textures (R = real,
+// G = imaginary). It is intentionally self-contained so it can serve as the
+// template every future compute feature in Stack follows.
+//
+// Pipeline:
+//   1. The caller provides a source texture (sampled) and a logical size.
+//   2. Forward()/Inverse() lift the data into a power-of-two RG32F complex
+//      buffer (zero-padded for forward, treated as already-complex for
+//      inverse), run log2(N) row butterfly passes, then log2(N) column
+//      passes via ping-pong image2D load/store, and return a complex
+//      texture handle.
+//   3. The caller samples the result, converts back to spatial RGBA, or
+//      passes it on to another frequency node.
+//
+// All GPU resources are owned by the instance and reused across calls so
+// repeated evaluation of an FFT node does not reallocate.
+class GpuFft {
+public:
+    GpuFft() = default;
+    ~GpuFft();
+ 
+    GpuFft(const GpuFft&) = delete;
+    GpuFft& operator=(const GpuFft&) = delete;
+ 
+    // Transform a sampled source texture (RGBA16F) into a complex RG32F
+    // spectrum of size paddedW x paddedH (both powers of two). When the
+    // source is smaller than the padded buffer it is zero-padded, which is
+    // the standard way to FFT arbitrarily sized images with a radix-2
+    // kernel. When luminanceOnly is true only the luma is transformed and
+    // the result still occupies a single RG32F texture; otherwise the red
+    // channel is transformed (color is handled by per-channel fan-out at
+    // the node level). Returns 0 on failure. The returned texture is owned
+    // by the instance and remains valid until the next call or destruction.
+    unsigned int Forward(unsigned int sourceTexture,
+                         int sourceW,
+                         int sourceH,
+                         int paddedW,
+                         int paddedH,
+                         bool luminanceOnly);
+ 
+    // Transform a complex RG32F spectrum back into a spatial RG32F texture
+    // (R = real part; imaginary output is discarded by the caller). The
+    // returned texture has dimensions paddedW x paddedH; the caller crops
+    // to the original source size when projecting back to RGBA16F.
+    unsigned int Inverse(unsigned int spectrumTexture,
+                         int paddedW,
+                         int paddedH);
+ 
+    // Round-trip helper used by validation: forwards then inverts the
+    // source and returns the reconstructed RG32F texture. Used during
+    // bring-up to confirm the butterfly math is correct.
+    unsigned int RoundTrip(unsigned int sourceTexture,
+                           int sourceW,
+                           int sourceH,
+                           int paddedW,
+                           int paddedH,
+                           bool luminanceOnly);
+ 
+    // Largest power of two not greater than n (used to pick a padded size
+    // that is >= the source when zero-padding).
+    static int NextPowerOfTwo(int n);
+ 
+    bool Ready() const { return m_ButterflyProgram != 0 && m_PackProgram != 0 && m_UnpackProgram != 0; }
+ 
+private:
+    void EnsurePrograms();
+    void EnsureScratch(int paddedW, int paddedH);
+ 
+    // Compute shader sources -------------------------------------------------
+    // Pack: read a source RGBA16F texel, convert to complex (real = luma or
+    // red, imag = 0), write into the RG32F padded buffer at the matching
+    // coordinate (zero elsewhere).
+    static const char* PackComputeSource();
+    // Butterfly: one Stockham pass along one axis. Stockham auto-sort
+    // produces natural-order output without an explicit bit-reversal pass,
+    // which keeps the kernel simple. directionSign = -1 for forward, +1 for
+    // inverse.
+    static const char* ButterflyComputeSource();
+    // Unpack: read the complex result, write the real part into an RG32F
+    // spatial texture (the caller then samples this and rebuilds RGBA16F).
+    // For inverse, applies the 1/(W*H) normalization.
+    static const char* UnpackComputeSource();
+ 
+    unsigned int m_ButterflyProgram = 0;
+    unsigned int m_PackProgram = 0;
+    unsigned int m_UnpackProgram = 0;
+ 
+    // Ping-pong complex buffers (RG32F). Forward/Inverse flip between them
+    // each butterfly pass.
+    unsigned int m_ComplexA = 0;
+    unsigned int m_ComplexB = 0;
+    int m_ScratchW = 0;
+    int m_ScratchH = 0;
+};
+ 
+} // namespace Stack::Renderer::Frequency
+ 
+Now the implementation. This is the most mathematically delicate file — the Stockham butterfly. Let me write it carefully.
+
+Wrote
+
+GpuFft.cpp
+src/Renderer/Frequency/
++
+3
+7
+8
+I made a typo in the GpuFft.cpp — kWorkgroupH_height(paddedH) is a nonexistent function. Let me fix that before it causes a compile error.
+
+Edited
+
+GpuFft.cpp
+src/Renderer/Frequency/
++
+1
+-
+1
+
+2 files changed
++482 -1
+continue with your plan implementation from where you left off
+Worked for 2m 4s
+
+Thought
+for a few seconds
+Before building, I need to fix an ownership issue: Forward returns m_ComplexA/m_ComplexB which are reused across calls — but the graph cache assumes returned textures are uniquely owned. I need to copy the result into a fresh texture. Let me check what copy primitives are loaded.
+
+Explore
+·
+1 search
+glCopyImageSubData is NOT loaded but glBlitFramebuffer is. I'll use FBO blit instead for the copy. Let me rewrite GpuFft.cpp cleanly — fixing the ownership issue (always return fresh textures), using FBO blit instead of glCopyImageSubData, and keeping the butterfly logic intact.
+
+Wrote
+
+GpuFft.cpp
+src/Renderer/Frequency/
++
+3
+8
+8
+Now let me try a build to verify Phase A compiles before wiring anything else. The new files should be auto-picked-up by GLOB_RECURSE.
+
+Explore
+·
+1 file
+Phase A compiles cleanly. GpuFft.cpp was picked up automatically by the GLOB and linked. The compute FFT engine is in place. Let me update the todo and move to Phase B — wiring the FFT and IFFT nodes through the editor and renderer layers.
+
+For Phase B I'll work methodically through the touchpoints. Let me start with the editor-side type definitions (enums + payloads), since everything depends on them.
+
+
+1 file changed
++388 -0

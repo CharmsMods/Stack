@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <sstream>
 
 #include <imgui.h>
 
@@ -85,8 +86,8 @@ std::uint64_t EditorModule::GetScopeNodeRevision(int sourceNodeId) const {
 }
 
 ImVec4 EditorModule::GetWorkspaceBaseColor() const {
-    if (m_Appearance) {
-        return m_Appearance->GetEffectiveWindowBackgroundColor();
+    if (const StackAppearance::AppearanceManager* appearance = GetAppearance()) {
+        return appearance->GetEffectiveWindowBackgroundColor();
     }
     if (ImGui::GetCurrentContext() != nullptr) {
         return ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
@@ -148,8 +149,34 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
     ImGui::Spacing();
     ImGui::Text("Main render: %.2f ms", stats.lastMainRenderMs);
     ImGui::Text("Main tiling: %s (%d)", stats.lastMainOutputTiled ? "Yes" : "No", stats.lastMainOutputTileCount);
+    if (stats.lastMainRegionPlanAvailable) {
+        ImGui::Text(
+            "Region plan: %s, halo %d x %d",
+            stats.lastMainRegionPlanTileable ? "Tileable" : "Full frame",
+            stats.lastMainRegionPlanHaloX,
+            stats.lastMainRegionPlanHaloY);
+        if (!stats.lastMainRegionPlanReason.empty()) {
+            ImGui::TextWrapped("Region reason: %s", stats.lastMainRegionPlanReason.c_str());
+        }
+    }
     ImGui::Text("Preview render: %.2f ms (%d)", stats.lastPreviewRenderMs, stats.lastRenderedPreviewCount);
     ImGui::Text("Composite render: %.2f ms (%d)", stats.lastCompositeRenderMs, stats.lastRenderedCompositeCount);
+    if (stats.lastSliceImportWidth > 0 && stats.lastSliceImportHeight > 0) {
+        ImGui::Spacing();
+        ImGui::Text(
+            "Last slice import: %d x %d (%.1f MB)",
+            stats.lastSliceImportWidth,
+            stats.lastSliceImportHeight,
+            static_cast<double>(stats.lastSliceImportPixelBytes) / (1024.0 * 1024.0));
+        ImGui::Text("Queue wait: %.2f ms", stats.lastSliceImportQueueMs);
+        ImGui::Text("Decode: %.2f ms", stats.lastSliceImportDecodeMs);
+        ImGui::Text("Thumbnail: %.2f ms", stats.lastSliceImportPreviewMs);
+        ImGui::Text("Embed copy: %.2f ms", stats.lastSliceImportStorageCopyMs);
+        ImGui::Text(
+            "Embed PNG: %.2f ms (%.1f MB)",
+            stats.lastSliceImportEmbedMs,
+            static_cast<double>(stats.lastSliceImportEmbeddedBytes) / (1024.0 * 1024.0));
+    }
     ImGui::Spacing();
     ImGui::Text(
         "Image cache: %d hit / %d miss%s",
@@ -166,6 +193,75 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
         cacheStats.rawStageCacheHits,
         cacheStats.rawStageCacheMisses,
         totalRawCacheEvents == 0 ? " (idle)" : "");
+
+    ImGui::Spacing();
+    ImGui::Text(
+        "Pointwise fusion: %d group / %d nodes / %d passes avoided",
+        cacheStats.fusedPointwiseGroups,
+        cacheStats.fusedPointwiseNodes,
+        cacheStats.avoidedPointwisePasses);
+    ImGui::Text(
+        "Generated programs: %d hit / %d miss / %d fallback",
+        cacheStats.pointwiseProgramCacheHits,
+        cacheStats.pointwiseProgramCacheMisses,
+        cacheStats.pointwiseFallbacks);
+    ImGui::Text(
+        "Reductions: %d pass / %d cache hit / %d miss",
+        cacheStats.reductionPasses,
+        cacheStats.reductionCacheHits,
+        cacheStats.reductionCacheMisses);
+    for (const ReductionExecutionStats& reduction : cacheStats.reductions) {
+        ImGui::Text(
+            "Field Mean node %d: %.9g from %llu samples%s",
+            reduction.nodeId,
+            reduction.value,
+            static_cast<unsigned long long>(reduction.sampleCount),
+            reduction.cacheHit ? " (cache hit)" : "");
+    }
+    if (!cacheStats.lastReductionFailure.empty()) {
+        ImGui::TextWrapped(
+            "Reduction failed at node %d: %s",
+            cacheStats.lastReductionFailureNodeId,
+            cacheStats.lastReductionFailure.c_str());
+    }
+    ImGui::Text(
+        "Persistent cache: %.1f / %.1f MB (%d evicted)",
+        static_cast<double>(cacheStats.persistentCacheBytes) / (1024.0 * 1024.0),
+        static_cast<double>(cacheStats.persistentCacheBudgetBytes) / (1024.0 * 1024.0),
+        cacheStats.persistentCacheEvictions);
+    ImGui::Text(
+        "Transient pool: %.1f MB (%d alloc / %d reuse)",
+        static_cast<double>(cacheStats.transientPoolBytes) / (1024.0 * 1024.0),
+        cacheStats.transientTargetAllocations,
+        cacheStats.transientTargetReuses);
+    for (std::size_t index = 0;
+         index < std::min<std::size_t>(cacheStats.pointwiseGroups.size(), 4);
+         ++index) {
+        const PointwiseExecutionGroupStats& group = cacheStats.pointwiseGroups[index];
+        std::ostringstream nodes;
+        for (std::size_t nodeIndex = 0; nodeIndex < group.authoredNodeIds.size(); ++nodeIndex) {
+            if (nodeIndex != 0) nodes << " -> ";
+            nodes << group.authoredNodeIds[nodeIndex];
+        }
+        ImGui::Text(
+            "Fused %s: %s, %.1f MB, %.3f ms%s",
+            nodes.str().c_str(),
+            group.targetFormat.c_str(),
+            static_cast<double>(group.targetBytes) / (1024.0 * 1024.0),
+            group.cpuSubmitMilliseconds,
+            group.programCacheHit ? " (program hit)" : "");
+    }
+    if (!cacheStats.lastPointwiseFailure.empty()) {
+        std::ostringstream nodes;
+        for (std::size_t index = 0; index < cacheStats.lastPointwiseFailureNodeIds.size(); ++index) {
+            if (index != 0) nodes << ", ";
+            nodes << cacheStats.lastPointwiseFailureNodeIds[index];
+        }
+        ImGui::TextWrapped(
+            "Fusion fallback at node(s) %s: %s",
+            nodes.str().c_str(),
+            cacheStats.lastPointwiseFailure.c_str());
+    }
 
     ImGui::End();
 }

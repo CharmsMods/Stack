@@ -17,6 +17,17 @@
 
 namespace {
 
+void PostNodeGraphClipboardNotification(
+    EditorModule* editor,
+    UiNotificationSeverity severity,
+    const std::string& message,
+    const char* dedupeKey) {
+    if (!editor || message.empty()) {
+        return;
+    }
+    editor->ShowUiNotification(severity, message, dedupeKey ? dedupeKey : "");
+}
+
 EditorNodeGraph::Vec2 ToGraphVec2(const ImVec2& value) {
     return EditorNodeGraph::Vec2{ value.x, value.y };
 }
@@ -57,6 +68,7 @@ nlohmann::json SerializeMaskUtilitySettings(const EditorNodeGraph::MaskUtilitySe
         { "gamma", settings.gamma },
         { "threshold", settings.threshold },
         { "softness", settings.softness },
+        { "enabled", settings.enabled },
         { "invert", settings.invert }
     };
 }
@@ -69,6 +81,7 @@ EditorNodeGraph::MaskUtilitySettings DeserializeMaskUtilitySettings(const nlohma
     settings.gamma = value.value("gamma", settings.gamma);
     settings.threshold = value.value("threshold", settings.threshold);
     settings.softness = value.value("softness", settings.softness);
+    settings.enabled = value.value("enabled", settings.enabled);
     settings.invert = value.value("invert", settings.invert);
     return settings;
 }
@@ -443,6 +456,12 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
 
     auto& targetGraph = editor->GetNodeGraph();
     auto& targetLayers = editor->GetLayers();
+    for (const Stack::NodeMath::CompoundDefinition& definition : tempGraph.GetCompoundDefinitions()) {
+        std::string definitionError;
+        if (!targetGraph.AddCompoundDefinition(definition, &definitionError) && !definitionError.empty()) {
+            warnings.push_back(definitionError);
+        }
+    }
     std::unordered_map<int, int> layerIndexMap;
     for (int i = 0; i < static_cast<int>(importedLayers.size()); ++i) {
         if (!importedLayers[i]) {
@@ -459,6 +478,10 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         EditorNodeGraph::Node nodeCopy = sourceNode;
         nodeCopy.id = targetGraph.GetNextNodeId();
         targetGraph.SetNextNodeId(nodeCopy.id + 1);
+        nodeCopy.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
+        if (nodeCopy.kind == EditorNodeGraph::NodeKind::Compound) {
+            nodeCopy.compound.instance.instanceUuid = nodeCopy.instanceUuid;
+        }
 
         if (useCursorPos && minX != std::numeric_limits<float>::max()) {
             nodeCopy.position.x = cursorGraphPos.x + (sourceNode.position.x - minX) + cursorOffsetX;
@@ -478,6 +501,9 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         }
 
         targetGraph.GetNodes().push_back(nodeCopy);
+        if (nodeCopy.kind == EditorNodeGraph::NodeKind::Compound) {
+            targetGraph.ResolveCompoundNode(nodeCopy.id);
+        }
         oldNodeIdToNew[sourceNode.id] = nodeCopy.id;
         pastedNodeIds.push_back(nodeCopy.id);
         importedNodeCount++;
@@ -581,15 +607,15 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor, bool preferSystemClipbo
                 std::string summary;
                 if (PasteClipboardPayload(editor, payload, &summary)) {
                     m_Clipboard = payload;
-                    m_StatusMessage = summary;
+                    PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Success, summary, "editor-node-graph-clipboard");
                 } else if (!summary.empty()) {
-                    m_StatusMessage = summary;
+                    PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Error, summary, "editor-node-graph-clipboard");
                 }
                 return;
             }
             case SystemClipboardGraphPayloadState::Invalid:
                 if (!clipboardError.empty()) {
-                    m_StatusMessage = clipboardError;
+                    PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Error, clipboardError, "editor-node-graph-clipboard");
                 }
                 return;
             case SystemClipboardGraphPayloadState::Missing:
@@ -603,9 +629,9 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor, bool preferSystemClipbo
 
     std::string summary;
     if (PasteClipboardPayload(editor, m_Clipboard, &summary)) {
-        m_StatusMessage = summary;
+        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Success, summary, "editor-node-graph-clipboard");
     } else if (!summary.empty()) {
-        m_StatusMessage = summary;
+        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Error, summary, "editor-node-graph-clipboard");
     }
 }
 
@@ -624,7 +650,11 @@ void EditorNodeGraphUI::CopyGraphInfo(EditorModule* editor, bool wholeGraph, boo
     }
 
     if (nodeIds.empty()) {
-        m_StatusMessage = wholeGraph ? "Graph is empty." : "Select at least one node to copy graph info.";
+        PostNodeGraphClipboardNotification(
+            editor,
+            UiNotificationSeverity::Info,
+            wholeGraph ? "Graph is empty." : "Select at least one node to copy graph info.",
+            "editor-node-graph-clipboard");
         return;
     }
 
@@ -633,9 +663,13 @@ void EditorNodeGraphUI::CopyGraphInfo(EditorModule* editor, bool wholeGraph, boo
     ImGui::SetClipboardText(text.c_str());
     m_Clipboard = payload;
     m_ClipboardPasteCount = 0;
-    m_StatusMessage = wholeGraph
-        ? (includeState ? "Whole graph copied with state." : "Whole graph copied as tree only.")
-        : (includeState ? "Selected graph copied with state." : "Selected graph copied as tree only.");
+    PostNodeGraphClipboardNotification(
+        editor,
+        UiNotificationSeverity::Success,
+        wholeGraph
+            ? (includeState ? "Whole graph copied with state." : "Whole graph copied as tree only.")
+            : (includeState ? "Selected graph copied with state." : "Selected graph copied as tree only."),
+        "editor-node-graph-clipboard");
 }
 
 void EditorNodeGraphUI::PasteGraphInfo(EditorModule* editor) {
@@ -647,20 +681,24 @@ void EditorNodeGraphUI::PasteGraphInfo(EditorModule* editor) {
     std::string error;
     const SystemClipboardGraphPayloadState clipboardState = TryReadSystemClipboardGraphPayload(payload, &error);
     if (clipboardState == SystemClipboardGraphPayloadState::Missing) {
-        m_StatusMessage = "Clipboard is empty.";
+        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Info, "Clipboard is empty.", "editor-node-graph-clipboard");
         return;
     }
     if (clipboardState == SystemClipboardGraphPayloadState::Invalid) {
-        m_StatusMessage = error;
+        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Error, error, "editor-node-graph-clipboard");
         return;
     }
 
     std::string summary;
     if (PasteClipboardPayload(editor, payload, &summary)) {
         m_Clipboard = payload;
-        m_StatusMessage = summary;
+        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Success, summary, "editor-node-graph-clipboard");
     } else {
-        m_StatusMessage = summary.empty() ? "Graph text could not be imported." : summary;
+        PostNodeGraphClipboardNotification(
+            editor,
+            UiNotificationSeverity::Error,
+            summary.empty() ? "Graph text could not be imported." : summary,
+            "editor-node-graph-clipboard");
     }
 }
 

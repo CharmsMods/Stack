@@ -1,4 +1,5 @@
 #include "LayerRegistry.h"
+#include "NodeGraph/UnifiedNodeDefinitionRegistry.h"
 
 #include "Layers/AiryBloomLayer.h"
 #include "Layers/AlphaHandlingLayer.h"
@@ -72,7 +73,7 @@ const std::vector<LayerDescriptor>& Descriptors() {
         { LayerType::Sharpen, "Sharpen", "Sharpen", "Sharpen", "Color", "Sharpen edges with threshold control.", {}, MakeLayer<SharpenLayer>, Stable, ChannelWarn, true, "", "Works on channels, but may amplify noise or ringing.", { "detail", "channel-warning" } },
         { LayerType::ColorGrade, "ColorGrade", "3-Way Color Grade", "3-Way Color Grade", "Color", "Grade shadows, midtones, and highlights.", {}, MakeLayer<ColorGradeLayer>, Stable, FullImagePreferred, true, "", "Color wheels are full-image-first; channel streams use grayscale interpretation.", { "grade", "advanced-ui", "full-image-preferred" } },
         { LayerType::HDR, "HDR", "HDR Compressor", "HDR Compressor", "Color", "Emulate HDR bloom and highlight recovery.", {}, MakeLayer<HDRLayer>, NeedsFix, FullImagePreferred, true, "", "Highlight/luma behavior is full-image-first.", { "color", "tone", "full-image-preferred" } },
-        { LayerType::ToneCurve, "ToneCurve", "Tone Curve", "Tone Curve", "Color / Tone", "Manual scene-referred finish curve for RAW and HDR chains, usually placed before View Transform.", {}, MakeLayer<ToneCurveLayer>, NeedsFix, FullImagePreferred, true, "Manual finish curve node for scene-linear workflows; pair it with View Transform for final preview/export.", "Scene output can exceed display range; add View Transform downstream for final preview/export.", { "tone", "curve", "scene-referred", "raw", "advanced-ui", "full-image-preferred", "manual-tone" } },
+        { LayerType::ToneCurve, "ToneCurve", "Tone Curve", "Tone Curve", "Color / Tone", "Apply a manual tone curve to either display-referred images or scene-linear RAW/HDR data.", {}, MakeLayer<ToneCurveLayer>, NeedsFix, FullImagePreferred, true, "For scene-linear inputs, pair Tone Curve with View Transform for final preview/export. Display-referred images can connect directly to Output.", "Scene-linear output can exceed display range; add View Transform downstream for final preview/export.", { "tone", "curve", "scene-referred", "raw", "advanced-ui", "full-image-preferred", "manual-tone" } },
         { LayerType::ToneEqualizer, "ToneEqualizer", "Tone Equalizer", "Tone Equalizer", "Color / Tone", "Adjust dynamic exposure by scene luminance bands without clamping HDR values.", {}, MakeLayer<ToneEqualizerLayer>, Hidden, FullImagePreferred, false, "", "Scene-referred EV gain; should generally feed a View Transform.", { "tone", "dynamic-range", "scene-referred", "raw", "advanced-ui", "full-image-preferred" } },
         { LayerType::ViewTransform, "ViewTransform", "View Transform", "View Transform", "Color / Tone", "Compress scene-linear RGB into display range for preview and output.", {}, MakeLayer<ViewTransformLayer>, Stable, FullImagePreferred, true, "", "Final display/output transform; place near the end of a scene-referred graph.", { "tone", "display", "view-transform", "scene-referred", "advanced-ui", "full-image-preferred" } },
 
@@ -290,6 +291,13 @@ bool ValidateRegistry(std::vector<std::string>* errors) {
             if (resolved != &descriptor) {
                 outErrors.push_back(std::string("Legacy alias does not resolve to its descriptor: '") + alias + "'.");
             }
+        }
+    }
+
+    std::vector<std::string> definitionErrors;
+    if (!EditorNodeGraphDefinitions::ValidateUnifiedNodeDefinitionRegistry(&definitionErrors)) {
+        for (const std::string& error : definitionErrors) {
+            outErrors.push_back("Unified node definition registry: " + error);
         }
     }
 

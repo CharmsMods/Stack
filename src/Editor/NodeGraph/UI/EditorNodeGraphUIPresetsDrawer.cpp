@@ -8,12 +8,24 @@
 #include "Presets/PresetManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <imgui.h>
 #include <string>
 #include <vector>
 
 namespace {
+
+void PostNodeGraphPresetNotification(
+    EditorModule* editor,
+    UiNotificationSeverity severity,
+    const std::string& message,
+    const char* dedupeKey) {
+    if (!editor || message.empty()) {
+        return;
+    }
+    editor->ShowUiNotification(severity, message, dedupeKey ? dedupeKey : "");
+}
 
 ImU32 WithAlpha(ImVec4 color, float alpha) {
     color.w *= std::clamp(alpha, 0.0f, 1.0f) * ImGui::GetStyle().Alpha;
@@ -45,7 +57,6 @@ bool BuildPreviewGraphFromPayload(
                 outLayers.push_back(nullptr);
                 continue;
             }
-            layer->InitializeGL();
             layer->Deserialize(layerData);
             outLayers.push_back(std::move(layer));
         }
@@ -178,8 +189,7 @@ void RenderUserPresetSection(
     EditorModule* editor,
     const std::vector<std::shared_ptr<PresetEntry>>& presets,
     float rowWidth,
-    const std::string& activePreviewId,
-    std::string& statusMessage) {
+    const std::string& activePreviewId) {
     if (presets.empty()) {
         ImGui::TextWrapped("Select one or more nodes, right-click, then choose Save As Preset.");
         return;
@@ -200,12 +210,24 @@ void RenderUserPresetSection(
             if (PresetManager::Get().LoadPresetPayload(*preset, graphPayload, &error)) {
                 std::string summary;
                 if (ui->ApplyPresetPayload(editor, graphPayload, &summary)) {
-                    statusMessage = summary.empty() ? "Preset applied." : summary;
+                    PostNodeGraphPresetNotification(
+                        editor,
+                        UiNotificationSeverity::Success,
+                        summary.empty() ? "Preset applied." : summary,
+                        "editor-node-graph-preset");
                 } else {
-                    statusMessage = summary.empty() ? "Preset could not be applied." : summary;
+                    PostNodeGraphPresetNotification(
+                        editor,
+                        UiNotificationSeverity::Error,
+                        summary.empty() ? "Preset could not be applied." : summary,
+                        "editor-node-graph-preset");
                 }
             } else {
-                statusMessage = error.empty() ? "Preset could not be loaded." : error;
+                PostNodeGraphPresetNotification(
+                    editor,
+                    UiNotificationSeverity::Error,
+                    error.empty() ? "Preset could not be loaded." : error,
+                    "editor-node-graph-preset");
             }
         }
 
@@ -234,9 +256,13 @@ void RenderUserPresetSection(
                     boundarySockets,
                     exportResult.nodeCount,
                     &error)) {
-                statusMessage = "Preset overwritten.";
+                PostNodeGraphPresetNotification(editor, UiNotificationSeverity::Success, "Preset overwritten.", "editor-node-graph-preset");
             } else {
-                statusMessage = error.empty() ? "Preset overwrite failed." : error;
+                PostNodeGraphPresetNotification(
+                    editor,
+                    UiNotificationSeverity::Error,
+                    error.empty() ? "Preset overwrite failed." : error,
+                    "editor-node-graph-preset");
             }
         }
         ImGui::SameLine(0.0f, 18.0f);
@@ -254,10 +280,14 @@ void RenderUserPresetSection(
             if (ImGui::Button("Rename", ImVec2(110.0f, 0.0f))) {
                 std::string error;
                 if (PresetManager::Get().RenameUserPreset(*preset, renameBuffer, &error)) {
-                    statusMessage = "Preset renamed.";
+                    PostNodeGraphPresetNotification(editor, UiNotificationSeverity::Success, "Preset renamed.", "editor-node-graph-preset");
                     ImGui::CloseCurrentPopup();
                 } else {
-                    statusMessage = error.empty() ? "Preset rename failed." : error;
+                    PostNodeGraphPresetNotification(
+                        editor,
+                        UiNotificationSeverity::Error,
+                        error.empty() ? "Preset rename failed." : error,
+                        "editor-node-graph-preset");
                 }
             }
             ImGui::SameLine();
@@ -272,10 +302,14 @@ void RenderUserPresetSection(
             if (ImGui::Button("Delete", ImVec2(110.0f, 0.0f))) {
                 std::string error;
                 if (PresetManager::Get().DeleteUserPreset(*preset, &error)) {
-                    statusMessage = "Preset deleted.";
+                    PostNodeGraphPresetNotification(editor, UiNotificationSeverity::Success, "Preset deleted.", "editor-node-graph-preset");
                     ImGui::CloseCurrentPopup();
                 } else {
-                    statusMessage = error.empty() ? "Preset delete failed." : error;
+                    PostNodeGraphPresetNotification(
+                        editor,
+                        UiNotificationSeverity::Error,
+                        error.empty() ? "Preset delete failed." : error,
+                        "editor-node-graph-preset");
                 }
             }
             ImGui::SameLine();
@@ -299,12 +333,18 @@ bool EditorNodeGraphUI::EnsurePresetPreviewGraphLoaded(const PresetEntry& preset
         return cache.error.empty();
     }
 
-    cache = {};
-    cache.revisionToken = revisionToken;
-    cache.loadAttempted = true;
-
     StackBinaryFormat::json graphPayload;
-    if (!PresetManager::Get().LoadPresetPayload(preset, graphPayload, &cache.error)) {
+    if (PresetManager::Get().TryGetPreloadedPresetPayload(preset, graphPayload)) {
+        cache = {};
+        cache.revisionToken = revisionToken;
+        cache.loadAttempted = true;
+    } else if (!preset.graphPayloadLoadError.empty()) {
+        cache = {};
+        cache.revisionToken = revisionToken;
+        cache.loadAttempted = true;
+        cache.error = preset.graphPayloadLoadError;
+        return false;
+    } else {
         return false;
     }
 
@@ -312,6 +352,44 @@ bool EditorNodeGraphUI::EnsurePresetPreviewGraphLoaded(const PresetEntry& preset
         return false;
     }
     return true;
+}
+
+void EditorNodeGraphUI::WarmPresetPreviewCache(EditorModule* editor, double budgetMs) {
+    if (!editor) {
+        return;
+    }
+
+    PresetManager& presetManager = PresetManager::Get();
+    const auto& userPresets = presetManager.GetUserPresets();
+    if (userPresets.empty()) {
+        m_PresetPreviewWarmupCursor = 0;
+        return;
+    }
+
+    using Clock = std::chrono::steady_clock;
+    const auto startTime = Clock::now();
+    const double clampedBudgetMs = std::max(0.0, budgetMs);
+    const std::size_t presetCount = userPresets.size();
+    std::size_t processedCount = 0;
+
+    while (processedCount < presetCount) {
+        const std::size_t presetIndex = (m_PresetPreviewWarmupCursor + processedCount) % presetCount;
+        const auto& preset = userPresets[presetIndex];
+        if (preset) {
+            EnsurePresetPreviewGraphLoaded(*preset);
+        }
+
+        ++processedCount;
+        if (processedCount < presetCount && clampedBudgetMs > 0.0) {
+            const double elapsedMs = std::chrono::duration<double, std::milli>(Clock::now() - startTime).count();
+            if (elapsedMs >= clampedBudgetMs) {
+                m_PresetPreviewWarmupCursor = (presetIndex + 1) % presetCount;
+                return;
+            }
+        }
+    }
+
+    m_PresetPreviewWarmupCursor = (m_PresetPreviewWarmupCursor + processedCount) % presetCount;
 }
 
 void EditorNodeGraphUI::SetPresetPreviewHoverTarget(const std::shared_ptr<PresetEntry>& preset) {
@@ -442,12 +520,7 @@ void EditorNodeGraphUI::RenderPresetsPanel(EditorModule* editor, float available
     const float rowWidth = std::max(180.0f, availableWidth - 8.0f);
     const auto userPresets = presetManager.GetUserPresets();
 
-    if (!m_StatusMessage.empty()) {
-        ImGui::TextDisabled("%s", m_StatusMessage.c_str());
-        ImGui::Dummy(ImVec2(0.0f, 12.0f));
-    }
-
     ImGui::TextDisabled("SAVED PRESETS");
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
-    RenderUserPresetSection(this, editor, userPresets, rowWidth, m_DisplayedPresetPreviewId, m_StatusMessage);
+    RenderUserPresetSection(this, editor, userPresets, rowWidth, m_DisplayedPresetPreviewId);
 }

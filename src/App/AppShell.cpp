@@ -13,6 +13,7 @@
 #include "AppSettingsPopup.h"
 #include "AppVersion.h"
 #include "Async/TaskSystem.h"
+#include "Presets/PresetManager.h"
 #include "Renderer/GLLoader.h"
 #include "settings/AppearanceTheme.h"
 #include <GLFW/glfw3.h>
@@ -1337,6 +1338,7 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
     // The Library tab populates asynchronously so the main window can appear quickly.
 
     LibraryManager::Get().RequestRefreshLibraryAsync();
+    PresetManager::Get();
 
     if (!loadedAppearance) {
         m_Appearance->Save();
@@ -1529,6 +1531,9 @@ void AppShell::Run() {
 
         const auto drawStarted = std::chrono::steady_clock::now();
         ImGui::Render();
+        if (!m_CloseRequested) {
+            ProcessGraphCaptureRequest();
+        }
         int display_w, display_h;
         glfwGetFramebufferSize(m_Window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
@@ -1933,6 +1938,9 @@ void AppShell::ReleaseLockedScrubCursor(bool restoreCursorPosition) {
         return;
     }
 
+    if (glfwRawMouseMotionSupported() == GLFW_TRUE) {
+        glfwSetInputMode(m_Window, GLFW_RAW_MOUSE_MOTION, GLFW_FALSE);
+    }
     glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     if (restoreCursorPosition) {
         const ImVec2 restoreLocal = ScreenToWindowCursorPos(m_Window, m_LockedScrubCursorRestoreScreenPos);
@@ -1973,6 +1981,9 @@ void AppShell::SyncCursorCaptureRequest() {
         m_LockedCursorCaptureMode = request.mode;
         m_LockedScrubCursorRestoreScreenPos = request.restoreScreenPos;
         glfwSetInputMode(m_Window, GLFW_CURSOR, glfwCursorMode);
+        if (glfwRawMouseMotionSupported() == GLFW_TRUE) {
+            glfwSetInputMode(m_Window, GLFW_RAW_MOUSE_MOTION, lockedPan ? GLFW_TRUE : GLFW_FALSE);
+        }
     }
 
     m_LockedScrubCursorAnchorScreenPos = request.anchorScreenPos;
@@ -3568,7 +3579,10 @@ void AppShell::RenderEditorSavePrompts() {
 
 void AppShell::OnTabChanged(int oldTab, int newTab) {
     if (oldTab == RootTabRaw && newTab != RootTabRaw) {
-        m_Editor.ReleaseRawWorkspacePreviewForTabChange();
+        m_Editor.LeaveRawWorkspaceRootTab(newTab == RootTabEditor);
+    }
+    if (newTab == RootTabRaw && oldTab != RootTabRaw) {
+        m_Editor.EnterRawWorkspaceRootTab();
     }
     m_ActiveSyncLayerId.clear();
 }

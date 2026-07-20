@@ -63,13 +63,6 @@ void CompositeModule::RenderToolbar() {
         ImGui::EndTable();
     }
 
-    const std::string& saveStatus = LibraryManager::Get().GetSaveStatusText();
-    if (!saveStatus.empty()) {
-        ImGui::Separator();
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextDisabled("%s", saveStatus.c_str());
-        ImGui::PopTextWrapPos();
-    }
 }
 
 void CompositeModule::RenderLayerPane() {

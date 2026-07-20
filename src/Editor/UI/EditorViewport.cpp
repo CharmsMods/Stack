@@ -10,6 +10,7 @@
 #include "Utils/ImGuiExtras.h"
 #include <imgui.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -587,20 +588,6 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         if (!wallpaperSurfaces) {
             drawList->AddRectFilled(canvasMin, canvasMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kCanvasRounding);
         }
-
-        const float checkerScale = 24.0f;
-        const float canvasW = std::max(1.0f, avail.x - margin * 2.0f);
-        const float canvasH = std::max(1.0f, avail.y - margin * 2.0f);
-        const float tilesX = std::max(1.0f, canvasW / checkerScale);
-        const float tilesY = std::max(1.0f, canvasH / checkerScale);
-        drawList->AddImageRounded(
-            (ImTextureID)(intptr_t)m_CheckerTex,
-            canvasMin,
-            canvasMax,
-            ImVec2(0.0f, 0.0f),
-            ImVec2(tilesX, tilesY),
-            IM_COL32(255, 255, 255, static_cast<int>((wallpaperSurfaces ? 84.0f : 105.0f) * viewportRevealAlpha)),
-            kCanvasRounding);
 
         ImGui::InvisibleButton("CompositeCanvasSurface", avail);
         const bool hovered = !inputBlocked && ImGui::IsItemHovered();
@@ -1364,7 +1351,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         }
 
         if (ImGui::BeginPopup("CompositeCanvasContext")) {
-            if (ImGui::MenuItem("Add Image")) {
+            if (ImGui::MenuItem("Import Slice")) {
                 m_PendingCompositeAddImageDialog = true;
                 ImGui::CloseCurrentPopup();
             }
@@ -1526,40 +1513,6 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             drawList->AddLine(guide.a, guide.b, guide.color, 1.4f);
         }
 
-        // Draw an ultra-premium, gap-free, non-overlapping concentric rounded vignette.
-        // This completely eliminates overlapping artifacts, double-blending at corners,
-        // and hard edges, creating a mathematically perfect and smooth blend for the canvas.
-        if (!wallpaperSurfaces) {
-            const float seamFade = 48.0f;
-            const float edgeFade = 24.0f;
-            const ImVec4 workspaceBg = editor->GetWorkspaceBaseColor();
-
-            constexpr int N = 32;
-            for (int i = 0; i < N; ++i) {
-                float t = static_cast<float>(i) / N;
-
-                // Inset from canvas edges moving inward
-                float leftInset = t * seamFade;
-                float rightInset = t * edgeFade;
-                float topInset = t * edgeFade;
-                float bottomInset = t * edgeFade;
-
-                ImVec2 rectMin(canvasMin.x + leftInset, canvasMin.y + topInset);
-                ImVec2 rectMax(canvasMax.x - rightInset, canvasMax.y - bottomInset);
-
-                // Premium cubic falloff for a cinematic, natural-looking smooth transition
-                float smoothAlpha = std::pow(1.0f - t, 2.5f);
-                ImU32 color = ImGui::ColorConvertFloat4ToU32(ImVec4(workspaceBg.x, workspaceBg.y, workspaceBg.z, smoothAlpha));
-
-                // Adjust corner rounding radius to match the inset rectangle perfectly
-                float rounding = std::max(0.0f, kCanvasRounding - (t * edgeFade));
-
-                // Draw concentric rounded rectangle outlines with a thickness of 2.0f.
-                // This ensures overlaps are continuous and completely gap-free.
-                drawList->AddRect(rectMin, rectMax, color, rounding, ImDrawFlags_None, 2.0f);
-            }
-        }
-
         drawList->PopClipRect();
 
         if (hasExportBounds) {
@@ -1633,6 +1586,41 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         return;
     }
 
+    constexpr float kSemanticFooterHeight = 27.0f;
+    auto drawSemanticFooter = [&]() {
+        Stack::NodeMath::ValueDescriptor descriptor;
+        std::string text = "Direct graph result | Output state: analyzing";
+        if (editor->TryGetGraphOutputSemanticDescriptor(descriptor)) {
+            text = "Direct graph result | " + Stack::NodeMath::CompactDescriptorLabel(descriptor);
+        }
+        std::size_t warningCount = 0;
+        for (const Stack::NodeMath::Diagnostic& diagnostic : editor->GetGraphSemanticDiagnostics()) {
+            if (diagnostic.severity == Stack::NodeMath::DiagnosticSeverity::Warning ||
+                diagnostic.severity == Stack::NodeMath::DiagnosticSeverity::HardError) {
+                ++warningCount;
+            }
+        }
+        if (warningCount > 0) {
+            text += " | " + std::to_string(warningCount) +
+                (warningCount == 1 ? " notice" : " notices");
+        }
+        const ImVec2 footerMin(
+            hostScreen.x + 8.0f,
+            hostScreen.y + hostAvail.y - kSemanticFooterHeight + 2.0f);
+        const ImVec2 footerMax(
+            hostScreen.x + hostAvail.x - 8.0f,
+            hostScreen.y + hostAvail.y - 2.0f);
+        hostDrawList->AddRectFilled(
+            footerMin, footerMax,
+            ApplyAlpha(IM_COL32(18, 22, 27, 220), viewportRevealAlpha), 6.0f);
+        hostDrawList->AddText(
+            ImVec2(footerMin.x + 8.0f, footerMin.y + 4.0f),
+            ApplyAlpha(
+                warningCount > 0 ? IM_COL32(235, 197, 112, 245) : IM_COL32(192, 207, 216, 235),
+                viewportRevealAlpha),
+            text.c_str());
+    };
+
     // ── Inputs & Zoom Logic ──────────────────────────────────────────────────
     
     // Toggle Lock with 'L' key
@@ -1642,6 +1630,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
 
     bool isHovered = !inputBlocked && ImGui::IsWindowHovered();
     ImVec2 avail = hostAvail;
+    avail.y = std::max(1.0f, avail.y - kSemanticFooterHeight);
     ImVec2 mousePos = ImGui::GetMousePos();
     ImVec2 contentScreen = hostScreen;
     ImVec2 relativeMouse = ImVec2(mousePos.x - contentScreen.x, mousePos.y - contentScreen.y);
@@ -1815,21 +1804,9 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             if (alpha <= 0.001f) {
                 return;
             }
-            const float imageW = std::max(1.0f, max.x - min.x);
-            const float imageH = std::max(1.0f, max.y - min.y);
-            const float tilesX = std::max(1.0f, imageW / 16.0f);
-            const float tilesY = std::max(1.0f, imageH / 16.0f);
             if (!wallpaperSurfaces) {
                 drawList->AddRectFilled(min, max, ApplyAlpha(workspaceFill, alpha), kImageRounding);
             }
-            drawList->AddImageRounded(
-                (ImTextureID)(intptr_t)m_CheckerTex,
-                min,
-                max,
-                ImVec2(0.0f, 0.0f),
-                ImVec2(tilesX, tilesY),
-                IM_COL32(255, 255, 255, static_cast<int>(170.0f * std::clamp(alpha, 0.0f, 1.0f))),
-                kImageRounding);
             if (hasViewportTiles && texture == outputTex) {
                 drawViewportTileSet(min, max, alpha / std::max(0.001f, viewportRevealAlpha));
             } else {
@@ -1884,6 +1861,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         const float sourceAlpha = SmoothStep01(m_StaticSingleCompareBlend);
         drawAnimatedImage(sourceTex, m_StaticCompareSourceMin, m_StaticCompareSourceMax, sourceAlpha);
         drawAnimatedImage(outputTex, m_StaticCompareOutputMin, m_StaticCompareOutputMax, 1.0f);
+        drawSemanticFooter();
         return;
     }
 
@@ -1956,23 +1934,31 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             int px = std::clamp((int)(imageU * imgW), 0, imgW - 1);
             int py = std::clamp((int)(imageV * imgH), 0, imgH - 1);
 
+            const bool samplesNodeInput = editor->IsCanvasColorPickSamplingNodeInput();
             const auto& sourcePixels = pipeline.GetSourcePixelsRaw();
             int ch = pipeline.GetSourceChannels();
 
             // Click to pick
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                int flippedY = imgH - 1 - py;
-                int idx = (flippedY * imgW + px) * ch;
-                if (!sourcePixels.empty() && idx >= 0 && (size_t)(idx + 2) < sourcePixels.size()) {
-                    float r = sourcePixels[idx] / 255.0f;
-                    float g = sourcePixels[idx + 1] / 255.0f;
-                    float b = sourcePixels[idx + 2] / 255.0f;
-                    editor->OnColorPicked(r, g, b);
+                if (samplesNodeInput) {
+                    std::array<float, 4> sampledRgba {};
+                    if (editor->SampleCanvasColorPickPixel(imageU, imageV, sampledRgba)) {
+                        editor->OnColorPicked(sampledRgba[0], sampledRgba[1], sampledRgba[2]);
+                    }
+                } else {
+                    int flippedY = imgH - 1 - py;
+                    int idx = (flippedY * imgW + px) * ch;
+                    if (!sourcePixels.empty() && idx >= 0 && (size_t)(idx + 2) < sourcePixels.size()) {
+                        float r = sourcePixels[idx] / 255.0f;
+                        float g = sourcePixels[idx + 1] / 255.0f;
+                        float b = sourcePixels[idx + 2] / 255.0f;
+                        editor->OnColorPicked(r, g, b);
+                    }
                 }
             }
 
             // Draw magnifier tooltip
-            if (!sourcePixels.empty()) {
+            if (!samplesNodeInput && !sourcePixels.empty()) {
                 const int magRadius = 5; // 11x11 grid
                 const float cellSize = 12.0f;
                 const int gridSize = magRadius * 2 + 1;
@@ -2030,10 +2016,8 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
 
     // ── Comparison Logic (Hover Fade) ────────────────────────────────────────
 
-    // 1) Draw checkerboard background so transparency is visible
-    float checkerSize = 16.0f;
-    float tilesX = dispW / checkerSize;
-    float tilesY = dispH / checkerSize;
+    // Reserve the fitted image rect; transparent output now blends directly
+    // into the workspace instead of drawing a separate checkerboard plate.
     constexpr float kImageRounding = 18.0f;
     ImGui::Dummy(ImVec2(dispW, dispH));
     const bool imageHovered = ImGui::IsItemHovered();
@@ -2216,11 +2200,9 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     if (!wallpaperSurfaces) {
         drawList->AddRectFilled(imageMin, imageMax, ApplyAlpha(workspaceFill, viewportRevealAlpha), kImageRounding);
     }
-    drawList->AddImageRounded((ImTextureID)(intptr_t)m_CheckerTex, imageMin, imageMax,
-                              ImVec2(0, 0), ImVec2(tilesX, tilesY), IM_COL32(255, 255, 255, static_cast<int>(170.0f * viewportRevealAlpha)), kImageRounding);
 
     // Handle Fade Factor (hover to compare with original)
-    float hoverTarget = (imageHovered && !m_IsLocked && !toneCurveProbeActive && !editor->IsToneCurveTargeting()) ? 1.0f : 0.0f;
+    float hoverTarget = (imageHovered && !m_IsLocked && !editor->IsPickingColor() && !toneCurveProbeActive && !editor->IsToneCurveTargeting()) ? 1.0f : 0.0f;
     float currentFactor = editor->GetHoverFade();
     const float fadeStep = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.2f);
     currentFactor += (hoverTarget - currentFactor) * fadeStep;
@@ -2326,4 +2308,5 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         }
         drawList->PopClipRect();
     }
+    drawSemanticFooter();
 }

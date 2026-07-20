@@ -1,0 +1,614 @@
+STACK APPLICATION — BUTTONS, MENUS, NAMING, AND FUNCTIONAL ORGANIZATION
+=========================================================================
+Researched from src/ source tree, May 2026
+
+This document catalogs every button, menu, and interactive element in the
+application with its exact label text, which file it is in, and notes on
+naming quality and functional placement.
+
+--------------------------------------------------------------------------------
+SPLASH SCREEN
+--------------------------------------------------------------------------------
+
+The splash screen has no interactive elements. It shows:
+  - The splash image (embedded from EmbeddedSplash.h)
+  - A 4px progress bar at the bottom
+  - Status text (e.g., "Loading project X of Y: <filename>", "Ready")
+
+No buttons exist on the splash.
+
+--------------------------------------------------------------------------------
+ROOT LEVEL: AppShell.cpp
+--------------------------------------------------------------------------------
+
+Modal: "Editor Project Already Open##AppShell"
+  Trigger: Attempting to open a project in the Editor when one is already loaded.
+  Message: "There is already a project open in the Editor tab. Would you like to
+            save it before loading the new project?"
+
+  Button: "Save & Continue"     (width 140px)
+    — Saves the current project and then navigates to Editor with new project.
+    — If the current project has no file name, opens the Save Name prompt.
+  Button: "Discard & Continue"  (width 140px)
+    — Discards the current editor project and loads the new one.
+  Button: "Cancel"              (width 100px)
+    — Closes the modal, no action.
+
+Modal: "Save New Editor Project##AppShell"
+  Trigger: The "Save & Continue" path when the current project has no file name.
+  Message: "Enter a name for the current project:"
+
+  InputText: ##ProjectName (unlabeled input, full-width)
+  Button: "Save"     (width 100px)
+    — If input is empty, saves as "Untitled Project".
+  Button: "Cancel"   (width 100px)
+
+NAMING NOTES (AppShell modals):
+  "Save & Continue" and "Discard & Continue" are clear and appropriately paired.
+  The ampersand is used consistently. "Cancel" is universally understood.
+  The ## suffix on the popup ID ("##AppShell") is correct ImGui practice to
+  avoid ID collisions. The popup titles contain the ## which means "AppShell"
+  is part of the ID but not displayed — only the part before ## is shown.
+  Wait — in ImGui, BeginPopupModal's first argument IS the title. Looking at
+  the code: ImGui::BeginPopupModal("Editor Project Already Open##AppShell", ...)
+  The ##AppShell is the ID disambiguation, the displayed title is
+  "Editor Project Already Open". This is correct.
+
+--------------------------------------------------------------------------------
+LIBRARY TAB: LibraryModule.cpp
+--------------------------------------------------------------------------------
+
+TOOLBAR (LibraryHeader child, 50px tall):
+  Button: "Options"
+    — Opens popup "LibraryOptionsPopup" with the library menu options (see below).
+  InputTextWithHint: ##search  (placeholder: "Search library...")  (width 220px)
+
+STATUS TEXT (below toolbar, if non-empty):
+  TextDisabled: import status text
+  TextDisabled: export status text
+  TextDisabled: save status text
+  These are display-only. They show the last async operation result.
+
+SIDEBAR (LibrarySidebar child, resizable 170-360px):
+  Text: "FILTERS"
+  Selectable: "All Projects"  — switches grid to show projects
+  Selectable: "Assets"        — switches grid to show rendered assets
+
+  CollapsingHeader: "Tags"  (DefaultOpen)
+    Checkbox: "Untagged only"
+      — When checked, clears active tag filters and filters to items with no tags.
+    [Per-tag checkboxes rendered dynamically from TagManager]
+
+    SmallButton: "Clear Filters"  — visible only when filters are active
+    InputTextWithHint: ##addtag  (placeholder: "New tag...")
+    SmallButton: "Apply Tag"
+      — Applies the typed tag to all selected items.
+    SmallButton: "Remove Tag"
+      — Removes the typed tag from all selected items.
+
+  TextDisabled: "Library refresh is automatic."
+
+SPLITTER (LibrarySidebarSplitter):
+  InvisibleButton 6px wide, draggable.
+  Cursor changes to ResizeEW on hover.
+
+GRID (LibraryGrid child):
+  Context menu on right-click with no items hovered ("LibraryGridContextMenu"):
+    — Shows same content as "Options" popup.
+
+PROJECT CARDS:
+  Image or Button("No Preview") — thumbnail display
+  BeginChild "CardInfo" — project name, dimensions, timestamp (no input)
+  InvisibleButton ##hitbox — full card click target
+
+  Left click: selects card (Ctrl for multi-select)
+  Double left click: opens preview modal
+  Right click: opens "ProjectCardContextMenu##<fileName>"
+
+  Project context menu contents:
+    MenuItem: "Open in Editor"
+      — Only visible for editor-kind projects. Loads project, switches to tab 1.
+    MenuItem: "Open in Composite"
+      — Only visible for composite-kind projects. Loads, switches to tab 2.
+    MenuItem: "Load Selected into Composite"
+      — Loads all selected projects as layers into the Composite canvas.
+      — Switches to tab 2 regardless of project kind.
+    Separator
+    MenuItem: "Delete Selected (N)"
+      — N is the count of selected items. Opens delete confirmation.
+
+ASSET CARDS (shown when "Assets" tab is active):
+  Same card structure as project cards.
+  Context menu "AssetCardContextMenu##<fileName>":
+    MenuItem: "Load Selected into Composite"
+      — Loads selected assets as image layers in Composite. Switches to tab 2.
+    Separator
+    MenuItem: "Delete Selected (N)"
+
+DELETE CONFIRMATION (RenderDeleteConfirmPopup):
+  Not read in detail during research but exists and shows item count.
+
+LIBRARY OPTIONS POPUP (RenderLibraryMenuOptions):
+  This popup content appears both in the "Options" button popup and in the
+  right-click background context menu.
+  Full catalog not extracted in detail here — contains import and export actions.
+
+PROJECT PREVIEW POPUP (Library Project Preview — full screen modal):
+  Header: project name (white text), metadata (timestamp, dimensions, file name)
+
+  Image area (LibraryPreviewViewport child):
+    — Compare slider showing Before/After with draggable split handle.
+    — "After" and "Before" labels drawn directly on the DrawList.
+
+  Side panel (~370px):
+    — Project metadata display (dates, dimensions, layer count)
+    — Rename field: InputText (project name editing)
+    — Tag display and management controls
+    — Action buttons (see below)
+
+  Action buttons in preview panel (actual labels depend on project kind):
+    For editor projects:
+      Button: "Open in Editor"   — loads project, closes preview, switches tab.
+      Button: "Load into Composite"
+    For render projects:
+      Button: "Open in Render"
+    For composite projects:
+      Button: "Open in Composite"
+    Button: "Load into Composite" (for any project with image data)
+    Button: "Close" / ESC to close
+
+  Footer buttons:
+    Button: "← Close"  or similar close control
+
+NAMING NOTES (Library):
+  "Options" is vague — it opens a popup with import/export/refresh actions.
+  "Import" would be more specific. "Options" is often used for settings, not
+  primary workflow actions like import.
+  
+  "All Projects" and "Assets" as sidebar filter selects are clear.
+  
+  "Load Selected into Composite" is accurate but verbose. It appears three
+  times in different contexts (project card menu, asset card menu, preview
+  panel). Consistent wording across all locations is a positive.
+  
+  "Delete Selected (N)" showing the count is excellent UX — the user knows
+  exactly how many items will be deleted.
+  
+  "Apply Tag" and "Remove Tag" beside each other with a shared text input
+  is a simple tagging interface. The lack of any label on the input (only a
+  placeholder) means there is no persistent visual affordance for what the
+  input is for once text is entered.
+  
+  "Untagged only" as a checkbox label is slightly awkward compared to
+  "Show untagged only" or "No tags".
+  
+  The "After" / "Before" labels on the compare view are drawn directly onto
+  the image via DrawList with no background. They use hardcoded screen positions
+  (10px from left, 55px from right, 10px from top). The text is small and
+  white with 220 alpha — adequate but could be missed on light images.
+
+--------------------------------------------------------------------------------
+EDITOR TAB
+--------------------------------------------------------------------------------
+
+INSPECTOR PANEL SIDEBAR (EditorSidebar.cpp):
+
+  Button: "SAVE TO LIBRARY"  (width -1, full sidebar width)
+    — Disabled and relabeled "SAVING TO LIBRARY..." while async save is running.
+    — If project has no name, uses "New Project" as default.
+    — Calls LibraryManager::RequestSaveProject().
+
+  TextDisabled: save status text (shown if non-empty)
+  Separator
+
+  Tab bar "SidebarTabs":
+    Tab: "Layers"    — shows LayersTab
+    Tab: "Canvas"    — shows CanvasTab
+    Tab: "Selected"  — shows SelectedTab (auto-focused when adding a layer)
+    Tab: "Pipeline"  — shows PipelineTab
+
+LAYERS TAB (LayersTab.cpp):
+  Text: "Available Modules"
+  TextDisabled: "Click to add to the end of the pipeline"
+  
+  Category headers (color-coded TextColored):
+    "BASE"          — blue-white (0.7, 0.7, 1.0)
+    "COLOR"         — green-white (0.7, 1.0, 0.7)
+    "TEXTURE & BLUR" — salmon (1.0, 0.7, 0.7)
+    "STYLIZE"       — warm yellow (0.95, 0.85, 0.55)
+    "DAMAGE & GLITCH" — orange-red (0.95, 0.55, 0.55)
+    "OPTICS"        — yellow (1.0, 1.0, 0.7)
+
+  Layer buttons (full width, ImVec2(-FLT_MIN, 0)):
+    BASE:
+      "Crop / Rotate / Flip"
+      "Expander (Canvas Pad)"
+      "Background Patcher"
+      "Alpha Handling / Protect"
+    COLOR:
+      "Adjustments (Color/Contrast)"
+      "3-Way Color Grade"
+      "HDR Emulation"
+    TEXTURE & BLUR:
+      "Blur (Box/Gaussian)"
+      "Denoising"
+      "Bilateral Filter"
+      "Noise / Film Grain"
+      "Tilt-Shift Blur"
+      "Hankel (Optical) Blur"
+    STYLIZE:
+      "Dithering"
+      "Halftoning (Dots)"
+      "Cell Shading"
+      "Palette Reconstructor"
+      "Edge Effects"
+      "Text Overlay"
+    DAMAGE & GLITCH:
+      "Compression"
+      "Corruption (Digital)"
+      "Image Breaks"
+      "Analog (VHS/CRT)"
+    OPTICS:
+      "Vignette"
+      "Glare Rays"
+      "Chromatic Aberration"
+      "Lens Distortion"
+      "Heatwave & Ripples"
+      "Airy Bloom"
+
+CANVAS TAB (CanvasTab.cpp):
+  Text: "Canvas Settings"
+  
+  When image IS loaded:
+    Text: "Dimensions: W x H"
+    Button: "Replace Image..."  — opens file dialog
+    Button: "Export Rendered Image..."  — opens save dialog
+    TextDisabled: "(PNG, JPG, BMP, TGA)"
+  
+  When NO image loaded:
+    TextWrapped: "No source image loaded. Load an image to begin editing."
+    Button: "Load Image..."  — opens file dialog
+  
+  TextDisabled: source load status text (if non-empty)
+  TextDisabled: export status text (if non-empty)
+  
+  Separator
+  Text: "Global Rendering Options"
+  Checkbox: "Only Render Up To Active Layer"
+  TextDisabled: "When enabled, the pipeline stops at the currently
+                 selected layer in the Pipeline tab."
+
+PIPELINE TAB (PipelineTab.cpp):
+  Text: "Rendering Stack (Sequential)"
+  TextDisabled: "Drag and drop to reorder processing flow"
+  
+  Per layer in the stack:
+    Checkbox: ##vis  (no label, visibility toggle)
+    Selectable: "N. <layer name>"  (N is 1-based index)
+      — Drag source: "DND_LAYER_INDEX" payload type
+      — Drop target: accepts DND_LAYER_INDEX, calls MoveLayer()
+    Button: "x"  (20x20px, right-aligned)  — removes the layer
+
+  When stack is empty:
+    TextDisabled: "No layers in pipeline."
+    TextDisabled: "Add one from the 'Layers' tab."
+
+SELECTED TAB (SelectedTab.cpp):
+  When no layer is selected:
+    TextDisabled: "Select a layer in the Pipeline tab to inspect its parameters."
+  
+  When a layer is selected:
+    Text: layer->GetName()
+    TextDisabled: "Category: <layer category>"
+    Separator
+    — delegates to layer->RenderUI(editor)
+
+CANVAS VIEWPORT (EditorViewport.cpp):
+  When no image loaded:
+    Text: "No image loaded. Go to the 'Canvas' tab to load an image."
+  
+  When image is loaded:
+    Status text overlaid on viewport:
+      If locked: TextColored(orange): "[ ZOOM LOCKED ] - Press 'L' to unlock"
+      If unlocked: TextDisabled: "Scroll to Zoom | 'L' to Lock | Movement Pans"
+    
+    Checkerboard background image (transparency indicator)
+    Hover: source image fades in for comparison (no button, pure hover behavior)
+    Processed output image drawn on top with alpha lerp.
+    
+    Color pick mode (triggered externally by a layer):
+      Cursor changes to Hand
+      Pixel magnifier tooltip (11x11 grid of color swatches)
+
+SCOPES PANEL (EditorScopes.cpp):
+  Tab bar "ScopeTabs":
+    Tab: "Histogram"   — four stacked PlotLines (R, G, B, Luminance)
+    Tab: "Vectorscope" — YUV scatter plot drawn via DrawList
+    Tab: "RGB Parade"  — per-column R/G/B histogram drawn via DrawList
+
+  Scopes update on a throttled timer (m_UpdateInterval, not visible to user).
+  No user-configurable controls in the scopes panel.
+  
+  When no image loaded:
+    TextDisabled: "No image loaded for analysis."
+
+LAYER UI CONTROLS (representative sample — AdjustmentsLayer):
+  SliderFloat: "Brightness"      -1.0 to 1.0
+  SliderFloat: "Contrast"        -1.0 to 1.0
+  SliderFloat: "Saturation"      -1.0 to 1.0
+  SliderFloat: "Warmth"          -1.0 to 1.0
+  SliderFloat: "Sharpening"      0.0 to 1.0
+  SliderFloat: "Sharpen Threshold" 0.0 to 1.0
+
+NAMING NOTES (Editor):
+  "SAVE TO LIBRARY" in all-caps is the primary call-to-action for the Editor.
+  It is prominently placed at the top of the sidebar. Good.
+  
+  The sidebar tab order — Layers, Canvas, Selected, Pipeline — is not ideal
+  for workflow. A user new to the Editor would first want to load an image
+  (Canvas), then browse layers to add (Layers), then configure the selected layer
+  (Selected), then reorder in the pipeline (Pipeline). The current order puts
+  the "add layer" interface first and "load image" second, which is backwards
+  for first use.
+  
+  "Available Modules" is the label for the layers list. This is unusual — "Effects"
+  or "Layers" would be the industry standard term. The application calls these
+  "layers" everywhere else ("Layers tab", "layer stack", "pipeline") but the
+  header above the list says "Modules", creating a naming inconsistency.
+  
+  Layer categories are named well and color-coded, which aids scanning. "DAMAGE &
+  GLITCH" is an unusual but accurate descriptor for compression artifacts, corruption,
+  image breaks, and VHS effects. "OPTICS" is clear.
+  
+  The "x" delete button on each pipeline layer has no label. It is 20x20px and
+  right-aligned. It is small and discoverable only by hovering near the right edge.
+  There is no tooltip. This is a usability gap — deleting a layer is permanent
+  (no undo system exists) and the button is tiny and unlabeled.
+  
+  The visibility checkbox in the pipeline has no label at all (##vis). A tooltip
+  saying "Toggle layer visibility" would be appropriate. The eye icon is the
+  industry convention here, but plain ImGui has no icon support by default.
+  
+  "Only Render Up To Active Layer" is long but accurate. The TextDisabled
+  explanation below it is good — it prevents confusion about what this option does.
+  
+  "[ ZOOM LOCKED ] - Press 'L' to unlock" is clear and specific. The keyboard
+  shortcut 'L' is not documented anywhere else — only in this runtime tooltip.
+  "Scroll to Zoom | 'L' to Lock | Movement Pans" is the unlocked state hint.
+  The 'L' shortcut is not shown in any menu or tooltip before the user discovers
+  it by hovering on the viewport.
+  
+  The comparison hover behavior (hovering the image fades in the original for
+  comparison) has no affordance whatsoever. There is no tooltip, no label, nothing
+  to tell the user this feature exists. The TextDisabled status line says nothing
+  about this.
+
+--------------------------------------------------------------------------------
+BUNDLER TAB: BundlerModule.cpp
+--------------------------------------------------------------------------------
+
+SETTINGS PANEL (Bundler Settings):
+  Text: "Bundler Inputs"
+  BeginChild InputList (100px tall, bordered):
+    — Lists paths as TextWrapped items, or shows:
+    TextColored(gray): "(no files/folders selected)"
+  
+  Button: "Add File(s)..."   (half width minus 4px)
+    — Opens multi-file dialog.
+  Button: "Add Folder..."    (remaining width minus 4px)
+    — Opens folder dialog.
+  Button: "Clear Inputs"     (full width)
+
+  Separator
+  Text: "Output Directory"
+    — If empty: TextColored(gray): "(defaults to project_root/dist)"
+    — If set: TextWrapped path display
+  Button: "Browse Output Folder..."  (full width)
+
+  Separator
+  Text: "Build Mode"
+  RadioButton: "Single HTML"     (value 0)
+  RadioButton: "Per-file Minify" (value 1)
+  RadioButton: "Bundle by Type"  (value 2)
+
+  Separator
+  Text: "Minification Tools"
+  
+  Before detection:
+    Button: "Detect Tools on PATH"  (full width)
+  After detection:
+    TextColored(green or gray): "  esbuild: <version or 'not found'>"
+    TextColored(green or gray): "  lightningcss: <version or 'not found'>"
+    TextColored(green or gray): "  terser: <version or 'not found'>"
+    TextColored(green or gray): "  minify-html: <version or 'not found'>"
+    SmallButton: "Re-detect"
+
+  Separator
+  Button: "Scan Inputs"   (full width, height 28px)
+    — Disabled if no inputs selected or a build is in progress.
+    — Triggers dependency graph scan.
+  Button: "Build"          (full width, height 28px)
+    — Disabled until scan has run once, and while building.
+    — Triggers minification/bundling job.
+  ProgressBar (full width, height default)
+    — Shown only while m_IsBuilding is true.
+
+  Reference summary (after scan):
+    Text: "References: N found"
+    TextColored(green): "  Resolved: N"
+    TextColored(yellow or gray): "  Unresolved: N"
+
+  Build result summary (after build):
+    Text: "Last Build"
+    Text: "  Processed: N files"
+    TextColored(green): "  Minified:  N"
+    TextColored(gray): "  Copied:    N"
+    TextColored(red): "  Failed:    N"  (only if N > 0)
+    Text: "  Input:  <size>"
+    Text: "  Output: <size>"
+    TextColored(green): "  Savings: X.X%"  (if output < input)
+
+FILE TREE PANEL (Project Files):
+  Summary line: "Total: N files  HTML:N  CSS:N  JS:N  Text:N  Asset:N"
+    — Each type is TextColored with its type color.
+  Combo: "Filter"  (150px wide, options: All/HTML/CSS/JavaScript/Text|Data/Asset/Unknown)
+  Checkbox: "Show References"
+
+  Per file, one of two forms:
+    Form A (no edges or edges hidden):
+      TextColored(type-color): "[TYPE]"
+      TextColored(gray): "(SIZE)"
+      TextUnformatted: relative path
+      (If build result + minified): TextColored(green): "-> OUTPUT_SIZE"
+    
+    Form B (has edges and Show References is on):
+      TreeNode: "[TYPE] (SIZE) path  [N refs]"  (type-colored)
+        Per edge:
+          If resolved: TextColored(green): "  -> [KIND] target  (specifier, line N)"
+          If unresolved: TextColored(orange): "  -> [KIND] UNRESOLVED: "specifier"  (line N)"
+
+DIAGNOSTICS PANEL (Bundler Diagnostics):
+  Combo: "Severity"  (120px wide, options: All/Info/Warning/Error)
+  Button: "Clear Logs"
+  Separator
+  BeginChild LogRegion (scrollable):
+    Per log entry, TextColored/TextUnformatted:
+      Errors: red (1.0, 0.4, 0.4)
+      Warnings: orange (1.0, 0.7, 0.3)
+      Info: gray (0.8, 0.8, 0.8)
+    Auto-scrolls to bottom when scroll is at max.
+
+NAMING NOTES (Bundler):
+  "Bundler Inputs" and "Output Directory" are clear.
+  
+  "Build Mode" option labels: "Single HTML", "Per-file Minify", "Bundle by Type"
+  — These are accurate and distinct. They correctly describe what each mode does
+  at a high level. A first-time user might want a tooltip on each, but the labels
+  are not misleading.
+  
+  "Detect Tools on PATH" is specific and honest — it tells the user exactly where
+  tools are looked for. The button disappearing after detection and being replaced
+  by status text with "Re-detect" is clean UX.
+  
+  "Scan Inputs" and "Build" are a two-step workflow. The disabled state of "Build"
+  until scan has run is correctly enforced. However, the height of both buttons
+  is 28px while all other buttons in the settings panel use height 0 (default).
+  This creates visual inconsistency — the primary action buttons are taller, which
+  is actually good for discoverability, but the inconsistency could be intentional
+  or accidental.
+  
+  The "Project Files" panel title doesn't describe what you're seeing well for a
+  bundler — "Dependency Graph" or "File Graph" would be more accurate, since the
+  panel shows a scanned dependency tree, not just a list of project files.
+  
+  "Bundler Diagnostics" is accurate. "Clear Logs" is clear.
+  
+  Auto-scroll to bottom in the log panel is the correct behavior for an output log.
+
+--------------------------------------------------------------------------------
+RENDER TAB: RenderTab.cpp (representative — file is 4046 lines)
+--------------------------------------------------------------------------------
+
+The Render tab contains the most UI in the application. Only major groupings
+are cataloged here.
+
+TOOLBAR:
+  — Project name display, save button, unsaved-changes indicator.
+  — View mode selector (Unlit / Path Trace).
+  — Camera options toggle, Final Render Settings toggle, Test Scenes toggle.
+  — Reset Scene button.
+  — Transform mode buttons (Translate W / Rotate E / Scale R) with keyboard hints.
+  — Transform space toggle (Local / World).
+
+SCENE PANEL:
+  — Object list (primitives, lights).
+  — Add buttons for: Sphere, Cube, Plane, Imported Mesh, Point Light, Spot Light,
+    Area Light, Directional Light, Laser Light.
+  — Import mesh button opening the import dialog.
+  — Select/deselect buttons.
+  — Delete selected button.
+
+INSPECTOR PANEL:
+  — Context-sensitive depending on selection (primitive, light, material, camera,
+    environment, render settings, postprocessing).
+  — For primitives: Transform (position, rotation, scale), Material assignment.
+  — For lights: Type, color, intensity, position, direction.
+  — For material: Base type (Diffuse/Metal/Glass), roughness, IOR, transmission,
+    color, clearcoat.
+  — For environment: HDR intensity, fog color.
+  — For camera (in Camera window): FOV, position, yaw, pitch, white balance,
+    exposure.
+  — For denoiser: Mode (Off/Bilateral/A-Trous), strength, debug view selector.
+  — For viewport: Performance mode (Auto/Exact/Proxy).
+  — For final render: Resolution, sample count, denoiser export mode.
+
+NAMING NOTES (Render — selective):
+  All enum label functions (ViewModeLabel, DenoiserModeLabel, etc.) live in the
+  anonymous namespace and are used purely to feed Combo/RadioButton displays.
+  This is a clean separation: the display strings are not scattered in the enum
+  definitions.
+  
+  "A-Trous" is a technical denoiser name — acceptable for a render tool where
+  the audience knows the term.
+  
+  "Smart" termination mode is vague next to "Brute Force" and "Optimized" — the
+  others have connotations but "Smart" could mean anything.
+  
+  "Keep Original Scale" and "Auto Fit Scene" for import scale modes are clear.
+  
+  "W/E/R" keyboard shortcut hints appear in the toolbar next to transform mode
+  buttons — this is good discoverability for non-obvious shortcuts.
+
+--------------------------------------------------------------------------------
+COMPOSITE TAB: CompositeModule.h (full cpp not read in detail)
+--------------------------------------------------------------------------------
+
+Based on the header, the Composite tab contains:
+
+  TOOLBAR (RenderToolbar):
+    — Add layer controls: Shape (Rect, Circle), Text, Image, Project.
+    — Add from Library button.
+    — Save to Library, Export PNG.
+    — Canvas size controls.
+    — Snap controls.
+
+  LAYER PANE (RenderLayerPane):
+    — Layer list with visibility toggles, lock indicators.
+    — Right-click context menu: RenderLayerContextMenu.
+
+  SELECTED INSPECTOR (RenderSelectedInspector):
+    — X, Y, Scale X, Scale Y, Rotation, Opacity controls.
+    — Blend mode selector (Normal/Multiply/Screen/Add/Overlay/SoftLight/
+      HardLight/Hue/Color).
+    — Flip X, Flip Y toggles.
+    — Layer-kind specific controls (fill color for shapes, text content for
+      text layers, project link status for editor project layers).
+
+  VIEW INSPECTOR (RenderViewInspector):
+    — Zoom level, pan controls.
+    — Checker background toggle.
+
+  EXPORT INSPECTOR (RenderExportInspector):
+    — Bounds mode (Auto / Custom).
+    — Background mode (Transparent / Solid).
+    — Aspect ratio presets (1x1, 4x3, 16x9, 9x16, etc., Custom).
+    — Output resolution with linked aspect or independent width/height inputs.
+
+  STAGE (RenderStage):
+    — Canvas area with pan/zoom.
+    — Selection handles (move, rotate, resize corners/edges).
+    — Export bounds overlay handles.
+
+  BLEND MODE LIST:
+    Normal, Multiply, Screen, Add, Overlay, SoftLight, HardLight, Hue, Color
+    — These match standard image editing conventions.
+
+NAMING NOTES (Composite):
+  The aspect ratio presets use internal enum names like Ratio1x1, Ratio16x9
+  which will map to display labels (not verified in detail, but common convention).
+  
+  "Save to Library" and "Export PNG" are clear and distinct — saving to the
+  internal library vs. exporting to a user-chosen file path.
+  
+  CompositeSnapModePreset enum has: Full, ObjectOnly, Off, Custom — these are
+  self-explanatory snap behavior modes.

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <imgui.h>
+#include <algorithm>
+#include <cmath>
 #include <string>
 
 namespace ImGuiExtras {
@@ -28,11 +30,24 @@ namespace ImGuiExtras {
         float valueWidth = 48.0f;
         float minSliderWidth = 78.0f;
         float scale = 1.0f;
+        float interactionScale = 1.0f;
         bool allowSliderTextEntry = false;
         bool useScrubHandles = false;
         GraphSliderRangePolicy rangePolicy = GraphSliderRangePolicy::Bounded;
         float scrubSensitivity = 1.0f;
     };
+
+    inline float GraphSliderDragStepPerPixel(
+        float valueMin,
+        float valueMax,
+        float screenTrackWidth,
+        float interactionScale,
+        float sensitivity) {
+        const float safeInteractionScale = std::max(0.0001f, interactionScale);
+        const float logicalTrackWidth = std::max(1.0f, screenTrackWidth / safeInteractionScale);
+        const float valueSpan = std::abs(valueMax - valueMin);
+        return (valueSpan / logicalTrackWidth) * std::max(0.0001f, sensitivity);
+    }
 
     enum class CursorCaptureMode {
         None,

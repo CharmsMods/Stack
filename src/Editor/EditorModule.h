@@ -6,6 +6,7 @@ namespace StackAppearance {
 
 #include "Async/TaskState.h"
 #include "Editor/EditorModuleTypes.h"
+#include "Editor/GraphCapture.h"
 #include "Editor/LoadedProjectData.h"
 #include "Layers/LayerBase.h"
 #include "LayerRegistry.h"
@@ -13,6 +14,7 @@ namespace StackAppearance {
 #include "NodeGraph/EditorNodeGraph.h"
 #include "UI/EditorSidebar.h"
 #include "UI/EditorViewport.h"
+#include "Raw/RawAutoStartPoint.h"
 #include "Raw/RawImageAnalysis.h"
 #include "Raw/RawWorkspace.h"
 #include "Raw/RawWorkspaceManagedGraph.h"
@@ -31,6 +33,7 @@ namespace StackAppearance {
 #include <memory>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -74,6 +77,7 @@ public:
     using RawAutoValueOwner = Stack::EditorModuleTypes::RawAutoValueOwner;
     using RawWorkspaceAutoBaseUiState = Stack::EditorModuleTypes::RawWorkspaceAutoBaseUiState;
     using RawWorkspaceLayoutUiState = Stack::EditorModuleTypes::RawWorkspaceLayoutUiState;
+    using TimelineUiState = Stack::EditorModuleTypes::TimelineUiState;
     enum class RawWorkspacePreviewOutputKind {
         None,
         SingleTexture,
@@ -91,6 +95,8 @@ public:
     // Called every frame by the AppShell
     void RenderUI();
     void RenderRawWorkspaceUI();
+    void EnterRawWorkspaceRootTab();
+    void LeaveRawWorkspaceRootTab(bool enteringEditorTab);
     void ReleaseRawWorkspacePreviewForTabChange();
     bool FocusRawWorkspace();
     bool FlushActiveRawWorkspaceProjectIfDirty();
@@ -139,7 +145,12 @@ public:
 
     RenderPipeline& GetPipeline() { return m_Pipeline; }
     std::vector<std::shared_ptr<LayerBase>>& GetLayers() { return m_Layers; }
-    StackAppearance::AppearanceManager* GetAppearance() { return m_Appearance; }
+    StackAppearance::AppearanceManager* GetAppearance() {
+        return m_GraphCaptureAppearanceOverride ? m_GraphCaptureAppearanceOverride : m_Appearance;
+    }
+    const StackAppearance::AppearanceManager* GetAppearance() const {
+        return m_GraphCaptureAppearanceOverride ? m_GraphCaptureAppearanceOverride : m_Appearance;
+    }
 
     // Dynamic Layer Management
     void AddLayer(LayerType type);
@@ -162,6 +173,7 @@ public:
     void PromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void RequestPromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPosition);
     bool AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
+    bool UseGraphImageNodeAsActiveSource(int nodeId);
     bool AddRawSourceNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
     bool LoadLutNodeFromFile(int nodeId, const std::string& path, bool notifyOnFailure = true);
     bool ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure = true);
@@ -322,6 +334,22 @@ public:
     void AddImageGeneratorNodeAt(EditorNodeGraph::ImageGeneratorKind generatorKind, EditorNodeGraph::Vec2 graphPosition);
     void AddMixNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddDataMathNodeAt(EditorNodeGraph::DataMathMode mode, EditorNodeGraph::Vec2 graphPosition);
+    void AddValueNodeAt(Stack::NodeMath::FirstClassValue value, EditorNodeGraph::Vec2 graphPosition);
+    void AddFieldMeanNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddReformatNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddTechnicalImageNodeAt(Stack::NodeMath::TechnicalImageOperation operation, EditorNodeGraph::Vec2 graphPosition);
+    void AddCompoundTemplateNodeAt(std::size_t templateIndex, EditorNodeGraph::Vec2 graphPosition);
+    bool MakeCompoundNodeUnique(int nodeId, std::string* error = nullptr);
+    bool UnpackCompoundNode(int nodeId, std::string* error = nullptr);
+    bool UpdateCompoundNodeToLatestEmbeddedVersion(int nodeId, std::string* error = nullptr);
+    bool CreateCompoundFromSelection(const std::string& label, std::string* error = nullptr);
+    void AddFrequencyFftNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddFrequencyIfftNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddSpectrumViewNodeAt(EditorNodeGraph::Vec2 graphPosition);
+    void AddFrequencyMaskNodeAt(EditorNodeGraph::FrequencyMaskShape shape, EditorNodeGraph::Vec2 graphPosition);
+    void AddSpectrumMathNodeAt(EditorNodeGraph::SpectrumMathMode mode, EditorNodeGraph::Vec2 graphPosition);
+    void AddMagnitudePhaseNodeAt(EditorNodeGraph::MagnitudePhaseMode mode, EditorNodeGraph::Vec2 graphPosition);
+    void AddSpectrumAnalyzerNodeAt(EditorNodeGraph::SpectrumAnalyzerMode mode, EditorNodeGraph::Vec2 graphPosition);
     void AddPreviewNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelSplitNodeAt(EditorNodeGraph::Vec2 graphPosition);
     void AddChannelCombineNodeAt(EditorNodeGraph::Vec2 graphPosition);
@@ -399,6 +427,14 @@ public:
     void MarkRenderDirty(int touchedNodeId = -1);
     void MarkRenderRefreshDirty();
     RenderGraphSnapshot BuildGraphSnapshot() const;
+    RenderGraphSnapshot BuildGraphSnapshotForTimelineFrame(int timelineFrame) const;
+    bool TryGetGraphOutputSemanticDescriptor(Stack::NodeMath::ValueDescriptor& descriptor) const;
+    bool TryGetGraphLinkSemanticDescriptor(
+        const EditorNodeGraph::Link& link,
+        Stack::NodeMath::ValueDescriptor& descriptor) const;
+    const std::vector<Stack::NodeMath::Diagnostic>& GetGraphSemanticDiagnostics() const {
+        return m_LastGraphSemanticDiagnostics;
+    }
     bool IsEditorRenderBusy() const { return m_RenderWorker.IsBusy() || m_RenderPending; }
     std::uint64_t GetRenderRevision() const { return m_RenderRevision; }
     const EditorRenderWorker::SharedTextureTileSet& GetViewportOutputTiles() const { return m_ViewportOutputTiles; }
@@ -438,6 +474,7 @@ public:
         bool interactionActive = false);
     bool SaveActiveRawWorkspaceProject(bool explicitSave = true);
     bool DecomposeActiveRawWorkspaceProjectToManagedGraph();
+    bool LoadActiveRawWorkspaceProjectInGraph();
     bool ValidateActiveRawWorkspaceManagedGraph(bool transitionOnFailure = true);
     bool ApplyActiveRawWorkspaceRecipeToManagedGraph();
     bool ReadoptActiveRawWorkspaceGraphAsRecipe();
@@ -497,6 +534,17 @@ public:
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
     bool IsExportBusy() const { return Async::IsBusy(m_ExportTaskState); }
     bool ConsumeUiNotification(UiNotificationEvent& outEvent);
+    void ShowUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
+    bool ConsumeGraphCaptureRequest(Stack::EditorGraphCapture::Request& outRequest);
+    void SetGraphCaptureProgress(std::string statusText);
+    void CompleteGraphCapture(Stack::EditorGraphCapture::Result result);
+    void RenderGraphCaptureCanvas(
+        EditorNodeGraphUI& renderer,
+        EditorNodeGraph::Graph& graph,
+        StackAppearance::AppearanceManager* captureAppearance,
+        const Stack::EditorGraphCapture::Request& request,
+        const ImVec2& canvasMin,
+        const ImVec2& canvasMax);
     const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceState() const { return m_RawWorkspace; }
     const Stack::RawWorkspace::WorkspaceState& GetRawWorkspaceStateForValidation() const { return m_RawWorkspace; }
     const Stack::RawWorkspace::GalleryPresentation& GetRawWorkspaceGalleryPresentation();
@@ -548,9 +596,12 @@ public:
         return m_CanvasToolKind == kind && m_CanvasToolOwnerNodeId == nodeId;
     }
     void BeginCanvasColorPick(int ownerNodeId, const std::string& statusText, std::function<void(float, float, float)> callback);
+    void BeginCanvasColorPickFromNodeInput(int ownerNodeId, const std::string& statusText, std::function<void(float, float, float)> callback);
     void CancelCanvasTool();
     void OnCanvasColorPicked(float r, float g, float b);
     bool IsPickingColor() const { return m_IsPickingColor; }
+    bool IsCanvasColorPickSamplingNodeInput() const { return m_CanvasColorPickSamplesNodeInput; }
+    bool SampleCanvasColorPickPixel(float u, float v, std::array<float, 4>& outRgba) const;
     void SetPickingColor(bool picking, std::function<void(float, float, float)> callback = nullptr) {
         if (picking) {
             BeginCanvasColorPick(-1, "Click canvas to sample color", std::move(callback));
@@ -648,6 +699,7 @@ public:
     void UseCompositeViewAsExportBounds(const ImVec2& canvasSize);
     bool BuildCompositeExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH);
     bool BuildSingleOutputExportRaster(std::vector<unsigned char>& outPixels, int& outW, int& outH) const;
+    bool BuildSingleOutputTimelineFrameRaster(int timelineFrame, std::vector<unsigned char>& outPixels, int& outW, int& outH) const;
     void ClampCompositeViewPanToContent(const ImVec2& canvasSize);
     void RefreshGraphLayerMetadata();
     float GetNodesPanelWidthAnim() const { return m_NodesPanelWidthAnim; }
@@ -777,17 +829,35 @@ private:
     std::map<int, double> m_ToolbarButtonSpawnTimes;
     double m_SpacebarPressTime = 0.0;
     bool m_SpacebarHeld = false;
+    Stack::EditorGraphCapture::Settings m_GraphCaptureSettings;
+    std::optional<Stack::EditorGraphCapture::Request> m_PendingGraphCaptureRequest;
+    Stack::EditorGraphCapture::Result m_LastGraphCaptureResult;
+    bool m_GraphCaptureWindowOpen = false;
+    bool m_GraphCaptureFocusRequested = false;
+    bool m_GraphCaptureBusy = false;
+    int m_GraphCaptureShortcutGuardFrames = 0;
+    std::string m_GraphCaptureStatusText;
 
     void LoadResourceTextures();
     void RenderFloatingToolbar();
+    void OpenGraphCaptureWindow();
+    void RenderGraphCaptureWindow();
 
     EditorNodeGraph::Graph m_NodeGraph;
+    mutable Stack::NodeMath::ValueDescriptor m_LastGraphOutputSemanticDescriptor;
+    mutable std::string m_LastGraphOutputSemanticDescriptorIdentity;
+    mutable std::unordered_map<std::string, Stack::NodeMath::ValueDescriptor>
+        m_LastGraphLinkSemanticDescriptors;
+    mutable std::vector<Stack::NodeMath::Diagnostic> m_LastGraphSemanticDiagnostics;
 
     std::vector<std::shared_ptr<LayerBase>> m_Layers;
     int m_SelectedLayerIndex = -1;
     bool m_FocusSelectedTabNextRender = false;
     bool m_OpenRawWorkspaceTabRequested = false;
     bool m_OpenEditorTabRequested = false;
+    std::optional<LoadedProjectData> m_EditorProjectBeforeRawTab;
+    bool m_LoadRawGraphOnNextEditorEntry = false;
+    bool m_EditorProjectBeforeRawWasDirty = false;
     float m_HoverFade = 0.0f;
     bool m_RenderOnlyUpToActive = false;
     std::string m_CurrentProjectName = "";
@@ -813,7 +883,9 @@ private:
     std::uint64_t m_GraphDropImportGeneration = 0;
     Async::TaskState m_GraphDropImportTaskState = Async::TaskState::Idle;
     std::string m_GraphDropImportStatusText;
+    std::uint64_t m_NextGraphImageImportRequestId = 1;
     std::deque<UiNotificationEvent> m_UiNotifications;
+    std::string m_LastOutputConnectionDiagnostic;
     std::vector<PendingGraphDropImportRequest> m_PendingGraphDropImports;
     std::deque<EditorRenderWorker::SharedTextureResult> m_DeferredViewportOutputTextureReleases;
     std::deque<EditorRenderWorker::SharedTextureTileSet> m_DeferredViewportOutputTileReleases;
@@ -902,6 +974,13 @@ private:
     std::string m_RawWorkspaceLocalRangeOverlayAcceptedMode;
     std::uint64_t m_RawWorkspaceLocalRangeOverlayGeneration = 0;
     RenderTextureStats m_RawWorkspaceViewTransformInputStats;
+    RenderTextureStats m_RawWorkspaceFinalDisplayStats;
+    std::vector<RawDevelopmentStageStatsReadback> m_RawWorkspaceStageStatsReadbacks;
+    Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics m_RawWorkspaceStartPointDiagnostics;
+    Stack::EditorModuleTypes::RawWorkspaceStartingPointCandidateRenderQueueState
+        m_RawWorkspaceStartPointCandidateRenderQueue;
+    std::vector<EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult>
+        m_RawWorkspaceStartPointCandidateRenderResults;
     Stack::RawAnalysis::RawImageAnalysis m_RawWorkspaceAnalysis;
     RawWorkspaceAutoBaseUiState m_RawWorkspaceAutoBaseUi;
     bool m_RawWorkspaceLocalRangeTargetMode = false;
@@ -933,6 +1012,7 @@ private:
     int m_CanvasToolOwnerNodeId = -1;
     std::string m_CanvasToolStatusText;
     bool m_IsPickingColor = false;
+    bool m_CanvasColorPickSamplesNodeInput = false;
     std::function<void(float, float, float)> m_ColorPickerCallback;
     int m_LastToneCurveProbeNodeId = -1;
     bool m_RenderWorkerAvailable = false;
@@ -1011,6 +1091,8 @@ private:
     RenderPipeline m_CompositePreviewPipeline;
     std::vector<CompositeSceneItem> m_CompositeSceneItems;
     std::vector<int> m_CompositeZOrder;
+    TimelineUiState m_TimelineUi;
+    Stack::Timeline::TimelineAnimationState m_TimelineAnimation;
     mutable std::vector<CachedCompositeChainState> m_CachedCompletedChains;
     std::unordered_map<int, std::size_t> m_CachedCompositeFingerprints;
     std::unordered_map<int, std::string> m_CachedCompositeLabels;
@@ -1135,6 +1217,8 @@ private:
     const PersistedCompositeSceneEntry* FindPersistedCompositeSceneEntry(int outputNodeId) const;
     nlohmann::json SerializeCompositePersistence() const;
     void DeserializeCompositePersistence(const nlohmann::json& pipelineData);
+    nlohmann::json SerializeTimelinePersistence() const;
+    void DeserializeTimelinePersistence(const nlohmann::json& pipelineData);
     void SyncCompositeSceneItems(const ImVec2& canvasSize);
     void HandleViewportModeTransition(ViewportMode previousMode, ViewportMode currentMode);
     void EnterSingleOutputPreviewMode();
@@ -1142,6 +1226,25 @@ private:
     void TogglePartialSplitTargets(float workspaceWidth, float minLeftWidth, float maxLeftWidth, bool compositeViewportMode);
     void HandleSpacebarPress(float workspaceWidth, float paneHeight, float minLeftWidth, float maxLeftWidth, float splitGap);
     void HandleSpacebarLongPress(float workspaceWidth, float paneHeight, float minLeftWidth, float maxLeftWidth, float splitGap);
+    float UpdateTimelinePanelHeight(float workspaceHeight);
+    void RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2& workspaceSize, float timelineHeight);
+    void SetTimelineFrame(int frame);
+    void StepTimelineFrame(int frameDelta);
+    void ToggleTimelinePlayback();
+    void StopTimelinePlayback(bool resetToStart);
+    int ResolveTimelinePlaybackEndFrame() const;
+    void MarkTimelineFrameRenderDirty();
+    void ClearTimelineLiveEditPreview();
+    void AddTimelineLiveEditPreviewTarget(const Stack::Timeline::AnimatableParameterTarget& target);
+    bool UpdateTimelineExistingKeyframesForLayerEdit(
+        const EditorNodeGraph::Node& node,
+        const nlohmann::json& before,
+        const nlohmann::json& after);
+    std::vector<Stack::Timeline::AnimatableParameterDefinition> BuildTimelineAnimatableParametersForChain(
+        const EditorNodeGraph::CompletedChainInfo& chain) const;
+    bool EnsureTimelineSelectedParameter(
+        const std::vector<Stack::Timeline::AnimatableParameterDefinition>& parameters);
+    bool AddTimelineKeyframeForSelectedParameter();
     bool UpdateDevelopAutoState(
         int nodeId,
         EditorNodeGraph::RawDevelopPayload& payload,
@@ -1159,6 +1262,8 @@ private:
     bool AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddMfsrNodeFromPayload(EditorNodeGraph::MfsrPayload payload, EditorNodeGraph::Vec2 graphPosition);
     bool AddLutNodeFromPayload(EditorNodeGraph::LutPayload payload, EditorNodeGraph::Vec2 graphPosition);
+    bool StartAsyncGraphImageNodeImport(const std::string& path, EditorNodeGraph::Vec2 graphPosition);
+    bool HasPendingGraphImageImports() const;
     bool AddGraphRawChainFromFile(const std::string& path, EditorNodeGraph::Vec2 sourcePosition);
     bool StartGraphImageChainImport(std::vector<std::string> paths, EditorNodeGraph::Vec2 sourcePosition);
     bool RequestGraphImageChainImports(const std::vector<std::string>& paths, EditorNodeGraph::Vec2 sourcePosition);
@@ -1277,18 +1382,41 @@ private:
     bool RenderRawWorkspaceLocalRangeControls(
         const Stack::RawWorkspace::SourceRecord* selectedSource,
         Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe,
-        float controlWidth);
+        float controlWidth,
+        bool defaultOpen,
+        const std::string& startingPointReadout);
     void RenderRawWorkspaceAnalysisPanel(float controlWidth);
     void RenderRawWorkspacePreviewPanel(
         const Stack::RawWorkspace::SourceRecord* selectedSource,
         const Stack::RawWorkspace::RawPanelState& panelState);
-    void TryApplyRawWorkspaceAutoBaseOnAnalysis();
+    void TryContinueRawWorkspaceStartingPointOnAnalysis();
     void RefreshRawWorkspaceAutoBaseRecommendations(
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
     bool ApplyRawWorkspaceAutoBaseViewFitForSource(
         const Stack::RawWorkspace::SourceRecord& source,
         Stack::RawRecipe::RawDevelopmentRecipe& recipe,
         bool explicitApply);
+    bool ApplyRawWorkspaceBuildStartingPointForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    bool BeginRawWorkspacePreciseStartingPointForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        const Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    void CancelRawWorkspacePreciseStartingPoint(std::string reason);
+    void HandleRawWorkspacePreciseSolveResult(
+        const Stack::PreciseIntegration::NativeSolveResult& result);
+    void AdoptRawWorkspacePreciseAppliedRender();
+    bool ApplyRawWorkspacePreciseCandidateAtomically(
+        const Stack::RawWorkspace::SourceRecord& source,
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+        const std::string& expectedBaseRecipeIdentity,
+        std::string& reason);
+    bool ApplyRawWorkspaceStartingPointBalancedLocalForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
+    bool ApplyRawWorkspaceStartingPointMildToneForSource(
+        const Stack::RawWorkspace::SourceRecord& source,
+        Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
     bool ApplyRawWorkspaceAutoBaseExposureSuggestion(
         Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe);
     bool ApplyRawWorkspaceAutoBaseWhiteBalanceSuggestion(
@@ -1301,6 +1429,9 @@ private:
     bool RevertRawWorkspaceAutoBaseForSelectedSource();
     void MarkRawWorkspaceViewTransformUserEdited();
     bool RawWorkspaceViewTransformAutoOwnedForSource(const std::string& sourceKey) const;
+    void CancelRawWorkspacePendingStartingPoint(std::string reason);
+    void CaptureRawWorkspaceAutoBaseRevertSnapshotForSelectedSource(
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
     void ResetRawWorkspaceAutoBaseState();
     Stack::RawAnalysis::RawMetadataSummary ResolveRawWorkspaceMetadataSummaryForAutoBase() const;
     std::uint64_t BuildRawWorkspaceAutoBaseSourceHash(
@@ -1314,6 +1445,7 @@ private:
     std::string BuildCompositeChainLabel(const EditorNodeGraph::CompletedChainInfo& chain) const;
     std::string BuildCompositeChainLabel(int outputNodeId) const;
     void QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
+    void LoadSourceFromImagePayload(const EditorNodeGraph::ImagePayload& payload, bool loadCompositePreview, bool markDirty);
     SharedPixelBuffer EnsureSharedImagePixels(const EditorNodeGraph::ImagePayload& payload) const;
     RenderGraphImagePayload BuildRenderImagePayload(const EditorNodeGraph::ImagePayload& payload) const;
     SharedPixelBuffer MakeSharedSourcePixelBufferCopy(const std::vector<unsigned char>& pixels) const;
@@ -1338,4 +1470,5 @@ private:
     void ResetRenderSubmissionState();
     void RenderProjectLifecyclePopups();
     StackAppearance::AppearanceManager* m_Appearance = nullptr;
+    StackAppearance::AppearanceManager* m_GraphCaptureAppearanceOverride = nullptr;
 };

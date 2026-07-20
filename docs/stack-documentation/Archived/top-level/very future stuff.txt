@@ -1,0 +1,65 @@
+add robust undo and redo system that covers most things
+
+
+graph tree copy could export a html in the future for sending someone an interactive version of the editor's current state allowing them to see what nodes there are, plus the image and before/after, along with the project file downloadable
+
+
+different types of connection curves
+
+
+curious about taking an edited and an un-edited image and comparing each pixels color difference to make a "LUT Creator" by using the direct values, and interpolating the data we dont have, to make a LUT
+the other possibility with this is 
+
+
+
+store as template function, where right clicking the graph has the option "Save Nodes as template", then in the library there is a new tab called templates, and each template is saved here, just like a project visually, and when loaded into the editor, it immediately opens file explorer for you to select the photo to use. templates can be saved in the folder next to the exe that are made by the user, but at some point in the future, some templates will be widely used enough to store baked into the exe
+
+
+
+
+add 2 feature toggles to the viewport:
+1. toggle on and off the blending of pixels together when zoomed into the image
+2. show RGB and A values of each pixel when zoomed in far enough
+
+
+
+
+add keybinds for splitting effects:
+when a node is selected, pressing G will split it into 4 Copies of itself, and add a split and combine node at the beginning and end with each channel connected to 1 of the 4 duplicated effects, then all connected to the combine node. this action should keep the nodes before the split node connected, and the nodes after the combine node also connected.
+
+
+
+
+add comments with key binds
+
+
+
+add right click menu for when the viewport is right clicked and show "View" then inside that 2 options "Compare" and "Composite", the composite option is what happens when 2 or more images have a full chain, and you go into composite mode, the compare is a new mode that has arrow icon buttons to move between what image to display on the canvas.
+
+
+
+
+
+
+ability to combind nodes together into 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+clean up charmslink repo so CLEAN OUT OLD FILES AND EDIT GITGNORE

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NodeMath/ContractTypes.h"
+
 #include <string>
 
 namespace EditorNodeGraph {
@@ -21,6 +23,10 @@ inline constexpr const char* kImageOutputSocketId = "imageOut";
 inline constexpr const char* kPreFinishImageOutputSocketId = "preFinishImageOut";
 inline constexpr const char* kRawOutputSocketId = "rawOut";
 inline constexpr const char* kMaskOutputSocketId = "maskOut";
+inline constexpr const char* kValueOutputSocketId = "valueOut";
+inline constexpr const char* kExposureValueInputSocketId = "evIn";
+inline constexpr const char* kReductionFieldInputSocketId = "fieldIn";
+inline constexpr const char* kReformatInputSocketId = "imageIn";
 inline constexpr const char* kMaskUtilityInputSocketId = "maskIn";
 inline constexpr const char* kImageToMaskInputSocketId = "imageIn";
 inline constexpr const char* kScopeInputSocketId = "scopeIn";
@@ -158,7 +164,19 @@ enum class NodeKind {
     ChannelSplit,
     ChannelCombine,
     CustomMask,
-    DataMath
+    DataMath,
+    Value,
+    TechnicalImage,
+    Compound,
+    FrequencyFft,
+    FrequencyIfft,
+    SpectrumView,
+    FrequencyMask,
+    SpectrumMath,
+    MagnitudePhase,
+    SpectrumAnalyzer,
+    FieldMean,
+    Reformat
 };
 
 enum class ScopeKind {
@@ -235,7 +253,8 @@ enum class MixBlendMode {
     Add,
     Multiply,
     Screen,
-    AlphaOver
+    StraightSourceOver,
+    PremultipliedSourceOver
 };
 
 enum class DataMathMode {
@@ -252,9 +271,59 @@ enum class DataMathMode {
     ImageAverage
 };
 
+enum class SpectrumViewLut {
+    Turbo,
+    Viridis,
+    Inferno,
+    Grayscale
+};
+
+enum class FrequencyMaskShape {
+    LowPass,
+    HighPass,
+    BandPass,
+    BandStop,
+    Notch,
+    Gaussian,
+    Butterworth
+};
+
+enum class SpectrumMathMode {
+    Multiply,
+    Add,
+    Subtract,
+    Difference
+};
+
+enum class MagnitudePhaseMode {
+    Magnitude,
+    Phase,
+    Recombine
+};
+
+enum class SpectrumAnalyzerMode {
+    RadialEnergy,
+    DominantFrequency
+};
+
 enum class SocketType {
     Image,
     Mask,
+    ScalarField,
+    Boolean,
+    Integer,
+    Scalar,
+    Vector2,
+    Vector3,
+    Vector4,
+    Matrix3,
+    Matrix4,
+    Curve,
+    Coordinate,
+    Histogram,
+    Statistics,
+    Metadata,
+    Handle,
     Value,
     Analysis,
     Raw
@@ -263,6 +332,12 @@ enum class SocketType {
 enum class SocketDirection {
     Input,
     Output
+};
+
+enum class SocketVisibilityTier {
+    Required,
+    CommonOptional,
+    Advanced
 };
 
 enum class SocketPreviewIntent {
@@ -279,6 +354,12 @@ struct SocketDefinition {
     std::string label;
     bool optional = false;
     bool visible = true;
+    Stack::NodeMath::LogicalValueType logicalType =
+        Stack::NodeMath::LogicalValueType::Invalid;
+    std::string semanticRoleKey;
+    Stack::NodeMath::SemanticField<Stack::NodeMath::ChannelDescriptor> declaredChannels;
+    Stack::NodeMath::SemanticField<Stack::NodeMath::UnitDescriptor> declaredUnits;
+    SocketVisibilityTier visibilityTier = SocketVisibilityTier::Required;
 };
 
 } // namespace EditorNodeGraph

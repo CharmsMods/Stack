@@ -24,6 +24,8 @@ inline constexpr std::uint64_t kRawDevelopStageCacheMediumEntryBytes = 64ull * 1
 inline constexpr std::uint64_t kRawDevelopStageCacheLargeEntryBytes = 128ull * 1024ull * 1024ull;
 inline constexpr std::uint64_t kRawDevelopStageCacheHugeEntryBytes = 256ull * 1024ull * 1024ull;
 inline constexpr std::uint64_t kRawDevelopStageCacheSingleEntryByteLimit = 384ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t kGraphPersistentCacheSoftByteBudget = 512ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t kGraphRgba16fBytesPerPixel = 8;
 
 inline void HashCombine(std::size_t& seed, std::size_t value) {
     seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
@@ -87,10 +89,12 @@ struct GraphExecutionContext {
 
     const RenderGraphLink* FindInputLink(int nodeId, std::string_view socketId) const;
     bool IsActiveNode(int nodeId) const;
+    int OutputUseCount(int nodeId, std::string_view socketId) const;
 
     const RenderGraphSnapshot& graph;
     std::unordered_map<int, const RenderGraphNode*> nodes;
     std::unordered_map<int, std::unordered_map<std::string_view, const RenderGraphLink*>> inputLinks;
+    std::unordered_map<std::string, int> outputUseCounts;
     std::unordered_map<std::string, unsigned int> imageCache;
     std::unordered_map<std::string, unsigned int> maskCache;
     std::unordered_map<std::string, std::size_t> imageFingerprintCache;

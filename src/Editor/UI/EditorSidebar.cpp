@@ -7,6 +7,7 @@
 #include "Utils/FileDialogs.h"
 #include <imgui.h>
 #include <algorithm>
+#include <cstdint>
 
 namespace {
     const char* ExportAspectPresetLabel(EditorModule::CompositeExportAspectPreset preset) {
@@ -86,6 +87,106 @@ namespace {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
 
+    ImVec2 FitSlicePreviewSize(float availableWidth, int sourceWidth, int sourceHeight) {
+        const float safeWidth = std::max(1.0f, static_cast<float>(std::max(1, sourceWidth)));
+        const float safeHeight = std::max(1.0f, static_cast<float>(std::max(1, sourceHeight)));
+        const float maxWidth = std::max(120.0f, availableWidth);
+        const float maxHeight = 220.0f * ImGui::GetIO().FontGlobalScale;
+        const float scale = std::min(maxWidth / safeWidth, maxHeight / safeHeight);
+        return ImVec2(std::max(1.0f, safeWidth * scale), std::max(1.0f, safeHeight * scale));
+    }
+
+    void RenderSliceMetadataField(const char* label, const std::string& value, float controlWidth) {
+        ImGui::TextDisabled("%s", label);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(120.0f, controlWidth));
+        ImGui::TextWrapped("%s", value.empty() ? "-" : value.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    }
+
+    void RenderSliceBasicsPanel(
+        EditorModule* editor,
+        EditorNodeGraphUI& graphUi,
+        EditorNodeGraph::Node& node,
+        float controlWidth) {
+        if (!editor || node.kind != EditorNodeGraph::NodeKind::Image) {
+            return;
+        }
+
+        EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+        const bool hasPixels = !node.image.pixels.empty() && node.image.width > 0 && node.image.height > 0;
+        const bool isActive = graph.GetActiveImageNodeId() == node.id;
+        const bool hasOutputLink = graph.FindOutputLink(node.id, EditorNodeGraph::kImageOutputSocketId) != nullptr;
+        const std::string sourcePath = node.image.sourcePath.empty() ? "Embedded source" : node.image.sourcePath;
+
+        ImGuiExtras::RichSectionLabel("SLICE PREVIEW", 4.0f);
+        const unsigned int texture = graphUi.GetImagePreviewTextureForNode(node);
+        const ImVec2 previewSize = FitSlicePreviewSize(controlWidth, node.image.width, node.image.height);
+        if (texture != 0) {
+            const float indent = std::max(0.0f, (controlWidth - previewSize.x) * 0.5f);
+            if (indent > 0.0f) {
+                ImGui::Dummy(ImVec2(indent, 0.0f));
+                ImGui::SameLine(0.0f, 0.0f);
+            }
+            ImGui::Image((ImTextureID)(intptr_t)texture, previewSize, ImVec2(0, 1), ImVec2(1, 0));
+        } else {
+            ImGui::Dummy(previewSize);
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            drawList->AddRect(
+                ImGui::GetItemRectMin(),
+                ImGui::GetItemRectMax(),
+                IM_COL32(140, 148, 160, 170),
+                4.0f);
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 10.0f));
+        ImGuiExtras::RichSectionLabel("SLICE BASICS", 4.0f);
+        RenderSliceMetadataField("Title", node.title.empty() ? std::string("Slice") : node.title, controlWidth);
+        RenderSliceMetadataField("Source", sourcePath, controlWidth);
+        RenderSliceMetadataField(
+            "Dimensions",
+            node.image.width > 0 && node.image.height > 0
+                ? std::to_string(node.image.width) + " x " + std::to_string(node.image.height)
+                : std::string("Unknown"),
+            controlWidth);
+        RenderSliceMetadataField(
+            "Channels",
+            std::to_string(node.image.channels) + " current / " + std::to_string(node.image.originalChannels) + " original",
+            controlWidth);
+        RenderSliceMetadataField("Active", isActive ? "Active slice" : "Not active", controlWidth);
+        RenderSliceMetadataField("Output Link", hasOutputLink ? "Connected" : "Not connected", controlWidth);
+
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGuiExtras::RichSectionLabel("SLICE ACTIONS", 4.0f);
+        ImGui::BeginDisabled(!hasPixels);
+        if (ImGuiExtras::RichFullWidthButton("Use As Active Slice", controlWidth, 32.0f)) {
+            editor->UseGraphImageNodeAsActiveSource(node.id);
+        }
+        if (ImGuiExtras::RichFullWidthButton("Connect To Output", controlWidth, 32.0f)) {
+            editor->ConnectGraphImageNode(node.id);
+        }
+
+        const float buttonGap = ImGui::GetStyle().ItemSpacing.x;
+        const float rotateButtonWidth = std::max(64.0f, (controlWidth - buttonGap * 2.0f) / 3.0f);
+        if (ImGui::Button("90 CW", ImVec2(rotateButtonWidth, 0.0f))) {
+            editor->RotateImageNode(node.id, 1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("90 CCW", ImVec2(rotateButtonWidth, 0.0f))) {
+            editor->RotateImageNode(node.id, -1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("180", ImVec2(rotateButtonWidth, 0.0f))) {
+            editor->RotateImageNode(node.id, 2);
+        }
+        ImGui::EndDisabled();
+
+        if (!hasPixels) {
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            ImGui::TextDisabled("Slice pixels are not available.");
+        }
+    }
+
 }
 
 EditorSidebar::EditorSidebar() {}
@@ -96,7 +197,6 @@ void EditorSidebar::Initialize() {
 }
 
 void EditorSidebar::Render(EditorModule* editor) {
-    const std::string& saveStatus = LibraryManager::Get().GetSaveStatusText();
     const bool isNodeGraph = editor->GetActiveSubWindow() == EditorModule::EditorSubWindow::NodeGraph;
 
     if (!isNodeGraph) {
@@ -105,10 +205,7 @@ void EditorSidebar::Render(EditorModule* editor) {
         ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 18.0f); // Right margin
     }
 
-    if (!saveStatus.empty()) {
-        ImGui::TextDisabled("%s", saveStatus.c_str());
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    } else if (isNodeGraph) {
+    if (isNodeGraph) {
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
     }
 
@@ -307,6 +404,11 @@ void EditorSidebar::RenderComplexNodeSettings(EditorModule* editor) {
     ImGui::BeginChild("ComplexNodeScrollRegion", ImVec2(0.0f, 0.0f), false);
     RenderLayerMetadataPanel(editor, *node, controlWidth);
     
+    if (node->kind == EditorNodeGraph::NodeKind::Image) {
+        RenderSliceBasicsPanel(editor, m_NodeGraphUI, *node, controlWidth);
+        ImGui::EndChild();
+        return;
+    }
     if (node->kind == EditorNodeGraph::NodeKind::RawSource) {
         editor->RenderRawSourceControls(*node, controlWidth, true);
         ImGui::EndChild();

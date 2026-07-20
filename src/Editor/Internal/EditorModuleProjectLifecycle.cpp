@@ -139,6 +139,10 @@ bool EditorModule::ConsumeUiNotification(UiNotificationEvent& outEvent) {
     return true;
 }
 
+void EditorModule::ShowUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey) {
+    QueueUiNotification(severity, std::move(message), std::move(dedupeKey));
+}
+
 void EditorModule::QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey) {
     if (message.empty()) {
         return;
@@ -534,6 +538,7 @@ void EditorModule::FinalizeDeferredRawWorkspaceProjectLoadIfNeeded() {
         m_PendingRawWorkspaceOpenGraphSourceKey == m_ActiveRawWorkspaceSourceKey) {
         m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
         m_PendingRawWorkspaceOpenGraphSourceKey.clear();
+        m_LoadRawGraphOnNextEditorEntry = true;
         FocusRawWorkspaceDevelopmentNode();
         RequestOpenEditorTab();
     }
@@ -700,6 +705,7 @@ bool EditorModule::OpenRawWorkspaceProjectInGraph(const Stack::RawWorkspace::Sou
         return true;
     }
 
+    m_LoadRawGraphOnNextEditorEntry = true;
     FocusRawWorkspaceDevelopmentNode();
     RequestOpenEditorTab();
     return true;
@@ -801,6 +807,22 @@ bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
     m_PendingRawWorkspaceDeferredProjectFinalize = true;
     m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey = source.relativePathKey;
     return true;
+}
+
+bool EditorModule::LoadActiveRawWorkspaceProjectInGraph() {
+    if (!IsRawWorkspaceProjectActive()) {
+        QueueUiNotification(
+            UiNotificationSeverity::Info,
+            "Open a RAW project before loading it into the graph.",
+            "raw-workspace-load-current-no-project");
+        return false;
+    }
+    m_LoadRawGraphOnNextEditorEntry = true;
+    const bool focused = FocusRawWorkspaceDevelopmentNode();
+    if (focused) {
+        RequestOpenEditorTab();
+    }
+    return focused;
 }
 
 bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
@@ -912,6 +934,21 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
 bool EditorModule::ApplyRawWorkspaceRecipeEditForSelectedSource(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     bool interactionActive) {
+    if (m_RawWorkspaceAutoBaseUi.preciseAppliedDisplayFitAwaitingRender &&
+        m_RawWorkspaceAutoBaseUi.preciseStartingPoint.state !=
+            Stack::PreciseIntegration::LifecycleState::Applying) {
+        m_RawWorkspaceAutoBaseUi.preciseAppliedDisplayFitAwaitingRender = false;
+        m_RawWorkspaceAutoBaseUi.preciseAppliedRecipeIdentity.clear();
+        m_RawWorkspaceAutoBaseUi.startingPointDisplayFitPending = false;
+    }
+    if (m_RawWorkspaceAutoBaseUi.preciseStartingPoint.active &&
+        Stack::PreciseIntegration::IsRunning(
+            m_RawWorkspaceAutoBaseUi.preciseStartingPoint.state) &&
+        m_RawWorkspaceAutoBaseUi.preciseStartingPoint.state !=
+            Stack::PreciseIntegration::LifecycleState::Applying) {
+        CancelRawWorkspacePreciseStartingPoint(
+            "The visible RAW recipe changed before precise apply.");
+    }
     if (IsRawWorkspaceProjectActive() &&
         m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
         m_RawWorkspace.selectedSourceKey == m_ActiveRawWorkspaceSourceKey) {
@@ -1402,6 +1439,17 @@ bool EditorModule::RequestSaveCurrentProject(
             onComplete(success);
         }
         return success;
+    }
+
+    if (HasPendingGraphImageImports()) {
+        QueueUiNotification(
+            UiNotificationSeverity::Info,
+            "Finishing imported slices before saving the project.",
+            "editor-graph-image-save-wait");
+        if (onComplete) {
+            onComplete(false);
+        }
+        return false;
     }
 
     const std::string projectName = !fallbackName.empty()

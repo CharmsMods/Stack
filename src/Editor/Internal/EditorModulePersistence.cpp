@@ -3,8 +3,11 @@
 #include "Async/TaskSystem.h"
 #include "Library/LibraryManager.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
+#include "Editor/Timeline/TimelinePersistence.h"
 #include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
+#include "NodeMath/PngMetadataWriter.h"
 #include "ThirdParty/stb_image.h"
 #include "ThirdParty/stb_image_write.h"
 
@@ -12,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -63,8 +67,8 @@ std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixe
     return encoded;
 }
 
-std::vector<unsigned char> EncodePngBytesForImageStorage(
-    const std::vector<unsigned char>& bottomLeftPixels,
+std::vector<unsigned char> EncodePngBytesForImageStorageOwned(
+    std::vector<unsigned char> bottomLeftPixels,
     int width,
     int height,
     int channels) {
@@ -72,9 +76,8 @@ std::vector<unsigned char> EncodePngBytesForImageStorage(
         return {};
     }
 
-    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
-    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
-    return EncodePngBytes(topLeftPixels, width, height, channels);
+    LibraryManager::FlipImageRowsInPlace(bottomLeftPixels, width, height, std::max(1, channels));
+    return EncodePngBytes(bottomLeftPixels, width, height, channels);
 }
 
 std::string FileNameFromPath(const std::string& path) {
@@ -179,6 +182,7 @@ nlohmann::json EditorModule::SerializePipeline() {
     }
     nlohmann::json payload = EditorNodeGraph::SerializeGraphPayload(serialized, m_NodeGraph);
     payload["editorComposite"] = SerializeCompositePersistence();
+    payload["editorTimeline"] = SerializeTimelinePersistence();
     return payload;
 }
 
@@ -211,6 +215,17 @@ void EditorModule::ResetForPipelineDeserialization() {
     m_PreviewRequestedGenerations.clear();
     m_PreviewCompletedGenerations.clear();
     m_ScopeDisplayedRevisions.clear();
+    m_TimelineAnimation = {};
+    m_TimelineUi.selectedOutputNodeId = -1;
+    m_TimelineUi.selectedParameterTarget = {};
+    m_TimelineUi.currentFrame = 0;
+    m_TimelineUi.durationFrames = 120;
+    m_TimelineUi.framesPerSecond = 30;
+    m_TimelineUi.playing = false;
+    m_TimelineUi.loopPlayback = true;
+    m_TimelineUi.settingsPopupOpen = false;
+    m_TimelineUi.playbackFrameAccumulator = 0.0;
+    ClearTimelineLiveEditPreview();
 }
 
 bool EditorModule::DeserializeSinglePipelineLayer(const nlohmann::json& layerData) {
@@ -248,6 +263,7 @@ bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized
     RefreshDeserializedRawRuntimeErrors(m_NodeGraph);
 
     DeserializeCompositePersistence(serialized);
+    DeserializeTimelinePersistence(serialized);
     RefreshGraphLayerMetadata();
 
     const int activeImageNodeId = m_NodeGraph.GetActiveImageNodeId();
@@ -298,6 +314,25 @@ void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h,
     MarkRenderDirty();
 }
 
+void EditorModule::LoadSourceFromImagePayload(
+    const EditorNodeGraph::ImagePayload& payload,
+    bool loadCompositePreview,
+    bool markDirty) {
+    SharedPixelBuffer sharedPixels = EnsureSharedImagePixels(payload);
+    if (sharedPixels.empty()) {
+        return;
+    }
+
+    m_Pipeline.LoadSourceFromSharedPixels(sharedPixels, payload.width, payload.height, payload.channels);
+    if (loadCompositePreview) {
+        m_CompositePreviewPipeline.LoadSourceFromSharedPixels(sharedPixels, payload.width, payload.height, payload.channels);
+    }
+    ClearCompositeSceneTextures();
+    if (markDirty) {
+        MarkRenderDirty();
+    }
+}
+
 bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
     if (projectData.sourcePixels.empty() || projectData.width <= 0 || projectData.height <= 0) {
         return false;
@@ -328,6 +363,60 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
     m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
     m_LastAutoSaveTime = -1.0;
     return true;
+}
+
+void EditorModule::EnterRawWorkspaceRootTab() {
+    if (m_EditorProjectBeforeRawTab.has_value()) {
+        return;
+    }
+
+    LoadedProjectData snapshot;
+    snapshot.pipelineData = SerializePipeline();
+    snapshot.sourcePixels = m_Pipeline.GetSourcePixels(snapshot.width, snapshot.height);
+    snapshot.channels = 4;
+    if (snapshot.sourcePixels.empty() || snapshot.width <= 0 || snapshot.height <= 0) {
+        // Graph image nodes carry their own encoded payload. ApplyLoadedProject
+        // still requires a valid pipeline source, so use a harmless transparent
+        // pixel when the Editor document has no conventional source image.
+        snapshot.sourcePixels = { 0, 0, 0, 0 };
+        snapshot.width = 1;
+        snapshot.height = 1;
+    }
+    snapshot.nodeBrowserThumbnailEntries = GetPersistedNodeBrowserThumbnails();
+    snapshot.projectName = m_CurrentProjectName;
+    snapshot.projectFileName = m_CurrentProjectFileName;
+    m_EditorProjectBeforeRawWasDirty = m_Dirty;
+    m_EditorProjectBeforeRawTab = std::move(snapshot);
+    m_LoadRawGraphOnNextEditorEntry = false;
+}
+
+void EditorModule::LeaveRawWorkspaceRootTab(bool enteringEditorTab) {
+    ReleaseRawWorkspacePreviewForTabChange();
+
+    const bool keepRawGraph = enteringEditorTab && m_LoadRawGraphOnNextEditorEntry;
+    m_LoadRawGraphOnNextEditorEntry = false;
+    if (keepRawGraph) {
+        m_EditorProjectBeforeRawTab.reset();
+        m_EditorProjectBeforeRawWasDirty = false;
+        return;
+    }
+
+    if (!m_EditorProjectBeforeRawTab.has_value()) {
+        return;
+    }
+
+    LoadedProjectData editorSnapshot = std::move(*m_EditorProjectBeforeRawTab);
+    m_EditorProjectBeforeRawTab.reset();
+    const bool restoreDirty = m_EditorProjectBeforeRawWasDirty;
+    m_EditorProjectBeforeRawWasDirty = false;
+    if (!ApplyLoadedProject(editorSnapshot)) {
+        QueueUiNotification(
+            UiNotificationSeverity::Error,
+            "The Editor graph could not be restored after leaving the RAW tab.",
+            "raw-workspace-editor-graph-restore");
+        return;
+    }
+    m_Dirty = restoreDirty;
 }
 
 void EditorModule::RestorePersistedNodeBrowserThumbnailEntries(
@@ -643,6 +732,7 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs) {
     if (!deferGraphPanWork) {
         ConsumeRenderWorkerResults();
         ConsumeNodeBrowserThumbnailWorkerResults();
+        m_Sidebar.GetNodeGraphUI().WarmPresetPreviewCache(this, 0.35);
     }
     TickRawWorkspacePersistence();
     TickRawWorkspacePreviewStaging();
@@ -691,16 +781,49 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
     m_SourceLoadTaskState = Async::TaskState::Queued;
     m_SourceLoadStatusText = "Loading source image in the background...";
 
-    Async::TaskSystem::Get().Submit([this, generation, path]() {
+    Async::TaskSystem::Get().SubmitHighPriority([this, generation, path]() {
         DecodedImageData decoded;
         const bool success = DecodeImageFromFile(path, decoded);
 
-        Async::TaskSystem::Get().PostToMain([this, generation, path, decoded = std::move(decoded), success]() mutable {
+        EditorNodeGraph::ImagePayload payload;
+        std::vector<unsigned char> storagePixels;
+        int width = 0;
+        int height = 0;
+        int channels = 4;
+        if (success && !decoded.pixels.empty()) {
+            payload.label = FileNameFromPath(path);
+            payload.sourcePath = path;
+            payload.width = decoded.width;
+            payload.height = decoded.height;
+            payload.channels = decoded.channels;
+            payload.originalChannels = decoded.originalChannels;
+            payload.sourceColorMetadata = EditorNodeGraph::InspectImageFileColorMetadata(
+                path, decoded.width, decoded.height, decoded.originalChannels);
+            EditorNodeGraph::BuildImagePayloadPreview(
+                decoded.pixels,
+                decoded.width,
+                decoded.height,
+                decoded.channels,
+                payload.previewPixels,
+                payload.previewWidth,
+                payload.previewHeight,
+                payload.previewChannels);
+            payload.pixels = std::move(decoded.pixels);
+            payload.isEmbedding = true;
+            payload.importRequestId = generation;
+            payload.embeddingRequestId = generation;
+            storagePixels = payload.pixels;
+            width = payload.width;
+            height = payload.height;
+            channels = payload.channels;
+        }
+
+        Async::TaskSystem::Get().PostToMain([this, generation, path, payload = std::move(payload), success]() mutable {
             if (generation != m_SourceLoadGeneration) {
                 return;
             }
 
-            if (!success || decoded.pixels.empty()) {
+            if (!success || payload.pixels.empty()) {
                 m_SourceLoadTaskState = Async::TaskState::Failed;
                 m_SourceLoadStatusText = "Failed to load the selected source image.";
                 QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected source image.", "editor-source-load");
@@ -710,15 +833,7 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             m_SourceLoadTaskState = Async::TaskState::Applying;
             m_SourceLoadStatusText = "Applying source image to the editor...";
 
-            LoadSourceFromPixels(decoded.pixels.data(), decoded.width, decoded.height, decoded.channels);
-            EditorNodeGraph::ImagePayload payload;
-            payload.label = FileNameFromPath(path);
-            payload.sourcePath = path;
-            payload.width = decoded.width;
-            payload.height = decoded.height;
-            payload.channels = decoded.channels;
-            payload.pngBytes = EncodePngBytesForImageStorage(decoded.pixels, decoded.width, decoded.height, decoded.channels);
-            payload.pixels = std::move(decoded.pixels);
+            LoadSourceFromPixels(payload.pixels.data(), payload.width, payload.height, payload.channels);
 
             EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
             if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image) {
@@ -731,7 +846,6 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             if (imageNode) {
                 imageNode->title = payload.label.empty() ? "Image" : payload.label;
                 imageNode->image = std::move(payload);
-                EditorNodeGraph::InvalidateImagePayloadRuntime(imageNode->image);
                 m_NodeGraph.SetActiveImageNodeId(imageNode->id);
             }
             SetCurrentProjectName("");
@@ -739,8 +853,45 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
             MarkNodeBrowserThumbnailSourceChanged();
 
             m_SourceLoadTaskState = Async::TaskState::Idle;
-            m_SourceLoadStatusText = "Source image loaded.";
+            m_SourceLoadStatusText = "Source image loaded; preparing portable storage...";
             QueueUiNotification(UiNotificationSeverity::Success, "Source image loaded.", "editor-source-load");
+        });
+
+        if (!success || storagePixels.empty()) {
+            return;
+        }
+
+        std::vector<unsigned char> pngBytes =
+            EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
+        Async::TaskSystem::Get().PostToMain([
+            this,
+            generation,
+            pngBytes = std::move(pngBytes)
+        ]() mutable {
+            if (generation != m_SourceLoadGeneration) {
+                return;
+            }
+            EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+            if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
+                !imageNode->image.isEmbedding || imageNode->image.embeddingRequestId != generation) {
+                return;
+            }
+
+            if (pngBytes.empty()) {
+                imageNode->image.isEmbedding = false;
+                imageNode->image.embeddingRequestId = 0;
+                m_SourceLoadStatusText = "Source image loaded, but portable storage could not be prepared.";
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    "The source image loaded, but Stack could not embed it for project storage.",
+                    "editor-source-load-embed");
+                return;
+            }
+
+            imageNode->image.pngBytes = std::move(pngBytes);
+            imageNode->image.isEmbedding = false;
+            imageNode->image.embeddingRequestId = 0;
+            m_SourceLoadStatusText = "Source image loaded.";
         });
     });
 }
@@ -756,6 +907,53 @@ bool EditorModule::RequestExportImage(const std::string& path) {
 
     if (Async::IsBusy(m_ExportTaskState)) {
         return false;
+    }
+
+    Stack::NodeMath::PngColorMetadataChunks colorChunks;
+    if (!IsCompositeViewportMode()) {
+        const RenderGraphSnapshot semanticSnapshot = BuildGraphSnapshot();
+        const Stack::NodeMath::DirectOutputPolicy outputPolicy =
+            Stack::NodeMath::EvaluateDirectPngOutputPolicy(semanticSnapshot.outputDescriptor);
+        if (!outputPolicy.executable) {
+            m_ExportTaskState = Async::TaskState::Failed;
+            m_ExportStatusText = outputPolicy.diagnostics.empty()
+                ? "The declared graph output cannot be written as PNG."
+                : outputPolicy.diagnostics.front().message;
+            QueueUiNotification(
+                UiNotificationSeverity::Error,
+                m_ExportStatusText,
+                "editor-export-semantic-policy");
+            return false;
+        }
+        colorChunks.writeSrgb = outputPolicy.writeSrgbChunk;
+        colorChunks.writeDisplayP3Cicp = outputPolicy.writeDisplayP3Cicp;
+        if (outputPolicy.writeRetainedIccProfile) {
+            for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+                if (node.kind != EditorNodeGraph::NodeKind::Image ||
+                    node.image.sourceColorMetadata.dependencyIdentity !=
+                        outputPolicy.retainedProfileDependency ||
+                    node.image.sourceColorMetadata.payloadKind !=
+                        Stack::NodeMath::EmbeddedColorPayloadKind::PngIccpChunk) {
+                    continue;
+                }
+                colorChunks.retainedIccpPayload =
+                    node.image.sourceColorMetadata.retainedPayload;
+                break;
+            }
+            if (colorChunks.retainedIccpPayload.empty()) {
+                QueueUiNotification(
+                    UiNotificationSeverity::Info,
+                    "The graph declares an ICC-based output, but reusable PNG profile bytes are unavailable. The direct result will be exported untagged.",
+                    "editor-export-profile-unavailable");
+            }
+        }
+        if (!colorChunks.writeSrgb && !colorChunks.writeDisplayP3Cicp &&
+            colorChunks.retainedIccpPayload.empty()) {
+            QueueUiNotification(
+                UiNotificationSeverity::Info,
+                "The graph output color state is Unknown or has no writable profile. Stack will export the direct result untagged without guessing.",
+                "editor-export-untagged");
+        }
     }
 
     int width = 0;
@@ -800,7 +998,15 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     m_ExportTaskState = Async::TaskState::Running;
     m_ExportStatusText = "Writing PNG export in the background...";
 
-    Async::TaskSystem::Get().Submit([this, generation, path, width, height, pixels = std::move(pixels)]() mutable {
+    Async::TaskSystem::Get().Submit([
+        this,
+        generation,
+        path,
+        width,
+        height,
+        colorChunks = std::move(colorChunks),
+        pixels = std::move(pixels)
+    ]() mutable {
         bool success = false;
         std::string errorMsg;
 
@@ -810,15 +1016,23 @@ bool EditorModule::RequestExportImage(const std::string& path) {
                 std::filesystem::create_directories(destination.parent_path());
             }
 
-            int stbiResult = stbi_write_png(
-                destination.string().c_str(),
-                width,
-                height,
-                4,
-                pixels.data(),
-                width * 4);
-
-            success = (stbiResult != 0);
+            const std::vector<unsigned char> basePng =
+                EncodePngBytes(pixels, width, height, 4);
+            std::vector<Stack::NodeMath::ContractIssue> metadataIssues;
+            const std::vector<unsigned char> outputPng =
+                Stack::NodeMath::InsertPngColorMetadataChunks(
+                    basePng, colorChunks, metadataIssues);
+            if (outputPng.empty()) {
+                errorMsg = metadataIssues.empty()
+                    ? "PNG encoding produced no data."
+                    : metadataIssues.front().message;
+            } else {
+                std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+                output.write(
+                    reinterpret_cast<const char*>(outputPng.data()),
+                    static_cast<std::streamsize>(outputPng.size()));
+                success = output.good();
+            }
 
             if (success) {
                 // Verify the file was actually written
@@ -829,17 +1043,22 @@ bool EditorModule::RequestExportImage(const std::string& path) {
             }
 
             if (!success) {
-                errorMsg = "stbi_write_png or verification failed.";
+                if (errorMsg.empty()) errorMsg = "PNG write or verification failed.";
                 // Try fallback path with sanitized name
-                std::string fallbackPath = (destination.parent_path() / "fallback_export.png").string();
+                const std::filesystem::path fallbackPath = destination.parent_path() / "fallback_export.png";
                 std::cerr << "[EditorModule] stbi_write_png failed for " << path << ". Trying fallback " << fallbackPath << std::endl;
-                success = stbi_write_png(
-                    fallbackPath.c_str(),
-                    width,
-                    height,
-                    4,
-                    pixels.data(),
-                    width * 4) != 0;
+                const std::vector<unsigned char> basePng = EncodePngBytes(pixels, width, height, 4);
+                std::vector<Stack::NodeMath::ContractIssue> metadataIssues;
+                const std::vector<unsigned char> outputPng =
+                    Stack::NodeMath::InsertPngColorMetadataChunks(
+                        basePng, colorChunks, metadataIssues);
+                if (!outputPng.empty()) {
+                    std::ofstream output(fallbackPath, std::ios::binary | std::ios::trunc);
+                    output.write(
+                        reinterpret_cast<const char*>(outputPng.data()),
+                        static_cast<std::streamsize>(outputPng.size()));
+                    success = output.good();
+                }
             }
         } catch (const std::exception& e) {
             success = false;
@@ -954,6 +1173,13 @@ bool EditorModule::BuildProjectDocumentForSave(
 
 bool EditorModule::RequestExportProject(const std::string& path) {
     if (path.empty() || Async::IsBusy(m_ExportTaskState)) {
+        return false;
+    }
+    if (HasPendingGraphImageImports()) {
+        QueueUiNotification(
+            UiNotificationSeverity::Info,
+            "Finishing imported slices before exporting the project.",
+            "editor-graph-image-export-wait");
         return false;
     }
 

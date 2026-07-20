@@ -1,0 +1,72 @@
+composite tab integration into editor tab - unification
+
+the composite tab and editor tab should now be combined into 1, where we build the composite tab's abilities on top of the current style we have now.
+
+the goal of this is to have a hybrid editor that only gets as complicated as the project currently needs.
+
+
+
+Changes:
+there can now be more than 1 output node, and this node can be added from the right click menu along with the other nodes.
+if there is more than 1 output node, AND also more than 1 image on the graph, AND they are connected separately, which means image1 to output1, image2 to output2 (plus others), we will then switch the canvas view window over to something a little more complicated and functional, that does more than display a simple single image output from a chain of edits/layers/pipeline.
+
+
+the composite tab currently has the capability to; in realtime, allow the user to drag around an image on a canvas which is position change, and there are handles to allow the image to be resized/scaled, either from the center of the image or from the opposite corner, there is also a top handle that users can grab to rotate the image.
+
+the composite canvas supports snapping for all transforms, including snapping to other objects, and center lines etc.
+
+
+in order to preserve the functionality of "z order" like behavour for objects on the canvas, when the rules for output nodes and connections above are met, a "Composite" Node should spawn on the editor graph, this node will have no connections to it, and will contain a reorganizable list of the current completed chains on the graph, with connected meaning, "goes from an input image, to an output node, regardless of what is in-between". its functionality is a list that the user can drag and drop the order of the completed chains, and therefore change the z order of objects on the canvas.
+
+
+note, to re-iterate, the canvas will be come "smart"/dual mode in the sense that when there is only one connected chain, it works exactly like we have it now, with a non-moveable canvas that just displays the image and it's edits just like it does now, but when there are more completed chains that 1, it auto switches over to a composite mode canvas that works very close to the current composite canvas's capabilities.
+
+
+another note, the goal is to not change how the editor and graph and viewport work currently, WHEN there is only one connected chain
+
+
+changes to the windows and slight styling change:
+that grab handle that exists to resize between the graph and the viewport, should stay, and when we are in composite mode when there are more than 1 completed chains, we will want to disable the drag on the viewport window to resize it, and only use the drag handle, since leaving it would mess with left click dragging on the canvas for multi-select. since when there are more than one completed chain, that will mean that we will have a graph with a chain for each object on the composite canvas, and so we will essentially just have 2 graphs, with the viewport turning into our composite canvas. i want to be able to fully move one window to take up all the space using the button when in composite mode, which means we need some rules for this to remove any ambiguity:
+using the grabber, the user MAY NOT fully close one and fully open the other window, instead, the grabber functions normally as is does right now, and with limits on how far it can be dragged, but when the user clicks once on it, instead of dragging it, it will anitmate close/open towards the side that it's closest to, it should be a smooth and about 200ms between the start and the end of the animation. to re-iterate, this will both open and shut, not just shut.
+
+
+
+composite canvas mode notes:
+this should work very very close to how we have the node graph right now, just with images.
+since there is no "before/after" view with mouse hover with multiple chains, this must be disabled.
+the background of the composite mode canvas must default to rendering as full alpha pixels.
+
+
+
+
+
+
+
+
+right clicking on the composite mode canvas should yield a right click menu with:
+Add Image:
+this should open file explorer, and let the user select and image, when one is imported, then it will show up on the canvas, within the currently visible bounds, IMPORTANT, this will also create a new image node on the node graph, connected to an output, and that chain will show up on the "Composite" node on the graph.
+
+Add Library Asset:
+This will open a popup window with all of the image assets that are currently in the assets part of the library
+
+Add Square:
+adds a vector square
+
+Add Circle:
+adds a vector circle
+
+Add Text
+Adds text, implement later
+
+
+DO NOT add "Add from library", "Add project", these are to not be added since the editor and composite tabs are going to directly interface with each other and just become part of the same workflow.
+
+
+
+
+
+
+
+lastly for the export boundery that lets the user choose what on the canvas to export, we need a way to make sure that the export boundery doesn't get in the way of the rest of the objects, and the way we will do this, is by having a switch mode, where the boundery is only available, when toggled, using the F key on the keyboard.
+the export boundery should respect the specific logic we have in the export tab right now, where it respects manual resolution input and aspect ratio handling, in order for these settings to be avalible, add a new node to the node graph, with no connections, that is just the settings for the export boundery.

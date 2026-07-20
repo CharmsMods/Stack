@@ -335,6 +335,50 @@ std::string SavePngFileDialog(const char* title, const char* defaultFileName) {
     return "";
 }
 
+RasterImageSaveResult SaveGraphImageFileDialog(
+    const char* title,
+    const char* defaultFileName,
+    RasterImageFormat preferredFormat,
+    bool allowBmp) {
+    RasterImageSaveResult result;
+#ifdef _WIN32
+    char filename[MAX_PATH] = "";
+    if (defaultFileName && defaultFileName[0]) {
+        strncpy_s(filename, defaultFileName, _TRUNCATE);
+    } else {
+        strncpy_s(filename, preferredFormat == RasterImageFormat::Bmp ? "editor_graph.bmp" : "editor_graph.png", _TRUNCATE);
+    }
+
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = allowBmp
+        ? "PNG Image\0*.png\0BMP Image\0*.bmp\0"
+        : "PNG Image\0*.png\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = title;
+    ofn.nFilterIndex = allowBmp && preferredFormat == RasterImageFormat::Bmp ? 2 : 1;
+    ofn.lpstrDefExt = ofn.nFilterIndex == 2 ? "bmp" : "png";
+
+    if (RunSaveFileDialog(ofn, "SaveGraphImageFileDialog", title)) {
+        result.format = allowBmp && ofn.nFilterIndex == 2
+            ? RasterImageFormat::Bmp
+            : RasterImageFormat::Png;
+        std::filesystem::path normalized(filename);
+        normalized.replace_extension(result.format == RasterImageFormat::Bmp ? ".bmp" : ".png");
+        result.path = normalized.string();
+    }
+#else
+    (void)title;
+    (void)defaultFileName;
+    (void)preferredFormat;
+    (void)allowBmp;
+#endif
+    return result;
+}
+
 std::string OpenLibraryBundleFileDialog(const char* title) {
 #ifdef _WIN32
     char filename[MAX_PATH] = "";

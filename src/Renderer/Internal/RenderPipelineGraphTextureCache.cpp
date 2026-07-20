@@ -1,6 +1,8 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "NodeMath/PointwiseIR.h"
 
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -15,6 +17,8 @@ void RenderPipeline::DeleteGraphCacheEntry(RenderPipeline::CachedGraphTexture& e
     entry.width = 0;
     entry.height = 0;
     entry.fingerprint = 0;
+    entry.bytes = 0;
+    entry.lastUseSerial = 0;
 }
 
 void RenderPipeline::DestroyGraphCache(std::unordered_map<std::string, CachedGraphTexture>& cache) {
@@ -93,6 +97,64 @@ void RenderPipeline::StoreGraphCacheEntry(
     entry.width = m_Width;
     entry.height = m_Height;
     entry.owned = owned;
+    entry.bytes = owned
+        ? Stack::Renderer::GraphExecution::EstimateRawDevelopStageCacheTextureBytes(m_Width, m_Height)
+        : 0;
+    TouchGraphCacheEntry(entry);
+}
+
+void RenderPipeline::TouchGraphCacheEntry(CachedGraphTexture& entry) {
+    entry.lastUseSerial = ++m_GraphResourceUseSerial;
+}
+
+std::uint64_t RenderPipeline::GraphPersistentCacheBytes() const {
+    std::uint64_t total = 0;
+    const auto addCache = [&](const auto& cache) {
+        for (const auto& [key, entry] : cache) {
+            (void)key;
+            if (entry.bytes > std::numeric_limits<std::uint64_t>::max() - total) {
+                total = std::numeric_limits<std::uint64_t>::max();
+                return;
+            }
+            total += entry.bytes;
+        }
+    };
+    addCache(m_GraphImageCache);
+    addCache(m_GraphMaskCache);
+    return total;
+}
+
+void RenderPipeline::TrimGraphPersistentCachesToBudget() {
+    std::vector<Stack::NodeMath::PersistentResourceEntry> resources;
+    resources.reserve(m_GraphImageCache.size() + m_GraphMaskCache.size());
+    const auto appendCache = [&](const auto& cache, const char* prefix) {
+        for (const auto& [key, entry] : cache) {
+            resources.push_back(Stack::NodeMath::PersistentResourceEntry{
+                std::string(prefix) + key,
+                entry.bytes,
+                entry.lastUseSerial,
+                entry.texture == m_OutputTexture ||
+                    entry.texture == m_GraphSourceTexture ||
+                    entry.texture == m_SourceTexture ||
+                    entry.texture == m_ExternalOutputTexture
+            });
+        }
+    };
+    appendCache(m_GraphImageCache, "image:");
+    appendCache(m_GraphMaskCache, "mask:");
+
+    for (const std::string& victim : Stack::NodeMath::SelectPersistentResourceEvictions(
+            resources,
+            kGraphPersistentCacheSoftByteBudget)) {
+        constexpr std::string_view imagePrefix = "image:";
+        constexpr std::string_view maskPrefix = "mask:";
+        if (victim.rfind(imagePrefix.data(), 0) == 0) {
+            ReleaseGraphCacheEntry(m_GraphImageCache, victim.substr(imagePrefix.size()));
+        } else if (victim.rfind(maskPrefix.data(), 0) == 0) {
+            ReleaseGraphCacheEntry(m_GraphMaskCache, victim.substr(maskPrefix.size()));
+        }
+        ++m_LastGraphExecutionStats.persistentCacheEvictions;
+    }
 }
 
 void RenderPipeline::PruneInactiveGraphCache(

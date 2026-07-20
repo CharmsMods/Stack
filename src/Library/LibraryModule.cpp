@@ -70,7 +70,7 @@ void LibraryModule::OpenProjectPreviewByFileName(const std::string& fileName) {
         m_AssetPreviewTransition = 0.0f;
         m_AssetPreviewClosing = false;
         m_CompareSplit = 0.5f;
-        m_ProjectPreviewMenuHover = 0.0f;
+        m_ProjectPreviewMenuHover = 1.0f;
         m_ProjectPreviewLaunchRect.valid = false;
         m_AssetPreviewMenuHover = 0.0f;
         m_AssetPreviewLaunchRect.valid = false;

@@ -169,6 +169,7 @@ ImVec4 FamilyAccent(NodeFamily family, const GraphStyleTokens& tokens);
 GraphStyleTokens BuildGraphStyleTokens(EditorModule* editor);
 GraphZoomDialStyle BuildGraphZoomDialStyle(EditorModule* editor, const GraphStyleTokens& tokens);
 bool GraphDottedMaskLinksEnabled(EditorModule* editor);
+bool GraphStraightLinksEnabled(EditorModule* editor);
 bool IsSummaryOnlyNode(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node);
 NodePresentationProfile BuildNodePresentationProfile(
     const EditorNodeGraphUI* ui,

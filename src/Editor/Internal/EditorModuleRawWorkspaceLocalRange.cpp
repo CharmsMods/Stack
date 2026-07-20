@@ -157,30 +157,6 @@ bool RenderLocalRangeTargetSummaryRow(
     return changed;
 }
 
-int LocalRangeOverlayModeToIndex(const std::string& mode) {
-    if (mode == "affected-tones") {
-        return 1;
-    }
-    if (mode == "delta-map") {
-        return 2;
-    }
-    if (mode == "region-mask") {
-        return 3;
-    }
-    return 0;
-}
-
-const char* LocalRangeOverlayModeFromIndex(int index) {
-    switch (std::clamp(index, 0, 3)) {
-        case 1: return "affected-tones";
-        case 2: return "delta-map";
-        case 3: return "region-mask";
-        case 0:
-        default:
-            return "none";
-    }
-}
-
 int LocalRangeRegionMaskModeToIndex(const std::string& mode) {
     if (mode == "radial-gradient") {
         return 1;
@@ -460,13 +436,27 @@ bool DrawLocalRangeWidget(
 bool EditorModule::RenderRawWorkspaceLocalRangeControls(
     const Stack::RawWorkspace::SourceRecord* selectedSource,
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe,
-    float controlWidth) {
+    float controlWidth,
+    bool defaultOpen,
+    const std::string& startingPointReadout) {
+    const ImGuiTreeNodeFlags headerFlags =
+        defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0;
     if (selectedSource == nullptr ||
-        !ImGui::CollapsingHeader("Local Range", ImGuiTreeNodeFlags_DefaultOpen)) {
+        !ImGui::CollapsingHeader("Local Range", headerFlags)) {
         return false;
     }
 
     bool changed = false;
+    if (startingPointReadout.empty()) {
+        // This row is fed by asynchronous analysis. Always reserve one line so
+        // the graph stays under the pointer when the readout changes state.
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetTextLineHeight()));
+    } else {
+        // Deliberately do not wrap: line-count changes above the graph turn a
+        // vertical layout shift into unintended point motion during a drag.
+        ImGui::TextDisabled("%s", startingPointReadout.c_str());
+        TooltipIfHovered(startingPointReadout.c_str());
+    }
     editedRecipe.localRange = BuildLocalRangeUiRecipe(editedRecipe.localRange);
     bool enabled = editedRecipe.localRange.enabled;
     if (ImGuiExtras::NodeCheckbox("Enable Local Range", "##RawLocalRangeEnabled", &enabled, controlWidth)) {
@@ -474,12 +464,19 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
         changed = true;
     }
     TooltipIfHovered("Apply the scene-EV graph before Finish Tone and View Transform.");
+    if (ImGui::SmallButton("Diagnostics##RawWorkspaceLocalRangeDiagnostics")) {
+        m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+    }
+    TooltipIfHovered("Open Diagnostics for Local Range candidate evidence, action readiness, suggestions, and warnings.");
 
     const float actionGap = 6.0f;
-    const float actionButtonWidth = std::max(68.0f, (controlWidth - actionGap) * 0.5f);
+    const float resetButtonWidth =
+        ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float targetButtonWidth =
+        std::max(96.0f, controlWidth - actionGap - resetButtonWidth);
     if (ImGuiExtras::RichFullWidthButton(
             m_RawWorkspaceLocalRangeTargetMode ? "Stop Target" : "Target",
-            actionButtonWidth,
+            targetButtonWidth,
             0.0f)) {
         if (m_RawWorkspaceLocalRangeTargetMode) {
             m_RawWorkspaceLocalRangeTargetMode = false;
@@ -492,7 +489,7 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
     }
     TooltipIfHovered("Click the preview and drag up/down to add or edit a Local Range point. Target samples scene EV and color together; Color Target uses the color only when enabled.");
     ImGui::SameLine(0.0f, actionGap);
-    if (ImGuiExtras::RichFullWidthButton("Reset", actionButtonWidth, 0.0f)) {
+    if (ImGui::SmallButton("Reset##RawLocalRangeReset")) {
         editedRecipe.localRange = BuildLocalRangeUiRecipe(
             Stack::RawRecipe::ApplyLocalRangePreset(
                 editedRecipe.localRange,
@@ -569,14 +566,45 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
             changed = true;
         }
     }
-    const char* overlayLabels[] = { "Off", "Affected", "Delta", "Mask" };
-    int overlayIndex = LocalRangeOverlayModeToIndex(m_RawWorkspaceLocalRangeOverlayMode);
-    if (ImGuiExtras::NodeCombo("Overlay", "##RawLocalRangeOverlayMode", &overlayIndex, overlayLabels, IM_ARRAYSIZE(overlayLabels), controlWidth)) {
-        m_RawWorkspaceLocalRangeOverlayMode = LocalRangeOverlayModeFromIndex(overlayIndex);
-        ClearRawWorkspaceLocalRangeOverlayState();
-        MarkRenderRefreshDirty();
+    ImGui::TextDisabled("Overlay");
+    const struct OverlayModeButton {
+        const char* label;
+        const char* mode;
+        const char* tooltip;
+    } overlayButtons[] = {
+        { "Off", "none", "Show the final RAW preview without the Local Range overlay." },
+        { "Affected", "affected-tones", "Show tones affected by Local Range." },
+        { "Delta", "delta-map", "Show the Local Range EV delta map." },
+        { "Mask", "region-mask", "Show the active Region Mask or Color Target mask." }
+    };
+    const float overlayGap = 6.0f;
+    const float overlayButtonWidth =
+        std::max(56.0f, (controlWidth - overlayGap * 3.0f) / 4.0f);
+    for (int i = 0; i < IM_ARRAYSIZE(overlayButtons); ++i) {
+        const OverlayModeButton& button = overlayButtons[i];
+        const bool selected = m_RawWorkspaceLocalRangeOverlayMode == button.mode;
+        if (selected) {
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 128, 176, 215));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(72, 146, 198, 235));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(80, 156, 210, 255));
+        }
+        if (ImGuiExtras::RichFullWidthButton(button.label, overlayButtonWidth, 0.0f)) {
+            if (m_RawWorkspaceLocalRangeOverlayMode != button.mode) {
+                m_RawWorkspaceLocalRangeOverlayMode = button.mode;
+                ClearRawWorkspaceLocalRangeOverlayState();
+                MarkRenderRefreshDirty();
+            }
+        }
+        TooltipIfHovered(button.tooltip);
+        if (selected) {
+            ImGui::PopStyleColor(3);
+            ImGui::PopStyleVar();
+        }
+        if (i + 1 < IM_ARRAYSIZE(overlayButtons)) {
+            ImGui::SameLine(0.0f, overlayGap);
+        }
     }
-    TooltipIfHovered("Preview-only view of Local Range affected tones, delta, or mask after region and color targeting.");
 
     float strength = editedRecipe.localRange.strength;
     if (ImGuiExtras::NodeSliderFloat("Strength", "##RawLocalRangeStrength", &strength, 0.0f, 1.0f, "%.2f", controlWidth)) {
@@ -626,25 +654,24 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
             TooltipIfHovered("Multiplies the Local Range result by color similarity in the pre-finish scene-linear image. Useful when the same luminance appears in different material colors.");
         }
 
-        ImGui::BeginDisabled(!hasTargetSample);
-        if (ImGuiExtras::RichFullWidthButton("Use Sample", controlWidth, 0.0f)) {
-            editedRecipe.localRange.colorMaskEnabled = true;
-            CopyLocalRangeTargetSampleToColorTarget(
-                editedRecipe.localRange,
-                m_RawWorkspaceLocalRangeTargetSceneR,
-                m_RawWorkspaceLocalRangeTargetSceneG,
-                m_RawWorkspaceLocalRangeTargetSceneB);
-            m_RawWorkspaceLocalRangeOverlayMode = "region-mask";
-            ClearRawWorkspaceLocalRangeOverlayState();
-            MarkRenderRefreshDirty();
-            changed = true;
+        if (hasTargetSample) {
+            if (ImGuiExtras::RichFullWidthButton("Use Sample", controlWidth, 0.0f)) {
+                editedRecipe.localRange.colorMaskEnabled = true;
+                CopyLocalRangeTargetSampleToColorTarget(
+                    editedRecipe.localRange,
+                    m_RawWorkspaceLocalRangeTargetSceneR,
+                    m_RawWorkspaceLocalRangeTargetSceneG,
+                    m_RawWorkspaceLocalRangeTargetSceneB);
+                m_RawWorkspaceLocalRangeOverlayMode = "region-mask";
+                ClearRawWorkspaceLocalRangeOverlayState();
+                MarkRenderRefreshDirty();
+                changed = true;
+            }
+            TooltipIfHovered("Copies the current target sample into Color Target.");
+        } else {
+            ImGui::TextDisabled("Use Target first, then copy the sampled color.");
+            TooltipIfHovered("Target samples scene EV and color together from the preview.");
         }
-        ImGui::EndDisabled();
-        TooltipIfHovered(
-            hasTargetSample
-                ? "Copies the current target sample into Color Target."
-                : "Use Target first, then copy the sampled color.",
-            hasTargetSample ? 0 : ImGuiHoveredFlags_AllowWhenDisabled);
 
         ImGui::BeginDisabled(!editedRecipe.localRange.colorMaskEnabled);
         float targetColor[3] = {
@@ -685,7 +712,7 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
         }
         TooltipIfHovered("For colored targets, this suppresses neutral or low-saturation pixels such as white clouds and grey glare.");
 
-        if (ImGuiExtras::RichFullWidthButton("Show Mask", controlWidth, 0.0f)) {
+        if (ImGui::SmallButton("View Mask##RawLocalRangeColorMaskView")) {
             m_RawWorkspaceLocalRangeOverlayMode = "region-mask";
             ClearRawWorkspaceLocalRangeOverlayState();
             MarkRenderRefreshDirty();
@@ -705,7 +732,7 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
         }
         TooltipIfHovered("Constrain Local Range to a manual image region without changing the tone-zone graph.");
 
-        if (ImGuiExtras::RichFullWidthButton("Show Mask", controlWidth, 0.0f)) {
+        if (ImGui::SmallButton("View Mask##RawLocalRangeRegionMaskView")) {
             m_RawWorkspaceLocalRangeOverlayMode = "region-mask";
             ClearRawWorkspaceLocalRangeOverlayState();
             MarkRenderRefreshDirty();

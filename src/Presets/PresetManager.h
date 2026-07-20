@@ -23,6 +23,9 @@ struct PresetEntry {
     int thumbnailWidth = 0;
     int thumbnailHeight = 0;
     bool thumbnailLoadAttempted = false;
+    bool graphPayloadLoaded = false;
+    bool graphPayloadLoadRequested = false;
+    std::string graphPayloadLoadError;
     StackBinaryFormat::json graphPayload = StackBinaryFormat::json();
 };
 
@@ -43,6 +46,7 @@ public:
         const std::vector<StackBinaryFormat::NodePresetBoundarySocket>& boundarySockets,
         std::uint32_t nodeCount,
         std::string* outError = nullptr);
+    bool TryGetPreloadedPresetPayload(const PresetEntry& entry, StackBinaryFormat::json& outGraphPayload) const;
     bool LoadPresetPayload(const PresetEntry& entry, StackBinaryFormat::json& outGraphPayload, std::string* outError = nullptr) const;
     bool RenameUserPreset(const PresetEntry& entry, const std::string& displayName, std::string* outError = nullptr);
     bool DeleteUserPreset(const PresetEntry& entry, std::string* outError = nullptr);
@@ -64,6 +68,7 @@ private:
     void EnsureDirectories();
     void BuildBuiltInPresets();
     void ReleaseTexture(std::shared_ptr<PresetEntry> entry);
+    void RequestBackgroundGraphPayloadPreload(const std::shared_ptr<PresetEntry>& entry);
     bool ReadUserPresetDocument(const PresetEntry& entry, StackBinaryFormat::NodePresetDocument& document, std::string* outError = nullptr) const;
     bool WriteUserPresetDocument(const PresetEntry& entry, const StackBinaryFormat::NodePresetDocument& document, std::string* outError = nullptr);
     std::uintmax_t BuildPresetSignature() const;

@@ -19,11 +19,44 @@ bool EditorNodeGraphUI::UsesFixedNodeViewport() const {
 }
 
 float EditorNodeGraphUI::NodeContentScale() const {
-    return EditorNodeGraphUIMetrics::NodeUiScaleFromZoom(m_Zoom);
+    return EditorNodeGraphUIMetrics::NodeUiScaleFromZoom(m_Zoom) * NodeUiScalePreference();
 }
 
 float EditorNodeGraphUI::NodePinRadius() const {
     return EditorNodeGraphUIMetrics::PinRadiusForZoom(NodeContentScale());
+}
+
+float EditorNodeGraphUI::NodeWidthScale() const {
+    const StackAppearance::AppearanceManager* appearance =
+        m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
+    return appearance
+        ? std::clamp(
+            appearance->GetGraphNodeSizing().widthScale,
+            StackAppearance::kGraphNodeWidthScaleMin,
+            StackAppearance::kGraphNodeWidthScaleMax)
+        : 1.12f;
+}
+
+float EditorNodeGraphUI::NodeUiScalePreference() const {
+    const StackAppearance::AppearanceManager* appearance =
+        m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
+    return appearance
+        ? std::clamp(
+            appearance->GetGraphNodeSizing().uiScale,
+            StackAppearance::kGraphNodeUiScaleMin,
+            StackAppearance::kGraphNodeUiScaleMax)
+        : 1.0f;
+}
+
+float EditorNodeGraphUI::NodeGrabAreaHeight() const {
+    const StackAppearance::AppearanceManager* appearance =
+        m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
+    return appearance
+        ? std::clamp(
+            appearance->GetGraphNodeSizing().grabAreaHeight,
+            StackAppearance::kGraphNodeGrabAreaHeightMin,
+            StackAppearance::kGraphNodeGrabAreaHeightMax)
+        : 38.0f;
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::ScreenToGraph(const EditorNodeGraph::Vec2& screen) const {

@@ -127,7 +127,6 @@ void ColorGradeLayer::RenderExpandedNodeSurface(EditorModule* editor, const Node
     const float logicalWidth = std::max(120.0f, context.logicalSafeContentWidth);
     const float itemGap = std::max(2.0f, context.itemGap);
     const float sectionGap = std::max(2.0f, context.sectionGap);
-    const float inlineGap = 12.0f * layoutScale;
     const float footerGap = 10.0f * layoutScale;
     const float resetButtonWidth = 88.0f * layoutScale;
     const float wheelGap = 12.0f * layoutScale;
@@ -149,13 +148,14 @@ void ColorGradeLayer::RenderExpandedNodeSurface(EditorModule* editor, const Node
     ImGui::Dummy(ImVec2(0.0f, sectionGap));
 
     ImGuiExtras::RichSectionLabel("Strength", std::max(1.0f, itemGap * 0.35f));
-    const float valueLaneWidth = 62.0f * layoutScale;
-    const float sliderWidth = std::max(48.0f, totalWidth - valueLaneWidth - inlineGap);
-    ImGui::SetNextItemWidth(sliderWidth);
-    ImGui::SliderFloat("##ColorGradeStrength", &m_Strength, 0.0f, 100.0f, "");
-    ImGui::SameLine(0.0f, inlineGap);
-    ImGui::AlignTextToFramePadding();
-    ImGui::Text("%.0f%%", m_Strength);
+    ImGuiExtras::NodeSliderFloat(
+        "Amount",
+        "##ColorGradeStrength",
+        &m_Strength,
+        0.0f,
+        100.0f,
+        "%.0f%%",
+        totalWidth);
 
     ImGui::Dummy(ImVec2(0.0f, sectionGap));
     ImGuiExtras::RichSectionLabel("Tonal Ranges", std::max(1.0f, itemGap * 0.5f));

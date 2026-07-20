@@ -11,9 +11,11 @@ namespace GLHelpers {
 
     // Compile a single shader stage from source string
     unsigned int CompileShader(unsigned int type, const char* source);
+    unsigned int CompileShader(unsigned int type, const char* source, std::string* error);
 
     // Link a vertex + fragment shader into a program, returns program ID
     unsigned int CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc);
+    unsigned int CreateShaderProgram(const char* vertexSrc, const char* fragmentSrc, std::string* error);
 
     // Link a compute shader into a program, returns program ID
     unsigned int CreateComputeProgram(const char* computeSrc);

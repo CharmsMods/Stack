@@ -351,9 +351,7 @@ ScenePathState AnalyzeScenePathFromNode(
             mergeInput(EditorNodeGraph::kRawInputSocketId);
             break;
         case EditorNodeGraph::NodeKind::Layer:
-            if (node->layerType == LayerType::ToneCurve) {
-                state.sceneReferred = true;
-            } else if (node->layerType == LayerType::ViewTransform) {
+            if (node->layerType == LayerType::ViewTransform) {
                 state.hasViewTransform = true;
             }
             mergeInput(EditorNodeGraph::kImageInputSocketId);
@@ -584,7 +582,9 @@ bool IsMaskOutputNode(EditorNodeGraph::NodeKind kind) {
         kind == EditorNodeGraph::NodeKind::CustomMask ||
         kind == EditorNodeGraph::NodeKind::ImageToMask ||
         kind == EditorNodeGraph::NodeKind::RawDetailAutoMask ||
-        kind == EditorNodeGraph::NodeKind::RawDetailFusion;
+        kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
+        kind == EditorNodeGraph::NodeKind::FrequencyMask ||
+        kind == EditorNodeGraph::NodeKind::MagnitudePhase;
 }
 
 bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
@@ -598,6 +598,11 @@ bool IsImageOutputNode(EditorNodeGraph::NodeKind kind) {
         kind == EditorNodeGraph::NodeKind::Layer ||
         kind == EditorNodeGraph::NodeKind::Mix ||
         kind == EditorNodeGraph::NodeKind::DataMath ||
+        kind == EditorNodeGraph::NodeKind::FrequencyFft ||
+        kind == EditorNodeGraph::NodeKind::FrequencyIfft ||
+        kind == EditorNodeGraph::NodeKind::SpectrumView ||
+        kind == EditorNodeGraph::NodeKind::SpectrumMath ||
+        kind == EditorNodeGraph::NodeKind::MagnitudePhase ||
         kind == EditorNodeGraph::NodeKind::Output;
 }
 
@@ -1117,8 +1122,33 @@ void EditorModule::RenderUI() {
     const float canvasPaneRevealAlpha = wallpaperSurfaces ? 1.0f : m_LibraryLoadCanvasRevealAlpha;
     const float toolbarRevealAlpha = wallpaperSurfaces ? 1.0f : m_LibraryLoadToolbarRevealAlpha;
 
-    const bool hotkeyOnePressed = CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_1, false);
-    const bool hotkeyTwoPressed = CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_2, false);
+    const ImGuiIO& commandIo = ImGui::GetIO();
+    const bool altOnePressed =
+        !commandIo.WantTextInput &&
+        ImGui::IsKeyChordPressed(ImGuiMod_Alt | ImGuiKey_1);
+    if (altOnePressed) {
+        // Some Windows input paths deliver the number-row key press one frame
+        // after the Alt chord. Keep a short guard so that deferred event can
+        // never fall through to the plain-1 fullscreen command.
+        m_GraphCaptureShortcutGuardFrames = 30;
+    }
+    const bool graphCaptureShortcutGuardActive = m_GraphCaptureShortcutGuardFrames > 0;
+    if (m_GraphCaptureShortcutGuardFrames > 0) {
+        --m_GraphCaptureShortcutGuardFrames;
+    }
+    const bool unmodifiedCommand =
+        !commandIo.KeyAlt && !commandIo.KeyCtrl && !commandIo.KeyShift && !commandIo.KeySuper;
+    const bool hotkeyOnePressed =
+        !graphCaptureShortcutGuardActive &&
+        unmodifiedCommand && CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_1, false);
+    const bool hotkeyTwoPressed =
+        unmodifiedCommand && CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_2, false);
+    if (altOnePressed &&
+        m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
+        m_TargetSubWindow == EditorSubWindow::NodeGraph &&
+        m_Sidebar.GetNodeGraphUI().GetGraphCaptureViewportSnapshot().IsValid()) {
+        OpenGraphCaptureWindow();
+    }
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
                            | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1272,13 +1302,16 @@ void EditorModule::RenderUI() {
         }
     }
 
-    if (CanConsumeEditorCommandKeys() && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
-        m_SpacebarPressTime = ImGui::GetTime();
-        m_SpacebarHeld = true;
+    if (CanConsumeEditorCommandKeys() &&
+        ImGui::GetIO().KeyCtrl &&
+        ImGui::GetIO().KeyShift &&
+        ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
+        m_TimelineUi.open = !m_TimelineUi.open;
     }
 
     if (CanConsumeEditorCommandKeys() &&
         ImGui::GetIO().KeyCtrl &&
+        !ImGui::GetIO().KeyShift &&
         ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
         TogglePresetsSubWindow();
     }
@@ -1289,10 +1322,43 @@ void EditorModule::RenderUI() {
         RequestSaveCurrentProject(m_CurrentProjectName.empty() ? "Untitled Project" : m_CurrentProjectName);
     }
 
+    const float timelineHeight = UpdateTimelinePanelHeight(workspaceSize.y);
+    const float paneHeight = std::max(0.0f, workspaceSize.y - timelineHeight);
+    const ImVec2 mousePos = ImGui::GetIO().MousePos;
+    const bool timelineHovered =
+        timelineHeight > 1.0f &&
+        mousePos.x >= workspacePos.x &&
+        mousePos.x <= workspacePos.x + workspaceSize.x &&
+        mousePos.y >= workspacePos.y + workspaceSize.y - timelineHeight &&
+        mousePos.y <= workspacePos.y + workspaceSize.y;
+    const bool timelineShortcutInputAllowed =
+        CanConsumeEditorCommandKeys() &&
+        !ImGui::IsAnyItemActive();
+
+    if (timelineShortcutInputAllowed && m_TimelineUi.open && ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
+        StepTimelineFrame(-1);
+    }
+
+    if (timelineShortcutInputAllowed && m_TimelineUi.open && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+        StepTimelineFrame(1);
+    }
+
+    if (timelineShortcutInputAllowed && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+        if (m_TimelineUi.playing) {
+            StopTimelinePlayback(false);
+            m_SpacebarHeld = false;
+        } else if (timelineHovered) {
+            ToggleTimelinePlayback();
+            m_SpacebarHeld = false;
+        } else {
+            m_SpacebarPressTime = ImGui::GetTime();
+            m_SpacebarHeld = true;
+        }
+    }
+
     if (m_SpacebarHeld) {
         if (!ImGui::IsKeyDown(ImGuiKey_Space)) {
             const float holdTime = static_cast<float>(ImGui::GetTime() - m_SpacebarPressTime);
-            const float paneHeight = std::max(0.0f, workspaceSize.y);
             if (holdTime >= 0.4f) {
                 HandleSpacebarLongPress(workspaceSize.x, paneHeight, minLeftWidth, maxLeftWidth, splitGap);
             } else {
@@ -1349,7 +1415,6 @@ void EditorModule::RenderUI() {
         }
     }
 
-    const float paneHeight = std::max(0.0f, workspaceSize.y);
     const float visibleLeftPaneWidth = detachedPreviewActive ? workspaceSize.x : m_LeftPaneWidth;
     const float rightWidth = detachedPreviewActive
         ? 0.0f
@@ -1357,7 +1422,10 @@ void EditorModule::RenderUI() {
 
     // Update Left Panel Hover & Animation State
     const bool isGraphDrawerOpen = m_Sidebar.GetNodeGraphUI().HasDrawerOpen();
-    if (m_ActiveSubWindow == EditorSubWindow::NodeGraph && visibleLeftPaneWidth > 1.0f) {
+    const bool graphMiddlePanActive = m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive();
+    if (!graphMiddlePanActive &&
+        m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
+        visibleLeftPaneWidth > 1.0f) {
         ImVec2 mousePos = ImGui::GetIO().MousePos;
         bool hoveringPanelOrTab = false;
 
@@ -1381,7 +1449,10 @@ void EditorModule::RenderUI() {
         }
 
         m_LeftPanelExpanded = hoveringPanelOrTab;
-    } else {
+    } else if (!graphMiddlePanActive) {
+        // Locked graph panning uses a hidden cursor path, so preserve the
+        // drawer state instead of letting hover-reactive chrome chase the
+        // drifting virtual cursor mid-pan.
         m_LeftPanelExpanded = false;
     }
 
@@ -1761,6 +1832,10 @@ void EditorModule::RenderUI() {
         }
     }
 
+    if (timelineHeight > 1.0f) {
+        RenderTimelinePanel(workspacePos, workspaceSize, timelineHeight);
+    }
+
     SubmitRenderIfReady();
 
     ImGui::EndChild();
@@ -1776,6 +1851,7 @@ void EditorModule::RenderUI() {
 
     RenderProjectLifecyclePopups();
     RenderManagedRawGraphMutationConfirmPopup();
+    RenderGraphCaptureWindow();
 
     if (IsGraphDropImportBusy()) {
         ImGuiExtras::RenderBusyOverlay(
@@ -1820,5 +1896,5 @@ int EditorModule::GetConnectedOutputCount() const {
 }
 
 bool EditorModule::CanConsumeEditorCommandKeys() const {
-    return !ImGui::GetIO().WantTextInput;
+    return !ImGui::GetIO().WantTextInput && !m_GraphCaptureWindowOpen;
 }

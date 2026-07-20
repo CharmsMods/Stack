@@ -1,0 +1,314 @@
+STACK APPLICATION — UI FRAMEWORK PORTABILITY ANALYSIS
+======================================================
+Researched from src/ source tree, May 2026
+
+This document analyzes how prepared the codebase is for switching UI frameworks
+(e.g., away from Dear ImGui to Qt, wxWidgets, a custom retained-mode UI, or a
+web-based UI via a CEF-style embed). It also covers what a "better ImGui
+appearance" improvement would require in terms of code changes.
+
+--------------------------------------------------------------------------------
+WHAT IS TIGHTLY COUPLED TO IMGUI
+--------------------------------------------------------------------------------
+
+THINGS ONLY IN AppShell.cpp:
+  - ImGui::CreateContext() / DestroyContext()
+  - ImGui_ImplGlfw_InitForOpenGL() / ImGui_ImplGlfw_Shutdown()
+  - ImGui_ImplOpenGL3_Init() / ImGui_ImplOpenGL3_Shutdown()
+  - ImGui::NewFrame() / Render() / GetDrawData()
+  - ImGui_ImplOpenGL3_RenderDrawData()
+  - ImGui::UpdatePlatformWindows() / RenderPlatformWindowsDefault()
+  - ImGuiIO configuration (ConfigFlags for docking, viewports, keyboard nav)
+  - ImGui::StyleColorsDark()
+  - The splash screen creates and destroys a second ImGui context
+
+Everything above is confined to AppShell.cpp. Replacing the backend would
+only touch this file for the startup/shutdown/frame-pump plumbing.
+
+THINGS IN MULTIPLE UI FILES:
+  All UI modules (EditorSidebar, EditorViewport, LayersTab, PipelineTab,
+  SelectedTab, CanvasTab, LibraryModule, BundlerModule, RenderTab,
+  CompositeModule) use #include <imgui.h> and call the ImGui:: API directly.
+  These would all need to be rewritten for a framework switch.
+
+  ImGuiExtras.cpp and ImGuiExtras.h use #include <imgui_internal.h> for
+  ImGuiWindow* access — this is an imgui_internal dependency.
+
+  EditorViewport.cpp, CompositeModule.cpp, RenderTab.cpp call into OpenGL
+  directly (texture creation, FBO management) from within UI files. This is
+  a separate concern from ImGui portability.
+
+THINGS THAT ARE IMGUI-ID DEPENDENT:
+  The docking system uses string-based window names as dock targets. These
+  names are hardcoded string literals. Any framework switch would need to
+  replace the docking system entirely.
+
+  IDs for popups use ImGui's ## convention. All popup open/close logic uses
+  ImGui::OpenPopup / BeginPopupModal / BeginPopup / EndPopup.
+
+DRAG AND DROP:
+  PipelineTab.cpp uses ImGui::BeginDragDropSource / BeginDragDropTarget with
+  the payload type "DND_LAYER_INDEX". This is ImGui-specific.
+
+--------------------------------------------------------------------------------
+WHAT IS FRAMEWORK-INDEPENDENT
+--------------------------------------------------------------------------------
+
+The following have zero ImGui dependencies and could be used unchanged under
+any UI framework:
+
+  Async/TaskSystem.cpp + TaskState.h
+    — Thread pool, main-thread posting, task state enum. Pure C++.
+
+  Persistence/StackBinaryFormat.cpp
+    — Binary project serialization. Pure C++.
+
+  Editor/Layers/*.cpp (except RenderUI() methods)
+    — All shader source, GL uniform upload, Execute() logic is independent
+      of ImGui. Only RenderUI() in each layer uses ImGui.
+    — LayerBase::Serialize() / Deserialize() are pure JSON/C++.
+
+  Library/LibraryManager.cpp
+    — Disk scanning, async project loading/saving, texture upload queue.
+    — No ImGui includes or calls. Pure C++ + OpenGL for texture upload only.
+
+  Library/TagManager.cpp
+    — Tag persistence. Pure C++.
+
+  Bundler/BundlerGraph.cpp + BundlerScanner.cpp + BundlerBuild.cpp
+  + BundlerRefExtractor.cpp + BundlerInliner.cpp + BundlerJobQueue.cpp
+  + BundlerToolAdapter.cpp
+    — The entire bundling backend. No ImGui.
+
+  RenderTab/Contracts/ + RenderTab/Foundation/ + RenderTab/Runtime/ + Renderer/
+    — The path tracer, GL pipeline, and all rendering infrastructure.
+    — No ImGui except in RenderTab.cpp itself.
+
+  Utils/FileDialogs.cpp
+    — Win32 native file dialogs. No ImGui.
+
+  Utils/Base64.h
+    — Pure C++ utility.
+
+SUMMARY: The codebase has a good separation between the rendering/data backend
+and the UI layer. The backend is entirely reusable. Only the module .cpp files
+that implement RenderUI() would need replacement.
+
+--------------------------------------------------------------------------------
+WHAT WOULD A FRAMEWORK SWITCH ACTUALLY REQUIRE
+--------------------------------------------------------------------------------
+
+The minimum set of changes to port to a retained-mode framework (e.g., Qt):
+
+1. Replace AppShell.cpp entirely.
+   - Replace the GLFW window, ImGui context, and render loop with Qt's
+     QMainWindow and a QOpenGLWidget (or Vulkan equivalent).
+   - Replace the splash screen with QSplashScreen.
+   - Implement the tab bar as QTabWidget.
+   - Implement RequestTabSwitch via QTabWidget::setCurrentIndex.
+
+2. Replace all RenderUI() methods in all modules.
+   - Each module's RenderUI() would become a Qt widget or panel.
+   - The data they read (LibraryManager::Get(), editor->GetLayers(), etc.)
+     would still work unchanged.
+   - Async busy overlays would become Qt progress indicators.
+
+3. Replace EditorSidebar.cpp.
+   - Becomes a QTabWidget with 4 panes.
+   - SAVE TO LIBRARY becomes a QPushButton.
+
+4. Replace LayersTab, PipelineTab, SelectedTab, CanvasTab.
+   - Becomes Qt widgets; PipelineTab's DnD becomes Qt's drag-and-drop model.
+
+5. Replace the dockspace layouts.
+   - Qt's QDockWidget + QMainWindow dock areas would handle this.
+   - Editor's three-panel layout (sidebar, viewport, scopes) maps directly.
+
+6. Replace ImGuiExtras.
+   - DrawSpinner becomes a QProgressIndicator-style custom widget.
+   - RenderBusyOverlay becomes an overlay widget with QOpacityEffect.
+
+7. EditorViewport and the RenderTab viewport would need special treatment.
+   - They render OpenGL textures from the pipeline.
+   - These become QOpenGLWidget or equivalent. The OpenGL calls inside them
+     remain, only the parent window context changes.
+
+8. Replace PipelineTab drag-and-drop.
+   - QListView with QAbstractItemModel + drag-and-drop model.
+
+Estimated scope: Large. The UI layer is large (total ~350KB of .cpp across all
+UI files). However, the clean backend means no data logic would need rewriting.
+
+--------------------------------------------------------------------------------
+WHAT WOULD IMPROVING IMGUI APPEARANCE REQUIRE
+--------------------------------------------------------------------------------
+
+The application uses stock ImGui::StyleColorsDark() with zero custom theming.
+Improving the appearance would require:
+
+STEP 1: Centralized Color Token System
+  Create a file (e.g., AppStyle.h or AppTheme.cpp) that defines named constants
+  for every color used in the application. Currently, colors are inline literals.
+  Example replacements needed:
+    IM_COL32(80, 160, 255, 255) — selection blue, used in LibraryModule
+    ImVec4(0.7f, 0.7f, 1.0f, 1.0f) — layer category BASE header
+    ImVec4(0.9f, 0.5f, 0.2f, 1.0f) — Bundler HTML file type color
+    ImVec4(0.04f, 0.05f, 0.06f, 0.97f) — Library preview modal background
+  These are scattered across 6+ files.
+
+STEP 2: Apply a Custom ImGuiStyle at Startup (in AppShell::Initialize)
+  Set all ImGuiStyle fields in one place. At minimum:
+    style.WindowRounding
+    style.ChildRounding
+    style.FrameRounding
+    style.PopupRounding
+    style.ScrollbarRounding
+    style.GrabRounding
+    style.TabRounding
+    style.FramePadding
+    style.ItemSpacing
+    style.ItemInnerSpacing
+    style.IndentSpacing
+    style.ScrollbarSize
+    style.GrabMinSize
+  And a custom color palette for:
+    ImGuiCol_WindowBg
+    ImGuiCol_ChildBg
+    ImGuiCol_PopupBg
+    ImGuiCol_Border
+    ImGuiCol_FrameBg, FrameBgHovered, FrameBgActive
+    ImGuiCol_TitleBg, TitleBgActive
+    ImGuiCol_TabBar (if using tab styling)
+    ImGuiCol_Button, ButtonHovered, ButtonActive
+    ImGuiCol_Header, HeaderHovered, HeaderActive
+    ImGuiCol_Separator
+    ImGuiCol_CheckMark
+    ImGuiCol_SliderGrab, SliderGrabActive
+    ImGuiCol_Tab, TabHovered, TabSelected (formerly TabActive)
+
+STEP 3: Load a Custom Font
+  ImGui::GetIO().Fonts->AddFontFromFileTTF() or use embedded TTF bytes via
+  AddFontFromMemoryTTF(). No font loading of any kind exists in the main context.
+  The embedded EmbeddedCompositeFont.h is for text layer rendering only.
+  A good candidate: Inter, JetBrains Mono (for the log panels), or Roboto.
+  For the Bundler diagnostic panel and Scopes panel, a monospace font would
+  improve readability of file paths and numeric labels.
+
+STEP 4: Icon Font
+  The pipeline visibility toggle uses a ##vis checkbox with no label. Everywhere
+  the application wants iconography (eye = visible, lock = locked, folder = browse),
+  it falls back to text. Adding an icon font (e.g., Font Awesome or Phosphor Icons
+  embedded as TTF) would replace the "x" delete button, visibility checkbox, and
+  lock text with proper icons. This has no architecture implications — it only
+  requires loading the font in AppShell and changing string literals at point of use.
+
+STEP 5: Per-Site Style Overrides Audit
+  The codebase uses PushStyleVar and PushStyleColor at point of use. After
+  setting a global theme, these overrides would need review to remove any that
+  fight the new global style or are now redundant.
+
+STEP 6: Improve Specific Widgets
+  - Library project/asset cards: Currently use BeginChild + InvisibleButton for
+    hit testing. The selection highlight is drawn via DrawList::AddRect(). A
+    more polished card would round the corners (DrawList::AddRect with rounding
+    arg), add a shadow effect, and animate the selection highlight color.
+  - The compare slider in the preview popup uses AddLine + AddCircleFilled for
+    the handle. This could become a more polished drag handle.
+  - The "SAVE TO LIBRARY" button is full-width in the sidebar. A colored button
+    (PushStyleColor ImGuiCol_Button to a brand color) would make it stand out
+    as a primary CTA.
+
+STEP 7: Spacing and Padding
+  Currently WindowPadding is zeroed out for the workspace container (EditorModule,
+  BundlerModule) to let the DockSpace fill completely. The individual windows
+  inside (Inspector Panel Sidebar, Canvas Viewport, Scopes Panel) then rely on
+  their own default padding. Consistent FramePadding and ItemSpacing values
+  defined globally would make all panels feel unified.
+
+--------------------------------------------------------------------------------
+WHERE IMGUI IS USED CORRECTLY
+--------------------------------------------------------------------------------
+
+CORRECT PATTERNS OBSERVED:
+
+1. ImGui::PushID / PopID is used correctly in all loops (LibraryModule card
+   rendering, PipelineTab layer list, BundlerModule file tree).
+
+2. ImGui::BeginDisabled / EndDisabled is used consistently to prevent interaction
+   during async operations. This is preferable to conditionally not rendering
+   buttons.
+
+3. ImGui::OpenPopup is called with a boolean flag one frame before the modal
+   check, avoiding the "popup opens immediately and closes" race condition.
+
+4. DockSpace layouts are guarded by static bools to prevent re-layout on every
+   frame.
+
+5. BundlerModule auto-scrolls the log panel:
+     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+         ImGui::SetScrollHereY(1.0f);
+   This is the canonical ImGui pattern for a live log view.
+
+6. LibraryModule's card hitbox uses InvisibleButton over the visual content to
+   capture mouse events — this is the correct ImGui pattern for custom interactive
+   regions.
+
+7. The drag-and-drop type "DND_LAYER_INDEX" in PipelineTab is a named string
+   payload type, preventing collisions with any future DnD in the application.
+
+8. Popup IDs in LibraryModule include the fileName in the ID string
+   ("ProjectCardContextMenu##<fileName>") to ensure each card has a unique
+   popup ID even though all cards use the same ImGui::PushID block.
+
+--------------------------------------------------------------------------------
+WHERE IMGUI IS USED INCORRECTLY OR SUBOPTIMALLY
+--------------------------------------------------------------------------------
+
+1. EditorSidebar.cpp line 18:
+     ImGui::Begin("Inspector Panel Sidebar")
+   This window name contains spaces. ImGui uses the full string including spaces
+   as the ID, so this works, but it is fragile. If the name needs to change
+   for any reason, the DockBuilder call in EditorModule.cpp must also be updated.
+   There is no constant shared between the two.
+
+2. Static bools for first-time layout (EditorModule, BundlerModule):
+     static bool first = true;
+   Using static locals like this means the layout cannot be reset without
+   restarting the application. If the user resizes the window significantly or
+   moves panels to an undesirable state, there is no "Reset Layout" function in
+   the Editor or Bundler tabs. (Composite has one: ResetWorkspaceLayout.)
+
+3. PipelineTab.cpp line 60:
+     if (ImGui::Button("x", ImVec2(20, 20)))
+   The delete button is unlabeled (just "x"), has no tooltip, and its size is
+   hardcoded to 20x20. This is below the recommended minimum touch target and
+   provides no affordance of its destructive nature. There is no undo.
+
+4. EditorViewport.cpp — no tooltip on viewport controls:
+   The zoom/pan/lock controls in the viewport have help text rendered as
+   TextDisabled overlaid on the image. This text is always visible and takes
+   screen space, rather than being a tooltip. More importantly, the hover-
+   comparison feature (fading between original and processed) has NO visible
+   hint anywhere.
+
+5. ImGuiExtras::DrawSpinner uses imgui_internal.h to access ImGuiWindow*:
+     ImGuiWindow* window = ImGui::GetCurrentWindow();
+   This is technically using the private API. It works but could break in
+   a Dear ImGui version update. The standard pattern is to use
+   ImGui::GetCursorPos and Dummy() to advance the cursor, then use
+   GetWindowDrawList() to draw on top.
+
+6. LibraryModule.cpp static-qualified helpers (FormatKeyLabel, LayerDisplayName,
+   FormatJsonValue) are in an anonymous namespace. These are display-name mapping
+   functions that duplicate the type-to-name logic that also exists in
+   EditorModule.cpp's DeserializePipeline (the if-else chain checking type
+   string names). The display name mapping and the serialization type key are
+   not shared from a single source of truth.
+
+7. The Library preview popup uses:
+     ImGui::SetNextWindowPos(viewport->Pos)
+     ImGui::SetNextWindowSize(viewport->Size)
+   to make the preview full-screen. This works but means the preview covers
+   the entire application. Escape is presumably the close key but the mechanism
+   depends on what "closeProjectPreview" flag is triggered (not fully verified).
+   There is no visible close button discovered in the header cataloging here.

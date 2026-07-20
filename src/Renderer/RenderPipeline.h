@@ -1,10 +1,14 @@
 #pragma once
 
 #include "Renderer/GLHelpers.h"
+#include "NodeMath/PointwiseIR.h"
+#include "NodeMath/SpecializedPlanning.h"
 #include "Renderer/FullscreenQuad.h"
+#include "Renderer/Frequency/GpuFft.h"
 #include "Editor/Layers/LayerBase.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Raw/RawAutoBase.h"
+#include "Raw/RawAutoStartPoint.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawGpuPipeline.h"
 #include <algorithm>
@@ -31,7 +35,11 @@ struct RenderTextureStats {
     float p001Luma = 0.0f;
     float p01Luma = 0.0f;
     float p05Luma = 0.0f;
+    float p10Luma = 0.0f;
+    float p25Luma = 0.0f;
     float p50Luma = 0.0f;
+    float p75Luma = 0.0f;
+    float p90Luma = 0.0f;
     float p95Luma = 0.0f;
     float p99Luma = 0.0f;
     float p999Luma = 0.0f;
@@ -40,6 +48,58 @@ struct RenderTextureStats {
     float validPixelPercent = 0.0f;
     float hdrPixelPercent = 0.0f;
     float displayClipPercent = 0.0f;
+    float displayClipHighPercent = 0.0f;
+    float displayClipLowPercent = 0.0f;
+};
+
+struct RawDevelopmentStageStatsReadback {
+    bool valid = false;
+    Stack::RawAutoStartPoint::RawAutoStartPointStage stage =
+        Stack::RawAutoStartPoint::RawAutoStartPointStage::RawTechnical;
+    Stack::RawAutoStartPoint::RawAutoStartPointStageStatus status =
+        Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Unavailable;
+    std::string stageId;
+    std::string label;
+    std::string sourceDescription;
+    std::string measurementDomain;
+    bool sceneLinearBeforeViewTransform = false;
+    bool displayMappedLinearRgb = false;
+    bool rawSafetyStats = false;
+    Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats rawSafety;
+    RenderTextureStats textureStats;
+};
+
+using RawDevelopmentStageImageReadback =
+    Stack::RawAutoStartPoint::RawAutoStartPointStageImage;
+
+struct PointwiseExecutionGroupStats {
+    std::vector<int> authoredNodeIds;
+    int operationCount = 0;
+    int avoidedPassCount = 0;
+    std::uint64_t targetBytes = 0;
+    double cpuSubmitMilliseconds = 0.0;
+    bool programCacheHit = false;
+    std::string targetFormat = "RGBA16F";
+    std::string semanticFingerprint;
+    std::string programFingerprint;
+};
+
+struct ReductionExecutionStats {
+    int nodeId = -1;
+    double value = 0.0;
+    std::uint64_t sampleCount = 0;
+    bool cacheHit = false;
+    std::string definitionId;
+};
+
+struct SpecializedBoundaryExecutionStats {
+    std::string kind;
+    int inputWidth = 0;
+    int inputHeight = 0;
+    int outputWidth = 0;
+    int outputHeight = 0;
+    bool fullQuality = false;
+    bool changesGraphResult = false;
 };
 
 struct GraphExecutionStats {
@@ -49,6 +109,30 @@ struct GraphExecutionStats {
     int maskCacheMisses = 0;
     int rawStageCacheHits = 0;
     int rawStageCacheMisses = 0;
+    int fusedPointwiseGroups = 0;
+    int fusedPointwiseNodes = 0;
+    int avoidedPointwisePasses = 0;
+    int pointwiseProgramCacheHits = 0;
+    int pointwiseProgramCacheMisses = 0;
+    int pointwiseFallbacks = 0;
+    int reductionPasses = 0;
+    int reductionCacheHits = 0;
+    int reductionCacheMisses = 0;
+    int transientTargetAllocations = 0;
+    int transientTargetReuses = 0;
+    int persistentCacheEvictions = 0;
+    std::uint64_t transientPoolBytes = 0;
+    std::uint64_t persistentCacheBytes = 0;
+    std::uint64_t persistentCacheBudgetBytes = 0;
+    std::string lastPointwiseFailure;
+    std::vector<int> lastPointwiseFailureNodeIds;
+    std::vector<PointwiseExecutionGroupStats> pointwiseGroups;
+    std::string lastReductionFailure;
+    int lastReductionFailureNodeId = -1;
+    std::vector<ReductionExecutionStats> reductions;
+    std::vector<SpecializedBoundaryExecutionStats> specializedBoundaries;
+    std::string lastSpecializedFailure;
+    int lastSpecializedFailureNodeId = -1;
 };
 
 // The sequential rendering pipeline.
@@ -103,6 +187,18 @@ public:
     std::vector<unsigned char> GetPreviewPixels(int& outW, int& outH, int maxDimension = 512);
     std::vector<unsigned char> GetRawDevelopmentLocalRangeOverlayPixels(int& outW, int& outH);
     RenderTextureStats GetRawDevelopmentViewTransformInputStats() const { return m_RawDevelopmentViewTransformInputStats; }
+    RenderTextureStats GetRawDevelopmentFinalDisplayStats() const { return m_RawDevelopmentFinalDisplayStats; }
+    const std::vector<RawDevelopmentStageStatsReadback>& GetRawDevelopmentStageStatsReadbacks() const {
+        return m_RawDevelopmentStageStatsReadbacks;
+    }
+    void SetRawDevelopmentStageImageReadbackMaxDimension(int maxDimension) {
+        m_RawDevelopmentStageImageReadbackMaxDimension = std::max(0, maxDimension);
+    }
+    const std::vector<RawDevelopmentStageImageReadback>& GetRawDevelopmentStageImageReadbacks() const {
+        return m_RawDevelopmentStageImageReadbacks;
+    }
+    Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics BuildRawDevelopmentStartPointDiagnostics(
+        const std::string& sourceKey) const;
     const Stack::RawAutoBase::LocalSuggestionAnalysisImage& GetRawDevelopmentLocalSuggestionImage() const {
         return m_RawDevelopmentLocalSuggestionImage;
     }
@@ -151,6 +247,41 @@ private:
         int width = 0;
         int height = 0;
         bool owned = false;
+        std::uint64_t bytes = 0;
+        std::uint64_t lastUseSerial = 0;
+    };
+
+    struct CachedGraphScalar {
+        std::size_t fingerprint = 0;
+        double value = 0.0;
+        std::uint64_t sampleCount = 0;
+        std::uint64_t lastUseSerial = 0;
+    };
+
+    struct CachedPointwiseProgram {
+        unsigned int program = 0;
+        std::uint64_t lastUseSerial = 0;
+        std::size_t sourceBytes = 0;
+    };
+
+    struct GraphTransientTarget {
+        unsigned int texture = 0;
+        int width = 0;
+        int height = 0;
+        bool inUse = false;
+        std::uint64_t lastUseSerial = 0;
+    };
+
+    struct PointwiseFusionPlan {
+        bool valid = false;
+        int inputNodeId = -1;
+        std::string inputSocketId;
+        std::vector<int> authoredNodeIds;
+        Stack::NodeMath::PointwiseOptimizationResult optimized;
+        Stack::NodeMath::GeneratedPointwiseShader shader;
+        Stack::NodeMath::PointwisePhysicalPlan physicalPlan;
+        std::string failure;
+        std::vector<int> failureNodeIds;
     };
 
     struct AutoGainSceneStats {
@@ -229,6 +360,13 @@ private:
     unsigned int m_ImageToMaskProgram;
     unsigned int m_ImageGeneratorProgram;
     unsigned int m_DataMathProgram;
+    unsigned int m_TechnicalImageProgram;
+    unsigned int m_ReformatProgram;
+    unsigned int m_SpectrumViewProgram;
+    unsigned int m_FrequencyMaskProgram;
+    unsigned int m_SpectrumMathProgram;
+    unsigned int m_MagnitudePhaseProgram;
+    unsigned int m_FrequencyIfftProjectProgram;
     unsigned int m_ChannelSplitProgram;
     unsigned int m_ChannelCombineProgram;
     unsigned int m_LutProgram;
@@ -247,6 +385,10 @@ private:
     std::string m_RawDevelopmentLocalRangeOverlayMode;
     std::string m_RawDevelopmentLocalRangeOverlayRequestMode;
     RenderTextureStats m_RawDevelopmentViewTransformInputStats;
+    RenderTextureStats m_RawDevelopmentFinalDisplayStats;
+    std::vector<RawDevelopmentStageStatsReadback> m_RawDevelopmentStageStatsReadbacks;
+    int m_RawDevelopmentStageImageReadbackMaxDimension = 0;
+    std::vector<RawDevelopmentStageImageReadback> m_RawDevelopmentStageImageReadbacks;
     Stack::RawAutoBase::LocalSuggestionAnalysisImage m_RawDevelopmentLocalSuggestionImage;
     bool m_RawDevelopmentLocalRangeTargetSampleRequested = false;
     float m_RawDevelopmentLocalRangeTargetSampleRequestU = 0.0f;
@@ -265,9 +407,13 @@ private:
     GraphExecutionStats m_LastGraphExecutionStats;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphImageCache;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphMaskCache;
+    std::unordered_map<std::string, CachedGraphScalar> m_GraphScalarCache;
     std::unordered_map<std::string, CachedGraphTexture> m_LutTextureCache;
     std::unordered_map<std::string, std::vector<CachedGraphTexture>> m_RawDevelopStageImageCache;
     std::unordered_set<std::string> m_LastGraphImageCacheHits;
+    std::unordered_map<std::string, CachedPointwiseProgram> m_PointwiseProgramCache;
+    std::vector<GraphTransientTarget> m_GraphTransientTargets;
+    std::uint64_t m_GraphResourceUseSerial = 0;
     std::unordered_map<std::size_t, AutoGainSceneStats> m_AutoGainSceneStatsCache;
     std::unordered_map<int, PreLocalExposureSummary> m_PreLocalExposureSummaries;
     std::vector<ToneCurveAutoRewriteFeedback> m_ToneCurveAutoRewriteFeedback;
@@ -276,6 +422,7 @@ private:
     std::unordered_map<int, std::string> m_RawDataCachePaths;
     std::unordered_map<int, Raw::RawImageData> m_RawPreviewDataCache;
     std::unordered_map<int, std::string> m_RawPreviewDataCacheKeys;
+    Stack::Renderer::Frequency::GpuFft m_GpuFft;
 
     void CleanupFBOs();
     void DeleteGraphCacheEntry(CachedGraphTexture& entry);
@@ -283,6 +430,9 @@ private:
     void ReleaseGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key);
     unsigned int CloneTextureForGraphCache(unsigned int sourceTexture, int width, int height);
     void StoreGraphCacheEntry(std::unordered_map<std::string, CachedGraphTexture>& cache, const std::string& key, unsigned int texture, std::size_t fingerprint, bool owned);
+    void TouchGraphCacheEntry(CachedGraphTexture& entry);
+    std::uint64_t GraphPersistentCacheBytes() const;
+    void TrimGraphPersistentCachesToBudget();
     void PruneInactiveGraphCache(std::unordered_map<std::string, CachedGraphTexture>& cache, const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext);
     void DestroyRawDevelopStageCache();
     void PruneInactiveRawDevelopStageCache(const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext);
@@ -302,6 +452,21 @@ private:
     void TrimRawDevelopStageCacheToBudget(std::uint64_t currentTotalBytes);
     void StoreRawDevelopStageCacheEntry(const std::string& key, unsigned int texture, std::size_t fingerprint);
     void InvalidateGraphCaches();
+    unsigned int AcquireGraphTransientTarget();
+    void ReleaseGraphTransientTarget(unsigned int texture);
+    bool PromoteGraphTransientTarget(unsigned int texture);
+    void DestroyGraphTransientTargets();
+    std::uint64_t GraphTransientTargetBytes() const;
+    PointwiseFusionPlan BuildPointwiseFusionPlan(
+        const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext,
+        int nodeId,
+        const std::string& socketId,
+        const std::unordered_set<int>& disabledNodes) const;
+    GraphNodeRenderResult RenderPointwiseFusionPlan(
+        const PointwiseFusionPlan& plan,
+        unsigned int inputTexture,
+        bool executionInspectionEnabled);
+    void DestroyPointwiseProgramCache();
     unsigned int CreateGraphRenderTargetTexture() const;
     bool RenderIntoGraphTargetTexture(unsigned int texture, const std::function<void(unsigned int)>& renderFn);
     const Raw::RawImageData& ResolveRawPreviewRenderData(
@@ -365,12 +530,24 @@ private:
         const std::string& socketId,
         const std::function<unsigned int(int, const std::string&)>& evalImage,
         const std::function<unsigned int(int, const std::string&)>& evalMask);
+    GraphNodeRenderResult RenderFrequencyGraphNode(
+        const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext,
+        const RenderGraphNode& node,
+        const std::string& socketId,
+        const std::function<unsigned int(int, const std::string&)>& evalImage,
+        const std::function<unsigned int(int, const std::string&)>& evalMask);
     void ExecuteGraphImpl(const RenderGraphSnapshot& graph);
+    bool RecordConsumerBoundary(
+        Stack::NodeMath::SpecializedStageKind kind,
+        int maximumDimension = 0);
     void EnsureMaskPrograms();
     void EnsureMixProgram();
     void EnsureUtilityPrograms();
     void EnsureChannelPrograms();
     void EnsureDataMathProgram();
+    void EnsureTechnicalImageProgram();
+    void EnsureReformatProgram();
+    void EnsureFrequencyPrograms();
     void EnsureLutProgram();
     void EnsureHdrMergeProgram();
     void EnsureRawDetailFusionPrograms();
@@ -378,6 +555,16 @@ private:
     void EnsureRawDevelopmentToneCurveProgram();
     void EnsureRawDevelopmentLocalRangeProgram();
     void EnsureRawDevelopmentLocalRangeOverlayProgram();
+    void ClearRawDevelopmentStageStatsReadbacks();
+    void CaptureRawDevelopmentStageImageReadback(
+        Stack::RawAutoStartPoint::RawAutoStartPointStage stage,
+        Stack::RawAutoStartPoint::RawAutoStartPointStageStatus status,
+        unsigned int texture,
+        int width,
+        int height,
+        const std::string& measurementDomain,
+        bool sceneLinearBeforeViewTransform,
+        bool displayMappedLinearRgb);
     void ClearRawDevelopmentLocalRangeOverlay();
     void ClearRawDevelopmentLocalRangeTargetSample();
     RenderTextureStats ReadTextureStats(unsigned int texture, int width, int height, const char* context);
@@ -408,6 +595,17 @@ private:
     void RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO);
     void RenderDataMath(unsigned int textureA, unsigned int textureB, bool hasA, bool hasB, bool scalarA, bool scalarB,
                         RenderDataMathMode mode, const RenderDataMathSettings& settings, bool scalarOutput, unsigned int targetFBO);
+    void RenderTechnicalImage(
+        unsigned int texture,
+        Stack::NodeMath::TechnicalImageOperation operation,
+        float exposureValue,
+        unsigned int targetFBO);
+    bool RenderReformat(
+        unsigned int texture,
+        int inputWidth,
+        int inputHeight,
+        const Stack::NodeMath::ReformatSettings& settings,
+        unsigned int targetFBO);
     void RenderChannelCombine(unsigned int texR, unsigned int texG, unsigned int texB, unsigned int texA,
                             bool hasR, bool hasG, bool hasB, bool hasA, unsigned int targetFBO);
     bool RenderHdrMerge(unsigned int texture1, unsigned int texture2, unsigned int texture3,

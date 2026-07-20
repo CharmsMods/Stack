@@ -24,8 +24,12 @@ void TaskSystem::Initialize() {
     const std::size_t workerCount = ResolveWorkerCount();
     m_Workers.reserve(workerCount);
     for (std::size_t i = 0; i < workerCount; ++i) {
-        m_Workers.emplace_back([this]() { WorkerLoop(); });
+        m_Workers.emplace_back([this]() { WorkerLoop(false); });
     }
+    // Keep one worker exclusively available for foreground actions such as
+    // Add Slice. The normal pool is often busy with library scans, thumbnails,
+    // or saves, and priority alone cannot pre-empt already-running work.
+    m_InteractiveWorker = std::thread([this]() { WorkerLoop(true); });
 
     m_Initialized = true;
 }
@@ -43,9 +47,14 @@ void TaskSystem::Shutdown() {
         }
     }
     m_Workers.clear();
+    if (m_InteractiveWorker.joinable()) {
+        m_InteractiveWorker.join();
+    }
 
     {
         std::lock_guard<std::mutex> workLock(m_WorkMutex);
+        std::queue<Task> highPriorityEmpty;
+        m_HighPriorityWorkQueue.swap(highPriorityEmpty);
         std::queue<Task> empty;
         m_WorkQueue.swap(empty);
     }
@@ -68,6 +77,8 @@ void TaskSystem::RequestStopDiscardQueued() {
     {
         std::lock_guard<std::mutex> lock(m_WorkMutex);
         m_StopRequested = true;
+        std::queue<Task> highPriorityEmpty;
+        m_HighPriorityWorkQueue.swap(highPriorityEmpty);
         std::queue<Task> empty;
         m_WorkQueue.swap(empty);
     }
@@ -96,6 +107,25 @@ void TaskSystem::Submit(Task task) {
             return;
         }
         m_WorkQueue.push(std::move(task));
+    }
+    m_WorkCv.notify_one();
+}
+
+void TaskSystem::SubmitHighPriority(Task task) {
+    if (!task) {
+        return;
+    }
+
+    if (!m_Initialized) {
+        Initialize();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_WorkMutex);
+        if (m_StopRequested) {
+            return;
+        }
+        m_HighPriorityWorkQueue.push(std::move(task));
     }
     m_WorkCv.notify_one();
 }
@@ -141,21 +171,28 @@ void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks) {
     }
 }
 
-void TaskSystem::WorkerLoop() {
+void TaskSystem::WorkerLoop(bool interactiveOnly) {
     while (true) {
         Task task;
         {
             std::unique_lock<std::mutex> lock(m_WorkMutex);
-            m_WorkCv.wait(lock, [this]() {
-                return m_StopRequested || !m_WorkQueue.empty();
+            m_WorkCv.wait(lock, [this, interactiveOnly]() {
+                return m_StopRequested ||
+                    !m_HighPriorityWorkQueue.empty() ||
+                    (!interactiveOnly && !m_WorkQueue.empty());
             });
 
             if (m_StopRequested) {
                 return;
             }
 
-            task = std::move(m_WorkQueue.front());
-            m_WorkQueue.pop();
+            if (!m_HighPriorityWorkQueue.empty()) {
+                task = std::move(m_HighPriorityWorkQueue.front());
+                m_HighPriorityWorkQueue.pop();
+            } else if (!interactiveOnly) {
+                task = std::move(m_WorkQueue.front());
+                m_WorkQueue.pop();
+            }
         }
 
         if (!task) {

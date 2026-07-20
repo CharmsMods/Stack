@@ -199,6 +199,7 @@ void RenderPipeline::EnsureMixProgram() {
             if (uHasFactorMask != 0) {
                 factor *= clamp(texture(uFactorMask, vTexCoord).r, 0.0, 1.0);
             }
+            factor = clamp(factor, 0.0, 1.0);
 
             vec4 blended = b;
             if (uBlendMode == 1) {
@@ -210,12 +211,20 @@ void RenderPipeline::EnsureMixProgram() {
             } else if (uBlendMode == 4) {
                 blended = 1.0 - (1.0 - a) * (1.0 - b);
             } else if (uBlendMode == 5) {
-                float outA = b.a + a.a * (1.0 - b.a);
-                vec3 outRgb = b.rgb * b.a + a.rgb * (1.0 - b.a);
-                if (outA > 0.0001) {
-                    outRgb /= outA;
+                float sourceAlpha = b.a * factor;
+                float outA = sourceAlpha + a.a * (1.0 - sourceAlpha);
+                vec3 outRgb = vec3(0.0);
+                if (outA > 0.000001) {
+                    outRgb = (b.rgb * sourceAlpha + a.rgb * a.a * (1.0 - sourceAlpha)) / outA;
                 }
-                blended = vec4(outRgb, outA);
+                FragColor = vec4(outRgb, outA);
+                return;
+            } else if (uBlendMode == 6) {
+                float sourceAlpha = b.a * factor;
+                vec3 outRgb = b.rgb * factor + a.rgb * (1.0 - sourceAlpha);
+                float outA = sourceAlpha + a.a * (1.0 - sourceAlpha);
+                FragColor = vec4(outRgb, outA);
+                return;
             }
             FragColor = mix(a, blended, factor);
         }
@@ -223,6 +232,115 @@ void RenderPipeline::EnsureMixProgram() {
 
     if (!m_MixProgram) {
         m_MixProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
+    }
+}
+
+void RenderPipeline::EnsureTechnicalImageProgram() {
+    static const char* vertexSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTex;
+        out vec2 vTexCoord;
+        void main() {
+            vTexCoord = aTex;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }
+    )";
+    static const char* fragmentSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uImage;
+        uniform int uOperation;
+        uniform float uExposureValue;
+
+        float signedPow(float value, float exponentValue) {
+            return sign(value) * pow(abs(value), exponentValue);
+        }
+        float decodeSrgb(float value) {
+            float magnitude = abs(value);
+            return magnitude <= 0.04045
+                ? value / 12.92
+                : sign(value) * pow((magnitude + 0.055) / 1.055, 2.4);
+        }
+        float encodeSrgb(float value) {
+            float magnitude = abs(value);
+            return magnitude <= 0.0031308
+                ? 12.92 * value
+                : sign(value) * (1.055 * pow(magnitude, 1.0 / 2.4) - 0.055);
+        }
+        void main() {
+            vec4 value = texture(uImage, vTexCoord);
+            vec3 rgb = value.rgb;
+            if (uOperation == 3) {
+                rgb = vec3(decodeSrgb(rgb.r), decodeSrgb(rgb.g), decodeSrgb(rgb.b));
+            } else if (uOperation == 4) {
+                rgb = vec3(encodeSrgb(rgb.r), encodeSrgb(rgb.g), encodeSrgb(rgb.b));
+            } else if (uOperation == 5) {
+                rgb = vec3(
+                    0.82259287 * value.r + 0.17753395 * value.g,
+                    0.03319951 * value.r + 0.96678350 * value.g,
+                    0.01708535 * value.r + 0.07239572 * value.g + 0.91030148 * value.b);
+            } else if (uOperation == 6) {
+                rgb = vec3(
+                    1.22474527 * value.r - 0.22490472 * value.g,
+                    -0.04205797 * value.r + 1.04208100 * value.g,
+                    -0.01964227 * value.r - 0.07865400 * value.g + 1.09853700 * value.b);
+            } else if (uOperation == 7) {
+                rgb *= exp2(uExposureValue);
+            } else if (uOperation == 8) {
+                rgb *= value.a;
+            } else if (uOperation == 9) {
+                rgb = value.a <= 0.000001 ? vec3(0.0) : rgb / value.a;
+            }
+            FragColor = vec4(rgb, value.a);
+        }
+    )";
+    if (!m_TechnicalImageProgram) {
+        m_TechnicalImageProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
+    }
+}
+
+void RenderPipeline::EnsureReformatProgram() {
+    static const char* vertexSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTex;
+        out vec2 vTexCoord;
+        void main() {
+            vTexCoord = aTex;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }
+    )";
+    static const char* fragmentSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uImage;
+        uniform ivec2 uInputSize;
+        uniform int uFilter;
+
+        ivec2 clampCoord(ivec2 value) {
+            return clamp(value, ivec2(0), uInputSize - ivec2(1));
+        }
+        vec4 fetchClamp(ivec2 value) {
+            return texelFetch(uImage, clampCoord(value), 0);
+        }
+        void main() {
+            vec2 source = vTexCoord * vec2(uInputSize) - vec2(0.5);
+            if (uFilter == 0) {
+                FragColor = fetchClamp(ivec2(floor(source + vec2(0.5))));
+                return;
+            }
+            ivec2 base = ivec2(floor(source));
+            vec2 fraction = source - vec2(base);
+            vec4 lower = mix(fetchClamp(base), fetchClamp(base + ivec2(1, 0)), fraction.x);
+            vec4 upper = mix(fetchClamp(base + ivec2(0, 1)), fetchClamp(base + ivec2(1, 1)), fraction.x);
+            FragColor = mix(lower, upper, fraction.y);
+        }
+    )";
+    if (!m_ReformatProgram) {
+        m_ReformatProgram = GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
     }
 }
 
@@ -662,11 +780,12 @@ void RenderPipeline::EnsureUtilityPrograms() {
         uniform float uGamma;
         uniform float uThreshold;
         uniform float uSoftness;
+        uniform int uEnabled;
         uniform int uInvert;
         void main() {
             float v = clamp(texture(uInputMask, vTexCoord).r, 0.0, 1.0);
             if (uKind == 0) {
-                v = 1.0 - v;
+                if (uEnabled != 0) v = 1.0 - v;
             } else if (uKind == 1) {
                 float denom = max(uWhitePoint - uBlackPoint, 0.0001);
                 v = clamp((v - uBlackPoint) / denom, 0.0, 1.0);

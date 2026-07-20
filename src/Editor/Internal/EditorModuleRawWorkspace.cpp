@@ -48,6 +48,7 @@ constexpr float kRawWorkspaceControlsMaxWidth = 520.0f;
 constexpr float kRawWorkspaceSplitterWidth = 6.0f;
 constexpr float kRawWorkspaceSplitterSideGap = 4.0f;
 constexpr float kRawWorkspacePreviewMinWidth = 320.0f;
+constexpr float kRawWorkspaceCropDefaultEpsilon = 0.0001f;
 
 struct RawWorkspaceThumbnailUpdate {
     std::size_t sourceIndex = 0;
@@ -152,10 +153,286 @@ std::string FormatRawWorkspaceCountBadge(int count, const char* singular, const 
     return std::to_string(count) + " " + (count == 1 ? singular : plural);
 }
 
+std::string BuildRawWorkspaceSuggestionButtonLabel(
+    const RawWorkspaceSuggestionBadgeSummary& summary) {
+    if (!summary.known) {
+        return "Suggestions";
+    }
+
+    std::string label;
+    if (summary.suggestions > 0) {
+        label = FormatRawWorkspaceCountBadge(summary.suggestions, "suggestion", "suggestions");
+    }
+    if (summary.warnings > 0) {
+        const std::string warningLabel =
+            FormatRawWorkspaceCountBadge(summary.warnings, "warning", "warnings");
+        label = label.empty() ? warningLabel : (label + " + " + warningLabel);
+    }
+    return label.empty() ? "No suggestions" : label;
+}
+
+std::string BuildRawWorkspaceOwnerSuggestionMarker(
+    const std::vector<RawWorkspaceSuggestionPopoutItem>& items,
+    const char* section) {
+    const RawWorkspaceSuggestionPopoutItem* appliedItem = nullptr;
+    const RawWorkspaceSuggestionPopoutItem* firstSuggestedItem = nullptr;
+    int suggestedCount = 0;
+    for (const RawWorkspaceSuggestionPopoutItem& item : items) {
+        if (item.section != section) {
+            continue;
+        }
+        if (item.applied || item.kind == RawWorkspaceSuggestionPopoutKind::AppliedOnly) {
+            if (appliedItem == nullptr) {
+                appliedItem = &item;
+            }
+            continue;
+        }
+        ++suggestedCount;
+        if (firstSuggestedItem == nullptr) {
+            firstSuggestedItem = &item;
+        }
+    }
+
+    if (appliedItem != nullptr) {
+        return "Applied: " + appliedItem->actionLabel;
+    }
+    if (suggestedCount <= 0 || firstSuggestedItem == nullptr) {
+        return {};
+    }
+    if (suggestedCount == 1) {
+        return "Manual suggestion: " + firstSuggestedItem->actionLabel;
+    }
+    return FormatRawWorkspaceCountBadge(suggestedCount, "manual suggestion", "manual suggestions");
+}
+
 std::string FormatRawWorkspaceSignedEv(float value) {
     std::ostringstream out;
     out << (value >= 0.0f ? "+" : "") << std::fixed << std::setprecision(2) << value << " EV";
     return out.str();
+}
+
+std::string BuildRawWorkspaceDisplayFitStateLabel(
+    bool hasUsableStats,
+    bool hasAppliedViewFit,
+    Stack::EditorModuleTypes::RawAutoValueOwner owner,
+    std::uint64_t appliedAnalysisHash,
+    std::uint64_t currentAnalysisHash) {
+    if (owner == Stack::EditorModuleTypes::RawAutoValueOwner::User) {
+        return "Manual/locked";
+    }
+
+    if (owner == Stack::EditorModuleTypes::RawAutoValueOwner::AutoBase && hasAppliedViewFit) {
+        if (!hasUsableStats) {
+            return "Auto recorded";
+        }
+        if (appliedAnalysisHash != 0 && appliedAnalysisHash == currentAnalysisHash) {
+            return "Auto-current";
+        }
+        return "Needs Refit";
+    }
+
+    if (owner == Stack::EditorModuleTypes::RawAutoValueOwner::AutoBase) {
+        return "Auto-adjusted";
+    }
+
+    return hasUsableStats ? "Ready" : "Preview pending";
+}
+
+std::string BuildRawWorkspaceBaseLightSummary(
+    float rawExposureEv,
+    bool hasUsableStats,
+    bool hasAppliedViewFit,
+    Stack::EditorModuleTypes::RawAutoValueOwner displayFitOwner,
+    std::uint64_t appliedAnalysisHash,
+    std::uint64_t currentAnalysisHash) {
+    return "RAW Exposure " + FormatRawWorkspaceSignedEv(rawExposureEv) +
+        "    Display Fit: " +
+        BuildRawWorkspaceDisplayFitStateLabel(
+            hasUsableStats,
+            hasAppliedViewFit,
+            displayFitOwner,
+            appliedAnalysisHash,
+            currentAnalysisHash);
+}
+
+std::string BuildRawWorkspaceWhiteBalanceSummary(
+    const Stack::RawRecipe::RawWhiteBalanceRecipe& whiteBalance) {
+    std::ostringstream out;
+    switch (whiteBalance.mode) {
+        case Stack::RawRecipe::WhiteBalanceMode::Auto:
+            return "WB: Auto";
+        case Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers:
+            out << "WB: Custom";
+            if (whiteBalance.hasTemperatureKelvin || whiteBalance.hasTint) {
+                const float temperature = whiteBalance.hasTemperatureKelvin
+                    ? whiteBalance.temperatureKelvin
+                    : 5500.0f;
+                const float tint = whiteBalance.hasTint ? whiteBalance.tint : 0.0f;
+                out << " " << std::fixed << std::setprecision(0) << temperature
+                    << " K, tint " << std::showpos << tint << std::noshowpos;
+            } else if (whiteBalance.hasMultipliers) {
+                out << " RGB "
+                    << std::fixed << std::setprecision(2)
+                    << whiteBalance.multipliers[0] << "/"
+                    << whiteBalance.multipliers[1] << "/"
+                    << whiteBalance.multipliers[2];
+            }
+            return out.str();
+        case Stack::RawRecipe::WhiteBalanceMode::SampledGrayPoint:
+            out << "WB: Gray Point";
+            if (whiteBalance.hasSamplePoint) {
+                out << " "
+                    << std::fixed << std::setprecision(3)
+                    << std::clamp(whiteBalance.sampleX, 0.0f, 1.0f)
+                    << ", "
+                    << std::clamp(whiteBalance.sampleY, 0.0f, 1.0f);
+            }
+            return out.str();
+        case Stack::RawRecipe::WhiteBalanceMode::AsShot:
+        default:
+            return "WB: As Shot";
+    }
+}
+
+const char* RawWorkspaceFinishToneModeLabel(int mode) {
+    switch (mode) {
+        case 0:
+            return "Y";
+        case 1:
+            return "RGB";
+        case 2:
+            return "R";
+        case 3:
+            return "G";
+        case 4:
+            return "B";
+        default:
+            return "RGB";
+    }
+}
+
+const char* RawWorkspaceFinishToneDomainLabel(int domain) {
+    switch (domain) {
+        case 0:
+            return "Scene Linear";
+        case 1:
+        default:
+            return "Log Scene";
+    }
+}
+
+std::string BuildRawWorkspaceFinishToneSummary(
+    int mode,
+    int domain,
+    std::size_t pointCount) {
+    std::ostringstream out;
+    out << "Mode: " << RawWorkspaceFinishToneModeLabel(mode)
+        << "    Domain: " << RawWorkspaceFinishToneDomainLabel(domain)
+        << "    " << pointCount << (pointCount == 1 ? " point" : " points");
+    return out.str();
+}
+
+std::string BuildRawWorkspaceFinishTonePointValuesSummary(
+    const std::vector<Stack::RawRecipe::RawToneCurvePoint>& points) {
+    if (points.empty()) {
+        return "Curve points: none";
+    }
+
+    std::ostringstream out;
+    out << "Curve points: ";
+    constexpr std::size_t kMaxInlinePoints = 6;
+    const std::size_t visibleCount = std::min(points.size(), kMaxInlinePoints);
+    for (std::size_t i = 0; i < visibleCount; ++i) {
+        if (i > 0) {
+            out << ", ";
+        }
+        out << std::fixed << std::setprecision(2)
+            << std::clamp(points[i].input, 0.0f, 1.0f)
+            << "->"
+            << std::clamp(points[i].output, 0.0f, 1.0f);
+    }
+    if (points.size() > visibleCount) {
+        out << ", +" << (points.size() - visibleCount) << " more";
+    }
+    return out.str();
+}
+
+int RawWorkspacePercent(float normalized) {
+    return static_cast<int>(
+        std::lround(std::clamp(normalized, 0.0f, 1.0f) * 100.0f));
+}
+
+int NormalizeRawWorkspaceRotationDegrees(int rotationDegrees) {
+    int normalized = rotationDegrees % 360;
+    if (normalized < 0) {
+        normalized += 360;
+    }
+    return normalized;
+}
+
+bool HasRawWorkspaceCropWindowNonDefault(
+    const Stack::RawRecipe::RawCropRotationRecipe& cropRotation) {
+    return std::abs(cropRotation.cropX) > kRawWorkspaceCropDefaultEpsilon ||
+        std::abs(cropRotation.cropY) > kRawWorkspaceCropDefaultEpsilon ||
+        std::abs(cropRotation.cropWidth - 1.0f) > kRawWorkspaceCropDefaultEpsilon ||
+        std::abs(cropRotation.cropHeight - 1.0f) > kRawWorkspaceCropDefaultEpsilon;
+}
+
+bool IsRawWorkspaceCropRotationActive(
+    const Stack::RawRecipe::RawCropRotationRecipe& cropRotation) {
+    return cropRotation.cropEnabled ||
+        HasRawWorkspaceCropWindowNonDefault(cropRotation) ||
+        NormalizeRawWorkspaceRotationDegrees(cropRotation.rotationDegrees) != 0;
+}
+
+std::string BuildRawWorkspaceCropRotationSummary(
+    const Stack::RawRecipe::RawCropRotationRecipe& cropRotation) {
+    std::ostringstream out;
+    const bool cropWindowNonDefault = HasRawWorkspaceCropWindowNonDefault(cropRotation);
+    if (cropRotation.cropEnabled) {
+        out << "Crop "
+            << RawWorkspacePercent(cropRotation.cropWidth)
+            << "% x "
+            << RawWorkspacePercent(cropRotation.cropHeight)
+            << "%";
+    } else {
+        out << "Crop off";
+        if (cropWindowNonDefault) {
+            out << " (saved "
+                << RawWorkspacePercent(cropRotation.cropWidth)
+                << "% x "
+                << RawWorkspacePercent(cropRotation.cropHeight)
+                << "%)";
+        }
+    }
+
+    const int rotationDegrees =
+        NormalizeRawWorkspaceRotationDegrees(cropRotation.rotationDegrees);
+    if (rotationDegrees != 0) {
+        out << ", rotate " << rotationDegrees;
+    }
+    return out.str();
+}
+
+std::string BuildRawWorkspacePreviewOutputSummary(
+    const Stack::RawRecipe::RawPreviewOutputRecipe& previewOutput) {
+    std::string previewLabel = "Developed Preview";
+    if (previewOutput.previewIntent == "neutral-preview") {
+        previewLabel = "Neutral Preview";
+    } else if (!previewOutput.previewIntent.empty() &&
+               previewOutput.previewIntent != "developed-preview") {
+        previewLabel = previewOutput.previewIntent;
+    }
+
+    const std::string colorSpace =
+        previewOutput.outputColorSpace.empty() ? "sRGB" : previewOutput.outputColorSpace;
+    return previewLabel + ", " + colorSpace;
+}
+
+bool IsRawWorkspacePreviewOutputActive(
+    const Stack::RawRecipe::RawPreviewOutputRecipe& previewOutput) {
+    return previewOutput.previewIntent != "developed-preview" ||
+        previewOutput.outputColorSpace != "sRGB";
 }
 
 const char* RawWorkspaceWhiteBalanceMethodLabel(
@@ -387,6 +664,48 @@ const char* RawWorkspaceModeBadgeLabel(Stack::RawWorkspace::RawProjectMode mode)
     }
 }
 
+bool HasRawWorkspaceNoiseDetailAdvisory(
+    const Stack::RawAutoBase::NoiseDetailRecommendation& noiseDetail) {
+    return noiseDetail.valid &&
+        (noiseDetail.suggestChromaDenoise ||
+         noiseDetail.suggestLumaDenoise ||
+         noiseDetail.suggestReduceSharpening ||
+         noiseDetail.shadowLiftEv >= 0.5f);
+}
+
+std::string BuildRawWorkspaceNoiseDetailAdvisorySummary(
+    const Stack::RawAutoBase::NoiseDetailRecommendation& noiseDetail) {
+    std::ostringstream out;
+    out << "Advisory: ";
+    if (noiseDetail.suggestChromaDenoise && noiseDetail.suggestLumaDenoise) {
+        out << "denoise may help";
+    } else if (noiseDetail.suggestChromaDenoise) {
+        out << "chroma noise may need attention";
+    } else if (noiseDetail.suggestLumaDenoise) {
+        out << "luma noise may need attention";
+    } else if (noiseDetail.suggestReduceSharpening) {
+        out << "sharpening may need restraint";
+    } else {
+        out << "watch shadow-lift noise";
+    }
+
+    if (noiseDetail.suggestReduceSharpening &&
+        (noiseDetail.suggestChromaDenoise || noiseDetail.suggestLumaDenoise)) {
+        out << "; reduce sharpening";
+    }
+
+    out << ". ISO " << std::fixed << std::setprecision(0) << noiseDetail.iso
+        << ", effective noise "
+        << std::setprecision(0)
+        << std::clamp(noiseDetail.effectiveNoiseScore, 0.0f, 1.0f) * 100.0f
+        << "%";
+    if (noiseDetail.shadowLiftEv >= 0.05f) {
+        out << ", shadow lift +" << std::setprecision(2) << noiseDetail.shadowLiftEv << " EV";
+    }
+    out << ".";
+    return out.str();
+}
+
 RawWorkspaceSuggestionBadgeSummary BuildRawWorkspaceSuggestionBadgeSummary(
     const Stack::EditorModuleTypes::RawWorkspaceAutoBaseUiState& autoBaseUi,
     const Stack::RawAnalysis::RawImageAnalysis& analysis,
@@ -420,6 +739,10 @@ RawWorkspaceSuggestionBadgeSummary BuildRawWorkspaceSuggestionBadgeSummary(
     if (highlight.recommendNoPositiveRawExposure ||
         highlight.recommendReconstruction ||
         highlight.recommendAchromaticClip) {
+        ++summary.warnings;
+    }
+
+    if (HasRawWorkspaceNoiseDetailAdvisory(recommendations.noiseDetail)) {
         ++summary.warnings;
     }
 
@@ -650,6 +973,142 @@ void TooltipIfHovered(const char* text, ImGuiHoveredFlags flags = 0) {
     }
 }
 
+bool RenderRawWorkspaceOwnerSuggestionMarker(
+    const char* id,
+    const std::string& marker,
+    float controlWidth) {
+    ImGui::PushID(id);
+    bool openSuggestions = false;
+    // Dummy() adds ItemSpacing itself, so use the frame height rather than
+    // GetFrameHeightWithSpacing(). Both marker states must advance identically.
+    const float rowHeight = ImGui::GetFrameHeight();
+    const float viewWidth =
+        ImGui::CalcTextSize("View").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float gap = 6.0f;
+    if (marker.empty()) {
+        ImGui::Dummy(ImVec2(0.0f, rowHeight));
+        ImGui::PopID();
+        return false;
+    }
+
+    const float textWidth = std::max(32.0f, controlWidth - viewWidth - gap);
+    const std::string clippedMarker = EllipsizeTextToWidth(marker, textWidth);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", clippedMarker.c_str());
+    ImGui::SameLine(0.0f, gap);
+    if (ImGui::SmallButton("View")) {
+        openSuggestions = true;
+    }
+    TooltipIfHovered("Open the suggestions panel. This marker does not change the recipe.");
+    ImGui::PopID();
+    return openSuggestions;
+}
+
+std::string TrimRawWorkspaceText(std::string text) {
+    const auto isSpace = [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    };
+    text.erase(
+        text.begin(),
+        std::find_if_not(text.begin(), text.end(), isSpace));
+    text.erase(
+        std::find_if_not(text.rbegin(), text.rend(), isSpace).base(),
+        text.end());
+    return text;
+}
+
+std::string ExtractStartingPointControlStatus(
+    const std::string& statusSummary,
+    const char* statusLabel) {
+    if (statusLabel == nullptr || statusLabel[0] == '\0') {
+        return {};
+    }
+
+    const std::string prefix = std::string(statusLabel) + ":";
+    std::size_t start = 0;
+    while (start <= statusSummary.size()) {
+        const std::size_t end = statusSummary.find(';', start);
+        const std::string segment = TrimRawWorkspaceText(
+            statusSummary.substr(
+                start,
+                end == std::string::npos ? std::string::npos : end - start));
+        if (segment.rfind(prefix, 0) == 0) {
+            return segment;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return {};
+}
+
+std::string BuildStartingPointManualControlReadout(
+    const Stack::EditorModuleTypes::RawWorkspaceAutoBaseUiState& ui,
+    const std::string& sourceKey,
+    const char* statusLabel,
+    const char* searchLabel,
+    const char* alternateSearchLabel = nullptr) {
+    if (sourceKey.empty() ||
+        ui.sourceKey != sourceKey ||
+        Stack::EditorModuleTypes::IsRawStartingPointSummaryEmptyOrNone(
+            ui.startingPointControlStatusSummary)) {
+        return {};
+    }
+
+    const std::string status = ExtractStartingPointControlStatus(
+        ui.startingPointControlStatusSummary,
+        statusLabel);
+    if (status.empty()) {
+        return {};
+    }
+
+    std::string detail =
+        Stack::EditorModuleTypes::RawStartingPointRelevantControlValueText(
+            ui.startingPointAppliedValuesSummary,
+            searchLabel,
+            alternateSearchLabel);
+    if (detail.empty()) {
+        detail =
+            Stack::EditorModuleTypes::RawStartingPointRelevantControlText(
+                ui.startingPointResultSummary,
+                ui.startingPointWithheldControlsSummary,
+                searchLabel,
+                alternateSearchLabel);
+    }
+
+    std::string readout = "Build Starting Point: " + status;
+    if (!detail.empty() && detail != status) {
+        readout += " - " + detail;
+    }
+    return readout;
+}
+
+void RenderStartingPointManualControlReadout(
+    const Stack::EditorModuleTypes::RawWorkspaceAutoBaseUiState& ui,
+    const std::string& sourceKey,
+    const char* statusLabel,
+    const char* searchLabel,
+    float controlWidth,
+    const char* alternateSearchLabel = nullptr) {
+    const std::string readout = BuildStartingPointManualControlReadout(
+        ui,
+        sourceKey,
+        statusLabel,
+        searchLabel,
+        alternateSearchLabel);
+    if (readout.empty()) {
+        // Keep downstream sliders and graphs fixed while render-driven status
+        // evidence appears or disappears.
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetTextLineHeight()));
+        return;
+    }
+    ImGui::TextDisabled(
+        "%s",
+        EllipsizeTextToWidth(readout, std::max(32.0f, controlWidth)).c_str());
+    TooltipIfHovered(readout.c_str());
+}
+
 int WhiteBalanceModeToIndex(Stack::RawRecipe::WhiteBalanceMode mode) {
     switch (mode) {
         case Stack::RawRecipe::WhiteBalanceMode::Auto: return 1;
@@ -754,6 +1213,47 @@ bool JsonBool(const nlohmann::json& value, const char* key, bool fallback) {
         return fallback;
     }
     return it->get<bool>();
+}
+
+std::string FormatRawWorkspaceSignedNumber(float value, int precision) {
+    std::ostringstream out;
+    out << (value >= 0.0f ? "+" : "")
+        << std::fixed << std::setprecision(precision)
+        << value;
+    return out.str();
+}
+
+std::string FormatRawWorkspaceNumber(float value, int precision) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(precision) << value;
+    return out.str();
+}
+
+std::string BuildRawWorkspaceDisplayFitValuesSummary(
+    const nlohmann::json& viewTransform,
+    bool detailed) {
+    const float viewExposure = JsonNumber(viewTransform, "exposure", 0.0f);
+    const float blackEv = JsonNumber(viewTransform, "blackEv", -8.0f);
+    const float whiteEv = JsonNumber(viewTransform, "whiteEv", 4.0f);
+    const float middleGrey = JsonNumber(viewTransform, "middleGrey", 0.18f);
+    const float shoulder = JsonNumber(viewTransform, "shoulder", 0.45f);
+    const float toe = JsonNumber(viewTransform, "toe", 0.18f);
+    const float contrast = JsonNumber(viewTransform, "contrast", 1.0f);
+    const float saturation = JsonNumber(viewTransform, "saturation", 1.0f);
+
+    std::ostringstream out;
+    out << "Display Fit values: Exp "
+        << FormatRawWorkspaceSignedNumber(viewExposure, 2)
+        << ", Black " << FormatRawWorkspaceSignedNumber(blackEv, 2)
+        << ", White " << FormatRawWorkspaceSignedNumber(whiteEv, 2)
+        << ", Grey " << FormatRawWorkspaceNumber(middleGrey, 3);
+    if (detailed) {
+        out << ", Shoulder " << FormatRawWorkspaceNumber(shoulder, 2)
+            << ", Toe " << FormatRawWorkspaceNumber(toe, 2)
+            << ", Contrast " << FormatRawWorkspaceNumber(contrast, 2)
+            << ", Saturation " << FormatRawWorkspaceNumber(saturation, 2);
+    }
+    return out.str();
 }
 
 void EnsureFinishToneJson(nlohmann::json& finishTone) {
@@ -3007,6 +3507,10 @@ void EditorModule::ClearRawWorkspaceLivePreviewState() {
     m_RawWorkspaceFullResolutionPreviewPending = false;
     m_RawWorkspaceFullResolutionPreviewRequested = false;
     m_RawWorkspaceViewTransformInputStats = {};
+    m_RawWorkspaceFinalDisplayStats = {};
+    m_RawWorkspaceStageStatsReadbacks.clear();
+    m_RawWorkspaceStartPointDiagnostics =
+        Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics();
     m_RawWorkspaceAnalysis = Stack::RawAnalysis::RawImageAnalysis();
     ClearRawWorkspaceLocalRangeTargetState(true);
 }
@@ -3096,10 +3600,90 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
             m_RawWorkspaceAutoBaseUi,
             m_RawWorkspaceAnalysis,
             selectedSource->relativePathKey);
+    const std::string baseLightSuggestionMarker =
+        BuildRawWorkspaceOwnerSuggestionMarker(suggestionItems, "Base Light");
+    const std::string displayFitSuggestionMarker =
+        BuildRawWorkspaceOwnerSuggestionMarker(suggestionItems, "Display Fit");
+    const std::string whiteBalanceSuggestionMarker =
+        BuildRawWorkspaceOwnerSuggestionMarker(suggestionItems, "White Balance");
+    const std::string localRangeSuggestionMarker =
+        BuildRawWorkspaceOwnerSuggestionMarker(suggestionItems, "Local Range");
+    const std::string finishToneSuggestionMarker =
+        BuildRawWorkspaceOwnerSuggestionMarker(suggestionItems, "Finish Tone");
     const std::uint64_t selectedSourceHash = BuildRawWorkspaceAutoBaseSourceHash(*selectedSource);
 
     Stack::RawRecipe::RawDevelopmentRecipe editedRecipe = recipe;
     bool changed = false;
+
+    const float identityWidth = std::max(48.0f, ImGui::GetContentRegionAvail().x);
+    const std::string sourceTitle =
+        EllipsizeTextToWidth(
+            selectedSource->fileName.empty() ? selectedSource->relativePathKey : selectedSource->fileName,
+            identityWidth);
+    ImGui::TextUnformatted(sourceTitle.c_str());
+    const std::string sourceTooltip =
+        selectedSource->absolutePath.empty()
+            ? selectedSource->relativePathKey
+            : selectedSource->absolutePath.string();
+    TooltipIfHovered(sourceTooltip.c_str());
+
+    std::vector<std::string> topBadges;
+    std::vector<bool> topBadgeWarnings;
+    auto addTopBadge = [&](std::string label, bool warning = false) {
+        if (label.empty()) {
+            return;
+        }
+        topBadges.push_back(std::move(label));
+        topBadgeWarnings.push_back(warning);
+    };
+    auto projectStatusNeedsAttention = [](Stack::RawWorkspace::ProjectStatus status) {
+        switch (status) {
+            case Stack::RawWorkspace::ProjectStatus::MissingSource:
+            case Stack::RawWorkspace::ProjectStatus::Conflict:
+            case Stack::RawWorkspace::ProjectStatus::Invalid:
+            case Stack::RawWorkspace::ProjectStatus::Unknown:
+                return true;
+            case Stack::RawWorkspace::ProjectStatus::NoProject:
+            case Stack::RawWorkspace::ProjectStatus::Existing:
+            case Stack::RawWorkspace::ProjectStatus::Embedded:
+            default:
+                return false;
+        }
+    };
+    addTopBadge(
+        RawWorkspaceProjectBadgeLabel(panelState.projectStatus, panelState.editCreatesProject),
+        projectStatusNeedsAttention(panelState.projectStatus) || selectedProjectLoadFailed);
+    addTopBadge(
+        RawWorkspaceModeBadgeLabel(resolvedMode),
+        resolvedMode == Stack::RawWorkspace::RawProjectMode::Unknown ||
+        resolvedMode == Stack::RawWorkspace::RawProjectMode::CustomGraph);
+    if (selectedProjectLoading) {
+        addTopBadge(selectedPreviewStageQueued ? "Preparing preview" : "Loading");
+    }
+    if (selectedProjectLoadFailed) {
+        addTopBadge("Load failed", true);
+    }
+    if (selectedProjectSaving) {
+        addTopBadge("Saving");
+    } else if (showInlineSave) {
+        addTopBadge("Unsaved");
+    }
+    if (!panelState.recipeControlsEditable && !panelState.readOnlyMessage.empty()) {
+        addTopBadge("Read-only", true);
+    }
+    if (!topBadges.empty()) {
+        const float badgeStripHeight =
+            ImGui::GetFrameHeight() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
+        ImGui::BeginChild(
+            "##RawWorkspaceTopBadgeStrip",
+            ImVec2(0.0f, badgeStripHeight),
+            false,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        RenderRawWorkspaceBadgeLine(topBadges, topBadgeWarnings);
+        ImGui::EndChild();
+    }
+
+    ImGui::Spacing();
 
     const float moreWidth = 38.0f;
     const float saveWidth = showInlineSave ? 54.0f : 0.0f;
@@ -3139,6 +3723,15 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
         ImGui::Separator();
         if (resolvedMode == Stack::RawWorkspace::RawProjectMode::RecipeBacked) {
             const bool enabled = selectedProjectActive && recipeResolved;
+            if (ImGui::MenuItem("Load Current System In Graph", nullptr, false, selectedProjectActive)) {
+                LoadActiveRawWorkspaceProjectInGraph();
+                ImGui::CloseCurrentPopup();
+            }
+            TooltipIfHovered(
+                selectedProjectActive
+                    ? "Load the current compact RAW system into the Editor graph."
+                    : "Open or edit this RAW project before loading it into the graph.",
+                ImGuiHoveredFlags_AllowWhenDisabled);
             if (ImGui::MenuItem("Convert to Nodes", nullptr, false, enabled)) {
                 DecomposeActiveRawWorkspaceProjectToManagedGraph();
                 ImGui::CloseCurrentPopup();
@@ -3186,12 +3779,32 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
         ImGui::EndPopup();
     }
 
+    const std::string suggestionButtonLabel =
+        BuildRawWorkspaceSuggestionButtonLabel(suggestionSummary);
+    const std::string suggestionButtonId = suggestionButtonLabel + "##RawWorkspaceSuggestionsButton";
+    const bool warningsOnly =
+        suggestionSummary.known &&
+        suggestionSummary.suggestions <= 0 &&
+        suggestionSummary.warnings > 0;
+    const float suggestionButtonNaturalWidth =
+        ImGui::CalcTextSize(suggestionButtonLabel.c_str()).x +
+        ImGui::GetStyle().FramePadding.x * 2.0f;
     const float suggestionButtonWidth =
-        std::min(120.0f, std::max(1.0f, ImGui::GetContentRegionAvail().x));
-    if (ImGui::Button("Suggestions", ImVec2(suggestionButtonWidth, 0.0f))) {
-        m_RawWorkspaceAutoBaseUi.suggestionsOpen = !m_RawWorkspaceAutoBaseUi.suggestionsOpen;
+        std::min(
+            std::max(120.0f, suggestionButtonNaturalWidth),
+            std::max(1.0f, ImGui::GetContentRegionAvail().x));
+    if (ImGui::Button(suggestionButtonId.c_str(), ImVec2(suggestionButtonWidth, 0.0f))) {
+        if (warningsOnly) {
+            m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+            m_RawWorkspaceAutoBaseUi.suggestionsOpen = false;
+        } else {
+            m_RawWorkspaceAutoBaseUi.suggestionsOpen = !m_RawWorkspaceAutoBaseUi.suggestionsOpen;
+        }
     }
-    TooltipIfHovered("Open active RAW suggestions. Closing this panel does not change the recipe.");
+    TooltipIfHovered(
+        warningsOnly
+            ? "Open Diagnostics for RAW warnings and advisories."
+            : "Open active RAW suggestions. Closing this panel does not change the recipe.");
 
     if (m_RawWorkspaceAutoBaseUi.suggestionsOpen) {
         ImGui::Spacing();
@@ -3270,20 +3883,24 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
                     ImGui::TextWrapped("%s", item.rationale.c_str());
                 }
 
-                const bool applyDisabled =
-                    !canEdit ||
+                const bool alreadyApplied =
                     item.applied ||
                     item.kind == RawWorkspaceSuggestionPopoutKind::AppliedOnly;
-                ImGui::BeginDisabled(applyDisabled);
-                if (ImGui::Button(item.applied ? "Applied" : "Apply", ImVec2(84.0f, 0.0f))) {
-                    applySuggestion(item);
+                if (alreadyApplied) {
+                    ImGui::TextDisabled("Applied");
+                    TooltipIfHovered("Already applied for the current source and analysis.");
+                } else {
+                    ImGui::BeginDisabled(!canEdit);
+                    if (ImGui::Button("Apply", ImVec2(84.0f, 0.0f))) {
+                        applySuggestion(item);
+                    }
+                    ImGui::EndDisabled();
+                    TooltipIfHovered(
+                        canEdit
+                            ? "Apply this as a normal visible recipe edit."
+                            : "Open or create this RAW project before applying suggestions.",
+                        ImGuiHoveredFlags_AllowWhenDisabled);
                 }
-                ImGui::EndDisabled();
-                TooltipIfHovered(
-                    canEdit
-                        ? "Apply this as a normal visible recipe edit."
-                        : "Open or create this RAW project before applying suggestions.",
-                    ImGuiHoveredFlags_AllowWhenDisabled);
                 ImGui::PopID();
             }
         }
@@ -3305,6 +3922,7 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
     }
 
     ImGui::Separator();
+    ImGui::SeparatorText("Main Controls");
 
     if (ImGui::CollapsingHeader("Base Light", ImGuiTreeNodeFlags_DefaultOpen)) {
         EnsureViewTransformJson(editedRecipe.viewTransform.layerJson);
@@ -3314,11 +3932,31 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
         const bool viewTransformEditedOwned =
             m_RawWorkspaceAutoBaseUi.sourceKey == selectedSource->relativePathKey &&
             m_RawWorkspaceAutoBaseUi.viewTransformOwner == RawAutoValueOwner::User;
+        const bool displayFitStateMatchesSource =
+            m_RawWorkspaceAutoBaseUi.sourceKey == selectedSource->relativePathKey;
+        Stack::EditorModuleTypes::RawAutoValueOwner displayFitOwner =
+            Stack::EditorModuleTypes::RawAutoValueOwner::None;
+        if (displayFitStateMatchesSource) {
+            displayFitOwner = m_RawWorkspaceAutoBaseUi.viewTransformOwner;
+        }
+        const bool hasBaseLightAnalysis =
+            m_RawWorkspaceAnalysis.sourceKey == selectedSource->relativePathKey &&
+            m_RawWorkspaceAnalysis.currentFrameStats.valid;
+        const bool hasAppliedDisplayFitForSource =
+            displayFitStateMatchesSource && m_RawWorkspaceAutoBaseUi.hasAppliedViewFit;
+        const std::uint64_t appliedDisplayFitAnalysisHash =
+            displayFitStateMatchesSource
+                ? m_RawWorkspaceAutoBaseUi.appliedAnalysisHash
+                : 0;
+        const std::uint64_t currentBaseLightAnalysisHash =
+            hasBaseLightAnalysis
+                ? BuildRawWorkspaceSuggestionAnalysisHash(m_RawWorkspaceAnalysis)
+                : 0;
         auto viewLabel = [&](const char* baseLabel) {
             static std::string label;
             label = baseLabel;
             if (viewTransformAutoOwned) {
-                label += " [Auto]";
+                label += hasAppliedDisplayFitForSource ? " [Display Fit]" : " [Auto]";
             } else if (viewTransformEditedOwned) {
                 label += " [Edited]";
             }
@@ -3327,13 +3965,82 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
         bool viewTransformChangedByUser = false;
 
         float exposureEv = editedRecipe.preToneExposureEv;
+        const std::string baseLightSummary =
+            BuildRawWorkspaceBaseLightSummary(
+                exposureEv,
+                hasBaseLightAnalysis,
+                hasAppliedDisplayFitForSource,
+                displayFitOwner,
+                appliedDisplayFitAnalysisHash,
+                currentBaseLightAnalysisHash);
+        ImGui::TextDisabled("%s", baseLightSummary.c_str());
+        TooltipIfHovered(
+            "Display Fit state is based on current RAW workspace ownership and the analysis hash from the last fit. Refit Display remains an explicit visible action.");
+        const std::string displayFitValuesSummary =
+            BuildRawWorkspaceDisplayFitValuesSummary(viewTransform, false);
+        const std::string displayFitValuesDetail =
+            BuildRawWorkspaceDisplayFitValuesSummary(viewTransform, true);
+        ImGui::TextDisabled(
+            "%s",
+            EllipsizeTextToWidth(displayFitValuesSummary, controlWidth).c_str());
+        TooltipIfHovered(displayFitValuesDetail.c_str());
         if (ImGuiExtras::NodeSliderFloat("RAW Exposure", "##RawExposureEv", &exposureEv, -8.0f, 8.0f, "%+.2f EV", controlWidth)) {
             editedRecipe.preToneExposureEv = exposureEv;
             changed = true;
         }
         TooltipIfHovered("+1 EV multiplies scene-linear decoded values by 2 before tone shaping.");
+        RenderStartingPointManualControlReadout(
+            m_RawWorkspaceAutoBaseUi,
+            selectedSource->relativePathKey,
+            "RAW Exposure",
+            "RAW Exposure",
+            controlWidth);
+        if (RenderRawWorkspaceOwnerSuggestionMarker(
+                "RawExposureSuggestionMarker",
+                baseLightSuggestionMarker,
+                controlWidth)) {
+            m_RawWorkspaceAutoBaseUi.suggestionsOpen = true;
+        }
 
-        if (ImGuiExtras::RichFullWidthButton("Refit", controlWidth, 0.0f)) {
+        float viewExposure = JsonNumber(viewTransform, "exposure", 0.0f);
+        float blackEv = JsonNumber(viewTransform, "blackEv", -8.0f);
+        float whiteEv = JsonNumber(viewTransform, "whiteEv", 4.0f);
+        float middleGrey = JsonNumber(viewTransform, "middleGrey", 0.18f);
+        ImGui::TextDisabled("Display Fit / View Transform");
+        TooltipIfHovered("These are the editable display-mapping values changed by Fit Display or Build Starting Point.");
+        RenderStartingPointManualControlReadout(
+            m_RawWorkspaceAutoBaseUi,
+            selectedSource->relativePathKey,
+            "Display Fit / View Transform",
+            "Display Fit",
+            controlWidth,
+            "View Transform");
+        if (ImGuiExtras::NodeSliderFloat("Display Exposure", "##RawViewExposure", &viewExposure, -8.0f, 8.0f, "%.2f stops", controlWidth)) {
+            viewTransform["exposure"] = viewExposure;
+            changed = true;
+            viewTransformChangedByUser = true;
+        }
+        TooltipIfHovered("Display-stage exposure offset inside the View Transform. Use RAW Exposure for scene-linear capture placement.");
+        if (ImGuiExtras::NodeSliderFloat(viewLabel("Black EV"), "##RawViewBlackEv", &blackEv, -16.0f, 0.0f, "%.2f", controlWidth)) {
+            viewTransform["blackEv"] = blackEv;
+            changed = true;
+            viewTransformChangedByUser = true;
+        }
+        TooltipIfHovered("Scene EV below Middle Grey that maps near display black after black subtraction.");
+        if (ImGuiExtras::NodeSliderFloat(viewLabel("White EV"), "##RawViewWhiteEv", &whiteEv, 0.0f, 16.0f, "%.2f", controlWidth)) {
+            viewTransform["whiteEv"] = whiteEv;
+            changed = true;
+            viewTransformChangedByUser = true;
+        }
+        TooltipIfHovered("Scene EV above Middle Grey that anchors display white before shoulder rolloff.");
+        if (ImGuiExtras::NodeSliderFloat(viewLabel("Middle Grey"), "##RawViewMiddleGrey", &middleGrey, 0.01f, 1.0f, "%.3f", controlWidth)) {
+            viewTransform["middleGrey"] = middleGrey;
+            changed = true;
+            viewTransformChangedByUser = true;
+        }
+        TooltipIfHovered("Scene-linear luma anchor for the EV scale. Display Fit sets this from median input luma.");
+
+        if (ImGuiExtras::RichFullWidthButton("Refit Display##RawBaseLightRefitDisplay", controlWidth, 0.0f)) {
             if (m_RawWorkspaceAnalysis.currentFrameStats.valid &&
                 m_RawWorkspaceAnalysis.sourceKey == selectedSource->relativePathKey) {
                 if (ApplyRawWorkspaceAutoBaseViewFitForSource(*selectedSource, editedRecipe, true)) {
@@ -3347,20 +4054,26 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
                     "raw-workspace-view-auto-no-stats");
             }
         }
-        TooltipIfHovered("Fits Display Fit / View Transform from the current frame. RAW Exposure remains unchanged.");
+        TooltipIfHovered("Refits Display Fit / View Transform from the current frame. RAW Exposure remains unchanged.");
+        if (RenderRawWorkspaceOwnerSuggestionMarker(
+                "DisplayFitSuggestionMarker",
+                displayFitSuggestionMarker,
+                controlWidth)) {
+            m_RawWorkspaceAutoBaseUi.suggestionsOpen = true;
+        }
+        if (ImGui::SmallButton("Diagnostics##RawWorkspaceBaseLightDiagnostics")) {
+            m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+        }
+        TooltipIfHovered("Open Diagnostics for RAW Exposure, Display Fit, highlight signals, Starting Point candidates, and warnings.");
 
         if (ImGui::TreeNodeEx("Advanced##RawBaseLightAdvanced")) {
-            if (ImGuiExtras::RichFullWidthButton("Reset", controlWidth, 0.0f)) {
+            if (ImGui::SmallButton("Reset View Transform##RawBaseLightResetViewTransform")) {
                 viewTransform = Stack::RawRecipe::DefaultViewTransformJson();
                 changed = true;
                 viewTransformChangedByUser = true;
             }
             TooltipIfHovered("Returns the display mapping to generic scene-linear defaults.");
 
-            float viewExposure = JsonNumber(viewTransform, "exposure", 0.0f);
-            float blackEv = JsonNumber(viewTransform, "blackEv", -8.0f);
-            float whiteEv = JsonNumber(viewTransform, "whiteEv", 4.0f);
-            float middleGrey = JsonNumber(viewTransform, "middleGrey", 0.18f);
             float shoulder = JsonNumber(viewTransform, "shoulder", 0.45f);
             float toe = JsonNumber(viewTransform, "toe", 0.18f);
             float contrast = JsonNumber(viewTransform, "contrast", 1.0f);
@@ -3368,30 +4081,6 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
             bool preserveHue = JsonBool(viewTransform, "preserveHue", true);
             bool falseColor = JsonBool(viewTransform, "debugFalseColor", false);
 
-            if (ImGuiExtras::NodeSliderFloat("Display Exposure", "##RawViewExposure", &viewExposure, -8.0f, 8.0f, "%.2f stops", controlWidth)) {
-                viewTransform["exposure"] = viewExposure;
-                changed = true;
-                viewTransformChangedByUser = true;
-            }
-            TooltipIfHovered("Display-stage exposure offset inside the View Transform. Use RAW Exposure for scene-linear capture placement.");
-            if (ImGuiExtras::NodeSliderFloat(viewLabel("Black EV"), "##RawViewBlackEv", &blackEv, -16.0f, 0.0f, "%.2f", controlWidth)) {
-                viewTransform["blackEv"] = blackEv;
-                changed = true;
-                viewTransformChangedByUser = true;
-            }
-            TooltipIfHovered("Scene EV below Middle Grey that maps near display black after black subtraction.");
-            if (ImGuiExtras::NodeSliderFloat(viewLabel("White EV"), "##RawViewWhiteEv", &whiteEv, 0.0f, 16.0f, "%.2f", controlWidth)) {
-                viewTransform["whiteEv"] = whiteEv;
-                changed = true;
-                viewTransformChangedByUser = true;
-            }
-            TooltipIfHovered("Scene EV above Middle Grey that anchors display white before shoulder rolloff.");
-            if (ImGuiExtras::NodeSliderFloat(viewLabel("Middle Grey"), "##RawViewMiddleGrey", &middleGrey, 0.01f, 1.0f, "%.3f", controlWidth)) {
-                viewTransform["middleGrey"] = middleGrey;
-                changed = true;
-                viewTransformChangedByUser = true;
-            }
-            TooltipIfHovered("Scene-linear luma anchor for the EV scale. Auto Fit sets this from median input luma.");
             if (ImGuiExtras::NodeSliderFloat(viewLabel("Shoulder"), "##RawViewShoulder", &shoulder, 0.05f, 4.0f, "%.2f", controlWidth)) {
                 viewTransform["shoulder"] = shoulder;
                 changed = true;
@@ -3431,6 +4120,10 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
     }
 
     if (ImGui::CollapsingHeader("White Balance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const std::string whiteBalanceSummary =
+            BuildRawWorkspaceWhiteBalanceSummary(editedRecipe.whiteBalance);
+        ImGui::TextDisabled("%s", whiteBalanceSummary.c_str());
+        TooltipIfHovered("White Balance summary from the current visible recipe controls.");
         const char* labels[] = { "As Shot", "Auto", "Custom", "Gray Point" };
         int wbIndex = WhiteBalanceModeToIndex(editedRecipe.whiteBalance.mode);
         if (ImGuiExtras::NodeCombo("Mode", "##RawWhiteBalanceMode", &wbIndex, labels, IM_ARRAYSIZE(labels), controlWidth)) {
@@ -3447,6 +4140,16 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
             }
             changed = true;
         }
+        if (RenderRawWorkspaceOwnerSuggestionMarker(
+                "WhiteBalanceSuggestionMarker",
+                whiteBalanceSuggestionMarker,
+                controlWidth)) {
+            m_RawWorkspaceAutoBaseUi.suggestionsOpen = true;
+        }
+        if (ImGui::SmallButton("Diagnostics##RawWorkspaceWhiteBalanceDiagnostics")) {
+            m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+        }
+        TooltipIfHovered("Open Diagnostics for White Balance rationale, protected suggestions, Starting Point candidates, and warnings.");
 
         if (editedRecipe.whiteBalance.mode == Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers) {
             float temperature = editedRecipe.whiteBalance.hasTemperatureKelvin
@@ -3488,16 +4191,52 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
                 editedRecipe.whiteBalance.hasSamplePoint = true;
                 changed = true;
             }
-            ImGui::BeginDisabled();
-            ImGui::Button("Pick Gray Point", ImVec2(-1.0f, 0.0f));
-            ImGui::EndDisabled();
-            TooltipIfHovered("Gray-point picking is reserved for the final picker backend.", ImGuiHoveredFlags_AllowWhenDisabled);
+            ImGui::TextDisabled("Gray-point picker pending");
+            TooltipIfHovered("Gray-point picking is reserved for the final picker backend.");
         }
     }
 
-    ImGui::Separator();
+    const Stack::RawAutoBase::NoiseDetailRecommendation& noiseDetail =
+        m_RawWorkspaceAutoBaseUi.recommendations.noiseDetail;
+    const bool hasNoiseAdvisory = HasRawWorkspaceNoiseDetailAdvisory(noiseDetail);
+    ImGui::Spacing();
+    ImGui::SeparatorText("Detail / Noise");
+    const std::string advisorySummary = hasNoiseAdvisory
+        ? BuildRawWorkspaceNoiseDetailAdvisorySummary(noiseDetail)
+        : std::string("No current advisory from the latest RAW analysis.");
+    ImGui::TextDisabled("%s", EllipsizeTextToWidth(advisorySummary, controlWidth).c_str());
+    ImGui::TextDisabled("%s", hasNoiseAdvisory ? "Advisory only" : "No advisory");
+    ImGui::SameLine(0.0f, 8.0f);
+    if (ImGui::SmallButton("Diagnostics##RawWorkspaceNoiseDetailDiagnostics")) {
+        m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+    }
+    TooltipIfHovered("Open Diagnostics for the full noise/detail rationale.");
 
-    if (RenderRawWorkspaceLocalRangeControls(selectedSource, editedRecipe, controlWidth)) {
+    ImGui::Separator();
+    ImGui::SeparatorText("Graph Controls");
+
+    if (RenderRawWorkspaceOwnerSuggestionMarker(
+            "LocalRangeSuggestionMarker",
+            localRangeSuggestionMarker,
+            controlWidth)) {
+        m_RawWorkspaceAutoBaseUi.suggestionsOpen = true;
+    }
+    const std::string localRangeStartingPointReadout =
+        BuildStartingPointManualControlReadout(
+        m_RawWorkspaceAutoBaseUi,
+        selectedSource->relativePathKey,
+        "Local Range",
+        "Local Range");
+    const bool localRangeDefaultOpen =
+        Stack::RawRecipe::IsLocalRangeEnabled(editedRecipe.localRange) ||
+        Stack::RawRecipe::IsLocalExposureEnabled(editedRecipe) ||
+        !localRangeSuggestionMarker.empty();
+    if (RenderRawWorkspaceLocalRangeControls(
+            selectedSource,
+            editedRecipe,
+            controlWidth,
+            localRangeDefaultOpen,
+            localRangeStartingPointReadout)) {
         changed = true;
     }
 
@@ -3516,6 +4255,31 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
             { 4, "B" }
         };
         int mode = std::clamp(JsonInt(finishTone, "mode", 1), 0, 4);
+        const char* domainLabels[] = { "Scene Linear", "Log Scene" };
+        int domain = std::clamp(JsonInt(finishTone, "domain", 1), 0, 1);
+        std::vector<Stack::RawRecipe::RawToneCurvePoint> points =
+            BuildFinishToneUiPoints(finishTone);
+        const std::string finishToneSummary =
+            BuildRawWorkspaceFinishToneSummary(mode, domain, points.size());
+        ImGui::TextDisabled("%s", finishToneSummary.c_str());
+        TooltipIfHovered("Finish Tone summary from the current visible graph controls.");
+        RenderStartingPointManualControlReadout(
+            m_RawWorkspaceAutoBaseUi,
+            selectedSource->relativePathKey,
+            "Finish Tone",
+            "Finish Tone",
+            controlWidth);
+        if (RenderRawWorkspaceOwnerSuggestionMarker(
+                "FinishToneSuggestionMarker",
+                finishToneSuggestionMarker,
+                controlWidth)) {
+            m_RawWorkspaceAutoBaseUi.suggestionsOpen = true;
+        }
+        if (ImGui::SmallButton("Diagnostics##RawWorkspaceFinishToneDiagnostics")) {
+            m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+        }
+        TooltipIfHovered("Open Diagnostics for Finish Tone candidate evidence, action readiness, suggestions, and warnings.");
+
         const float modeGap = 6.0f;
         const float modeWidth = std::max(34.0f, (controlWidth - modeGap * 4.0f) / 5.0f);
         for (int i = 0; i < IM_ARRAYSIZE(modeButtons); ++i) {
@@ -3538,14 +4302,18 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
             }
         }
 
-        const char* domainLabels[] = { "Scene Linear", "Log Scene" };
-        int domain = std::clamp(JsonInt(finishTone, "domain", 1), 0, 1);
         if (ImGuiExtras::NodeCombo("Curve Domain", "##RawFinishToneDomain", &domain, domainLabels, IM_ARRAYSIZE(domainLabels), controlWidth)) {
             finishTone["domain"] = domain;
             changed = true;
         }
 
-        std::vector<Stack::RawRecipe::RawToneCurvePoint> points = BuildFinishToneUiPoints(finishTone);
+        const std::string finishTonePointValuesSummary =
+            BuildRawWorkspaceFinishTonePointValuesSummary(points);
+        ImGui::TextDisabled(
+            "%s",
+            EllipsizeTextToWidth(finishTonePointValuesSummary, controlWidth).c_str());
+        TooltipIfHovered(finishTonePointValuesSummary.c_str());
+
         if (DrawToneCurveWidget(
                 points,
                 ImVec2(controlWidth, std::clamp(controlWidth * 0.42f, 170.0f, 220.0f)))) {
@@ -3572,20 +4340,31 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
                 }
             }
 
-            if (ImGuiExtras::RichFullWidthButton("Reset Curve", controlWidth, 0.0f)) {
+            if (ImGui::SmallButton("Reset Curve##RawFinishToneResetCurve")) {
                 nlohmann::json resetTone = Stack::RawRecipe::DefaultFinishToneJson();
                 resetTone["mode"] = mode;
                 resetTone["domain"] = domain;
                 finishTone = std::move(resetTone);
                 changed = true;
             }
+            TooltipIfHovered("Reset Finish Tone points while keeping the current mode and domain.");
             ImGui::TreePop();
         }
     }
 
     RenderRawWorkspaceAnalysisPanel(controlWidth);
 
-    if (ImGui::CollapsingHeader("Crop & Rotate", ImGuiTreeNodeFlags_DefaultOpen)) {
+    const Stack::RawRecipe::RawCropRotationRecipe& cropRotation = editedRecipe.cropRotation;
+    const std::string cropRotationSummary =
+        BuildRawWorkspaceCropRotationSummary(cropRotation);
+    const bool cropRotationActive = IsRawWorkspaceCropRotationActive(cropRotation);
+    const ImGuiTreeNodeFlags cropRotationHeaderFlags =
+        cropRotationActive ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+
+    const bool cropRotationOpen =
+        ImGui::CollapsingHeader("Crop & Rotate", cropRotationHeaderFlags);
+    ImGui::TextDisabled("%s", cropRotationSummary.c_str());
+    if (cropRotationOpen) {
         bool cropEnabled = editedRecipe.cropRotation.cropEnabled;
         if (ImGui::Checkbox("Crop Enabled", &cropEnabled)) {
             editedRecipe.cropRotation.cropEnabled = cropEnabled;
@@ -3625,7 +4404,17 @@ void EditorModule::RenderRawWorkspaceControlsPanel(
         }
     }
 
-    if (ImGui::CollapsingHeader("Preview & Output", ImGuiTreeNodeFlags_DefaultOpen)) {
+    const Stack::RawRecipe::RawPreviewOutputRecipe& previewOutput = editedRecipe.previewOutput;
+    const std::string previewOutputSummary =
+        BuildRawWorkspacePreviewOutputSummary(previewOutput);
+    const bool previewOutputActive = IsRawWorkspacePreviewOutputActive(previewOutput);
+    const ImGuiTreeNodeFlags previewOutputHeaderFlags =
+        previewOutputActive ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+
+    const bool previewOutputOpen =
+        ImGui::CollapsingHeader("Preview & Output", previewOutputHeaderFlags);
+    ImGui::TextDisabled("%s", previewOutputSummary.c_str());
+    if (previewOutputOpen) {
         const char* previewLabels[] = { "Developed Preview", "Neutral Preview" };
         const char* previewValues[] = { "developed-preview", "neutral-preview" };
         int previewIndex = editedRecipe.previewOutput.previewIntent == "neutral-preview" ? 1 : 0;
@@ -3705,6 +4494,10 @@ void EditorModule::RenderRawWorkspacePreviewPanel(
         true,
         "Show the final RAW preview.",
         "");
+    ImGui::TextDisabled("Compare");
+    TooltipIfHovered(
+        "Compare needs a stable before/after RAW preview state; it is deferred until that state can be isolated safely.");
+    ImGui::SameLine(0.0f, 5.0f);
     renderViewModeButton(
         "Affected",
         "affected-tones",
@@ -3726,10 +4519,10 @@ void EditorModule::RenderRawWorkspacePreviewPanel(
         localRangeMaskAvailable,
         "Show the Local Range region/color mask.",
         "Enable a Region Mask or Color Target before viewing the mask.");
-    ImGui::BeginDisabled(true);
-    ImGui::Button("Risk", ImVec2(54.0f, 0.0f));
-    ImGui::EndDisabled();
-    TooltipIfHovered("Highlight Risk is reported in Diagnostics until a viewport overlay exists.", ImGuiHoveredFlags_AllowWhenDisabled);
+    if (ImGui::Button("Risk", ImVec2(54.0f, 0.0f))) {
+        m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+    }
+    TooltipIfHovered("Open Diagnostics for Highlight Risk until a viewport overlay exists.");
 
     if (!selectedSource->thumbnail.errorMessage.empty()) {
         ImGui::TextWrapped("%s", selectedSource->thumbnail.errorMessage.c_str());
@@ -4211,7 +5004,11 @@ void EditorModule::RenderRawWorkspaceBrowser(
             targetPreviewWidth);
     };
     auto renderControlsPane = [&](const char* id, float controlsWidth, float height = 0.0f) {
-        ImGui::BeginChild(id, ImVec2(controlsWidth, height), true);
+        ImGui::BeginChild(
+            id,
+            ImVec2(controlsWidth, height),
+            true,
+            ImGuiWindowFlags_AlwaysVerticalScrollbar);
         RenderRawWorkspaceControlsPanel(selectedSource, panelState);
         ImGui::EndChild();
     };

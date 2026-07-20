@@ -1,0 +1,428 @@
+A node can depend on:
+
+One pixel at the same coordinate.
+Nearby pixels around that coordinate.
+Statistics from the entire image.
+Another image, mask, or reference.
+Metadata or calibration data.
+A trained model or an interpretation of the scene.
+
+Even AI denoising is ultimately math, but it is not a simple transparent formula in the same sense as RGB × 2.
+
+1. Fundamental per-pixel math
+
+These are the purest building blocks. Each output pixel can be calculated independently from the corresponding input pixel.
+
+| Operation            | Basic math                           | Common image use                               |
+| -------------------- | ------------------------------------ | ---------------------------------------------- |
+| Add                  | `out = in + value`                   | Offset, brightness-like adjustment, lift       |
+| Subtract             | `out = in - value`                   | Black-level removal, channel correction        |
+| Multiply             | `out = in × value`                   | Exposure-like scaling, gain, channel intensity |
+| Divide               | `out = in ÷ value`                   | Normalization, inverse gain                    |
+| Power                | `out = in^value`                     | Gamma, nonlinear contrast                      |
+| Square root          | `out = √in`                          | Encoding curves, mathematical effects          |
+| Logarithm            | `out = log(in)`                      | Log encoding, dynamic-range compression        |
+| Exponential          | `out = exp(in)`                      | Inverse log transforms                         |
+| Absolute value       | `out = abs(in)`                      | Difference visualization, procedural effects   |
+| Negate               | `out = -in`                          | Signed-data manipulation                       |
+| Reciprocal           | `out = 1/in`                         | Specialized transforms                         |
+| Minimum              | `out = min(a,b)`                     | Darken blending, clamping                      |
+| Maximum              | `out = max(a,b)`                     | Lighten blending, clamping                     |
+| Clamp                | `out = min(max(in,low),high)`        | Keep values within a range                     |
+| Saturate             | `clamp(in,0,1)`                      | Standard normalized clipping                   |
+| Modulo               | `out = in mod value`                 | Repeating procedural patterns                  |
+| Fractional part      | `out = fract(in)`                    | Repeating gradients and patterns               |
+| Floor                | Round downward                       | Posterization, indexing                        |
+| Ceiling              | Round upward                         | Quantization effects                           |
+| Round                | Nearest discrete value               | Bit-depth reduction                            |
+| Sign                 | `-1`, `0`, or `1`                    | Signed masks and comparisons                   |
+| Step                 | `0 if in < edge, else 1`             | Hard thresholds and masks                      |
+| Smoothstep           | Smoothed threshold                   | Soft masks and transitions                     |
+| Linear interpolation | `a × (1-t) + b × t`                  | Blending nearly anything                       |
+| Remap                | Convert one range to another         | Levels, normalization                          |
+| Bias                 | Nonlinear weighting toward 0 or 1    | Procedural grading                             |
+| Gain                 | Nonlinear contrast around a midpoint | Contrast shaping                               |
+| Conditional select   | Choose A or B from a condition       | Mask-driven processing                         |
+
+
+These primitives alone could form a shader-like image math system.
+
+2. Channel operations
+
+These still normally work one pixel at a time, but treat RGB, alpha, or other channels as vectors.
+
+| Operation          | What it does                                | Typical implementation               |
+| ------------------ | ------------------------------------------- | ------------------------------------ |
+| Split channels     | RGB → separate R, G, B outputs              | Component extraction                 |
+| Merge channels     | Separate values → RGB                       | Vector construction                  |
+| Swizzle            | Reorder channels                            | `RGB → BGR`, `RRG`, etc.             |
+| Copy channel       | Replace one channel with another            | `B = G`                              |
+| Remove channel     | Zero or neutralize a channel                | `R = 0`                              |
+| Per-channel gain   | Scale R, G, and B separately                | `RGB × gainRGB`                      |
+| Per-channel offset | Add different values to channels            | `RGB + offsetRGB`                    |
+| Channel mixer      | Each output channel uses all input channels | 3×3 matrix                           |
+| Grayscale          | RGB → one luminance-like value              | Weighted channel sum                 |
+| False color        | Scalar value → selected colors              | Lookup or mathematical mapping       |
+| RGB matrix         | General linear color transform              | `out = matrix × RGB`                 |
+| Matrix plus offset | Linear transform plus translation           | `out = M×RGB + b`                    |
+| Normalize vector   | Scale RGB vector to unit length             | Specialized color math               |
+| Dot product        | Reduce RGB to one number                    | Luminance, similarity                |
+| Cross product      | Vector relationship calculation             | Rare procedural uses                 |
+| Channel difference | `R-G`, `B-G`, etc.                          | Color-opponent information           |
+| Channel ratio      | `R/G`, `B/G`, etc.                          | Chromaticity and scientific analysis |
+| Largest channel    | `max(R,G,B)`                                | HSV value, masking                   |
+| Smallest channel   | `min(R,G,B)`                                | HSV calculations                     |
+| Channel ranking    | Determine dominant channel                  | Color classification                 |
+
+
+A channel mixer node is particularly powerful because white balance, grayscale conversion, color crosstalk, and many stylized looks can all be expressed as matrices.
+
+3. Tone and brightness operations
+
+Most of these are still per-pixel operations, but their appearance depends heavily on whether the incoming numbers are linear, sRGB-encoded, log-encoded, or perceptual.
+
+| Operation          | Typical math                                            | Important detail                                 |
+| ------------------ | ------------------------------------------------------- | ------------------------------------------------ |
+| Exposure           | Multiply linear RGB by `2^EV`                           | Physically meaningful in linear light            |
+| Gain               | Multiply values                                         | Similar to exposure, but terminology varies      |
+| Offset             | Add a constant                                          | Raises black and white levels together           |
+| Lift               | Raise or lower darker values preferentially             | Several formulas exist                           |
+| Gamma              | Power function                                          | Usually affects midtones most                    |
+| Lift/gamma/gain    | Offset, power, and scale combination                    | Common grading control                           |
+| Printer lights     | Add RGB exposure-like increments                        | Usually implemented in log-like space            |
+| Brightness         | Could be add, multiply, curve, or perceptual adjustment | The name alone is ambiguous                      |
+| Contrast           | Expand distances around a pivot                         | `pivot + (in-pivot)×contrast`                    |
+| Contrast pivot     | Select the fixed center of contrast                     | Changes which tones move                         |
+| Levels             | Remap black, white, and midpoint                        | Range mapping plus gamma                         |
+| Black point        | Move or clip the lowest values                          | Can be hard or soft                              |
+| White point        | Move or clip the highest values                         | Can be hard or soft                              |
+| Shadows            | Apply adjustment using a dark-tone weight               | Pointwise with a tonal weighting curve           |
+| Midtones           | Adjustment weighted around middle values                | Pointwise with a bell-shaped weight              |
+| Highlights         | Adjustment weighted toward bright values                | Pointwise with a tonal weighting curve           |
+| Tone curve         | Map input intensity to output intensity                 | 1D lookup or spline                              |
+| RGB curve          | Same curve applied to all RGB channels                  | Changes tone with minimal hue movement           |
+| Per-channel curves | Separate R, G, and B curves                             | Alters tone and color simultaneously             |
+| S-curve            | Raise highlights and lower shadows                      | Standard contrast look                           |
+| Filmic curve       | Soft toe and shoulder                                   | Compresses extremes smoothly                     |
+| Toe                | Smooth shadow rolloff                                   | Avoids abrupt black clipping                     |
+| Shoulder           | Smooth highlight rolloff                                | Avoids abrupt white clipping                     |
+| Sigmoid contrast   | Smooth S-shaped mapping                                 | Often more stable than simple contrast           |
+| Log encoding       | Compress linear dynamic range                           | Useful for storage and grading                   |
+| Log decoding       | Restore log values to linear                            | Required before linear-light operations          |
+| Threshold          | Convert values above/below a level                      | Binary mask or graphic effect                    |
+| Posterization      | Quantize tones into bands                               | Round to a limited number of levels              |
+| Solarization       | Invert part of the tonal range                          | Conditional curve                                |
+| Inversion          | `out = 1-in` for normalized values                      | Encoding-dependent                               |
+| Highlight recovery | Reconstruct or estimate clipped information             | May require RAW channels or neighborhood context |
+
+
+The crucial Stack lesson is that “brightness” is not a mathematical specification. A node should either state its formula or let the user choose the method.
+
+4. Color-grading operations
+
+Many of these can be pointwise, but their exact meaning depends on the chosen color model.
+
+| Operation                    | Mechanism                                              | Space dependence                                        |
+| ---------------------------- | ------------------------------------------------------ | ------------------------------------------------------- |
+| RGB balance                  | Add or multiply RGB independently                      | Works anywhere, but looks different by encoding         |
+| Color wheels                 | Weighted RGB or color-space offsets                    | Shadows/mids/highlights use tonal masks                 |
+| Temperature                  | Move along warm–cool axis                              | Could use RGB gains, XYZ adaptation, or camera metadata |
+| Tint                         | Move along green–magenta axis                          | Formula varies by implementation                        |
+| White balance gains          | Multiply RGB channels                                  | Simple and pointwise                                    |
+| Chromatic adaptation         | Transform one white point to another                   | Usually XYZ-based matrix math                           |
+| Saturation                   | Move color away from an achromatic axis                | Different in RGB, HSV, HSL, Lab, OKLab, etc.            |
+| Desaturation                 | Move color toward grayscale                            | Requires a grayscale/luma definition                    |
+| Vibrance                     | Increase muted colors more than strong colors          | Usually heuristic and skin-protecting                   |
+| Hue rotation                 | Rotate around a color axis                             | Depends strongly on color model                         |
+| Hue shift                    | Modify hue coordinate                                  | Usually HSV/HSL/LCh-like                                |
+| Lightness                    | Modify perceptual lightness coordinate                 | Requires a perceptual space                             |
+| Chroma                       | Modify distance from neutral                           | Lab/LCh or OKLab/OKLCh                                  |
+| Colorfulness                 | Perception-relative saturation measure                 | Viewing-condition dependent in advanced models          |
+| Selective color              | Modify chosen color families                           | Uses hue-range masks                                    |
+| Hue versus hue               | Use hue to control hue change                          | 1D curve lookup                                         |
+| Hue versus saturation        | Use hue to control saturation                          | 1D curve lookup                                         |
+| Hue versus luminance         | Use hue to control brightness/lightness                | 1D curve lookup                                         |
+| Luma versus saturation       | Use luminance to control saturation                    | 1D curve lookup                                         |
+| Saturation versus saturation | Remap existing saturation                              | 1D curve lookup                                         |
+| Color replacement            | Detect a color and map it elsewhere                    | Distance/key plus color transform                       |
+| Split toning                 | Tint shadows and highlights separately                 | Tonal masks plus color blend                            |
+| Color balance                | Bias shadows, mids, and highlights                     | Similar to multi-zone color wheels                      |
+| Three-way grading            | Separate shadow/midtone/highlight controls             | Weighted pointwise adjustment                           |
+| Six-vector grading           | Adjust red, yellow, green, cyan, blue, magenta         | Hue-sector masks                                        |
+| Density                      | Darken colors while increasing perceived richness      | Several film-inspired formulas                          |
+| Preserve luminance           | Color change followed by luma correction               | Requires a chosen luma model                            |
+| Preserve hue                 | Tone change constrained to hue direction               | Space-dependent                                         |
+| Gamut compression            | Pull extreme colors toward the valid gamut             | Often nonlinear and color-space aware                   |
+| Gamut clipping               | Hard-limit out-of-gamut values                         | Simple but can distort hue                              |
+| LUT application              | Sample a 1D or 3D lookup table                         | Depends on expected input/output spaces                 |
+| Color-space conversion       | Transfer function plus matrix and sometimes adaptation | Explicitly defined transform                            |
+| Display transform            | Scene values → display-ready values                    | Tone mapping plus gamut mapping                         |
+| Look transform               | Artistic mapping between working and output stages     | Could be LUTs, curves, matrices, or combinations        |
+
+
+A color wheel is therefore not one operation. It is usually:
+
+tonal weight × color offset or color rotation × blend
+
+That could be exposed as a convenience node built from lower-level nodes.
+
+5. Alpha, masks, and compositing
+
+These generally require one pixel from each connected input, but not neighboring pixels.
+
+| Operation          | Core mechanism                                     |
+| ------------------ | -------------------------------------------------- |
+| Alpha extraction   | Read the alpha channel                             |
+| Set alpha          | Replace alpha with a supplied value or mask        |
+| Premultiply        | `RGB = RGB × alpha`                                |
+| Unpremultiply      | `RGB = RGB ÷ alpha` where alpha is nonzero         |
+| Mask blend         | `A×mask + B×(1-mask)`                              |
+| Opacity            | Blend an image with its background                 |
+| Over composite     | Standard alpha “A over B” equation                 |
+| Under composite    | Reverse over operation                             |
+| Add blend          | `A+B`                                              |
+| Subtract blend     | `A-B`                                              |
+| Multiply blend     | `A×B`                                              |
+| Screen blend       | `1-(1-A)(1-B)`                                     |
+| Overlay            | Multiply in dark regions, screen in bright regions |
+| Soft light         | Nonlinear contrast blend                           |
+| Hard light         | Overlay with inputs reversed                       |
+| Darken             | Per-channel minimum                                |
+| Lighten            | Per-channel maximum                                |
+| Difference         | `abs(A-B)`                                         |
+| Exclusion          | Softer difference formula                          |
+| Divide blend       | One image divided by another                       |
+| Color dodge        | Brightening division formula                       |
+| Color burn         | Darkening inverse formula                          |
+| Hue blend          | Hue from one image, other components from another  |
+| Saturation blend   | Saturation from one image                          |
+| Color blend        | Hue/saturation from one, luminosity from another   |
+| Luminosity blend   | Luminosity from one image                          |
+| Matte intersection | Multiply masks                                     |
+| Matte union        | Maximum or Boolean OR                              |
+| Matte subtraction  | Remove one mask from another                       |
+| Matte inversion    | `1-mask`                                           |
+| Mask threshold     | Turn soft mask into hard mask                      |
+| Mask remap         | Levels or curve applied to mask                    |
+| Mask opacity       | Multiply mask strength                             |
+
+
+Blend modes are an excellent example of nodes that are “just math,” although some traditional blend modes assume gamma-encoded RGB and look different in linear light.
+
+6. Neighborhood and filtering operations
+
+These use pixels surrounding the current coordinate. They are still explicit math, but they need a sampling kernel, radius, or iteration process.
+
+| Operation                         | Required information                       | Basic mechanism                             |
+| --------------------------------- | ------------------------------------------ | ------------------------------------------- |
+| Box blur                          | Nearby pixels                              | Uniform average                             |
+| Gaussian blur                     | Nearby pixels                              | Weighted average using Gaussian kernel      |
+| Median filter                     | Nearby pixels                              | Middle value after sorting                  |
+| Bilateral filter                  | Nearby positions and colors                | Weight by distance and color similarity     |
+| Guided filter                     | Neighborhood plus guide image              | Edge-aware local linear model               |
+| Surface blur                      | Nearby pixels                              | Blur similar regions while preserving edges |
+| Motion blur                       | Pixels along a direction                   | Directional sampling                        |
+| Radial blur                       | Pixels along radial paths                  | Sample toward or around a center            |
+| Zoom blur                         | Samples along scaling path                 | Radial resampling                           |
+| Lens blur                         | Neighborhood and aperture shape            | Convolution or stochastic sampling          |
+| Bokeh simulation                  | Neighborhood, depth, aperture model        | Spatially varying blur                      |
+| Sharpen                           | Nearby pixels                              | Original minus blurred image                |
+| Unsharp mask                      | Original plus scaled high-frequency detail | `in + amount×(in-blur)`                     |
+| High-pass                         | Subtract low-frequency content             | `in-blur`                                   |
+| Low-pass                          | Remove high frequencies                    | Blur                                        |
+| Laplacian sharpening              | Second spatial derivative                  | Convolution kernel                          |
+| Sobel edge detection              | Local gradients                            | Horizontal and vertical kernels             |
+| Scharr edge detection             | Improved local gradient                    | Convolution                                 |
+| Canny edge detection              | Gradient, thinning, hysteresis             | Multi-stage neighborhood operation          |
+| Emboss                            | Directional difference kernel              | Convolution                                 |
+| Convolution                       | Arbitrary neighborhood matrix              | General filtering primitive                 |
+| Deconvolution                     | Estimate image before blur                 | Iterative inverse problem                   |
+| Local contrast                    | Compare pixel to local average             | High-pass or multiscale method              |
+| Clarity                           | Mid-frequency local contrast               | Usually multiscale filtering                |
+| Texture                           | Finer-frequency local contrast             | Frequency-selective processing              |
+| Detail extraction                 | Separate frequency bands                   | Pyramids, wavelets, or filters              |
+| Frequency separation              | Low and high frequency layers              | Blur plus subtraction                       |
+| Wavelet decomposition             | Multiple spatial scales                    | Wavelet transform                           |
+| Laplacian pyramid                 | Image at successively lower frequencies    | Blur/downsample/difference                  |
+| Morphological dilate              | Neighborhood maximum                       | Expands bright masks                        |
+| Morphological erode               | Neighborhood minimum                       | Shrinks bright masks                        |
+| Morphological open                | Erode then dilate                          | Removes small bright details                |
+| Morphological close               | Dilate then erode                          | Fills small holes                           |
+| Distance transform                | Distance to nearest mask boundary          | Multi-pass neighborhood algorithm           |
+| Flood fill                        | Connected neighboring pixels               | Region traversal                            |
+| Region growing                    | Similar connected pixels                   | Iterative neighborhood test                 |
+| Inpainting                        | Surrounding pixels or learned model        | Fill missing regions                        |
+| Demosaicing                       | CFA neighborhood and sensor pattern        | Reconstruct missing RGB components          |
+| Chroma subsampling reconstruction | Nearby chroma samples                      | Interpolation                               |
+| Dither                            | Noise or neighboring quantization error    | Hide banding                                |
+| Error diffusion                   | Current and future neighboring pixels      | Spread quantization error                   |
+
+
+For Stack, one generic convolution node could expose many filters, but specialized nodes would still be useful for performance and friendlier controls.
+
+7. Geometry and coordinate operations
+
+These operate on pixel positions rather than just pixel values.
+
+| Operation             | Core mechanism                                       |                            |
+| --------------------- | ---------------------------------------------------- | -------------------------- |
+| Translate             | Sample from an offset coordinate                     |                            |
+| Scale                 | Sample after coordinate multiplication               |                            |
+| Rotate                | Apply a rotation matrix to coordinates               |                            |
+| Flip                  | Reverse one coordinate axis                          |                            |
+| Crop                  | Restrict the valid coordinate region                 |                            |
+| Canvas resize         | Change output extent                                 |                            |
+| Perspective transform | Projective coordinate matrix                         |                            |
+| Affine transform      | Translation, scale, rotation, and shear              |                            |
+| Homography            | General planar projective mapping                    |                            |
+| Warp                  | Modify coordinates using a displacement function     |                            |
+| Displacement map      | Offset coordinates using another image               |                            |
+| Liquify               | User-created displacement field                      |                            |
+| Lens distortion       | Radial and tangential coordinate equations           |                            |
+| Fisheye transform     | Nonlinear radial mapping                             |                            |
+| Panorama projection   | Map between spherical/cylindrical/planar coordinates |                            |
+| Polar conversion      | Cartesian ↔ polar coordinates                        |                            |
+| Twirl                 | Rotate based on distance from a center               |                            |
+| Pinch/bulge           | Radial coordinate scaling                            |                            |
+| Ripple                | Sinusoidal coordinate displacement                   |                            |
+| Kaleidoscope          | Fold and repeat angular coordinates                  |                            |
+| Tile                  | Repeat coordinates                                   |                            |
+| Mirror tile           | Repeat with alternating reflection                   |                            |
+| Seamless offset       | Wrap coordinates at image borders                    |                            |
+| Resampling            | Interpolate between pixel locations                  |                            |
+| Nearest-neighbor      | Choose nearest source pixel                          |                            |
+| Bilinear              | Blend four neighboring samples                       |                            |
+| Bicubic               | Cubic interpolation across a neighborhood            |                            |
+| Lanczos               | Windowed sinc reconstruction                         |                            |
+| Content-aware scale   | Detect and preserve important regions                | Requires global analysis   |
+| Optical-flow warp     | Use estimated movement vectors                       | Requires motion estimation |
+
+
+The transform itself may be simple math, but sampling and interpolation are part of the operation and should be explicit somewhere in Stack.
+
+8. Global and image-statistical operations
+
+These cannot calculate each pixel completely independently because they first need information from the whole image or a large region.
+
+| Operation                     | Global information needed                     |
+| ----------------------------- | --------------------------------------------- |
+| Auto exposure                 | Histogram, average, median, or percentiles    |
+| Auto contrast                 | Darkest and brightest meaningful values       |
+| Auto white balance            | Image color distribution or scene assumptions |
+| Normalize                     | Global minimum and maximum                    |
+| Histogram stretch             | Histogram endpoints                           |
+| Histogram equalization        | Cumulative histogram                          |
+| CLAHE                         | Histograms from local tiles                   |
+| Automatic levels              | Chosen histogram percentiles                  |
+| Gray-world correction         | Average RGB values                            |
+| White-patch correction        | Brightest likely-neutral region               |
+| Color cast detection          | Global channel statistics                     |
+| Global tone mapping           | Scene luminance distribution                  |
+| Local tone mapping            | Global and neighborhood luminance             |
+| Dehaze                        | Estimated atmospheric light and transmission  |
+| Dynamic range compression     | Image-wide brightness distribution            |
+| Palette extraction            | Color clustering                              |
+| Automatic palette reduction   | Image-wide color quantization                 |
+| K-means color quantization    | Cluster centers derived from all pixels       |
+| Dominant-color detection      | Histogram or clustering                       |
+| Image normalization by mean   | Whole-image average                           |
+| Standardization               | Whole-image mean and variance                 |
+| Percentile clipping           | Global percentile values                      |
+| Match histogram               | Histograms from source and reference          |
+| Match color                   | Global statistics from two images             |
+| Scene-referred peak detection | Brightest meaningful scene values             |
+| Automatic crop                | Edge/content analysis                         |
+| Saliency detection            | Relative importance across the image          |
+| Content-aware scaling         | Paths of lowest visual importance             |
+| Global noise estimation       | Flat-region statistics                        |
+| Sharpness estimation          | Global edge statistics                        |
+| Focus scoring                 | Frequency or edge measurements                |
+
+
+These can still be nodes, but internally they usually need a reduction pass first: histogram, minimum, maximum, sum, variance, percentile, and so forth.
+
+9. Multiple-image and reference-dependent operations
+
+These need more than one image or frame.
+
+| Operation              | Additional input                       |
+| ---------------------- | -------------------------------------- |
+| Blend/composite        | Second image                           |
+| Difference comparison  | Reference image                        |
+| Color matching         | Reference image                        |
+| Histogram matching     | Reference histogram or image           |
+| LUT inference          | Known input/output pair                |
+| HDR merge              | Multiple exposures                     |
+| Exposure fusion        | Multiple exposures                     |
+| Focus stacking         | Multiple focus distances               |
+| Panorama stitching     | Overlapping images                     |
+| Image alignment        | Reference frame                        |
+| Registration           | One or more corresponding images       |
+| Temporal denoising     | Adjacent video frames                  |
+| Frame interpolation    | Previous and next frames               |
+| Super-resolution       | Multiple frames or learned prior       |
+| Motion estimation      | Multiple frames                        |
+| Background subtraction | Reference background or temporal model |
+| Difference matte       | Clean background plate                 |
+| Chroma key refinement  | Foreground image plus key color/model  |
+| Relighting from depth  | Depth, normals, or scene information   |
+| Depth compositing      | Depth map                              |
+| Normal-map lighting    | Surface-normal map and light direction |
+| Texture transfer       | Source texture or reference image      |
+| Style transfer         | Style image or learned model           |
+
+
+10. Metadata, calibration, or scene-dependent operations
+
+These are the operations that genuinely require information not safely recoverable from ordinary RGB pixels alone.
+
+Operation
+
+| Operation                       | Outside information needed                           |
+| ------------------------------- | ---------------------------------------------------- |
+| Accurate RAW white balance      | Camera metadata or user-selected neutral             |
+| Camera color correction         | Camera-specific calibration matrices or profiles     |
+| RAW black-level subtraction     | Sensor metadata                                      |
+| RAW saturation level            | Sensor metadata                                      |
+| CFA interpretation              | Bayer/X-Trans pattern metadata                       |
+| Lens correction                 | Lens profile, focal length, aperture, focus distance |
+| Vignetting correction           | Lens calibration profile                             |
+| Chromatic-aberration correction | Lens model or image analysis                         |
+| Distortion correction           | Lens coefficients or estimation                      |
+| Flat-field correction           | Calibration image                                    |
+| Dead-pixel correction           | Sensor map or detection                              |
+| Dark-frame subtraction          | Matching dark-frame image                            |
+| Color-chart calibration         | Measured chart reference values                      |
+| Physical color conversion       | Accurate source profile                              |
+| Absolute luminance conversion   | Display or capture calibration                       |
+| Depth-aware blur                | Depth map or depth estimate                          |
+| Scene-linear reconstruction     | RAW data, exposure metadata, or assumptions          |
+| Highlight reconstruction        | Unclipped sensor channels or inferred information    |
+| Camera response recovery        | Multiple exposures or known response curve           |
+| Display proofing                | Output-device ICC profile                            |
+| Print simulation                | Printer, ink, paper, and viewing profiles            |
+
+
+11. Model-based or intent-based operations
+
+These may use only the image as an input, but the result relies on knowledge learned elsewhere rather than a fully inspectable hand-written formula.
+
+| Operation                            | Hidden or external knowledge       |
+| ------------------------------------ | ---------------------------------- |
+| Neural denoising                     | Trained noise/image model          |
+| Neural super-resolution              | Learned detail prior               |
+| Face restoration                     | Learned face model                 |
+| Object removal                       | Semantic image-generation model    |
+| Generative fill                      | Text/image model                   |
+| Sky replacement                      | Segmentation and compositing model |
+| Subject selection                    | Semantic segmentation model        |
+| Skin detection                       | Learned or heuristic classifier    |
+| Depth estimation                     | Learned monocular-depth model      |
+| Relighting                           | Learned geometry/lighting prior    |
+| Automatic grading                    | Learned aesthetic preferences      |
+| Style transfer                       | Learned feature representation     |
+| Image caption-guided editing         | Language and image model           |
+| Deblurring                           | Learned or estimated blur model    |
+| Colorization                         | Learned object and color priors    |
+| Semantic masking                     | Object-recognition model           |
+| Image upscaling with invented detail | Learned generative prior           |

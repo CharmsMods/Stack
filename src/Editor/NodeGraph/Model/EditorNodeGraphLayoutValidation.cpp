@@ -15,6 +15,29 @@ bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
 }
 
+bool IsUniformOrResourceSocketType(SocketType type) {
+    switch (type) {
+        case SocketType::Boolean:
+        case SocketType::Integer:
+        case SocketType::Scalar:
+        case SocketType::Vector2:
+        case SocketType::Vector3:
+        case SocketType::Vector4:
+        case SocketType::Matrix3:
+        case SocketType::Matrix4:
+        case SocketType::Curve:
+        case SocketType::Coordinate:
+        case SocketType::Histogram:
+        case SocketType::Statistics:
+        case SocketType::Metadata:
+        case SocketType::Handle:
+        case SocketType::Value:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
     return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
         socketId == EditorNodeGraph::kDataMathBaseInputSocketId;
@@ -58,6 +81,7 @@ bool IsSourceLikeNode(const Node& node) {
         node.kind == NodeKind::RawSource ||
         node.kind == NodeKind::RawDevelopment ||
         node.kind == NodeKind::ImageGenerator ||
+        node.kind == NodeKind::Value ||
         node.kind == NodeKind::MaskGenerator ||
         node.kind == NodeKind::CustomMask;
 }
@@ -77,6 +101,7 @@ int LayoutKindPriority(const Node& node) {
             return 0;
         case NodeKind::MaskGenerator:
         case NodeKind::CustomMask:
+        case NodeKind::Value:
             return 1;
         case NodeKind::RawNeuralDenoise:
         case NodeKind::RawDecode:
@@ -319,6 +344,7 @@ void Graph::AutoLayout() {
 ValidationResult Graph::Validate() const {
     ValidationResult result;
     std::set<int> ids;
+    std::set<std::string> instanceUuids;
     int outputCount = 0;
     std::set<int> outgoingImages;
 
@@ -327,6 +353,11 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Duplicate or invalid node id.");
         }
+        if (!Stack::NodeMath::IsValidCanonicalUuid(node.instanceUuid) ||
+            !instanceUuids.insert(node.instanceUuid).second) {
+            result.valid = false;
+            result.messages.push_back("Duplicate or invalid node instance UUID.");
+        }
         if (node.kind == NodeKind::Output) {
             ++outputCount;
         }
@@ -334,6 +365,17 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Layer node has no layer reference.");
         }
+        if (!node.definitionResolutionError.empty()) {
+            result.valid = false;
+            result.messages.push_back("Node " + std::to_string(node.id) +
+                " has an unresolved definition: " + node.definitionResolutionError);
+        }
+    }
+
+    for (const Stack::NodeMath::ContractIssue& issue :
+            Stack::NodeMath::ValidateCompoundCatalog(m_CompoundDefinitions)) {
+        result.valid = false;
+        result.messages.push_back("Compound catalog: " + issue.message);
     }
 
     if (outputCount < 1) {
@@ -381,6 +423,7 @@ ValidationResult Graph::Validate() const {
             if (to->kind == NodeKind::Scope) {
                 const bool validScopeInput = link.toSocketId == kScopeInputSocketId &&
                     (fromSocket.type == SocketType::Image ||
+                     fromSocket.type == SocketType::ScalarField ||
                      (fromSocket.type == SocketType::Mask && IsScalarSocketStream(link.fromNodeId, link.fromSocketId)));
                 if (!validScopeInput) {
                     result.valid = false;
@@ -389,6 +432,7 @@ ValidationResult Graph::Validate() const {
             } else if (to->kind == NodeKind::Preview) {
                 const bool validPreview = link.toSocketId == kPreviewInputSocketId &&
                     (fromSocket.type == SocketType::Image ||
+                     fromSocket.type == SocketType::ScalarField ||
                      (fromSocket.type == SocketType::Mask && IsScalarSocketStream(link.fromNodeId, link.fromSocketId)));
                 if (!validPreview) {
                     result.valid = false;
@@ -410,7 +454,24 @@ ValidationResult Graph::Validate() const {
                 result.valid = false;
                 result.messages.push_back("Invalid RAW link.");
             }
-        } else if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask) {
+        } else if (IsUniformOrResourceSocketType(fromSocket.type) ||
+                   IsUniformOrResourceSocketType(toSocket.type)) {
+            const bool exactType = fromSocket.type == toSocket.type;
+            const bool implementedInput = to->kind == NodeKind::TechnicalImage &&
+                link.toSocketId == kExposureValueInputSocketId &&
+                toSocket.type == SocketType::Scalar;
+            if (!exactType || !implementedInput) {
+                result.valid = false;
+                result.messages.push_back(!exactType
+                    ? "Typed value link requires an exact type match."
+                    : "Typed value input is not implemented by the selected node definition.");
+            } else if (from->kind == NodeKind::Value &&
+                       from->value.value.availability != Stack::NodeMath::ValueAvailability::Known) {
+                result.valid = false;
+                result.messages.push_back("An execution-critical typed input is connected but its value is not known.");
+            }
+        } else if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask ||
+                   fromSocket.type == SocketType::ScalarField || toSocket.type == SocketType::ScalarField) {
             const bool fromIsScalarStream = IsScalarSocketStream(link.fromNodeId, link.fromSocketId);
             const bool validScalarSource =
                 ((from->kind == NodeKind::MaskGenerator ||
@@ -419,13 +480,17 @@ ValidationResult Graph::Validate() const {
                   from->kind == NodeKind::CustomMask ||
                   from->kind == NodeKind::ImageToMask ||
                   from->kind == NodeKind::RawDetailAutoMask ||
-                  from->kind == NodeKind::RawDetailFusion) && link.fromSocketId == kMaskOutputSocketId) ||
+                  from->kind == NodeKind::RawDetailFusion ||
+                  from->kind == NodeKind::FrequencyMask ||
+                  from->kind == NodeKind::MagnitudePhase) && link.fromSocketId == kMaskOutputSocketId) ||
                 (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(link.fromSocketId)) ||
                 fromIsScalarStream;
 
-            const bool isScalarToScalar = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask;
-            const bool isScalarImageToScalar = fromSocket.type == SocketType::Image && toSocket.type == SocketType::Mask && fromIsScalarStream;
-            const bool isScalarToImage = fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image;
+            const bool fromScalarField = fromSocket.type == SocketType::Mask || fromSocket.type == SocketType::ScalarField;
+            const bool toScalarField = toSocket.type == SocketType::Mask || toSocket.type == SocketType::ScalarField;
+            const bool isScalarToScalar = fromScalarField && toScalarField;
+            const bool isScalarImageToScalar = fromSocket.type == SocketType::Image && toScalarField && fromIsScalarStream;
+            const bool isScalarToImage = fromScalarField && toSocket.type == SocketType::Image;
 
             if (isScalarToScalar || isScalarImageToScalar) {
                 const bool validScalarTarget = IsScalarTargetSocket(link.toNodeId, link.toSocketId);
@@ -437,12 +502,20 @@ ValidationResult Graph::Validate() const {
                 const bool validImageTarget =
                     (to->kind == NodeKind::Layer && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::Lut && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::TechnicalImage && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::RawDetailAutoMask && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::Mix && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
                     (to->kind == NodeKind::Output && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::ImageToMask && link.toSocketId == kImageToMaskInputSocketId) ||
                     (to->kind == NodeKind::ChannelSplit && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::FrequencyFft && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::FrequencyIfft && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::SpectrumView && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::SpectrumAnalyzer && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::MagnitudePhase && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::SpectrumMath &&
+                        (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
                     DataMathAllowsScalarToImageTarget(*to, link.toSocketId);
                 if (!validScalarSource || !validImageTarget) {
                     result.valid = false;
@@ -584,6 +657,17 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::Output ||
         node.kind == NodeKind::Mix ||
         node.kind == NodeKind::DataMath ||
+        node.kind == NodeKind::TechnicalImage ||
+        node.kind == NodeKind::FieldMean ||
+        node.kind == NodeKind::Reformat ||
+        node.kind == NodeKind::Compound ||
+        node.kind == NodeKind::FrequencyFft ||
+        node.kind == NodeKind::FrequencyIfft ||
+        node.kind == NodeKind::SpectrumView ||
+        node.kind == NodeKind::FrequencyMask ||
+        node.kind == NodeKind::SpectrumMath ||
+        node.kind == NodeKind::MagnitudePhase ||
+        node.kind == NodeKind::SpectrumAnalyzer ||
         node.kind == NodeKind::ImageToMask ||
         node.kind == NodeKind::CustomMask ||
         node.kind == NodeKind::ChannelSplit ||
@@ -611,6 +695,13 @@ bool Graph::IsRenderLink(const Link& link) const {
         return true;
     }
     if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask) {
+        return true;
+    }
+    if ((fromSocket.type == SocketType::Mask || fromSocket.type == SocketType::ScalarField) &&
+        (toSocket.type == SocketType::Mask || toSocket.type == SocketType::ScalarField)) {
+        return true;
+    }
+    if (fromSocket.type == SocketType::Scalar && toSocket.type == SocketType::Scalar) {
         return true;
     }
     if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image) {
