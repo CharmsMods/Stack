@@ -69,6 +69,10 @@ struct RawMetadataSummary {
     bool hasActiveArea = false;
     bool hasMaskedAreas = false;
     bool hasLinearResponseLimit = false;
+    int appliedOpcodeList2Count = 0;
+    int unsupportedOpcodeList1Count = 0;
+    int unsupportedOpcodeList2Count = 0;
+    int unsupportedOpcodeList3Count = 0;
 
     float cameraWbR = 1.0f;
     float cameraWbG = 1.0f;

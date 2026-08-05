@@ -2,14 +2,15 @@
 
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Library/LibraryManager.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "Presets/PresetManager.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
 #include <algorithm>
-#include <cctype>
 #include <cstring>
+#include <utility>
 
 namespace {
 
@@ -22,32 +23,6 @@ void PostNodeGraphContextNotification(
         return;
     }
     editor->ShowUiNotification(severity, message, dedupeKey ? dedupeKey : "");
-}
-
-std::string DefaultProjectExportFileName(const EditorModule* editor) {
-    if (!editor) {
-        return "project.stack";
-    }
-    if (!editor->GetCurrentProjectFileName().empty()) {
-        return editor->GetCurrentProjectFileName();
-    }
-    if (!editor->GetCurrentProjectName().empty()) {
-        std::string stem;
-        for (unsigned char ch : editor->GetCurrentProjectName()) {
-            if (std::isalnum(ch) || ch == '_' || ch == '-') {
-                stem.push_back(static_cast<char>(ch));
-            } else if (std::isspace(ch)) {
-                stem.push_back('_');
-            }
-        }
-        while (!stem.empty() && stem.back() == '_') {
-            stem.pop_back();
-        }
-        if (!stem.empty()) {
-            return stem + ".stack";
-        }
-    }
-    return "project.stack";
 }
 
 std::string DefaultPresetName(const EditorModule* editor) {
@@ -150,13 +125,140 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     editor->ClearGraphAutoFocusIfTrackedNode(node->id);
                 }
             }
+            if (const EditorNodeGraphDefinitions::LiveNodeDefinition* definition =
+                    EditorNodeGraphDefinitions::FindLiveNodeDefinition(*node)) {
+                const bool hasExposableParameter = std::any_of(
+                    definition->parameters.begin(),
+                    definition->parameters.end(),
+                    [](const EditorNodeGraphDefinitions::LiveParameterDefinition& parameter) {
+                        return parameter.graphInputCapable;
+                    });
+                if (hasExposableParameter && ImGui::BeginMenu("Expose as Input")) {
+                    for (const EditorNodeGraphDefinitions::LiveParameterDefinition& parameter :
+                         definition->parameters) {
+                        if (!parameter.graphInputCapable) continue;
+                        const bool exposed = std::find(
+                            node->exposedParameterIds.begin(),
+                            node->exposedParameterIds.end(),
+                            parameter.id) != node->exposedParameterIds.end();
+                        if (ImGui::MenuItem(
+                                parameter.label.c_str(), nullptr, exposed)) {
+                            editor->SetFrequencyParameterExposed(
+                                node->id, parameter.id, !exposed);
+                        }
+                    }
+                    if (node->kind ==
+                        EditorNodeGraph::NodeKind::FrequencyResponse) {
+                        for (std::size_t notchIndex = 0;
+                             notchIndex <
+                                 node->frequencyResponseSettings.notches.size();
+                             ++notchIndex) {
+                            const EditorNodeGraph::FrequencyNotch& notch =
+                                node->frequencyResponseSettings.notches[
+                                    notchIndex];
+                            for (const auto& field : {
+                                     std::pair<const char*, const char*>{
+                                         "frequency", "Frequency" },
+                                     { "direction", "Direction" },
+                                     { "width", "Width" } }) {
+                                const std::string parameterId =
+                                    EditorNodeGraph::FrequencyNotchParameterId(
+                                        notch.id, field.first);
+                                const bool exposed = std::find(
+                                    node->exposedParameterIds.begin(),
+                                    node->exposedParameterIds.end(),
+                                    parameterId) !=
+                                    node->exposedParameterIds.end();
+                                const std::string label =
+                                    "Notch " +
+                                    std::to_string(notchIndex + 1) + " " +
+                                    field.second;
+                                if (ImGui::MenuItem(
+                                        label.c_str(), nullptr, exposed)) {
+                                    editor->SetFrequencyParameterExposed(
+                                        node->id, parameterId, !exposed);
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+            }
+            if (node->kind == EditorNodeGraph::NodeKind::FrequencyFilter) {
+                const bool hasResponse = editor->GetNodeGraph().FindAnyInputLink(
+                    node->id,
+                    EditorNodeGraph::kFrequencyResponseInputSocketId) != nullptr;
+                ImGui::BeginDisabled(hasResponse);
+                if (ImGui::MenuItem("Extract Response Node")) {
+                    std::string error;
+                    if (!editor->ExtractFrequencyResponseNode(node->id, &error)) {
+                        PostNodeGraphContextNotification(
+                            editor, UiNotificationSeverity::Error,
+                            error, "frequency-extract-response");
+                    } else {
+                        node = editor->GetNodeGraph().FindNode(m_ContextNodeId);
+                    }
+                }
+                ImGui::EndDisabled();
+                if (ImGui::MenuItem("Expand to Advanced Nodes")) {
+                    std::string error;
+                    if (!editor->ExpandFrequencyFilterNode(node->id, &error)) {
+                        PostNodeGraphContextNotification(
+                            editor, UiNotificationSeverity::Error,
+                            error, "frequency-expand-advanced");
+                    } else {
+                        ImGui::EndPopup();
+                        ImGui::PopStyleVar();
+                        return;
+                    }
+                }
+            }
+            if (editor->CanUndoFrequencyGraphAction() ||
+                editor->CanRedoFrequencyGraphAction()) {
+                ImGui::Separator();
+                if (ImGui::MenuItem(
+                        "Undo Frequency Action", "Ctrl+Z", false,
+                        editor->CanUndoFrequencyGraphAction())) {
+                    editor->UndoFrequencyGraphAction();
+                    ImGui::EndPopup();
+                    ImGui::PopStyleVar();
+                    return;
+                }
+                if (ImGui::MenuItem(
+                        "Redo Frequency Action", "Ctrl+Y", false,
+                        editor->CanRedoFrequencyGraphAction())) {
+                    editor->RedoFrequencyGraphAction();
+                    ImGui::EndPopup();
+                    ImGui::PopStyleVar();
+                    return;
+                }
+            }
             if (node->kind == EditorNodeGraph::NodeKind::Output) {
-                ImGui::BeginDisabled(!editor->GetNodeGraph().IsOutputConnected() || editor->IsExportBusy());
+                bool outputUsesChannel = false;
+                if (const EditorNodeGraph::Link* input =
+                        editor->GetNodeGraph().FindInputLink(
+                            node->id,
+                            EditorNodeGraph::kImageInputSocketId)) {
+                    outputUsesChannel =
+                        editor->GetNodeGraph().IsScalarSocketStream(
+                            input->fromNodeId,
+                            input->fromSocketId);
+                }
+                ImGui::BeginDisabled(
+                    !editor->GetNodeGraph().IsOutputConnected() ||
+                    outputUsesChannel ||
+                    editor->IsExportBusy());
                 if (ImGui::MenuItem("Export")) {
                     const std::string path = FileDialogs::SavePngFileDialog("Export Rendered Image", "rendered_output.png");
                     if (!path.empty()) {
                         editor->RequestExportImage(path);
                     }
+                }
+                if (outputUsesChannel &&
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip(
+                        "PNG export requires an Image. Connect this Channel "
+                        "to Image Combine first.");
                 }
                 ImGui::EndDisabled();
                 if (ImGui::MenuItem(node->outputEnabled ? "Deactivate Output" : "Activate Output", "D")) {
@@ -233,22 +335,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         ImGui::EndPopup();
     }
     else if (contextMenuOpen) {
-        const bool canSaveProject = editor &&
-            (editor->GetPipeline().HasSourceImage() || editor->GetNodeGraph().IsOutputConnected());
         const bool canRenameProject = editor &&
             (!editor->GetCurrentProjectName().empty() || !editor->GetCurrentProjectFileName().empty());
         const bool saveBusy = Async::IsBusy(LibraryManager::Get().GetSaveTaskState());
-        const bool exportBusy = editor && editor->IsExportBusy();
-
-        if (ImGui::MenuItem("New Project")) {
-            editor->RequestNewProject();
-        }
-        if (ImGui::MenuItem("Load Project File...")) {
-            const std::string path = FileDialogs::OpenProjectFileDialog("Load Project File");
-            if (!path.empty()) {
-                LibraryManager::Get().RequestImportAndLoad(path, editor);
-            }
-        }
 
         ImGui::BeginDisabled(!canRenameProject || saveBusy);
         if (ImGui::MenuItem("Rename Project")) {
@@ -260,27 +349,6 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
             m_OpenRenameProjectPopup = true;
         }
         ImGui::EndDisabled();
-
-        if (ImGui::BeginMenu("Save...")) {
-            ImGui::BeginDisabled(!canSaveProject || saveBusy);
-            if (ImGui::MenuItem("To Library")) {
-                const std::string projectName = editor->GetCurrentProjectName().empty()
-                    ? "New Project"
-                    : editor->GetCurrentProjectName();
-                editor->RequestSaveCurrentProject(projectName);
-            }
-            ImGui::EndDisabled();
-
-            ImGui::BeginDisabled(!canSaveProject || exportBusy);
-            if (ImGui::MenuItem("Export File")) {
-                const std::string path = FileDialogs::SaveProjectFileDialog("Export Project File", DefaultProjectExportFileName(editor).c_str());
-                if (!path.empty()) {
-                    editor->RequestExportProject(path);
-                }
-            }
-            ImGui::EndDisabled();
-            ImGui::EndMenu();
-        }
 
         ImGui::Separator();
 
@@ -441,8 +509,12 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 if (ImGui::MenuItem("Channel Split")) {
                     editor->AddChannelSplitNodeAt(m_ContextGraphPos);
                 }
-                if (ImGui::MenuItem("Channel Combine")) {
+                if (ImGui::MenuItem("Image Combine")) {
                     editor->AddChannelCombineNodeAt(m_ContextGraphPos);
+                }
+                if (ImGui::MenuItem("Constant Channel")) {
+                    editor->AddConstantChannelNodeAt(
+                        m_ContextGraphPos);
                 }
                 ImGui::EndMenu();
             }
@@ -488,6 +560,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 }
                 if (ImGui::MenuItem("Whole Graph / Tree + State")) {
                     CopyGraphInfo(editor, true, true);
+                }
+                if (ImGui::MenuItem("Whole Graph / Ordered Structure (No Layout)")) {
+                    CopyGraphInfo(editor, true, true, false);
                 }
                 ImGui::EndMenu();
             }

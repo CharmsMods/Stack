@@ -2,7 +2,9 @@
 
 #include "Editor/EditorModule.h"
 #include "Renderer/FullscreenQuad.h"
+#include "Renderer/GLStateGuards.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +15,8 @@
 #include <fstream>
 #include <imgui.h>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,9 +27,12 @@ struct ClassicalRgbDenoiseLayer::FloatImage {
     std::vector<float> rgba;
 
     bool IsValid() const {
+        std::size_t expectedElements = 0;
         return width > 0 &&
             height > 0 &&
-            rgba.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+            Stack::PixelBuffer::TryComputePixelElementCount(
+                width, height, 4, expectedElements) &&
+            rgba.size() == expectedElements;
     }
 };
 
@@ -784,6 +791,7 @@ void ClassicalRgbDenoiseLayer::Execute(unsigned int inputTexture, int width, int
         return;
     }
 
+    try {
     const auto start = std::chrono::steady_clock::now();
     const QualityPlan qualityPlan = QualityPlanForMode(m_QualityMode);
     std::vector<CandidateParams> candidates = BuildCandidates(
@@ -871,6 +879,19 @@ void ClassicalRgbDenoiseLayer::Execute(unsigned int inputTexture, int width, int
     m_RunRequestAllowLargeCpu = false;
     m_LastExecutionStatus = "Cached result";
     PublishRenderStatus();
+    } catch (const std::bad_alloc&) {
+        m_RunRequestAllowLargeCpu = false;
+        m_LastExecutionStatus = "Processing failed: insufficient memory";
+        m_LastError = m_LastExecutionStatus;
+        PublishRenderStatus();
+        DrawCopy(inputTexture, quad);
+    } catch (const std::length_error&) {
+        m_RunRequestAllowLargeCpu = false;
+        m_LastExecutionStatus = "Processing failed: image dimensions exceed CPU buffer limits";
+        m_LastError = m_LastExecutionStatus;
+        PublishRenderStatus();
+        DrawCopy(inputTexture, quad);
+    }
 }
 
 void ClassicalRgbDenoiseLayer::DrawCopy(unsigned int inputTexture, FullscreenQuad& quad) {
@@ -891,47 +912,55 @@ bool ClassicalRgbDenoiseLayer::ReadTextureToImage(unsigned int inputTexture, int
         return false;
     }
 
-    GLint prevReadFbo = 0;
-    GLint prevDrawFbo = 0;
-    GLint prevFbo = 0;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFbo);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
-
-    GLuint readFbo = 0;
-    glGenFramebuffers(1, &readFbo);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, inputTexture, 0);
-    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevReadFbo));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(prevDrawFbo));
-        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
-        glDeleteFramebuffers(1, &readFbo);
+    std::size_t elementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            width, height, 4, elementCount)) {
+        return false;
+    }
+    FloatImage image;
+    image.width = width;
+    image.height = height;
+    try {
+        image.rgba.assign(elementCount, 0.0f);
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
         return false;
     }
 
-    std::vector<float> bottomLeft(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u, 0.0f);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, bottomLeft.data());
-
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevReadFbo));
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(prevDrawFbo));
-    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
-    glDeleteFramebuffers(1, &readFbo);
-
-    outImage.width = width;
-    outImage.height = height;
-    outImage.rgba.assign(bottomLeft.size(), 0.0f);
-    for (int y = 0; y < height; ++y) {
-        const int sourceY = height - 1 - y;
-        const std::size_t dst = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u;
-        const std::size_t src = static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(width) * 4u;
-        std::copy(
-            bottomLeft.begin() + static_cast<std::ptrdiff_t>(src),
-            bottomLeft.begin() + static_cast<std::ptrdiff_t>(src + static_cast<std::size_t>(width) * 4u),
-            outImage.rgba.begin() + static_cast<std::ptrdiff_t>(dst));
+    const Stack::Renderer::GLState::FramebufferState savedFramebufferState;
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
+    const GLuint readFbo = GLHelpers::CreateFBO(inputTexture);
+    if (readFbo == 0) {
+        savedPackState.Restore();
+        return false;
     }
-    return outImage.IsValid();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, image.rgba.data());
+    const GLenum readError = glGetError();
+
+    savedPackState.Restore();
+    savedFramebufferState.Restore();
+    glDeleteFramebuffers(1, &readFbo);
+    if (readError != GL_NO_ERROR) {
+        return false;
+    }
+
+    const std::size_t rowElements = static_cast<std::size_t>(width) * 4u;
+    for (int y = 0; y < height / 2; ++y) {
+        const std::size_t top = static_cast<std::size_t>(y) * rowElements;
+        const std::size_t bottom =
+            static_cast<std::size_t>(height - 1 - y) * rowElements;
+        std::swap_ranges(
+            image.rgba.begin() + static_cast<std::ptrdiff_t>(top),
+            image.rgba.begin() + static_cast<std::ptrdiff_t>(top + rowElements),
+            image.rgba.begin() + static_cast<std::ptrdiff_t>(bottom));
+    }
+    outImage = std::move(image);
+    return true;
 }
 
 bool ClassicalRgbDenoiseLayer::UploadAndDrawResult(const FloatImage& image, FullscreenQuad& quad) {
@@ -939,25 +968,14 @@ bool ClassicalRgbDenoiseLayer::UploadAndDrawResult(const FloatImage& image, Full
         return false;
     }
 
-    if (m_ResultTexture == 0 || m_ResultWidth != image.width || m_ResultHeight != image.height) {
-        if (m_ResultTexture) {
-            glDeleteTextures(1, &m_ResultTexture);
-            m_ResultTexture = 0;
-        }
-        glGenTextures(1, &m_ResultTexture);
-        glBindTexture(GL_TEXTURE_2D, m_ResultTexture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, image.width, image.height, 0, GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        m_ResultWidth = image.width;
-        m_ResultHeight = image.height;
-    } else {
-        glBindTexture(GL_TEXTURE_2D, m_ResultTexture);
+    std::vector<float> bottomLeft;
+    try {
+        bottomLeft.resize(image.rgba.size());
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
     }
-
-    std::vector<float> bottomLeft(image.rgba.size(), 0.0f);
     for (int y = 0; y < image.height; ++y) {
         const int dstY = image.height - 1 - y;
         const std::size_t src = static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width) * 4u;
@@ -968,9 +986,44 @@ bool ClassicalRgbDenoiseLayer::UploadAndDrawResult(const FloatImage& image, Full
             bottomLeft.begin() + static_cast<std::ptrdiff_t>(dst));
     }
 
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    const bool needsNewTexture =
+        m_ResultTexture == 0 ||
+        m_ResultWidth != image.width ||
+        m_ResultHeight != image.height;
+    const unsigned int newTexture = needsNewTexture
+        ? GLHelpers::CreateEmptyTexture(image.width, image.height)
+        : 0;
+    if (needsNewTexture && newTexture == 0) {
+        return false;
+    }
+    const unsigned int uploadTexture =
+        needsNewTexture ? newTexture : m_ResultTexture;
+
+    const Stack::Renderer::GLState::TextureBinding savedTexture(
+        GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
+    const Stack::Renderer::GLState::PixelUnpackState savedUnpackState;
+    glBindTexture(GL_TEXTURE_2D, uploadTexture);
+    savedUnpackState.ConfigureTightCpuUpload();
+    while (glGetError() != GL_NO_ERROR) {}
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image.width, image.height, GL_RGBA, GL_FLOAT, bottomLeft.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
+    const GLenum uploadError = glGetError();
+    savedUnpackState.Restore();
+    savedTexture.Restore();
+    if (uploadError != GL_NO_ERROR) {
+        if (newTexture != 0) {
+            glDeleteTextures(1, &newTexture);
+        }
+        return false;
+    }
+
+    if (needsNewTexture) {
+        if (m_ResultTexture != 0) {
+            glDeleteTextures(1, &m_ResultTexture);
+        }
+        m_ResultTexture = newTexture;
+        m_ResultWidth = image.width;
+        m_ResultHeight = image.height;
+    }
     DrawCopy(m_ResultTexture, quad);
     return true;
 }

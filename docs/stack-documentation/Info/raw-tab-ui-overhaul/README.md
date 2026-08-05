@@ -1,5 +1,11 @@
 # RAW Tab UI Overhaul Notes
 
+## Status
+
+This is supporting history for the former automatic RAW-editor direction. That
+direction was archived on July 23, 2026. Current work begins at
+`docs/stack-documentation/Current/raw-tab-ui-overhaul/manual-first-raw-workflow/README.md`.
+
 ## Purpose
 
 This packet began as planning/design documentation and now includes an implementation contract for the first RAW tab UI overhaul passes. The goal is to make the RAW tab easier to understand, faster to operate, and more honest about what Auto Base is doing before we spend too much time testing image behavior through the current UI.
@@ -52,16 +58,19 @@ The strongest existing interaction surfaces are the Local Range graph and Finish
 
 ## Documentation Map
 
-The active validation/contract subset for this older overhaul packet now lives in `docs/stack-documentation/Current/raw-tab-ui-overhaul/`. The broader background and historical planning notes are rehomed here in `docs/stack-documentation/`.
+The former active validation/contract subset is archived under
+`docs/stack-documentation/Archived/raw-tab-ui-overhaul/automatic-raw-editor-2026-07-23/`.
+The broader background and historical planning notes remain here.
 
-- `docs/stack-documentation/Current/raw-tab-ui-overhaul/implementation-contract.md`: controlling defaults for the first UI implementation passes.
+- `docs/stack-documentation/Current/raw-tab-ui-overhaul/manual-first-raw-workflow/README.md`: current manual-first RAW editor entry point.
+- `docs/stack-documentation/Archived/raw-tab-ui-overhaul/automatic-raw-editor-2026-07-23/implementation-contract.md`: former controlling defaults for the automatic UI implementation passes.
 - `docs/stack-documentation/Archived/raw-tab-ui-overhaul/implementation-passes.md`: pass-by-pass implementation order and acceptance criteria.
-- `docs/stack-documentation/Current/raw-tab-ui-overhaul/ui-validation-checklist.md`: manual/UI validation checklist for layout and interaction passes.
-- `docs/stack-documentation/Current/raw-tab-ui-overhaul/pass-11-validation-notes.md`: automated evidence, manual visual gaps, and accepted deferred behavior from the first UI overhaul implementation set.
+- `docs/stack-documentation/Archived/raw-tab-ui-overhaul/automatic-raw-editor-2026-07-23/ui-validation-checklist.md`: former manual/UI validation checklist.
+- `docs/stack-documentation/Archived/raw-tab-ui-overhaul/automatic-raw-editor-2026-07-23/pass-11-validation-notes.md`: former automated evidence and manual visual gaps.
 - `docs/stack-documentation/Archived/raw-tab-ui-overhaul/current-ui-map.md`: how the UI was originally assembled and where the pressure points were before the shipped overhaul.
 - `docs/stack-documentation/Info/raw-tab-ui-overhaul/side-panel-redesign-spec.md`: proposed rules for ordering, density, visibility, text, spacing, and control grouping.
 - `interaction-ideas.md`: concrete ideas for turning existing controls into better interaction surfaces.
-- `docs/stack-documentation/Current/raw-tab-ui-overhaul/auto-starting-point/`: automatic/foundational RAW control research, including ordering, ownership, recompute timing, and the proposed staged sampling model for a one-click starting point button.
+- `docs/stack-documentation/Archived/raw-tab-ui-overhaul/automatic-raw-editor-2026-07-23/auto-starting-point/`: archived automatic/foundational RAW control research and solver history.
 - `human-workflow-notes.md`: plain-language workflow model, including suggestion preview behavior.
 - `missed-angles-audit.md`: extra design angles checked before the implementation contract was written.
 - `docs/stack-documentation/Archived/raw-tab-ui-overhaul/open-questions.md`: previous open questions, now mostly resolved into implementation defaults.
@@ -96,7 +105,8 @@ Use a hybrid layout:
 - Suggestions should use a dedicated popout/expander pattern with hover preview and click-to-apply, while owning sections show compact local markers or applied state.
 - Before implementation, fold in the missing-angle audit around preview state, undo/revert behavior, Display Fit staleness, center workspace modes, and suggestion-chip/popout wording.
 
-The finalized implementation defaults now live in `docs/stack-documentation/Current/raw-tab-ui-overhaul/implementation-contract.md`. The design docs are still useful context, but implementation should not treat every exploratory note as required scope.
+These design docs remain historical context. Current implementation direction
+lives in the manual-first RAW workflow packet.
 
 ## Important Caution
 

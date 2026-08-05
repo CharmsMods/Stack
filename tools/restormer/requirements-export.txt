@@ -1,0 +1,6 @@
+einops
+numpy
+onnx
+onnxruntime
+onnxscript
+torch

@@ -20,6 +20,10 @@ using namespace Stack::Library::ModuleUI;
 
 namespace {
 
+constexpr float kLibraryViewScaleMin = 0.55f;
+constexpr float kLibraryViewScaleMax = 1.80f;
+constexpr float kLibraryViewScaleStep = 1.10f;
+
 ImVec4 BlendColor(const ImVec4& from, const ImVec4& to, float t) {
     const float clamped = std::clamp(t, 0.0f, 1.0f);
     return ImVec4(
@@ -58,9 +62,34 @@ void LibraryModule::RenderLibraryGrid(
     }
 
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
-        const float wheel = ImGui::GetIO().MouseWheel;
+        const ImGuiIO& io = ImGui::GetIO();
+        const float wheel = io.MouseWheel;
         if (wheel != 0.0f) {
-            m_ScrollTargetY -= wheel * 90.0f;
+            if (io.KeyCtrl) {
+                const float previousScale = m_LibraryViewScale;
+                m_LibraryViewScale = std::clamp(
+                    previousScale * std::pow(kLibraryViewScaleStep, wheel),
+                    kLibraryViewScaleMin,
+                    kLibraryViewScaleMax);
+
+                if (std::abs(m_LibraryViewScale - previousScale) > 0.0001f) {
+                    const float scaleRatio = m_LibraryViewScale / previousScale;
+                    const float cursorOffsetY = std::clamp(
+                        io.MousePos.y - ImGui::GetWindowPos().y,
+                        0.0f,
+                        ImGui::GetWindowHeight());
+                    const float anchoredScrollY =
+                        (currentScrollY + cursorOffsetY) * scaleRatio - cursorOffsetY;
+                    m_ScrollTargetY = std::max(0.0f, anchoredScrollY);
+                    m_ScrollCurrentY = m_ScrollTargetY;
+                    m_CachedLayoutKey.clear();
+                    SaveViewState();
+                }
+
+                ImGui::SetTooltip("Library view: %.0f%%", m_LibraryViewScale * 100.0f);
+            } else {
+                m_ScrollTargetY -= wheel * 90.0f;
+            }
         }
     }
 
@@ -68,7 +97,7 @@ void LibraryModule::RenderLibraryGrid(
     const ImVec2 layoutStartScreen = ImGui::GetCursorScreenPos();
     const ImVec2 layoutStartLocal = ImGui::GetCursorPos();
     const float layoutWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-    const float packedCardGap = 22.0f;
+    const float packedCardGap = 22.0f * m_LibraryViewScale;
     const auto layoutStarted = std::chrono::steady_clock::now();
     const auto& assets = LibraryManager::Get().GetAssets();
     const auto& projects = LibraryManager::Get().GetProjects();
@@ -88,7 +117,10 @@ void LibraryModule::RenderLibraryGrid(
 
             LibraryPackedCard card;
             card.index = idx;
-            card.size = ComputeLibraryCardSize(static_cast<float>(asset->width), static_cast<float>(asset->height));
+            card.size = ComputeLibraryCardSize(
+                static_cast<float>(asset->width),
+                static_cast<float>(asset->height),
+                m_LibraryViewScale);
             cards.push_back(card);
             contentHash = HashCombine(contentHash, HashString(asset->fileName));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, asset->width)));
@@ -107,7 +139,10 @@ void LibraryModule::RenderLibraryGrid(
 
             LibraryPackedCard card;
             card.index = idx;
-            card.size = ComputeLibraryCardSize(static_cast<float>(project->sourceWidth), static_cast<float>(project->sourceHeight));
+            card.size = ComputeLibraryCardSize(
+                static_cast<float>(project->sourceWidth),
+                static_cast<float>(project->sourceHeight),
+                m_LibraryViewScale);
             cards.push_back(card);
             contentHash = HashCombine(contentHash, HashString(project->fileName));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, project->sourceWidth)));
@@ -118,6 +153,7 @@ void LibraryModule::RenderLibraryGrid(
     std::ostringstream layoutKey;
     layoutKey << (m_ShowAssets ? 'A' : 'P')
               << '|' << static_cast<int>(std::round(layoutWidth))
+              << '|' << static_cast<int>(std::round(m_LibraryViewScale * 1000.0f))
               << '|' << refreshSnapshot.generation
               << '|' << m_FilterNoTag
               << '|' << m_SearchFilter

@@ -2,15 +2,20 @@
 
 #include "ThirdParty/json.hpp"
 #include "ThirdParty/stb_image.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +32,25 @@ struct VoxelAccumulator {
     std::array<float, 3> sum { 0.0f, 0.0f, 0.0f };
     float weight = 0.0f;
 };
+
+bool TryComputeVoxelCount(int edgeLength, std::size_t& outCount) {
+    outCount = 0;
+    if (edgeLength <= 1) {
+        return false;
+    }
+    const std::size_t edge =
+        static_cast<std::size_t>(edgeLength);
+    if (edge > std::numeric_limits<std::size_t>::max() / edge) {
+        return false;
+    }
+    const std::size_t square = edge * edge;
+    if (square > std::numeric_limits<std::size_t>::max() / edge) {
+        return false;
+    }
+    outCount = square * edge;
+    return outCount <=
+        std::numeric_limits<std::size_t>::max() / 3u;
+}
 
 std::string FileStem(const std::string& path) {
     try {
@@ -328,15 +352,23 @@ bool LoadRasterImageForLutCreator(const std::string& path, LutCreatorImage& outI
         return false;
     }
 
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, width, height, 4, outImage.pixels);
+    stbi_image_free(pixels);
+    if (!copied) {
+        outImage = {};
+        if (outMessage) {
+            *outMessage =
+                "The decoded image dimensions exceed available memory.";
+        }
+        return false;
+    }
+
     outImage.sourcePath = path;
     outImage.width = width;
     outImage.height = height;
     outImage.channels = 4;
     outImage.originalChannels = originalChannels;
-    outImage.pixels.assign(
-        pixels,
-        pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
-    stbi_image_free(pixels);
 
     if (outMessage) {
         outMessage->clear();
@@ -345,7 +377,9 @@ bool LoadRasterImageForLutCreator(const std::string& path, LutCreatorImage& outI
 }
 
 std::array<float, 3> SampleLut3D(const Lut3DStage& stage, const std::array<float, 3>& rgb) {
-    if (stage.size <= 1 || stage.values.size() != static_cast<std::size_t>(stage.size) * static_cast<std::size_t>(stage.size) * static_cast<std::size_t>(stage.size) * 3u) {
+    std::size_t voxelCount = 0;
+    if (!TryComputeVoxelCount(stage.size, voxelCount) ||
+        stage.values.size() != voxelCount * 3u) {
         return rgb;
     }
 
@@ -410,12 +444,22 @@ LutCreatorResult CreateLutFromImages(
     result.payload.inputTransform = settings.inputTransform;
     result.payload.outputTransform = settings.outputTransform;
 
-    if (sourceImage.width <= 0 || sourceImage.height <= 0 || sourceImage.pixels.empty()) {
+    if (sourceImage.channels != 4 ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            sourceImage.pixels.size(),
+            sourceImage.width,
+            sourceImage.height,
+            4)) {
         result.message = "Choose a valid source image before generating a LUT.";
         result.payload.importError = result.message;
         return result;
     }
-    if (targetImage.width <= 0 || targetImage.height <= 0 || targetImage.pixels.empty()) {
+    if (targetImage.channels != 4 ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            targetImage.pixels.size(),
+            targetImage.width,
+            targetImage.height,
+            4)) {
         result.message = "Choose a valid target image before generating a LUT.";
         result.payload.importError = result.message;
         return result;
@@ -425,17 +469,16 @@ LutCreatorResult CreateLutFromImages(
         result.payload.importError = result.message;
         return result;
     }
-    if (settings.lutSize <= 1) {
-        result.message = "Choose a LUT size greater than 1.";
+    std::size_t voxelCount = 0;
+    if (!TryComputeVoxelCount(settings.lutSize, voxelCount)) {
+        result.message =
+            "Choose a LUT size whose 3D grid fits supported memory limits.";
         result.payload.importError = result.message;
         return result;
     }
 
+    try {
     const int effectiveStride = ComputeEffectiveStride(sourceImage, settings);
-    const std::size_t voxelCount =
-        static_cast<std::size_t>(settings.lutSize) *
-        static_cast<std::size_t>(settings.lutSize) *
-        static_cast<std::size_t>(settings.lutSize);
     std::vector<VoxelAccumulator> accumulators(voxelCount);
     int sampledPixelCount = 0;
 
@@ -482,7 +525,9 @@ LutCreatorResult CreateLutFromImages(
                 }
             }
 
-            ++sampledPixelCount;
+            if (sampledPixelCount < std::numeric_limits<int>::max()) {
+                ++sampledPixelCount;
+            }
         }
     }
 
@@ -574,7 +619,14 @@ LutCreatorResult CreateLutFromImages(
     payload.lut3D.domainMax = { 1.0f, 1.0f, 1.0f };
     payload.lut3D.values = std::move(values);
 
-    result.stats.totalPixelCount = sourceImage.width * sourceImage.height;
+    const std::uint64_t totalPixelCount =
+        static_cast<std::uint64_t>(sourceImage.width) *
+        static_cast<std::uint64_t>(sourceImage.height);
+    result.stats.totalPixelCount = static_cast<int>(
+        std::min<std::uint64_t>(
+            totalPixelCount,
+            static_cast<std::uint64_t>(
+                std::numeric_limits<int>::max())));
     result.stats.sampledPixelCount = sampledPixelCount;
     result.stats.effectiveStride = effectiveStride;
     result.stats.voxelCoverage = voxelCount > 0u
@@ -597,7 +649,9 @@ LutCreatorResult CreateLutFromImages(
             maeSum += (static_cast<double>(er) + static_cast<double>(eg) + static_cast<double>(eb)) / 3.0;
             mseSum += (static_cast<double>(er * er) + static_cast<double>(eg * eg) + static_cast<double>(eb * eb)) / 3.0;
             maxError = std::max(maxError, maxChannelError);
-            ++evaluatedSamples;
+            if (evaluatedSamples < std::numeric_limits<int>::max()) {
+                ++evaluatedSamples;
+            }
         }
     }
 
@@ -613,6 +667,22 @@ LutCreatorResult CreateLutFromImages(
     result.success = true;
     result.message = "LUT generated successfully.";
     result.payload = std::move(payload);
+    return result;
+    } catch (const std::bad_alloc&) {
+        result.success = false;
+        result.message =
+            "LUT generation requires more memory than is safely available.";
+    } catch (const std::length_error&) {
+        result.success = false;
+        result.message =
+            "The requested LUT dimensions exceed supported memory limits.";
+    } catch (const std::exception& error) {
+        result.success = false;
+        result.message =
+            std::string("LUT generation failed safely: ") + error.what();
+    }
+    result.payload.importError = result.message;
+    ClearCanonicalLutData(result.payload);
     return result;
 }
 

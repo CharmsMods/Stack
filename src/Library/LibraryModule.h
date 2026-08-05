@@ -109,6 +109,8 @@ private:
     void RenderDeleteConfirmPopup();
     void SyncRenameBuffer();
     void OpenAssetPreviewByFileName(const std::string& fileName);
+    void LoadViewState();
+    void SaveViewState() const;
 
     std::shared_ptr<struct ProjectEntry> m_PreviewProject = nullptr;
     std::shared_ptr<struct AssetEntry> m_PreviewAsset = nullptr;
@@ -120,11 +122,9 @@ private:
     float m_CompareSplit = 0.5f;
     float m_ConflictCompareSplit = 0.5f;
     float m_AssetConflictCompareSplit = 0.5f;
-    float m_FilterPanelWidth = 220.0f;
-    float m_FilterPanelExpandedWidth = 220.0f;
-    bool m_FilterPanelCollapsed = false;
     bool m_FilterPanelExpanded = false;
     float m_FilterPanelWidthAnim = 0.0f;
+    float m_FilterPanelHoverGrace = 0.0f;
     std::string m_RenameTargetFileName;
     std::string m_PendingRenderProjectFileName;
     bool m_RenderLoadConfirmOpen = false;
@@ -194,6 +194,7 @@ private:
     unsigned int m_OptionsIconTex = 0;
     unsigned int m_AllProjectsIconTex = 0;
     unsigned int m_AssetsIconTex = 0;
+    float m_LibraryViewScale = 1.0f;
     float m_ScrollTargetY = -1.0f;
     float m_ScrollCurrentY = -1.0f;
 };

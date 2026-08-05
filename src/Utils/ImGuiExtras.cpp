@@ -192,6 +192,25 @@ bool AssignIfChanged(TValue* value, TValue nextValue) {
     return true;
 }
 
+std::string EllipsizeTextForWidth(const char* text, float maxWidth) {
+    const std::string original = text ? text : "";
+    if (original.empty() ||
+        maxWidth <= 0.0f ||
+        ImGui::CalcTextSize(original.c_str()).x <= maxWidth) {
+        return original;
+    }
+    static constexpr const char* kEllipsis = "...";
+    std::string trimmed = original;
+    while (!trimmed.empty()) {
+        trimmed.pop_back();
+        const std::string candidate = trimmed + kEllipsis;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+            return candidate;
+        }
+    }
+    return kEllipsis;
+}
+
 NodeControlLayout BuildNodeControlLayout(float controlWidth, bool includeValueLane) {
     NodeControlLayout layout;
     layout.startX = ImGui::GetCursorPosX();
@@ -208,22 +227,47 @@ NodeControlLayout BuildNodeControlLayout(float controlWidth, bool includeValueLa
     }
 
     if (graphScope) {
-        const float minLabelWidth = std::max(0.5f, 38.0f * graphScale);
-        const float minValueWidth = std::max(0.5f, 36.0f * graphScale);
-        const float minWidgetWidth = std::max(0.5f, 38.0f * graphScale);
-        layout.labelWidth = std::min(g_GraphNodeControlScopeConfig.labelWidth, std::max(minLabelWidth, availableWidth * 0.34f));
-        layout.valueWidth = includeValueLane
-            ? std::min(g_GraphNodeControlScopeConfig.valueWidth, std::max(minValueWidth, availableWidth * 0.20f))
+        const float safeScale = std::max(0.0001f, graphScale);
+        const float logicalAvailableWidth = availableWidth / safeScale;
+        const float logicalSpacing = layout.spacing / safeScale;
+        constexpr float minLabelWidth = 38.0f;
+        constexpr float minValueWidth = 36.0f;
+        constexpr float minWidgetWidth = 38.0f;
+        float logicalLabelWidth = std::min(
+            g_GraphNodeControlScopeConfig.labelWidth,
+            std::max(minLabelWidth, logicalAvailableWidth * 0.34f));
+        float logicalValueWidth = includeValueLane
+            ? std::min(
+                g_GraphNodeControlScopeConfig.valueWidth,
+                std::max(
+                    minValueWidth,
+                    logicalAvailableWidth * 0.20f))
             : 0.0f;
-        const float occupiedSpacing = includeValueLane ? (layout.spacing * 2.0f) : layout.spacing;
-        layout.widgetWidth = availableWidth - layout.labelWidth - layout.valueWidth - occupiedSpacing;
-        if (includeValueLane && layout.widgetWidth < g_GraphNodeControlScopeConfig.minSliderWidth) {
+        const float occupiedLogicalSpacing = includeValueLane
+            ? logicalSpacing * 2.0f
+            : logicalSpacing;
+        float logicalWidgetWidth =
+            logicalAvailableWidth -
+            logicalLabelWidth -
+            logicalValueWidth -
+            occupiedLogicalSpacing;
+        if (includeValueLane &&
+            logicalWidgetWidth <
+                g_GraphNodeControlScopeConfig.minSliderWidth) {
             layout.stacked = true;
-            layout.labelWidth = std::max(minLabelWidth, availableWidth - layout.valueWidth - layout.spacing);
-            layout.widgetWidth = std::max(minWidgetWidth, availableWidth);
-        } else {
-            layout.widgetWidth = std::max(minWidgetWidth, layout.widgetWidth);
+            logicalLabelWidth = std::max(
+                minLabelWidth,
+                logicalAvailableWidth -
+                    logicalValueWidth -
+                    logicalSpacing);
+            logicalWidgetWidth = std::max(
+                minWidgetWidth, logicalAvailableWidth);
         }
+        layout.labelWidth = logicalLabelWidth * safeScale;
+        layout.valueWidth = logicalValueWidth * safeScale;
+        layout.widgetWidth =
+            std::max(minWidgetWidth, logicalWidgetWidth) *
+            safeScale;
         return layout;
     }
 
@@ -238,14 +282,14 @@ NodeControlLayout BuildNodeControlLayout(float controlWidth, bool includeValueLa
 
 void RenderNodeControlLabel(const char* label, const NodeControlLayout& layout) {
     ImGui::AlignTextToFramePadding();
-    ImGui::PushClipRect(
-        layout.screenPos,
-        ImVec2(
-            layout.screenPos.x + layout.labelWidth,
-            layout.screenPos.y + ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2.0f),
-        true);
-    ImGui::TextDisabled("%s", label);
-    ImGui::PopClipRect();
+    const std::string displayLabel = EllipsizeTextForWidth(
+        label,
+        std::max(0.0f, layout.labelWidth));
+    ImGui::TextDisabled("%s", displayLabel.c_str());
+    if (displayLabel != (label ? label : "") &&
+        ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", label ? label : "");
+    }
 }
 
 void CaptureNodeControlItem(bool popupOpen = false, bool rightClickConsumed = false) {
@@ -299,9 +343,14 @@ void DrawGraphNodeSliderVisual(
     const ImVec2 labelMax = layout.stacked
         ? ImVec2(std::max(labelMin.x, valueMin.x - layout.spacing), layout.screenPos.y + textHeight + style.FramePadding.y)
         : ImVec2(layout.screenPos.x + layout.labelWidth, layout.screenPos.y + textHeight + style.FramePadding.y);
-    drawList->PushClipRect(labelMin, labelMax, true);
-    drawList->AddText(labelMin, textColor, label ? label : "");
-    drawList->PopClipRect();
+    const std::string displayLabel = EllipsizeTextForWidth(
+        label,
+        std::max(0.0f, labelMax.x - labelMin.x));
+    drawList->AddText(
+        labelMin, textColor, displayLabel.c_str());
+    if (hovered && displayLabel != (label ? label : "")) {
+        ImGui::SetTooltip("%s", label ? label : "");
+    }
 
     const ImVec2 valueClipMin = valueMin;
     const ImVec2 valueClipMax(valueMin.x + layout.valueWidth, valueMin.y + textHeight + style.FramePadding.y);
@@ -324,7 +373,9 @@ void DrawGraphNodeSliderVisual(
     const ImVec2 chipMax(chipCenterX + chipWidth * 0.5f, centerY + chipHeight * 0.5f);
 
     if (active) {
-        const ImVec2 glowExpand(std::max(1.0f, 4.0f * graphScale), std::max(1.0f, 3.0f * graphScale));
+        const ImVec2 glowExpand(
+            4.0f * graphScale,
+            3.0f * graphScale);
         const ImVec4 glow = ImGui::ColorConvertU32ToFloat4(glowColor);
         drawList->AddRectFilled(
             ImVec2(chipMin.x - glowExpand.x, chipMin.y - glowExpand.y),
@@ -334,11 +385,17 @@ void DrawGraphNodeSliderVisual(
     }
 
     drawList->AddRectFilled(chipMin, chipMax, chipColor, chipRounding);
-    drawList->AddRect(chipMin, chipMax, chipBorder, chipRounding, 0, std::max(1.0f, graphScale));
+    drawList->AddRect(
+        chipMin,
+        chipMax,
+        chipBorder,
+        chipRounding,
+        0,
+        graphScale);
 
-    const float gripSpacing = std::max(1.0f, 4.0f * graphScale);
-    const float gripHalfHeight = std::max(1.0f, chipHeight * 0.24f);
-    const float gripHalfWidth = std::max(1.0f, 1.0f * graphScale);
+    const float gripSpacing = 4.0f * graphScale;
+    const float gripHalfHeight = chipHeight * 0.24f;
+    const float gripHalfWidth = graphScale;
     for (int index = -1; index <= 1; ++index) {
         const float x = chipCenterX + static_cast<float>(index) * gripSpacing;
         drawList->AddRectFilled(

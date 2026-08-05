@@ -230,7 +230,64 @@ void LibraryModule::RenderRawWorkspaceView(
     if (!state.selectedSourceKey.empty()) {
         ImGui::SameLine(0.0f, 18.0f);
         if (ImGui::Button("Open in RAW", ImVec2(112.0f, 28.0f))) {
+            editor->SelectRawWorkspaceSourceForGallery(
+                state.selectedSourceKey,
+                false,
+                false,
+                true);
             openSelectedInRawTab();
+        }
+    }
+    if (state.selectedSourceKeys.size() >= 2u) {
+        const bool canCreateMfd =
+            !editor->IsRawWorkspaceProjectLoadBusy();
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::BeginDisabled(!canCreateMfd);
+        if (ImGui::Button("Create New MFD Project", ImVec2(196.0f, 28.0f))) {
+            editor->RequestCreateMfdProjectFromGallerySelection();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                canCreateMfd
+                    ? "Create a separate project from this selection. The current project is not modified."
+                    : "Finish opening the current RAW selection first.");
+        }
+
+        const Stack::Project::RawProjectSnapshot* activeProject =
+            editor->GetActiveRawProjectSnapshot();
+        if (editor->IsMultiFrameRawProjectActive() && activeProject) {
+            ImGui::SameLine(0.0f, 8.0f);
+            if (ImGui::Button("Add to Current Burst", ImVec2(172.0f, 28.0f))) {
+                std::vector<std::filesystem::path> paths;
+                paths.reserve(state.selectedSourceKeys.size());
+                for (const std::string& key : state.selectedSourceKeys) {
+                    const auto source = std::find_if(
+                        state.sources.begin(),
+                        state.sources.end(),
+                        [&](const Stack::RawWorkspace::SourceRecord& candidate) {
+                            return candidate.relativePathKey == key;
+                        });
+                    if (source != state.sources.end()) {
+                        paths.push_back(source->absolutePath);
+                    }
+                }
+                std::string error;
+                if (!editor->AddFramesToMultiFrameSourceSet(
+                        activeProject->activeSourceSetId,
+                        paths,
+                        &error) &&
+                    !error.empty()) {
+                    editor->ShowUiNotification(
+                        UiNotificationSeverity::Error,
+                        error,
+                        "library-add-to-current-mfd");
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Embed the selection into the currently open MFD burst.");
+            }
         }
     }
 
@@ -264,10 +321,13 @@ void LibraryModule::RenderRawWorkspaceView(
         const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
         const bool doubleClicked = hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
         if (clicked) {
-            editor->SelectRawWorkspaceSourceForPreview(source.relativePathKey);
+            editor->SelectRawWorkspaceSourceForGallery(
+                source.relativePathKey,
+                ImGui::GetIO().KeyCtrl,
+                ImGui::GetIO().KeyShift,
+                doubleClicked);
         }
         if (doubleClicked) {
-            editor->SelectRawWorkspaceSourceForPreview(source.relativePathKey);
             openSelectedInRawTab();
         }
         if (hovered) {

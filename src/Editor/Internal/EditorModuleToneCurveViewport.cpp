@@ -1,6 +1,8 @@
 #include "Editor/EditorModule.h"
 
 #include "Editor/Layers/ToneLayers.h"
+#include "Renderer/GLHelpers.h"
+#include "Renderer/GLStateGuards.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -9,13 +11,6 @@
 #include <vector>
 
 namespace {
-
-std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return {};
-    }
-    return std::vector<unsigned char>(static_cast<size_t>(width * height * 4), 0);
-}
 
 bool SampleTexturePixel(
     unsigned int texture,
@@ -33,32 +28,24 @@ bool SampleTexturePixel(
     const int py = std::clamp(static_cast<int>(std::round(std::clamp(v, 0.0f, 1.0f) * static_cast<float>(std::max(0, height - 1)))), 0, height - 1);
     const int readY = std::clamp(height - 1 - py, 0, height - 1);
 
-    GLint prevReadFbo = 0;
-    GLint prevDrawFbo = 0;
-    GLint prevReadBuffer = 0;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFbo);
-    glGetIntegerv(GL_READ_BUFFER, &prevReadBuffer);
-
-    unsigned int readFbo = 0;
-    glGenFramebuffers(1, &readFbo);
+    const Stack::Renderer::GLState::FramebufferState savedState;
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
+    const unsigned int readFbo = GLHelpers::CreateFBO(texture);
+    if (readFbo == 0) {
+        savedPackState.Restore();
+        return false;
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
 
-    bool success = false;
-    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(px, readY, 1, 1, GL_RGBA, GL_FLOAT, outRgba.data());
-        success = glGetError() == GL_NO_ERROR;
-    }
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(px, readY, 1, 1, GL_RGBA, GL_FLOAT, outRgba.data());
+    const bool success = glGetError() == GL_NO_ERROR;
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevReadFbo));
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(prevDrawFbo));
-    glReadBuffer(static_cast<GLenum>(prevReadBuffer));
-    if (readFbo != 0) {
-        glDeleteFramebuffers(1, &readFbo);
-    }
+    savedPackState.Restore();
+    savedState.Restore();
+    glDeleteFramebuffers(1, &readFbo);
     return success;
 }
 
@@ -121,7 +108,7 @@ bool EditorModule::ProbeViewTransformInputStats(int viewTransformNodeId, RenderT
         sourceH = m_Pipeline.GetCanvasHeight();
         sourceCh = std::max(1, m_Pipeline.GetSourceChannels());
     }
-    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+    if (sourceW <= 0 || sourceH <= 0) {
         return false;
     }
 
@@ -142,7 +129,11 @@ bool EditorModule::ProbeViewTransformInputStats(int viewTransformNodeId, RenderT
 
     RenderPipeline probePipeline;
     probePipeline.Initialize();
-    probePipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, std::max(1, sourceCh));
+    probePipeline.LoadSourceFromPixels(
+        sourcePixels.empty() ? nullptr : sourcePixels.data(),
+        sourceW,
+        sourceH,
+        std::max(1, sourceCh));
     probePipeline.ExecuteGraph(snapshot);
     outStats = probePipeline.GetOutputTextureStats();
     return outStats.valid;
@@ -305,7 +296,7 @@ bool EditorModule::SampleToneCurveViewportPixel(
                 sourceW > 0 &&
                 sourceH > 0) {
                 sourceCh = 4;
-                sourcePixels = BuildTransparentPixels(sourceW, sourceH);
+                sourcePixels.clear();
             } else {
                 sourcePixels = m_Pipeline.GetSourcePixelsRaw();
                 sourceW = m_Pipeline.GetCanvasWidth();
@@ -350,7 +341,7 @@ bool EditorModule::SampleToneCurveViewportPixel(
         return false;
     }
 
-    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+    if (sourceW <= 0 || sourceH <= 0) {
         return false;
     }
 
@@ -359,7 +350,11 @@ bool EditorModule::SampleToneCurveViewportPixel(
 
     RenderPipeline probePipeline;
     probePipeline.Initialize();
-    probePipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, std::max(1, sourceCh));
+    probePipeline.LoadSourceFromPixels(
+        sourcePixels.empty() ? nullptr : sourcePixels.data(),
+        sourceW,
+        sourceH,
+        std::max(1, sourceCh));
     probePipeline.ExecuteGraph(snapshot);
     return probePipeline.SampleOutputPixel(u, v, outRgba);
 }

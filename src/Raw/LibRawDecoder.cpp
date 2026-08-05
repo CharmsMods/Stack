@@ -370,20 +370,42 @@ void ParseDngOpcodeList2(const std::vector<std::uint8_t>& bytes, RawMetadata& me
         map.bottom = ReadBeI32(bytes, p + 8);
         map.right = ReadBeI32(bytes, p + 12);
         map.plane = ReadBeI32(bytes, p + 16);
-        map.planes = std::max(1, ReadBeI32(bytes, p + 20));
-        map.rowPitch = std::max(1, ReadBeI32(bytes, p + 24));
-        map.colPitch = std::max(1, ReadBeI32(bytes, p + 28));
-        map.mapPointsV = std::max(0, ReadBeI32(bytes, p + 32));
-        map.mapPointsH = std::max(0, ReadBeI32(bytes, p + 36));
+        map.planes = ReadBeI32(bytes, p + 20);
+        map.rowPitch = ReadBeI32(bytes, p + 24);
+        map.colPitch = ReadBeI32(bytes, p + 28);
+        map.mapPointsV = ReadBeI32(bytes, p + 32);
+        map.mapPointsH = ReadBeI32(bytes, p + 36);
         map.mapSpacingV = ReadBeDouble(bytes, p + 40);
         map.mapSpacingH = ReadBeDouble(bytes, p + 48);
         map.mapOriginV = ReadBeDouble(bytes, p + 56);
         map.mapOriginH = ReadBeDouble(bytes, p + 64);
-        map.mapPlanes = std::max(1, ReadBeI32(bytes, p + 72));
+        map.mapPlanes = ReadBeI32(bytes, p + 72);
         const std::size_t gainOffset = p + 76;
+        const bool validShape =
+            map.top < map.bottom &&
+            map.left < map.right &&
+            map.plane >= 0 &&
+            map.planes > 0 &&
+            map.rowPitch > 0 &&
+            map.colPitch > 0 &&
+            map.mapPointsV > 0 &&
+            map.mapPointsH > 0 &&
+            map.mapPlanes == 1 &&
+            std::isfinite(map.mapSpacingV) &&
+            std::isfinite(map.mapSpacingH) &&
+            std::isfinite(map.mapOriginV) &&
+            std::isfinite(map.mapOriginH) &&
+            map.mapSpacingV > 0.0 &&
+            map.mapSpacingH > 0.0;
+        if (!validShape) {
+            ++metadata.dngUnsupportedOpcodeCount;
+            p += byteCount;
+            continue;
+        }
         const std::size_t gainCount = static_cast<std::size_t>(map.mapPointsV) *
-            static_cast<std::size_t>(map.mapPointsH) * static_cast<std::size_t>(map.mapPlanes);
-        if (map.mapPointsV <= 0 || map.mapPointsH <= 0 || map.mapPlanes != 1 ||
+            static_cast<std::size_t>(map.mapPointsH);
+        if (gainCount >
+                (std::numeric_limits<std::size_t>::max() - gainOffset) / sizeof(float) ||
             gainOffset + gainCount * sizeof(float) > p + byteCount) {
             ++metadata.dngUnsupportedOpcodeCount;
             p += byteCount;
@@ -392,6 +414,13 @@ void ParseDngOpcodeList2(const std::vector<std::uint8_t>& bytes, RawMetadata& me
         map.gains.resize(gainCount);
         for (std::size_t g = 0; g < gainCount; ++g) {
             map.gains[g] = ReadBeFloat(bytes, gainOffset + g * sizeof(float));
+        }
+        if (!std::all_of(map.gains.begin(), map.gains.end(), [](float gain) {
+                return std::isfinite(gain) && gain >= 0.0f;
+            })) {
+            ++metadata.dngUnsupportedOpcodeCount;
+            p += byteCount;
+            continue;
         }
         metadata.dngGainMaps.push_back(std::move(map));
         p += byteCount;
@@ -790,7 +819,11 @@ void ExtractDngColorMetadata(const libraw_data_t& image, RawMetadata& metadata) 
     }
 }
 
-void ExtractMetadata(LibRaw& processor, const std::string& path, RawMetadata& metadata) {
+void ExtractMetadata(
+    LibRaw& processor,
+    const std::string& path,
+    RawMetadata& metadata,
+    bool includeDngSupplement = true) {
     const libraw_data_t& image = processor.imgdata;
     const libraw_imgother_t& capture = image.other;
     metadata.cameraMake = image.idata.make ? image.idata.make : "";
@@ -846,7 +879,9 @@ void ExtractMetadata(LibRaw& processor, const std::string& path, RawMetadata& me
     }
     metadata.hasCameraMatrix = hasMatrix;
     ExtractDngColorMetadata(image, metadata);
-    ApplyDngSupplement(path, metadata);
+    if (includeDngSupplement) {
+        ApplyDngSupplement(path, metadata);
+    }
 
     if (metadata.visibleWidth <= 0 || metadata.visibleHeight <= 0) {
         metadata.visibleWidth = metadata.rawWidth;
@@ -1017,6 +1052,35 @@ bool CopyRawImageToBuffer(
 #endif
 
 } // namespace
+
+bool ProbeMetadataWithLibRaw(
+    const std::string& path,
+    RawMetadata& outMetadata) {
+    outMetadata = {};
+    outMetadata.sourcePath = path;
+#ifndef STACK_ENABLE_LIBRAW
+    outMetadata.error = "LibRaw support is disabled in this build.";
+    return false;
+#else
+    if (path.empty()) {
+        outMetadata.error = "No RAW source path.";
+        return false;
+    }
+    LibRaw processor;
+    const int status = processor.open_file(path.c_str());
+    if (status != LIBRAW_SUCCESS) {
+        outMetadata.error = std::string("LibRaw open_file failed: ") +
+            libraw_strerror(status);
+        return false;
+    }
+    // Do not call unpack() here. Header-provided LibRaw fields are sufficient
+    // for structural burst compatibility. Deep DNG supplements and pixel
+    // statistics remain part of the ordinary decode path.
+    ExtractMetadata(processor, path, outMetadata, false);
+    processor.recycle();
+    return outMetadata.error.empty();
+#endif
+}
 
 bool DecodeWithLibRaw(
     const std::string& path,

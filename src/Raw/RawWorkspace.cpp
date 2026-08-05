@@ -966,6 +966,12 @@ GalleryPresentation BuildGalleryPresentation(const WorkspaceState& state) {
         view.thumbnailRelativePath = source.thumbnail.relativePath;
         view.projectStatus = source.project.status;
         view.selected = !state.selectedSourceKey.empty() && source.relativePathKey == state.selectedSourceKey;
+        view.multiSelected = std::find(
+            state.selectedSourceKeys.begin(),
+            state.selectedSourceKeys.end(),
+            source.relativePathKey) != state.selectedSourceKeys.end();
+        view.sourceSetProjectMembershipCount =
+            static_cast<std::uint64_t>(source.sourceSetProjectMemberships.size());
         presentation.groups[groupIt->second].sources.push_back(std::move(view));
 
         switch (source.thumbnail.status) {
@@ -1396,6 +1402,23 @@ bool SaveAppStateIfCurrent(
     if (state.controlsPanelWidth > 0.0f && std::isfinite(state.controlsPanelWidth)) {
         root["controlsPanelWidth"] = state.controlsPanelWidth;
     }
+    if (state.rawLabWorkbenchHeight > 0.0f && std::isfinite(state.rawLabWorkbenchHeight)) {
+        root["rawLabWorkbenchHeight"] = state.rawLabWorkbenchHeight;
+    }
+    if (state.rawLabToolRailWidth > 0.0f && std::isfinite(state.rawLabToolRailWidth)) {
+        root["rawLabToolRailWidth"] = state.rawLabToolRailWidth;
+    }
+    if (state.rawLabLowerShelfHeight > 0.0f && std::isfinite(state.rawLabLowerShelfHeight)) {
+        root["rawLabLowerShelfHeight"] = state.rawLabLowerShelfHeight;
+    }
+    if (state.rawLabFilmstripHeight > 0.0f && std::isfinite(state.rawLabFilmstripHeight)) {
+        root["rawLabFilmstripHeight"] = state.rawLabFilmstripHeight;
+    }
+    root["rawLabLowerShelfOpen"] = state.rawLabLowerShelfOpen;
+    root["rawLabActiveTool"] = std::clamp(state.rawLabActiveTool, 0, 7);
+    root["rawLabActivePointCurve"] = std::clamp(state.rawLabActivePointCurve, 0, 3);
+    root["rawLabLastGalleryHost"] = std::clamp(state.rawLabLastGalleryHost, 1, 3);
+    root["rawLabGalleryDisplayMode"] = std::clamp(state.rawLabGalleryDisplayMode, 0, 1);
     return WriteJsonFile(path, root, shouldCommit, outError);
 }
 
@@ -1431,6 +1454,56 @@ bool LoadAppState(const std::filesystem::path& path, AppState& outState, std::st
             if (width > 0.0f && std::isfinite(width)) {
                 outState.controlsPanelWidth = width;
             }
+        }
+        const nlohmann::json* rawLabWorkbenchHeight = FindJsonMember(root, "rawLabWorkbenchHeight");
+        if (rawLabWorkbenchHeight != nullptr && rawLabWorkbenchHeight->is_number()) {
+            const float height = rawLabWorkbenchHeight->get<float>();
+            if (height > 0.0f && std::isfinite(height)) {
+                outState.rawLabWorkbenchHeight = height;
+            }
+        }
+        const nlohmann::json* rawLabToolRailWidth = FindJsonMember(root, "rawLabToolRailWidth");
+        if (rawLabToolRailWidth != nullptr && rawLabToolRailWidth->is_number()) {
+            const float width = rawLabToolRailWidth->get<float>();
+            if (width > 0.0f && std::isfinite(width)) {
+                outState.rawLabToolRailWidth = width;
+            }
+        }
+        const nlohmann::json* rawLabLowerShelfHeight = FindJsonMember(root, "rawLabLowerShelfHeight");
+        if (rawLabLowerShelfHeight != nullptr && rawLabLowerShelfHeight->is_number()) {
+            const float height = rawLabLowerShelfHeight->get<float>();
+            if (height > 0.0f && std::isfinite(height)) {
+                outState.rawLabLowerShelfHeight = height;
+            }
+        }
+        const nlohmann::json* rawLabFilmstripHeight = FindJsonMember(root, "rawLabFilmstripHeight");
+        if (rawLabFilmstripHeight != nullptr && rawLabFilmstripHeight->is_number()) {
+            const float height = rawLabFilmstripHeight->get<float>();
+            if (height > 0.0f && std::isfinite(height)) {
+                outState.rawLabFilmstripHeight = height;
+            }
+        }
+        const nlohmann::json* rawLabLowerShelfOpen = FindJsonMember(root, "rawLabLowerShelfOpen");
+        if (rawLabLowerShelfOpen != nullptr && rawLabLowerShelfOpen->is_boolean()) {
+            outState.rawLabLowerShelfOpen = rawLabLowerShelfOpen->get<bool>();
+        }
+        const nlohmann::json* rawLabActiveTool = FindJsonMember(root, "rawLabActiveTool");
+        if (rawLabActiveTool != nullptr && rawLabActiveTool->is_number_integer()) {
+            outState.rawLabActiveTool = std::clamp(rawLabActiveTool->get<int>(), 0, 7);
+        }
+        const nlohmann::json* rawLabActivePointCurve =
+            FindJsonMember(root, "rawLabActivePointCurve");
+        if (rawLabActivePointCurve != nullptr && rawLabActivePointCurve->is_number_integer()) {
+            outState.rawLabActivePointCurve =
+                std::clamp(rawLabActivePointCurve->get<int>(), 0, 3);
+        }
+        const nlohmann::json* rawLabLastGalleryHost = FindJsonMember(root, "rawLabLastGalleryHost");
+        if (rawLabLastGalleryHost != nullptr && rawLabLastGalleryHost->is_number_integer()) {
+            outState.rawLabLastGalleryHost = std::clamp(rawLabLastGalleryHost->get<int>(), 1, 3);
+        }
+        const nlohmann::json* rawLabGalleryDisplayMode = FindJsonMember(root, "rawLabGalleryDisplayMode");
+        if (rawLabGalleryDisplayMode != nullptr && rawLabGalleryDisplayMode->is_number_integer()) {
+            outState.rawLabGalleryDisplayMode = std::clamp(rawLabGalleryDisplayMode->get<int>(), 0, 1);
         }
 
         const nlohmann::json* recent = FindJsonMember(root, "recentWorkspaces");

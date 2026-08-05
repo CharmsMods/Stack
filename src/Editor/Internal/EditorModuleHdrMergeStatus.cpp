@@ -4,7 +4,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <functional>
 #include <limits>
 #include <string>
 #include <unordered_set>
@@ -127,17 +126,19 @@ std::vector<int> EditorModule::CollectHdrMergeNodesForOutput(int outputNodeId) c
     }
 
     std::unordered_set<int> seenNodes;
-    std::unordered_set<int> seenHdrNodes;
-    std::function<void(int)> visit = [&](int nodeId) {
+    std::vector<int> pending{ outputNodeId };
+    while (!pending.empty()) {
+        const int nodeId = pending.back();
+        pending.pop_back();
         if (!seenNodes.insert(nodeId).second) {
-            return;
+            continue;
         }
 
         const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
         if (!node) {
-            return;
+            continue;
         }
-        if (node->kind == EditorNodeGraph::NodeKind::HdrMerge && seenHdrNodes.insert(nodeId).second) {
+        if (node->kind == EditorNodeGraph::NodeKind::HdrMerge) {
             hdrNodes.push_back(nodeId);
         }
 
@@ -146,12 +147,10 @@ std::vector<int> EditorModule::CollectHdrMergeNodesForOutput(int outputNodeId) c
                 continue;
             }
             if (const EditorNodeGraph::Link* input = m_NodeGraph.FindAnyInputLink(nodeId, socket.id)) {
-                visit(input->fromNodeId);
+                pending.push_back(input->fromNodeId);
             }
         }
-    };
-
-    visit(outputNodeId);
+    }
     return hdrNodes;
 }
 

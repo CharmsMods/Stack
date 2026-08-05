@@ -38,7 +38,10 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
         return false;
     }
 
-    ImVec2 thumbSize = ComputeLibraryCardSize(static_cast<float>(project.sourceWidth), static_cast<float>(project.sourceHeight));
+    ImVec2 thumbSize = ComputeLibraryCardSize(
+        static_cast<float>(project.sourceWidth),
+        static_cast<float>(project.sourceHeight),
+        m_LibraryViewScale);
 
     const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
@@ -211,7 +214,10 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
         return false;
     }
 
-    ImVec2 thumbSize = ComputeLibraryCardSize(static_cast<float>(asset.width), static_cast<float>(asset.height));
+    ImVec2 thumbSize = ComputeLibraryCardSize(
+        static_cast<float>(asset.width),
+        static_cast<float>(asset.height),
+        m_LibraryViewScale);
 
     const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;

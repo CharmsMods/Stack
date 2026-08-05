@@ -1,10 +1,12 @@
 #include "ToneLayers.h"
 
 #include "Renderer/FullscreenQuad.h"
+#include "Renderer/GLStateGuards.h"
 
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -91,6 +93,8 @@ layout (location = 0) out vec4 FragColor;
 uniform sampler2D uInputTex;
 uniform sampler2D uCurveLut;
 uniform int uMode;
+uniform int uPointCurveSetEnabled;
+uniform int uLegacyLumaEnabled;
 uniform int uDomain;
 uniform float uLogMinEv;
 uniform float uLogMaxEv;
@@ -114,6 +118,10 @@ float lumaOf(vec3 rgb) {
 
 float curve(float x) {
     return texture(uCurveLut, vec2(clamp(x, 0.0, 1.0), 0.5)).r;
+}
+
+vec4 curveSet(float x) {
+    return texture(uCurveLut, vec2(clamp(x, 0.0, 1.0), 0.5));
 }
 
 float sceneToCurveCoord(float x) {
@@ -234,7 +242,21 @@ void main() {
     } else {
         rgb *= exp2(foundationGainEvFor(foundationOldLuma));
     }
-    if (uMode == 0) {
+    if (uPointCurveSetEnabled != 0) {
+        if (uLegacyLumaEnabled != 0) {
+            float oldLuma = lumaOf(rgb);
+            float coord = sceneToCurveCoord(oldLuma);
+            float newLuma = curveCoordToScene(curveSet(coord).a);
+            rgb *= newLuma / max(oldLuma, 0.000001);
+        }
+        float redCoord = sceneToCurveCoord(rgb.r);
+        float greenCoord = sceneToCurveCoord(rgb.g);
+        float blueCoord = sceneToCurveCoord(rgb.b);
+        rgb = vec3(
+            curveCoordToScene(curveSet(redCoord).r),
+            curveCoordToScene(curveSet(greenCoord).g),
+            curveCoordToScene(curveSet(blueCoord).b));
+    } else if (uMode == 0) {
         float oldLuma = lumaOf(rgb);
         float newLuma = toneResponse(oldLuma);
         float gain = newLuma / max(oldLuma, 0.000001);
@@ -326,6 +348,8 @@ uniform float uContrast;
 uniform float uSaturation;
 uniform int uPreserveHue;
 uniform int uDebugFalseColor;
+uniform int uInputIsRec2020;
+uniform int uEncodeSrgbOutput;
 
 float lumaOf(vec3 rgb) {
     return max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
@@ -370,9 +394,22 @@ vec3 compressDisplayGamut(vec3 rgb) {
     return mix(rgb, vec3(luma), amount);
 }
 
+vec3 rec2020ToLinearSrgb(vec3 rgb) {
+    return mat3(
+         1.6604910, -0.1245505, -0.0181508,
+        -0.5876411,  1.1328999, -0.1005789,
+        -0.0728499, -0.0083494,  1.1187297) * rgb;
+}
+
+vec3 linearToSrgb(vec3 rgb) {
+    vec3 low = rgb * 12.92;
+    vec3 high = 1.055 * pow(max(rgb, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return mix(low, high, step(vec3(0.0031308), rgb));
+}
+
 void main() {
     vec4 color = texture(uInputTex, vUV);
-    vec3 rgb = max(vec3(0.0), color.rgb);
+    vec3 rgb = uInputIsRec2020 != 0 ? rec2020ToLinearSrgb(color.rgb) : color.rgb;
     float oldLuma = lumaOf(rgb);
     if (uDebugFalseColor != 0) {
         float ev = log2(max(0.000001, oldLuma) / max(0.000001, uMiddleGrey));
@@ -397,7 +434,11 @@ void main() {
     if (outAlpha <= 0.0001 && max(rgb.r, max(rgb.g, rgb.b)) > 0.0001) {
         outAlpha = 1.0;
     }
-    FragColor = vec4(clamp(rgb, 0.0, 1.0), outAlpha);
+    rgb = clamp(rgb, 0.0, 1.0);
+    if (uEncodeSrgbOutput != 0) {
+        rgb = linearToSrgb(rgb);
+    }
+    FragColor = vec4(rgb, outAlpha);
 }
 )";
 
@@ -555,6 +596,12 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glBindTexture(GL_TEXTURE_2D, m_LutTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uCurveLut"), 1);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uMode"), static_cast<int>(m_Mode));
+    glUniform1i(
+        glGetUniformLocation(m_ShaderProgram, "uPointCurveSetEnabled"),
+        m_PointCurveSetEnabled ? 1 : 0);
+    glUniform1i(
+        glGetUniformLocation(m_ShaderProgram, "uLegacyLumaEnabled"),
+        m_PointCurveSetEnabled && m_PointCurveSet.legacyLumaEnabled ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDomain"), static_cast<int>(m_Domain));
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uLogMinEv"), m_LogMinEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uLogMaxEv"), m_LogMaxEv);
@@ -592,23 +639,93 @@ void ToneCurveLayer::UpdateLut() {
     if (!m_LutDirty && m_LutTexture != 0) {
         return;
     }
-    std::array<float, 256 * 4> lut {};
-    for (std::size_t i = 0; i < lut.size(); ++i) {
-        const std::size_t pixel = i / 4;
-        const float value = Clamp01(EvaluateCombinedPointCurve(static_cast<float>(pixel) / 255.0f));
-        lut[i] = value;
+    const int sampleCount = m_PointCurveSetEnabled ? 4096 : 256;
+    std::vector<float> lut(static_cast<std::size_t>(sampleCount) * 4u, 0.0f);
+    for (int sample = 0; sample < sampleCount; ++sample) {
+        const float input = static_cast<float>(sample) /
+            static_cast<float>(std::max(1, sampleCount - 1));
+        const std::size_t offset = static_cast<std::size_t>(sample) * 4u;
+        if (m_PointCurveSetEnabled) {
+            const float composite = Stack::RawRecipe::EvaluateRawPointCurveComponent(
+                m_PointCurveSet.curves[static_cast<std::size_t>(
+                    Stack::RawRecipe::RawPointCurveChannel::Composite)],
+                input);
+            for (int channel = 0; channel < 3; ++channel) {
+                lut[offset + static_cast<std::size_t>(channel)] = Clamp01(
+                    Stack::RawRecipe::EvaluateRawPointCurveComponent(
+                        m_PointCurveSet.curves[static_cast<std::size_t>(channel + 1)],
+                        composite));
+            }
+            lut[offset + 3u] = m_PointCurveSet.legacyLumaEnabled
+                ? Clamp01(Stack::RawRecipe::EvaluateRawPointCurveComponent(
+                      m_PointCurveSet.legacyLuma,
+                      input))
+                : input;
+        } else {
+            const float value = Clamp01(EvaluateCombinedPointCurve(input));
+            lut[offset] = value;
+            lut[offset + 1u] = value;
+            lut[offset + 2u] = value;
+            lut[offset + 3u] = value;
+        }
     }
-    if (m_LutTexture == 0) {
-        glGenTextures(1, &m_LutTexture);
+    unsigned int replacement = 0;
+    {
+        const Stack::Renderer::GLState::TextureBinding savedTexture(
+            GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
+        glGenTextures(1, &replacement);
+        glBindTexture(GL_TEXTURE_2D, replacement);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA32F,
+            sampleCount,
+            1,
+            0,
+            GL_RGBA,
+            GL_FLOAT,
+            nullptr);
+        savedTexture.Restore();
     }
-    glBindTexture(GL_TEXTURE_2D, m_LutTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 256, 1, 0, GL_RGBA, GL_FLOAT, lut.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    if (replacement == 0) {
+        return;
+    }
+
+    const Stack::Renderer::GLState::TextureBinding savedTexture(
+        GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
+    const Stack::Renderer::GLState::PixelUnpackState savedUnpackState;
+    glBindTexture(GL_TEXTURE_2D, replacement);
+    savedUnpackState.ConfigureTightCpuUpload();
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        0,
+        0,
+        sampleCount,
+        1,
+        GL_RGBA,
+        GL_FLOAT,
+        lut.data());
+    const GLenum uploadError = glGetError();
+    savedUnpackState.Restore();
+    savedTexture.Restore();
+    if (uploadError != GL_NO_ERROR) {
+        glDeleteTextures(1, &replacement);
+        return;
+    }
+
+    const unsigned int previous = m_LutTexture;
+    m_LutTexture = replacement;
     m_LutDirty = false;
+    if (previous != 0) {
+        glDeleteTextures(1, &previous);
+    }
 }
 
 ToneEqualizerLayer::~ToneEqualizerLayer() {
@@ -670,6 +787,8 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uSaturation"), m_Saturation);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uPreserveHue"), m_PreserveHue ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDebugFalseColor"), m_DebugFalseColor ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputIsRec2020"), m_InputIsRec2020 ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uEncodeSrgbOutput"), m_EncodeSrgbOutput ? 1 : 0);
     quad.Draw();
     glUseProgram(0);
 }

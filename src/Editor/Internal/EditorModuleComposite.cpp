@@ -10,9 +10,54 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace {
+
+struct GraphSelectionSnapshot {
+    std::vector<int> nodeIds;
+    std::optional<EditorNodeGraph::Link> link;
+
+    static GraphSelectionSnapshot Capture(
+        const EditorNodeGraph::Graph& graph) {
+        GraphSelectionSnapshot snapshot;
+        snapshot.nodeIds = graph.GetSelectedNodeIds();
+        if (const EditorNodeGraph::Link* selected =
+                graph.GetSelectedLink()) {
+            snapshot.link = *selected;
+        }
+        return snapshot;
+    }
+
+    void Restore(EditorNodeGraph::Graph& graph) const {
+        graph.ClearSelection();
+        for (const int nodeId : nodeIds) {
+            graph.SelectNode(nodeId, true);
+        }
+        if (link) {
+            graph.SelectLink(
+                link->fromNodeId,
+                link->fromSocketId,
+                link->toNodeId,
+                link->toSocketId);
+        }
+    }
+};
+
+void RollBackNewSourceOutputChain(
+    EditorNodeGraph::Graph& graph,
+    int sourceNodeId,
+    int outputNodeId,
+    const GraphSelectionSnapshot& selectionBefore) {
+    if (outputNodeId > 0) {
+        graph.RemoveNode(outputNodeId);
+    }
+    if (sourceNodeId > 0) {
+        graph.RemoveNode(sourceNodeId);
+    }
+    selectionBefore.Restore(graph);
+}
 
 struct AffineTransform2D {
     float m00 = 1.0f;
@@ -404,6 +449,8 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
         }
         return AddGraphRawChainFromFile(path, sourcePosition);
     }
+    const GraphSelectionSnapshot selectionBefore =
+        GraphSelectionSnapshot::Capture(m_NodeGraph);
     const int completedBefore = GetCompletedChainCount();
     if (!AddImageNodeFromFile(path, sourcePosition)) {
         return false;
@@ -411,13 +458,23 @@ bool EditorModule::AddGraphImageChainFromFile(const std::string& path, EditorNod
 
     const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 330.0f, sourcePosition.y });
+    const int outputNodeId = outputNode ? outputNode->id : -1;
     if (sourceNodeId <= 0 || !outputNode) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            sourceNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
-    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
     if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            sourceNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -442,8 +499,7 @@ bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeG
         m_NodeGraph.SetActiveImageNodeId(sourceNodeId);
         const int width = std::max(1, Raw::DisplayWidth(sourceNode->rawSource.metadata));
         const int height = std::max(1, Raw::DisplayHeight(sourceNode->rawSource.metadata));
-        std::vector<unsigned char> transparentPixels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4ull, 0u);
-        LoadSourceFromPixels(transparentPixels.data(), width, height, 4);
+        LoadSourceFromPixels(nullptr, width, height, 4);
     }
 
     if (!AddFullRawTreeToSource(sourceNodeId)) {
@@ -454,6 +510,8 @@ bool EditorModule::AddGraphRawChainFromFile(const std::string& path, EditorNodeG
 }
 
 bool EditorModule::AddGraphImageChainFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 sourcePosition) {
+    const GraphSelectionSnapshot selectionBefore =
+        GraphSelectionSnapshot::Capture(m_NodeGraph);
     const int completedBefore = GetCompletedChainCount();
     if (!AddImageNodeFromPayload(std::move(payload), sourcePosition)) {
         return false;
@@ -461,13 +519,23 @@ bool EditorModule::AddGraphImageChainFromPayload(EditorNodeGraph::ImagePayload p
 
     const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ sourcePosition.x + 330.0f, sourcePosition.y });
+    const int outputNodeId = outputNode ? outputNode->id : -1;
     if (sourceNodeId <= 0 || !outputNode) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            sourceNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
-    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
     if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            sourceNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -501,6 +569,8 @@ std::pair<EditorNodeGraph::Vec2, EditorNodeGraph::Vec2> EditorModule::BuildCompo
 }
 
 bool EditorModule::AddCompositeImageChainFromFile(const std::string& path) {
+    const GraphSelectionSnapshot selectionBefore =
+        GraphSelectionSnapshot::Capture(m_NodeGraph);
     const int completedBefore = GetCompletedChainCount();
     const auto [sourcePos, outputPos] = BuildCompositeChainPlacement();
     if (!AddImageNodeFromFile(path, sourcePos)) {
@@ -509,13 +579,23 @@ bool EditorModule::AddCompositeImageChainFromFile(const std::string& path) {
 
     const int sourceNodeId = m_NodeGraph.GetSelectedNodeId();
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(outputPos);
+    const int outputNodeId = outputNode ? outputNode->id : -1;
     if (sourceNodeId <= 0 || !outputNode) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            sourceNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
-    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
     if (!ConnectGraphNodes(sourceNodeId, outputNodeId, &errorMessage)) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            sourceNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -540,18 +620,30 @@ bool EditorModule::AddCompositeLibraryAssetChain(const std::string& assetFileNam
 }
 
 bool EditorModule::AddCompositeGeneratorChain(EditorNodeGraph::ImageGeneratorKind generatorKind) {
+    const GraphSelectionSnapshot selectionBefore =
+        GraphSelectionSnapshot::Capture(m_NodeGraph);
     const int completedBefore = GetCompletedChainCount();
     const auto [sourcePos, outputPos] = BuildCompositeChainPlacement();
     EditorNodeGraph::Node* generatorNode = m_NodeGraph.AddImageGeneratorNode(generatorKind, sourcePos);
     const int generatorNodeId = generatorNode ? generatorNode->id : -1;
     EditorNodeGraph::Node* outputNode = m_NodeGraph.AddOutputNode(outputPos);
+    const int outputNodeId = outputNode ? outputNode->id : -1;
     if (generatorNodeId <= 0 || !outputNode) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            generatorNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
-    const int outputNodeId = outputNode->id;
 
     std::string errorMessage;
     if (!ConnectGraphNodes(generatorNodeId, outputNodeId, &errorMessage)) {
+        RollBackNewSourceOutputChain(
+            m_NodeGraph,
+            generatorNodeId,
+            outputNodeId,
+            selectionBefore);
         return false;
     }
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {
@@ -809,7 +901,7 @@ std::vector<unsigned char> EditorModule::GetCompositePixelsForOutputNode(int out
         }
     }
 
-    if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
+    if (sourceW <= 0 || sourceH <= 0) {
         const CompositeSceneItem* item = FindCompositeSceneItem(outputNodeId);
         if (CompletedChainSourceUsesScalableGenerator(outputNodeId)) {
             constexpr int kScalableGeneratorBaseRaster = 1024;
@@ -845,7 +937,11 @@ std::vector<unsigned char> EditorModule::GetCompositePixelsForOutputNode(int out
         }
     }
 
-    m_CompositePreviewPipeline.LoadSourceFromPixels(sourcePixels.data(), sourceW, sourceH, sourceCh);
+    m_CompositePreviewPipeline.LoadSourceFromPixels(
+        sourcePixels.empty() ? nullptr : sourcePixels.data(),
+        sourceW,
+        sourceH,
+        sourceCh);
     RenderGraphSnapshot snapshot = BuildGraphSnapshot();
     snapshot.outputNodeId = outputNodeId;
     m_CompositePreviewPipeline.ExecuteGraph(snapshot);

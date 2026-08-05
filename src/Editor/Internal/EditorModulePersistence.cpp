@@ -9,7 +9,8 @@
 #include "Raw/RawLoader.h"
 #include "NodeMath/PngMetadataWriter.h"
 #include "ThirdParty/stb_image.h"
-#include "ThirdParty/stb_image_write.h"
+#include "Utils/PixelBufferUtils.h"
+#include "Utils/PngEncodingUtils.h"
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <new>
 
 namespace {
 
@@ -46,25 +48,18 @@ bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
     outImage.height = height;
     outImage.channels = 4;
     outImage.originalChannels = channels;
-    outImage.pixels.assign(pixels, pixels + (width * height * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, width, height, 4, outImage.pixels);
     stbi_image_free(pixels);
-    return true;
+    if (!copied) {
+        outImage = {};
+    }
+    return copied;
 }
 
 std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    std::vector<unsigned char> encoded;
-    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
-        return encoded;
-    }
-
-    auto writeCallback = [](void* context, void* data, int size) {
-        auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-        const auto* src = static_cast<unsigned char*>(data);
-        bytes->insert(bytes->end(), src, src + size);
-    };
-
-    stbi_write_png_to_func(writeCallback, &encoded, width, height, channels, pixels.data(), width * channels);
-    return encoded;
+    return Stack::PngEncoding::EncodeInterleaved(
+        pixels, width, height, channels);
 }
 
 std::vector<unsigned char> EncodePngBytesForImageStorageOwned(
@@ -107,10 +102,7 @@ std::string BuildTimestampString() {
 }
 
 std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return {};
-    }
-    return std::vector<unsigned char>(static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull, 0u);
+    return Stack::PixelBuffer::BuildTransparentRgbaPixels(width, height);
 }
 
 bool IsLibRawRuntimeErrorMessage(const std::string& message) {
@@ -279,7 +271,11 @@ bool EditorModule::FinalizeDeserializedPipeline(const nlohmann::json& serialized
                 const int width = Raw::DisplayWidth(imageNode->rawSource.metadata);
                 const int height = Raw::DisplayHeight(imageNode->rawSource.metadata);
                 std::vector<unsigned char> transparent = BuildTransparentPixels(width, height);
-                LoadSourceFromPixels(transparent.data(), width, height, 4);
+                LoadSourceFromPixels(
+                    transparent.empty() ? nullptr : transparent.data(),
+                    width,
+                    height,
+                    4);
             }
         }
     }
@@ -306,9 +302,48 @@ void EditorModule::DeserializePipeline(const nlohmann::json& serialized) {
 }
 
 void EditorModule::LoadSourceFromPixels(const unsigned char* data, int w, int h, int ch, bool loadCompositePreview) {
-    m_Pipeline.LoadSourceFromPixels(data, w, h, ch);
-    if (loadCompositePreview) {
-        m_CompositePreviewPipeline.LoadSourceFromPixels(data, w, h, ch);
+    if (data != nullptr) {
+        std::vector<unsigned char> ownedPixels;
+        if (!Stack::PixelBuffer::CopyInterleavedPixels(
+                data,
+                w,
+                h,
+                ch,
+                ownedPixels)) {
+            m_Pipeline.Clear();
+            if (loadCompositePreview) {
+                m_CompositePreviewPipeline.Clear();
+            }
+            ClearCompositeSceneTextures();
+            MarkRenderDirty();
+            return;
+        }
+
+        SharedPixelBuffer sharedPixels;
+        try {
+            sharedPixels = MakeSharedPixelBufferOwned(std::move(ownedPixels));
+        } catch (const std::bad_alloc&) {
+            m_Pipeline.Clear();
+            if (loadCompositePreview) {
+                m_CompositePreviewPipeline.Clear();
+            }
+            ClearCompositeSceneTextures();
+            MarkRenderDirty();
+            return;
+        }
+        m_Pipeline.LoadSourceFromSharedPixels(sharedPixels, w, h, ch);
+        if (loadCompositePreview) {
+            m_CompositePreviewPipeline.LoadSourceFromSharedPixels(
+                sharedPixels,
+                w,
+                h,
+                ch);
+        }
+    } else {
+        m_Pipeline.LoadSourceFromPixels(nullptr, w, h, ch);
+        if (loadCompositePreview) {
+            m_CompositePreviewPipeline.LoadSourceFromPixels(nullptr, w, h, ch);
+        }
     }
     ClearCompositeSceneTextures();
     MarkRenderDirty();
@@ -334,12 +369,41 @@ void EditorModule::LoadSourceFromImagePayload(
 }
 
 bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
-    if (projectData.sourcePixels.empty() || projectData.width <= 0 || projectData.height <= 0) {
+    const bool hasSharedSource = !projectData.sourcePixelsShared.empty();
+    if ((!hasSharedSource && projectData.sourcePixels.empty()) ||
+        projectData.width <= 0 ||
+        projectData.height <= 0) {
         return false;
     }
 
+    CancelMfdExperimentalProcessing({}, true);
+
+    std::string rawSessionError;
+    if (!ApplyLoadedRawProjectSessionMetadata(projectData, &rawSessionError)) {
+        return false;
+    }
+    m_RawWorkspacePipelineActive = false;
     ResetForPipelineDeserialization();
-    LoadSourceFromPixels(projectData.sourcePixels.data(), projectData.width, projectData.height, projectData.channels);
+    if (hasSharedSource) {
+        m_Pipeline.LoadSourceFromSharedPixels(
+            projectData.sourcePixelsShared,
+            projectData.width,
+            projectData.height,
+            projectData.channels);
+        m_CompositePreviewPipeline.LoadSourceFromSharedPixels(
+            projectData.sourcePixelsShared,
+            projectData.width,
+            projectData.height,
+            projectData.channels);
+        ClearCompositeSceneTextures();
+        MarkRenderDirty();
+    } else {
+        LoadSourceFromPixels(
+            projectData.sourcePixels.data(),
+            projectData.width,
+            projectData.height,
+            projectData.channels);
+    }
     const nlohmann::json layers = EditorNodeGraph::ExtractLayerArray(projectData.pipelineData);
     if (!layers.is_array()) {
         return false;
@@ -357,66 +421,60 @@ bool EditorModule::ApplyLoadedProject(const LoadedProjectData& projectData) {
         nextThumbIndex);
     SetCurrentProjectName(projectData.projectName);
     SetCurrentProjectFileName(projectData.projectFileName);
+    if (!ApplyLoadedRawProjectSessionMetadata(projectData, &rawSessionError)) {
+        return false;
+    }
+    ClearDirty();
+    if (projectData.rawProjectSnapshot &&
+        !ValidateAndRepairActiveRawProjectGraphBindings(nullptr, &rawSessionError)) {
+        return false;
+    }
     WarmNodeBrowserThumbnailPixelsAsync();
     EnsureNodeBrowserThumbnailCatalog();
-    ClearDirty();
     m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
     m_LastAutoSaveTime = -1.0;
     return true;
 }
 
-void EditorModule::EnterRawWorkspaceRootTab() {
-    if (m_EditorProjectBeforeRawTab.has_value()) {
-        return;
+bool EditorModule::EnterRawWorkspaceRootTab() {
+    if (m_RawWorkspaceRootTabActive) {
+        return true;
     }
 
-    LoadedProjectData snapshot;
-    snapshot.pipelineData = SerializePipeline();
-    snapshot.sourcePixels = m_Pipeline.GetSourcePixels(snapshot.width, snapshot.height);
-    snapshot.channels = 4;
-    if (snapshot.sourcePixels.empty() || snapshot.width <= 0 || snapshot.height <= 0) {
-        // Graph image nodes carry their own encoded payload. ApplyLoadedProject
-        // still requires a valid pipeline source, so use a harmless transparent
-        // pixel when the Editor document has no conventional source image.
-        snapshot.sourcePixels = { 0, 0, 0, 0 };
-        snapshot.width = 1;
-        snapshot.height = 1;
+    m_RawWorkspaceRootTabActive = true;
+    // RAW, RAW Lab, and Editor are views over one project. A normal Editor
+    // project remains live while the RAW presentation is visibly locked; a
+    // RAW project/preview keeps the exact same graph and render caches.
+    m_RawWorkspaceLockedByEditorProject =
+        !IsRawWorkspaceProjectActive() && HasProjectContent();
+    if (!m_PendingRawWorkspaceExplicitOpenSourceKey.empty()) {
+        const std::string sourceKey =
+            std::move(m_PendingRawWorkspaceExplicitOpenSourceKey);
+        m_PendingRawWorkspaceExplicitOpenSourceKey.clear();
+        // The pending key only comes from an explicit Open/Double-click
+        // action. Let it replace a clean/saved Editor project instead of
+        // treating it as passive Gallery browsing.
+        m_RawWorkspaceLockedByEditorProject = false;
+        m_RawWorkspaceExplicitReplacementSourceKey = sourceKey;
+        SelectRawWorkspaceSource(sourceKey);
     }
-    snapshot.nodeBrowserThumbnailEntries = GetPersistedNodeBrowserThumbnails();
-    snapshot.projectName = m_CurrentProjectName;
-    snapshot.projectFileName = m_CurrentProjectFileName;
-    m_EditorProjectBeforeRawWasDirty = m_Dirty;
-    m_EditorProjectBeforeRawTab = std::move(snapshot);
-    m_LoadRawGraphOnNextEditorEntry = false;
+    return true;
 }
 
-void EditorModule::LeaveRawWorkspaceRootTab(bool enteringEditorTab) {
-    ReleaseRawWorkspacePreviewForTabChange();
+bool EditorModule::LeaveRawWorkspaceRootTab(bool enteringEditorTab) {
+    (void)enteringEditorTab;
 
-    const bool keepRawGraph = enteringEditorTab && m_LoadRawGraphOnNextEditorEntry;
-    m_LoadRawGraphOnNextEditorEntry = false;
-    if (keepRawGraph) {
-        m_EditorProjectBeforeRawTab.reset();
-        m_EditorProjectBeforeRawWasDirty = false;
-        return;
-    }
-
-    if (!m_EditorProjectBeforeRawTab.has_value()) {
-        return;
-    }
-
-    LoadedProjectData editorSnapshot = std::move(*m_EditorProjectBeforeRawTab);
-    m_EditorProjectBeforeRawTab.reset();
-    const bool restoreDirty = m_EditorProjectBeforeRawWasDirty;
-    m_EditorProjectBeforeRawWasDirty = false;
-    if (!ApplyLoadedProject(editorSnapshot)) {
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            "The Editor graph could not be restored after leaving the RAW tab.",
-            "raw-workspace-editor-graph-restore");
-        return;
-    }
-    m_Dirty = restoreDirty;
+    auto closeRawWorkspaceWindows = [this]() {
+        if (m_RawWorkspaceLabUi.galleryHost == RawGalleryHost::NativeWindow) {
+            CloseRawWorkspaceLabNativeGallery();
+        }
+        m_RawWorkspaceLabUi.galleryHost = RawGalleryHost::Closed;
+        m_RawWorkspaceGalleryWindowOpen = false;
+    };
+    closeRawWorkspaceWindows();
+    m_RawWorkspaceRootTabActive = false;
+    m_RawWorkspaceLockedByEditorProject = false;
+    return true;
 }
 
 void EditorModule::RestorePersistedNodeBrowserThumbnailEntries(
@@ -450,6 +508,9 @@ void EditorModule::ResetDeferredLoadedProjectApplyState() {
 }
 
 void EditorModule::FailDeferredLoadedProjectApply(std::string message) {
+    const std::shared_ptr<LoadedProjectData> rollbackProject =
+        m_DeferredLoadedProjectApply.rollbackProject;
+    const bool rollbackDirty = m_DeferredLoadedProjectApply.rollbackDirty;
     m_DeferredLoadedProjectApply.active = false;
     m_DeferredLoadedProjectApply.failed = true;
     m_DeferredLoadedProjectApply.allowRenderSubmission = false;
@@ -457,26 +518,133 @@ void EditorModule::FailDeferredLoadedProjectApply(std::string message) {
     m_DeferredLoadedProjectApply.statusText = std::move(message);
     m_DeferredLoadedProjectApply.project.reset();
     m_DeferredLoadedProjectApply.layerArray = nlohmann::json::array();
+    m_DeferredLoadedProjectApply.rollbackProject.reset();
+    if (rollbackProject) {
+        if (ApplyLoadedProject(*rollbackProject)) {
+            if (rollbackDirty) {
+                MarkDirty();
+            }
+        } else {
+            ResetToBlankProject();
+            m_DeferredLoadedProjectApply.statusText +=
+                " The previous in-memory project could not be restored.";
+        }
+    } else {
+        ResetToBlankProject();
+    }
 }
 
 bool EditorModule::BeginDeferredLoadedProjectApply(std::shared_ptr<LoadedProjectData> projectData) {
     ResetDeferredLoadedProjectApplyState();
     if (!projectData ||
-        projectData->sourcePixels.empty() ||
+        (projectData->sourcePixels.empty() && projectData->sourcePixelsShared.empty()) ||
         projectData->width <= 0 ||
         projectData->height <= 0) {
         FailDeferredLoadedProjectApply("Failed to apply the loaded project.");
         return false;
     }
 
-    m_DeferredLoadedProjectApply.active = true;
-    m_DeferredLoadedProjectApply.project = std::move(projectData);
-    m_DeferredLoadedProjectApply.layerArray =
-        EditorNodeGraph::ExtractLayerArray(m_DeferredLoadedProjectApply.project->pipelineData);
-    if (!m_DeferredLoadedProjectApply.layerArray.is_array()) {
+    const bool isRawProject =
+        projectData->projectKind == StackFormat::kRawProjectKind ||
+        (projectData->rawWorkspaceData.is_object() &&
+         projectData->rawWorkspaceData.value("schema", std::string()) ==
+             "stack.rawWorkspace.project");
+    if (isRawProject && !projectData->rawProjectSnapshot) {
+        StackFormat::ProjectDocument rawDocument;
+        rawDocument.rawWorkspaceData = projectData->rawWorkspaceData;
+        Stack::RawWorkspace::ProjectInfo rawInfo;
+        if (!Stack::RawWorkspace::ReadProjectInfoFromDocument(
+                rawDocument,
+                rawInfo,
+                nullptr)) {
+            FailDeferredLoadedProjectApply(rawInfo.errorMessage.empty()
+                ? "The project does not contain valid RAW Workspace metadata."
+                : rawInfo.errorMessage);
+            return false;
+        }
+        if (rawInfo.mode == Stack::RawWorkspace::RawProjectMode::CustomGraph ||
+            rawInfo.mode == Stack::RawWorkspace::RawProjectMode::Unknown) {
+            FailDeferredLoadedProjectApply(
+                rawInfo.mode == Stack::RawWorkspace::RawProjectMode::CustomGraph
+                    ? "This legacy custom RAW graph cannot be converted safely and was not opened."
+                    : "This project uses an unsupported RAW Workspace mode and was not opened.");
+            return false;
+        }
+    }
+
+    const nlohmann::json layerArray =
+        EditorNodeGraph::ExtractLayerArray(projectData->pipelineData);
+    if (!layerArray.is_array()) {
         FailDeferredLoadedProjectApply("Failed to read the project's editor state.");
         return false;
     }
+
+    if (HasProjectContent()) {
+        auto rollbackProject = std::make_shared<LoadedProjectData>();
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        int sourceChannels = 4;
+        rollbackProject->sourcePixelsShared = m_Pipeline.ShareSourcePixels(
+            sourceWidth,
+            sourceHeight,
+            sourceChannels);
+        if (rollbackProject->sourcePixelsShared.empty()) {
+            rollbackProject->sourcePixels.assign(4, 0);
+            sourceWidth = 1;
+            sourceHeight = 1;
+            sourceChannels = 4;
+        }
+        rollbackProject->width = sourceWidth;
+        rollbackProject->height = sourceHeight;
+        rollbackProject->channels = sourceChannels;
+        rollbackProject->pipelineData = SerializePipeline();
+        rollbackProject->nodeBrowserThumbnailEntries =
+            GetPersistedNodeBrowserThumbnails();
+        rollbackProject->projectName = m_CurrentProjectName;
+        rollbackProject->projectFileName = m_CurrentProjectFileName;
+        if (IsRawWorkspaceProjectActive()) {
+            if (m_ActiveRawProjectSnapshot && m_ActiveRawProjectStore) {
+                rollbackProject->rawProjectSnapshot =
+                    std::make_shared<Stack::Project::RawProjectSnapshot>(
+                        *m_ActiveRawProjectSnapshot);
+                rollbackProject->projectStore = m_ActiveRawProjectStore;
+                rollbackProject->rawWorkspaceData =
+                    m_ActiveRawProjectSnapshot->rawWorkspaceData;
+                rollbackProject->projectKind = StackFormat::kRawProjectKind;
+            }
+            const Stack::RawWorkspace::SourceRecord* source =
+                FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+            if (!m_ActiveRawProjectSnapshot && source &&
+                m_ActiveRawWorkspaceMode !=
+                    Stack::RawWorkspace::RawProjectMode::CustomGraph) {
+                StackFormat::ProjectDocument rollbackDocument;
+                Stack::RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
+                    *source,
+                    m_ActiveRawWorkspaceRecipe,
+                    nlohmann::json::object(),
+                    rollbackDocument,
+                    m_ActiveRawWorkspaceMode,
+                    source->project.status !=
+                        Stack::RawWorkspace::ProjectStatus::Embedded);
+                rollbackProject->rawWorkspaceData =
+                    std::move(rollbackDocument.rawWorkspaceData);
+                rollbackProject->projectKind = StackFormat::kRawProjectKind;
+            }
+        }
+        m_DeferredLoadedProjectApply.rollbackProject =
+            std::move(rollbackProject);
+        m_DeferredLoadedProjectApply.rollbackDirty = m_Dirty;
+    }
+
+    // The candidate is structurally valid and project identity is now about
+    // to change. Stop any source-set worker before deserialization begins;
+    // generation fencing prevents a stale completion from publishing into
+    // the replacement project.
+    CancelMfdExperimentalProcessing("The editing project is switching.", true);
+    m_RawWorkspacePipelineActive = false;
+    m_DeferredLoadedProjectApply.active = true;
+    m_DeferredLoadedProjectApply.project = std::move(projectData);
+    m_DeferredLoadedProjectApply.layerArray = layerArray;
 
     m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::ResetRuntime;
     m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
@@ -583,7 +751,22 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
         case DeferredLoadedProjectApplyState::Step::InstallSource: {
             const auto& project = *m_DeferredLoadedProjectApply.project;
             m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
-            LoadSourceFromPixels(project.sourcePixels.data(), project.width, project.height, project.channels, false);
+            if (!project.sourcePixelsShared.empty()) {
+                m_Pipeline.LoadSourceFromSharedPixels(
+                    project.sourcePixelsShared,
+                    project.width,
+                    project.height,
+                    project.channels);
+                ClearCompositeSceneTextures();
+                MarkRenderDirty();
+            } else {
+                LoadSourceFromPixels(
+                    project.sourcePixels.data(),
+                    project.width,
+                    project.height,
+                    project.channels,
+                    false);
+            }
             m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::DeserializeLayers;
             processedWorkThisFrame = true;
             break;
@@ -617,6 +800,13 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
         case DeferredLoadedProjectApplyState::Step::FinalizePipeline:
             m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
             FinalizeDeserializedPipeline(m_DeferredLoadedProjectApply.project->pipelineData, false);
+            if (m_RawWorkspaceRootTabActive &&
+                m_PendingRawWorkspaceDeferredProjectFinalize) {
+                // The first RAW frame must use RAW presentation/render
+                // ownership even though thumbnail warm-up and bookkeeping are
+                // still completing.
+                m_RawWorkspacePipelineActive = true;
+            }
             m_DeferredLoadedProjectApply.targetRenderRevision = m_RenderRevision;
             m_DeferredLoadedProjectApply.allowRenderSubmission = true;
             m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::RestorePersistedThumbnails;
@@ -653,11 +843,33 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
         }
 
         case DeferredLoadedProjectApplyState::Step::FinalizeBookkeeping: {
-            const auto& project = *m_DeferredLoadedProjectApply.project;
+            auto& project = *m_DeferredLoadedProjectApply.project;
             m_DeferredLoadedProjectApply.statusText = "Applying editor state...";
+            std::string migrationError;
+            if (!MigrateLoadedManagedRawProject(project, &migrationError)) {
+                FailDeferredLoadedProjectApply(migrationError.empty()
+                    ? "The legacy RAW project could not be migrated safely."
+                    : migrationError);
+                return;
+            }
             SetCurrentProjectName(project.projectName);
             SetCurrentProjectFileName(project.projectFileName);
+            std::string rawSessionError;
+            if (!ApplyLoadedRawProjectSessionMetadata(project, &rawSessionError)) {
+                FailDeferredLoadedProjectApply(rawSessionError.empty()
+                    ? "Failed to activate the loaded RAW project."
+                    : rawSessionError);
+                return;
+            }
             ClearDirty();
+            if (project.rawProjectSnapshot &&
+                !ValidateAndRepairActiveRawProjectGraphBindings(
+                    nullptr, &rawSessionError)) {
+                FailDeferredLoadedProjectApply(rawSessionError.empty()
+                    ? "Failed to validate multi-frame graph bindings."
+                    : rawSessionError);
+                return;
+            }
             m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
             m_LastAutoSaveTime = -1.0;
             m_DeferredLoadedProjectApply.step = DeferredLoadedProjectApplyState::Step::PrepareNodeBrowserThumbnails;
@@ -703,6 +915,7 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
             m_DeferredLoadedProjectApply.failed = false;
             m_DeferredLoadedProjectApply.allowRenderSubmission = false;
             m_DeferredLoadedProjectApply.project.reset();
+            m_DeferredLoadedProjectApply.rollbackProject.reset();
             m_DeferredLoadedProjectApply.layerArray = nlohmann::json::array();
             m_DeferredLoadedProjectApply.statusText = "Project ready.";
             FinalizeDeferredRawWorkspaceProjectLoadIfNeeded();
@@ -737,6 +950,23 @@ void EditorModule::PumpNonRenderingWork(double projectApplyBudgetMs) {
     TickRawWorkspacePersistence();
     TickRawWorkspacePreviewStaging();
     TickDeferredLoadedProjectApply(projectApplyBudgetMs);
+    if (m_PendingRawWorkspaceDeferredProjectFinalize &&
+        m_DeferredLoadedProjectApply.failed) {
+        m_PendingRawWorkspaceDeferredProjectFinalize = false;
+        m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey.clear();
+        m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Failed;
+        m_RawWorkspaceProjectLoadStatusText =
+            m_DeferredLoadedProjectApply.statusText.empty()
+                ? "Failed to apply the RAW project. The previous project was restored."
+                : m_DeferredLoadedProjectApply.statusText;
+        if (IsRawWorkspaceProjectActive()) {
+            m_RawWorkspace.selectedSourceKey = m_ActiveRawWorkspaceSourceKey;
+        }
+        QueueUiNotification(
+            UiNotificationSeverity::Error,
+            m_RawWorkspaceProjectLoadStatusText,
+            "raw-workspace-project-load");
+    }
     if (!deferGraphPanWork &&
         (!m_DeferredLoadedProjectApply.active || m_DeferredLoadedProjectApply.allowRenderSubmission)) {
         SubmitRenderIfReady();
@@ -781,119 +1011,179 @@ void EditorModule::RequestLoadSourceImage(const std::string& path) {
     m_SourceLoadTaskState = Async::TaskState::Queued;
     m_SourceLoadStatusText = "Loading source image in the background...";
 
-    Async::TaskSystem::Get().SubmitHighPriority([this, generation, path]() {
-        DecodedImageData decoded;
-        const bool success = DecodeImageFromFile(path, decoded);
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().SubmitHighPriority([this, generation, path]() {
+            auto postLoadFailure = [this, generation]() {
+                return Async::TaskSystem::Get().PostToMain([this, generation]() {
+                    if (generation != m_SourceLoadGeneration) {
+                        return;
+                    }
+                    m_SourceLoadTaskState = Async::TaskState::Failed;
+                    m_SourceLoadStatusText = "Failed to load the selected source image.";
+                    QueueUiNotification(
+                        UiNotificationSeverity::Error,
+                        m_SourceLoadStatusText,
+                        "editor-source-load");
+                });
+            };
+            auto postEmbeddingFailure = [this, generation]() {
+                return Async::TaskSystem::Get().PostToMain([this, generation]() {
+                    if (generation != m_SourceLoadGeneration) {
+                        return;
+                    }
+                    EditorNodeGraph::Node* imageNode =
+                        m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+                    if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
+                        !imageNode->image.isEmbedding ||
+                        imageNode->image.embeddingRequestId != generation) {
+                        return;
+                    }
+                    imageNode->image.isEmbedding = false;
+                    imageNode->image.embeddingRequestId = 0;
+                    m_SourceLoadStatusText =
+                        "Source image loaded, but portable storage could not be prepared.";
+                    QueueUiNotification(
+                        UiNotificationSeverity::Error,
+                        "The source image loaded, but Stack could not embed it for project storage.",
+                        "editor-source-load-embed");
+                });
+            };
+            bool payloadQueued = false;
+            try {
+            DecodedImageData decoded;
+            const bool success = DecodeImageFromFile(path, decoded);
 
-        EditorNodeGraph::ImagePayload payload;
-        std::vector<unsigned char> storagePixels;
-        int width = 0;
-        int height = 0;
-        int channels = 4;
-        if (success && !decoded.pixels.empty()) {
-            payload.label = FileNameFromPath(path);
-            payload.sourcePath = path;
-            payload.width = decoded.width;
-            payload.height = decoded.height;
-            payload.channels = decoded.channels;
-            payload.originalChannels = decoded.originalChannels;
-            payload.sourceColorMetadata = EditorNodeGraph::InspectImageFileColorMetadata(
-                path, decoded.width, decoded.height, decoded.originalChannels);
-            EditorNodeGraph::BuildImagePayloadPreview(
-                decoded.pixels,
-                decoded.width,
-                decoded.height,
-                decoded.channels,
-                payload.previewPixels,
-                payload.previewWidth,
-                payload.previewHeight,
-                payload.previewChannels);
-            payload.pixels = std::move(decoded.pixels);
-            payload.isEmbedding = true;
-            payload.importRequestId = generation;
-            payload.embeddingRequestId = generation;
-            storagePixels = payload.pixels;
-            width = payload.width;
-            height = payload.height;
-            channels = payload.channels;
-        }
+            EditorNodeGraph::ImagePayload payload;
+            std::vector<unsigned char> storagePixels;
+            int width = 0;
+            int height = 0;
+            int channels = 4;
+            if (success && !decoded.pixels.empty()) {
+                payload.label = FileNameFromPath(path);
+                payload.sourcePath = path;
+                payload.width = decoded.width;
+                payload.height = decoded.height;
+                payload.channels = decoded.channels;
+                payload.originalChannels = decoded.originalChannels;
+                payload.sourceColorMetadata = EditorNodeGraph::InspectImageFileColorMetadata(
+                    path, decoded.width, decoded.height, decoded.originalChannels);
+                EditorNodeGraph::BuildImagePayloadPreview(
+                    decoded.pixels,
+                    decoded.width,
+                    decoded.height,
+                    decoded.channels,
+                    payload.previewPixels,
+                    payload.previewWidth,
+                    payload.previewHeight,
+                    payload.previewChannels);
+                payload.pixels = std::move(decoded.pixels);
+                payload.isEmbedding = true;
+                payload.importRequestId = generation;
+                payload.embeddingRequestId = generation;
+                storagePixels = payload.pixels;
+                width = payload.width;
+                height = payload.height;
+                channels = payload.channels;
+            }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, path, payload = std::move(payload), success]() mutable {
-            if (generation != m_SourceLoadGeneration) {
+            payloadQueued = Async::TaskSystem::Get().PostToMain([this, generation, path, payload = std::move(payload), success]() mutable {
+                if (generation != m_SourceLoadGeneration) {
+                    return;
+                }
+
+                if (!success || payload.pixels.empty()) {
+                    m_SourceLoadTaskState = Async::TaskState::Failed;
+                    m_SourceLoadStatusText = "Failed to load the selected source image.";
+                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected source image.", "editor-source-load");
+                    return;
+                }
+
+                m_SourceLoadTaskState = Async::TaskState::Applying;
+                m_SourceLoadStatusText = "Applying source image to the editor...";
+
+                LoadSourceFromPixels(payload.pixels.data(), payload.width, payload.height, payload.channels);
+
+                EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+                if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image) {
+                    m_NodeGraph.ResetFromLayers(static_cast<int>(m_Layers.size()), true);
+                    imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+                } else if (!m_NodeGraph.IsOutputConnected()) {
+                    m_NodeGraph.RebuildLinks();
+                }
+
+                if (imageNode) {
+                    imageNode->title = payload.label.empty() ? "Image" : payload.label;
+                    imageNode->image = std::move(payload);
+                    m_NodeGraph.SetActiveImageNodeId(imageNode->id);
+                }
+                SetCurrentProjectName("");
+                SetCurrentProjectFileName("");
+                MarkNodeBrowserThumbnailSourceChanged();
+
+                m_SourceLoadTaskState = Async::TaskState::Idle;
+                m_SourceLoadStatusText = "Source image loaded; preparing portable storage...";
+                QueueUiNotification(UiNotificationSeverity::Success, "Source image loaded.", "editor-source-load");
+            });
+            if (!payloadQueued) {
                 return;
             }
 
-            if (!success || payload.pixels.empty()) {
-                m_SourceLoadTaskState = Async::TaskState::Failed;
-                m_SourceLoadStatusText = "Failed to load the selected source image.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected source image.", "editor-source-load");
+            if (!success || storagePixels.empty()) {
                 return;
             }
 
-            m_SourceLoadTaskState = Async::TaskState::Applying;
-            m_SourceLoadStatusText = "Applying source image to the editor...";
+            std::vector<unsigned char> pngBytes =
+                EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
+            Async::TaskSystem::Get().PostToMain([
+                this,
+                generation,
+                pngBytes = std::move(pngBytes)
+            ]() mutable {
+                if (generation != m_SourceLoadGeneration) {
+                    return;
+                }
+                EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+                if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
+                    !imageNode->image.isEmbedding || imageNode->image.embeddingRequestId != generation) {
+                    return;
+                }
 
-            LoadSourceFromPixels(payload.pixels.data(), payload.width, payload.height, payload.channels);
+                if (pngBytes.empty()) {
+                    imageNode->image.isEmbedding = false;
+                    imageNode->image.embeddingRequestId = 0;
+                    m_SourceLoadStatusText = "Source image loaded, but portable storage could not be prepared.";
+                    QueueUiNotification(
+                        UiNotificationSeverity::Error,
+                        "The source image loaded, but Stack could not embed it for project storage.",
+                        "editor-source-load-embed");
+                    return;
+                }
 
-            EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
-            if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image) {
-                m_NodeGraph.ResetFromLayers(static_cast<int>(m_Layers.size()), true);
-                imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
-            } else if (!m_NodeGraph.IsOutputConnected()) {
-                m_NodeGraph.RebuildLinks();
-            }
-
-            if (imageNode) {
-                imageNode->title = payload.label.empty() ? "Image" : payload.label;
-                imageNode->image = std::move(payload);
-                m_NodeGraph.SetActiveImageNodeId(imageNode->id);
-            }
-            SetCurrentProjectName("");
-            SetCurrentProjectFileName("");
-            MarkNodeBrowserThumbnailSourceChanged();
-
-            m_SourceLoadTaskState = Async::TaskState::Idle;
-            m_SourceLoadStatusText = "Source image loaded; preparing portable storage...";
-            QueueUiNotification(UiNotificationSeverity::Success, "Source image loaded.", "editor-source-load");
-        });
-
-        if (!success || storagePixels.empty()) {
-            return;
-        }
-
-        std::vector<unsigned char> pngBytes =
-            EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
-        Async::TaskSystem::Get().PostToMain([
-            this,
-            generation,
-            pngBytes = std::move(pngBytes)
-        ]() mutable {
-            if (generation != m_SourceLoadGeneration) {
-                return;
-            }
-            EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
-            if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
-                !imageNode->image.isEmbedding || imageNode->image.embeddingRequestId != generation) {
-                return;
-            }
-
-            if (pngBytes.empty()) {
+                imageNode->image.pngBytes = std::move(pngBytes);
                 imageNode->image.isEmbedding = false;
                 imageNode->image.embeddingRequestId = 0;
-                m_SourceLoadStatusText = "Source image loaded, but portable storage could not be prepared.";
-                QueueUiNotification(
-                    UiNotificationSeverity::Error,
-                    "The source image loaded, but Stack could not embed it for project storage.",
-                    "editor-source-load-embed");
-                return;
+                m_SourceLoadStatusText = "Source image loaded.";
+            });
+            } catch (...) {
+                if (payloadQueued) {
+                    postEmbeddingFailure();
+                } else {
+                    postLoadFailure();
+                }
             }
-
-            imageNode->image.pngBytes = std::move(pngBytes);
-            imageNode->image.isEmbedding = false;
-            imageNode->image.embeddingRequestId = 0;
-            m_SourceLoadStatusText = "Source image loaded.";
         });
-    });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted && generation == m_SourceLoadGeneration) {
+        m_SourceLoadTaskState = Async::TaskState::Failed;
+        m_SourceLoadStatusText = "Could not queue the source image load.";
+        QueueUiNotification(
+            UiNotificationSeverity::Error,
+            m_SourceLoadStatusText,
+            "editor-source-load");
+    }
 }
 
 bool EditorModule::ExportImage(const std::string& path) {
@@ -912,6 +1202,19 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     Stack::NodeMath::PngColorMetadataChunks colorChunks;
     if (!IsCompositeViewportMode()) {
         const RenderGraphSnapshot semanticSnapshot = BuildGraphSnapshot();
+        if (m_NodeGraph.IsOutputChannelInspection(
+                semanticSnapshot.outputNodeId)) {
+            m_ExportTaskState = Async::TaskState::Failed;
+            m_ExportStatusText =
+                "A Channel can be inspected in Output, but PNG export "
+                "requires an Image. Connect the Channel to Image Combine "
+                "first.";
+            QueueUiNotification(
+                UiNotificationSeverity::Error,
+                m_ExportStatusText,
+                "editor-export-channel-unsupported");
+            return false;
+        }
         const Stack::NodeMath::DirectOutputPolicy outputPolicy =
             Stack::NodeMath::EvaluateDirectPngOutputPolicy(semanticSnapshot.outputDescriptor);
         if (!outputPolicy.executable) {
@@ -998,15 +1301,17 @@ bool EditorModule::RequestExportImage(const std::string& path) {
     m_ExportTaskState = Async::TaskState::Running;
     m_ExportStatusText = "Writing PNG export in the background...";
 
-    Async::TaskSystem::Get().Submit([
-        this,
-        generation,
-        path,
-        width,
-        height,
-        colorChunks = std::move(colorChunks),
-        pixels = std::move(pixels)
-    ]() mutable {
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit([
+            this,
+            generation,
+            path,
+            width,
+            height,
+            colorChunks = std::move(colorChunks),
+            pixels = std::move(pixels)
+        ]() mutable {
         bool success = false;
         std::string errorMsg;
 
@@ -1072,24 +1377,38 @@ bool EditorModule::RequestExportImage(const std::string& path) {
             std::cerr << "[EditorModule] Export failed for path: " << path << ". Reason: " << errorMsg << std::endl;
         }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, success]() {
-            if (generation != m_ExportGeneration) {
-                return;
-            }
+            Async::TaskSystem::Get().PostToMain([this, generation, success]() {
+                if (generation != m_ExportGeneration) {
+                    return;
+                }
 
-            if (success) {
-                m_ExportTaskState = Async::TaskState::Idle;
-                m_ExportStatusText = "Rendered image exported.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Rendered image exported.", "editor-export-image");
-            } else {
-                m_ExportTaskState = Async::TaskState::Failed;
-                m_ExportStatusText = "Failed to write the exported PNG.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to write the exported PNG.", "editor-export-image");
-            }
+                if (success) {
+                    m_ExportTaskState = Async::TaskState::Idle;
+                    m_ExportStatusText = "Rendered image exported.";
+                    QueueUiNotification(UiNotificationSeverity::Success, "Rendered image exported.", "editor-export-image");
+                } else {
+                    m_ExportTaskState = Async::TaskState::Failed;
+                    m_ExportStatusText = "Failed to write the exported PNG.";
+                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to write the exported PNG.", "editor-export-image");
+                }
+            });
         });
-    });
+    } catch (...) {
+        submitted = false;
+    }
 
-    return true;
+    if (submitted) {
+        return true;
+    }
+    if (generation == m_ExportGeneration) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = "Could not queue the image export.";
+        QueueUiNotification(
+            UiNotificationSeverity::Error,
+            m_ExportStatusText,
+            "editor-export-image");
+    }
+    return false;
 }
 
 bool EditorModule::BuildProjectDocumentForSave(
@@ -1097,6 +1416,34 @@ bool EditorModule::BuildProjectDocumentForSave(
     StackFormat::ProjectDocument& outDocument) {
     const std::string trimmedName = displayName.empty() ? "Untitled Project" : displayName;
     const StackFormat::json pipeline = SerializePipeline();
+
+    if (m_ActiveRawProjectSnapshot && m_ActiveRawProjectStore) {
+        outDocument = {};
+        outDocument.metadata.projectKind = StackFormat::kRawProjectKind;
+        outDocument.metadata.projectName = trimmedName;
+        outDocument.metadata.timestamp = BuildTimestampString();
+        outDocument.metadata.sourceWidth = 1;
+        outDocument.metadata.sourceHeight = 1;
+        outDocument.thumbnailBytes = m_ActiveRawProjectSnapshot->coverThumbnailBytes;
+        outDocument.pipelineData = pipeline;
+        outDocument.rawWorkspaceData = m_ActiveRawProjectSnapshot->rawWorkspaceData;
+        if (!outDocument.rawWorkspaceData.is_object()) {
+            outDocument.rawWorkspaceData = StackFormat::json::object();
+        }
+        outDocument.rawWorkspaceData["schema"] = "stack.rawWorkspace.project";
+        outDocument.rawWorkspaceData["schemaVersion"] = 3;
+        outDocument.rawWorkspaceData["rawProjectModel"] =
+            Stack::Project::kRawProjectModelSourceSets;
+        outDocument.projectStore = m_ActiveRawProjectStore;
+        outDocument.rawProjectSnapshot =
+            std::make_shared<Stack::Project::RawProjectSnapshot>(
+                *m_ActiveRawProjectSnapshot);
+        outDocument.rawProjectSnapshot->projectName = trimmedName;
+        outDocument.rawProjectSnapshot->pipelineData = pipeline;
+        outDocument.rawProjectSnapshot->rawWorkspaceData =
+            outDocument.rawWorkspaceData;
+        return true;
+    }
 
     int renderedW = 0;
     int renderedH = 0;
@@ -1111,7 +1458,12 @@ bool EditorModule::BuildProjectDocumentForSave(
         }
     }
     if (renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) {
-        return false;
+        // A graph-only Editor project is still a valid project. Persist its
+        // topology with a neutral placeholder raster until it has a rendered
+        // output, rather than making project safety depend on graph wiring.
+        renderedW = 1;
+        renderedH = 1;
+        renderedPixels = BuildTransparentPixels(renderedW, renderedH);
     }
 
     int sourceW = 0;
@@ -1200,38 +1552,55 @@ bool EditorModule::RequestExportProject(const std::string& path) {
     m_ExportTaskState = Async::TaskState::Running;
     m_ExportStatusText = "Writing project file...";
 
-    Async::TaskSystem::Get().Submit([this, generation, path, document = std::move(document)]() mutable {
-        bool success = false;
-        try {
-            const std::filesystem::path destination(path);
-            if (destination.has_parent_path()) {
-                std::filesystem::create_directories(destination.parent_path());
-            }
-            success = StackFormat::WriteProjectFile(destination, document);
-        } catch (...) {
-            success = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this, generation, path, success]() {
-            if (generation != m_ExportGeneration) {
-                return;
-            }
-
-            if (success) {
-                m_ExportTaskState = Async::TaskState::Idle;
-                m_ExportStatusText = "Project exported.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Project exported.", "editor-export-project");
-                if (m_CurrentProjectName.empty()) {
-                    const std::string stem = std::filesystem::path(path).stem().string();
-                    m_CurrentProjectName = stem.empty() ? std::string("Untitled Project") : stem;
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit(
+            [this, generation, path, document = std::move(document)]() mutable {
+                bool success = false;
+                try {
+                    const std::filesystem::path destination(path);
+                    if (destination.has_parent_path()) {
+                        std::filesystem::create_directories(destination.parent_path());
+                    }
+                    success = StackFormat::WriteProjectFile(destination, document);
+                } catch (...) {
+                    success = false;
                 }
-            } else {
-                m_ExportTaskState = Async::TaskState::Failed;
-                m_ExportStatusText = "Failed to write the project file.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to write the project file.", "editor-export-project");
-            }
-        });
-    });
 
-    return true;
+                Async::TaskSystem::Get().PostToMain([this, generation, path, success]() {
+                    if (generation != m_ExportGeneration) {
+                        return;
+                    }
+
+                    if (success) {
+                        m_ExportTaskState = Async::TaskState::Idle;
+                        m_ExportStatusText = "Project exported.";
+                        QueueUiNotification(UiNotificationSeverity::Success, "Project exported.", "editor-export-project");
+                        if (m_CurrentProjectName.empty()) {
+                            const std::string stem = std::filesystem::path(path).stem().string();
+                            m_CurrentProjectName = stem.empty() ? std::string("Untitled Project") : stem;
+                        }
+                    } else {
+                        m_ExportTaskState = Async::TaskState::Failed;
+                        m_ExportStatusText = "Failed to write the project file.";
+                        QueueUiNotification(UiNotificationSeverity::Error, "Failed to write the project file.", "editor-export-project");
+                    }
+                });
+            });
+    } catch (...) {
+        submitted = false;
+    }
+
+    if (submitted) {
+        return true;
+    }
+    if (generation == m_ExportGeneration) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = "Could not queue the project export.";
+        QueueUiNotification(
+            UiNotificationSeverity::Error,
+            m_ExportStatusText,
+            "editor-export-project");
+    }
+    return false;
 }

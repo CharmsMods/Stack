@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -75,6 +76,46 @@ void TestAvailabilityAndValidation() {
     CurveValue invalidCurve{ { {0.0, 0.0}, {0.0, 1.0} }, "linear", "clamp" };
     Require(!ValidateFirstClassValue(Known(LogicalValueType::Curve1D, ValueStorageClass::StructuredResource, invalidCurve)).empty(), "curve requires strictly ordered x coordinates");
     Require(!ValidateFirstClassValue(Known(LogicalValueType::ScalarField, ValueStorageClass::Uniform, ResourceValue{ "field", "x", {} })).empty(), "field cannot masquerade as a uniform value");
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double infinity = std::numeric_limits<double>::infinity();
+    Require(!ValidateFirstClassValue(MakeUniformScalar(nan)).empty(),
+        "known uniform Scalar values must reject NaN");
+    Require(!ValidateFirstClassValue(Known(
+        LogicalValueType::Vector3,
+        ValueStorageClass::Uniform,
+        std::array<double, 3>{ 1.0, infinity, 3.0 })).empty(),
+        "known uniform vector values must reject infinity");
+    Require(!ValidateFirstClassValue(Known(
+        LogicalValueType::Histogram,
+        ValueStorageClass::StructuredResource,
+        HistogramValue{ 0.0, 1.0, { 1.0, nan }, "invalid" })).empty(),
+        "known histograms must reject non-finite bins");
+    Require(!ValidateFirstClassValue(Known(
+        LogicalValueType::Statistics,
+        ValueStorageClass::StructuredResource,
+        StatisticsValue{ { { "mean", infinity } }, "invalid" })).empty(),
+        "known statistics must reject non-finite entries");
+    const FirstClassValue nonFiniteVector = Known(
+        LogicalValueType::Vector3,
+        ValueStorageClass::Uniform,
+        std::array<double, 3>{ 1.0, nan, 3.0 });
+    Require(!CanExplicitlyBroadcast(
+            MakeUniformScalar(infinity),
+            LogicalValueType::Vector3,
+            ValueStorageClass::Uniform),
+        "explicit broadcast should reject a non-finite uniform source");
+    Require(
+        ExtractUniformComponent(nonFiniteVector, 0).availability ==
+            ValueAvailability::Failure &&
+        ReduceUniformVector(nonFiniteVector, VectorReduction::Mean).availability ==
+            ValueAvailability::Failure,
+        "component extraction and reduction should propagate invalid uniform values as typed failures");
+
+    FirstClassValue mismatchedPayload = MakeUniformScalar(1.0);
+    mismatchedPayload.logicalType = LogicalValueType::Curve1D;
+    Require(!ValidateFirstClassValue(mismatchedPayload).empty(),
+        "malformed type/payload pairs should fail validation without throwing");
 }
 
 void TestRules() {

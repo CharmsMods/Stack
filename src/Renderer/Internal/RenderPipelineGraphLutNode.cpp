@@ -1,5 +1,6 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <functional>
 #include <string>
@@ -18,8 +19,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
     GraphNodeRenderResult result;
 
     const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, "imageIn");
-    unsigned int combinedInputTexture = 0;
-    bool combinedInputOwned = false;
+    Stack::Renderer::ScopedGLTexture combinedInputTexture;
     const unsigned int inputTexture = [&]() -> unsigned int {
         if (input) {
             return evalImage(input->fromNodeId, input->fromSocketId);
@@ -33,14 +33,41 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
             return 0;
         }
 
-        const unsigned int texR = linkR ? evalMask(linkR->fromNodeId, linkR->fromSocketId) : 0;
-        const unsigned int texG = linkG ? evalMask(linkG->fromNodeId, linkG->fromSocketId) : 0;
-        const unsigned int texB = linkB ? evalMask(linkB->fromNodeId, linkB->fromSocketId) : 0;
-        const unsigned int texA = linkA ? evalMask(linkA->fromNodeId, linkA->fromSocketId) : 0;
+        int referenceWidth = 0;
+        int referenceHeight = 0;
+        const auto evaluateChannel = [&](const RenderGraphLink* link) {
+            if (!link) {
+                return 0u;
+            }
+            const unsigned int texture =
+                evalMask(link->fromNodeId, link->fromSocketId);
+            if (texture != 0 && referenceWidth <= 0) {
+                referenceWidth = m_Width;
+                referenceHeight = m_Height;
+            }
+            return texture;
+        };
+        const unsigned int texR = evaluateChannel(linkR);
+        const unsigned int texG = evaluateChannel(linkG);
+        const unsigned int texB = evaluateChannel(linkB);
+        const unsigned int texA = evaluateChannel(linkA);
+        const bool inputsReady =
+            (!linkR || texR != 0) &&
+            (!linkG || texG != 0) &&
+            (!linkB || texB != 0) &&
+            (!linkA || texA != 0);
+        if (!inputsReady || referenceWidth <= 0 || referenceHeight <= 0) {
+            return 0;
+        }
+        m_Width = referenceWidth;
+        m_Height = referenceHeight;
 
-        combinedInputTexture = CreateGraphRenderTargetTexture();
-        RenderIntoGraphTargetTexture(combinedInputTexture, [&](unsigned int fbo) {
-            RenderChannelCombine(
+        combinedInputTexture.Reset(
+            CreateGraphRenderTargetTexture());
+        bool combinePassExecuted = false;
+        const bool combined =
+            RenderIntoGraphTargetTexture(combinedInputTexture.Get(), [&](unsigned int fbo) {
+                combinePassExecuted = RenderChannelCombine(
                 texR,
                 texG,
                 texB,
@@ -50,9 +77,13 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
                 linkB != nullptr,
                 linkA != nullptr,
                 fbo);
-        });
-        combinedInputOwned = combinedInputTexture != 0;
-        return combinedInputTexture;
+            }) &&
+            combinePassExecuted;
+        if (!combined || !combinedInputTexture) {
+            combinedInputTexture.Reset();
+            return 0;
+        }
+        return combinedInputTexture.Get();
     }();
 
     const std::string lut1DKey = std::to_string(node.nodeId) + ":lut1d";
@@ -61,13 +92,21 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
     if (inputTexture == 0) {
         return result;
     }
+    const auto publishInput = [&]() {
+        result.texture = inputTexture;
+        result.owned = static_cast<bool>(combinedInputTexture);
+        if (combinedInputTexture) {
+            result.texture = combinedInputTexture.Release();
+        }
+    };
+    const int inputWidth = m_Width;
+    const int inputHeight = m_Height;
 
     if (!ColorLut::HasAnyLutData(node.lut)) {
         ClearLutTextureKey(lut1DKey);
         ClearLutTextureKey(shaperKey);
         ClearLutTextureKey(lut3DKey);
-        result.texture = inputTexture;
-        result.owned = false;
+        publishInput();
         return result;
     }
 
@@ -104,13 +143,13 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
         (hasLut3D && lut3DTexture == 0) ||
         m_LutProgram == 0;
     if (missingRequiredTexture) {
-        result.texture = inputTexture;
-        result.owned = combinedInputOwned;
+        publishInput();
         return result;
     }
 
-    unsigned int processed = CreateGraphRenderTargetTexture();
-    const bool renderedLut = RenderIntoGraphTargetTexture(processed, [&](unsigned int) {
+    Stack::Renderer::ScopedGLTexture processed(
+        CreateGraphRenderTargetTexture());
+    const bool renderedLut = RenderIntoGraphTargetTexture(processed.Get(), [&](unsigned int) {
         glUseProgram(m_LutProgram);
 
         glActiveTexture(GL_TEXTURE0);
@@ -155,44 +194,41 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLutGraphNode(
         glActiveTexture(GL_TEXTURE0);
     });
 
-    if (!renderedLut || processed == 0) {
-        if (processed != 0) {
-            glDeleteTextures(1, &processed);
-        }
-        result.texture = inputTexture;
-        result.owned = combinedInputOwned;
+    if (!renderedLut || !processed) {
+        publishInput();
         return result;
     }
 
-    result.texture = processed;
-    result.owned = true;
     const RenderGraphLink* maskLink = executionContext.FindInputLink(node.nodeId, "maskIn");
     const unsigned int maskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
+    m_Width = inputWidth;
+    m_Height = inputHeight;
+    if (maskLink != nullptr && maskTexture == 0) {
+        publishInput();
+        return result;
+    }
     if (maskTexture) {
-        unsigned int blended = CreateGraphRenderTargetTexture();
-        RenderIntoGraphTargetTexture(blended, [&](unsigned int fbo) {
-            RenderMaskBlend(inputTexture, processed, maskTexture, fbo);
-        });
-        if (processed != 0) {
-            glDeleteTextures(1, &processed);
-        }
-        result.texture = blended != 0 ? blended : inputTexture;
-        if (blended != 0) {
-            if (combinedInputOwned && combinedInputTexture != 0) {
-                glDeleteTextures(1, &combinedInputTexture);
-                combinedInputTexture = 0;
-                combinedInputOwned = false;
-            }
+        EnsureMaskPrograms();
+        Stack::Renderer::ScopedGLTexture blended(
+            CreateGraphRenderTargetTexture());
+        bool blendPassExecuted = false;
+        const bool renderedBlend =
+            m_MaskBlendProgram != 0 &&
+            RenderIntoGraphTargetTexture(blended.Get(), [&](unsigned int fbo) {
+                blendPassExecuted = RenderMaskBlend(
+                    inputTexture, processed.Get(), maskTexture, fbo);
+            }) &&
+            blendPassExecuted;
+        if (renderedBlend && blended) {
+            result.texture = blended.Release();
             result.owned = true;
         } else {
-            result.owned = combinedInputOwned;
+            publishInput();
         }
-    }
-    if (maskTexture == 0 && combinedInputOwned && combinedInputTexture != 0) {
-        glDeleteTextures(1, &combinedInputTexture);
-        combinedInputTexture = 0;
-        combinedInputOwned = false;
+        return result;
     }
 
+    result.texture = processed.Release();
+    result.owned = true;
     return result;
 }

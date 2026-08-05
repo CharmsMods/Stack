@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <utility>
@@ -9,7 +11,7 @@
 
 namespace Stack::NodeMath {
 
-inline constexpr std::uint32_t kSemanticDescriptorSchemaVersion = 2;
+inline constexpr std::uint32_t kSemanticDescriptorSchemaVersion = 3;
 
 enum class LogicalValueType {
     Invalid,
@@ -24,6 +26,7 @@ enum class LogicalValueType {
     Coordinate2,
     Curve1D,
     Lut,
+    Channel,
     ScalarField,
     Vector2Field,
     Vector3Field,
@@ -32,6 +35,9 @@ enum class LogicalValueType {
     Mask,
     DataImage,
     ComplexSpectrum,
+    FrequencyResponse,
+    SpectrumMagnitude,
+    SpectrumPhase,
     Histogram,
     Statistics,
     Metadata,
@@ -94,6 +100,30 @@ struct ChannelDescriptor {
 };
 
 bool operator==(const ChannelDescriptor& left, const ChannelDescriptor& right);
+
+enum class ImageComponent : std::uint8_t {
+    Red = 1u << 0u,
+    Green = 1u << 1u,
+    Blue = 1u << 2u,
+    Alpha = 1u << 3u
+};
+
+struct ImageComponentSet {
+    std::uint8_t bits = 0;
+};
+
+bool operator==(const ImageComponentSet& left, const ImageComponentSet& right);
+bool operator!=(const ImageComponentSet& left, const ImageComponentSet& right);
+bool HasImageComponent(const ImageComponentSet& components, ImageComponent component);
+bool AddImageComponent(ImageComponentSet& components, ImageComponent component);
+std::size_t ImageComponentCount(const ImageComponentSet& components);
+std::vector<ImageComponent> OrderedImageComponents(const ImageComponentSet& components);
+std::string ImageComponentToken(ImageComponent component);
+std::optional<ImageComponent> ParseImageComponentToken(const std::string& token);
+ImageComponentSet MakeImageComponentSet(
+    std::initializer_list<ImageComponent> components);
+ChannelDescriptor MakeImageChannelDescriptor(
+    const ImageComponentSet& components);
 
 enum class ColorRelation {
     Standard,
@@ -266,6 +296,7 @@ struct ValueDescriptor {
     std::uint32_t schemaVersion = kSemanticDescriptorSchemaVersion;
     LogicalValueType logicalType = LogicalValueType::Invalid;
     SemanticField<ChannelDescriptor> channels;
+    SemanticField<ImageComponentSet> presentImageComponents;
     SemanticField<ColorIdentity> color;
     SemanticField<TransferDescriptor> transfer;
     SemanticField<ReferenceState> reference;

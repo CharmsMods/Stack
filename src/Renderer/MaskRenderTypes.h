@@ -5,6 +5,7 @@
 #include "MFSR/MFSRTypes.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
 #include "NodeMath/ContractTypes.h"
+#include "NodeMath/OutputInspection.h"
 #include "NodeMath/TechnicalImageMath.h"
 #include "NodeMath/GeometryMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
@@ -172,6 +173,7 @@ enum class RenderGraphNodeKind {
     RawDetailFusion,
     HdrMerge,
     Mfsr,
+    RawProjectSourceSet,
     Lut,
     Layer,
     Output,
@@ -183,12 +185,19 @@ enum class RenderGraphNodeKind {
     ImageGenerator,
     ChannelSplit,
     ChannelCombine,
+    ConstantChannel,
     CustomMask,
     DataMath,
     TechnicalImage,
+    FrequencyFilter,
+    FrequencyResponse,
     FrequencyFft,
     FrequencyIfft,
     SpectrumView,
+    ApplyFrequencyResponse,
+    CombineSpectra,
+    SpectrumSeparate,
+    SpectrumRecombine,
     FrequencyMask,
     SpectrumMath,
     MagnitudePhase,
@@ -265,11 +274,77 @@ enum class RenderSpectrumAnalyzerMode {
     DominantFrequency
 };
 
+enum class RenderFrequencyFilterMode {
+    AllPass,
+    LowPass,
+    HighPass,
+    BandPass,
+    BandStop,
+    NotchReject
+};
+
+enum class RenderFrequencyTransitionProfile {
+    Smooth,
+    Gaussian,
+    Butterworth,
+    Hard
+};
+
+enum class RenderFrequencyEdgePolicy {
+    Mirror,
+    Wrap,
+    ZeroPad
+};
+
+enum class RenderSpectrumCombineMode {
+    Add,
+    Subtract
+};
+
+enum class RenderSpectrumViewMode {
+    Magnitude,
+    Phase,
+    Real,
+    Imaginary
+};
+
+struct RenderFrequencyNotch {
+    std::string id;
+    float frequency = 0.25f;
+    float directionDegrees = 0.0f;
+    float width = 0.025f;
+};
+
+struct RenderFrequencyResponseSettings {
+    RenderFrequencyFilterMode mode = RenderFrequencyFilterMode::AllPass;
+    RenderFrequencyTransitionProfile profile = RenderFrequencyTransitionProfile::Smooth;
+    float lowCutoff = 0.08f;
+    float highCutoff = 0.25f;
+    float transitionWidth = 0.025f;
+    float butterworthOrder = 2.0f;
+    std::vector<RenderFrequencyNotch> notches;
+};
+
+struct RenderFrequencyFilterSettings {
+    RenderFrequencyResponseSettings localResponse;
+    RenderFrequencyEdgePolicy edgePolicy = RenderFrequencyEdgePolicy::Mirror;
+    float strength = 1.0f;
+};
+
+struct RenderApplyFrequencyResponseSettings {
+    float strength = 1.0f;
+};
+
+struct RenderCombineSpectraSettings {
+    RenderSpectrumCombineMode mode = RenderSpectrumCombineMode::Add;
+};
+
 struct RenderFrequencyFftSettings {
-    bool luminanceOnly = true;
+    RenderFrequencyEdgePolicy edgePolicy = RenderFrequencyEdgePolicy::Mirror;
 };
 
 struct RenderSpectrumViewSettings {
+    RenderSpectrumViewMode mode = RenderSpectrumViewMode::Magnitude;
     RenderSpectrumViewLut lut = RenderSpectrumViewLut::Turbo;
     float exposure = 1.0f;
     float gamma = 1.0f;
@@ -298,7 +373,42 @@ struct RenderMagnitudePhaseSettings {
 
 struct RenderSpectrumAnalyzerSettings {
     float innerRadius = 0.0f;
-    float outerRadius = 1.0f;
+    float outerRadius = 0.5f;
+    bool excludeDc = true;
+};
+
+enum class RenderFrequencyResourceKind {
+    Spectrum,
+    Magnitude,
+    Phase
+};
+
+struct RenderFrequencyResource {
+    unsigned int texture = 0;
+    RenderFrequencyResourceKind kind = RenderFrequencyResourceKind::Spectrum;
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    int paddedWidth = 0;
+    int paddedHeight = 0;
+    int paddingOriginX = 0;
+    int paddingOriginY = 0;
+    RenderFrequencyEdgePolicy edgePolicy = RenderFrequencyEdgePolicy::Mirror;
+    std::string sourceRole;
+    std::string normalization = "forward-unscaled-inverse-1-over-n";
+    std::string precision = "rg32f";
+    std::string coordinateConvention = "unshifted-dft-cycles-per-pixel";
+    bool hermitian = true;
+    bool valid = false;
+};
+
+struct RenderSpectrumAnalysis {
+    bool valid = false;
+    std::array<float, 256> radialPower {};
+    float bandPower = 0.0f;
+    float peakFrequency = 0.0f;
+    float peakDirectionDegrees = 0.0f;
+    std::size_t fingerprint = 0;
+    std::string error;
 };
 
 struct RenderGraphImagePayload {
@@ -317,6 +427,10 @@ struct RenderGraphRawSourcePayload {
 
 struct RenderGraphRawDevelopmentPayload {
     Stack::RawRecipe::RawDevelopmentRecipe recipe;
+    // Runtime-only source used by managed multi-frame RAW nodes. Ordinary
+    // RAW Development nodes leave this empty and continue to load the
+    // recipe source path lazily.
+    std::shared_ptr<const Raw::RawImageData> embeddedRawData;
 };
 
 struct RenderGraphRawDevelopPayload {
@@ -356,6 +470,16 @@ struct RenderGraphMfsrPayload {
     std::string errorMessage;
 };
 
+struct RenderGraphRawProjectSourceSetPayload {
+    std::string sourceSetId;
+    std::string unavailableStatus;
+    std::uint64_t inputRevision = 0u;
+    std::uint64_t postRecipeRevision = 0u;
+    std::uint64_t contentHash = 0u;
+    bool resultAvailable = false;
+    bool quarantined = false;
+};
+
 using RenderGraphLutPayload = ColorLut::LutPayload;
 
 struct ToneCurveAutoRewriteFeedback {
@@ -388,6 +512,9 @@ struct RenderGraphNode {
     std::string definitionVersion;
     std::string definitionHash;
     RenderGraphNodeKind kind = RenderGraphNodeKind::Image;
+    Stack::NodeMath::OutputChannelViewMode outputChannelViewMode =
+        Stack::NodeMath::OutputChannelViewMode::Neutral;
+    float constantChannelValue = 1.0f;
     RenderGraphImagePayload image;
     RenderGraphRawSourcePayload rawSource;
     RenderGraphRawDevelopmentPayload rawDevelopment;
@@ -398,6 +525,7 @@ struct RenderGraphNode {
     RenderGraphRawDetailFusionPayload rawDetailFusion;
     RenderGraphHdrMergePayload hdrMerge;
     RenderGraphMfsrPayload mfsr;
+    RenderGraphRawProjectSourceSetPayload rawProjectSourceSet;
     RenderGraphLutPayload lut;
     nlohmann::json layerJson;
     RenderMaskGeneratorKind maskKind = RenderMaskGeneratorKind::Solid;
@@ -420,9 +548,13 @@ struct RenderGraphNode {
     Stack::NodeMath::ReformatSettings reformatSettings;
     Stack::NodeMath::ValueDescriptor semanticDescriptor;
     std::string semanticDescriptorIdentity;
+    RenderFrequencyFilterSettings frequencyFilterSettings;
+    RenderFrequencyResponseSettings frequencyResponseSettings;
     RenderFrequencyFftSettings frequencyFftSettings;
     RenderFrequencyFftSettings frequencyIfftSettings;
     RenderSpectrumViewSettings spectrumViewSettings;
+    RenderApplyFrequencyResponseSettings applyFrequencyResponseSettings;
+    RenderCombineSpectraSettings combineSpectraSettings;
     RenderFrequencyMaskSettings frequencyMaskSettings;
     RenderSpectrumMathMode spectrumMathMode = RenderSpectrumMathMode::Multiply;
     RenderSpectrumMathSettings spectrumMathSettings;
@@ -441,6 +573,20 @@ struct RenderGraphLink {
     std::string semanticDescriptorIdentity;
 };
 
+struct RawLocalRangeTargetPreviewRequest {
+    bool enabled = false;
+    bool requestConnectedRefinement = false;
+    bool provisional = true;
+    std::uint64_t generation = 0;
+    float sourceU = 0.5f;
+    float sourceV = 0.5f;
+    float hitRadiusU = 0.0f;
+    float hitRadiusV = 0.0f;
+    int existingZoneIndex = -1;
+    bool interactionEditing = false;
+    Stack::RawRecipe::RawLocalRangeTargetZone prospectiveZone;
+};
+
 struct RenderGraphSnapshot {
     int outputNodeId = -1;
     std::string outputSocketId;
@@ -450,6 +596,7 @@ struct RenderGraphSnapshot {
     bool executionInspectionEnabled = false;
     float rawWorkspaceLocalRangeTargetSampleU = 0.0f;
     float rawWorkspaceLocalRangeTargetSampleV = 0.0f;
+    RawLocalRangeTargetPreviewRequest rawWorkspaceLocalRangeTargetPreview;
     std::vector<RenderGraphNode> nodes;
     std::vector<RenderGraphLink> links;
     Stack::NodeMath::ValueDescriptor outputDescriptor;

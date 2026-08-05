@@ -437,8 +437,7 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
     const Stack::RawWorkspace::SourceRecord* selectedSource,
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe,
     float controlWidth,
-    bool defaultOpen,
-    const std::string& startingPointReadout) {
+    bool defaultOpen) {
     const ImGuiTreeNodeFlags headerFlags =
         defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0;
     if (selectedSource == nullptr ||
@@ -447,16 +446,6 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
     }
 
     bool changed = false;
-    if (startingPointReadout.empty()) {
-        // This row is fed by asynchronous analysis. Always reserve one line so
-        // the graph stays under the pointer when the readout changes state.
-        ImGui::Dummy(ImVec2(0.0f, ImGui::GetTextLineHeight()));
-    } else {
-        // Deliberately do not wrap: line-count changes above the graph turn a
-        // vertical layout shift into unintended point motion during a drag.
-        ImGui::TextDisabled("%s", startingPointReadout.c_str());
-        TooltipIfHovered(startingPointReadout.c_str());
-    }
     editedRecipe.localRange = BuildLocalRangeUiRecipe(editedRecipe.localRange);
     bool enabled = editedRecipe.localRange.enabled;
     if (ImGuiExtras::NodeCheckbox("Enable Local Range", "##RawLocalRangeEnabled", &enabled, controlWidth)) {
@@ -464,10 +453,14 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
         changed = true;
     }
     TooltipIfHovered("Apply the scene-EV graph before Finish Tone and View Transform.");
-    if (ImGui::SmallButton("Diagnostics##RawWorkspaceLocalRangeDiagnostics")) {
-        m_RawWorkspaceLayoutUi.diagnosticsOpenRequested = true;
+    if (!editedRecipe.localRange.targetZones.empty()) {
+        ImGui::TextDisabled(
+            "%zu independent target zone%s active in RAW Lab",
+            editedRecipe.localRange.targetZones.size(),
+            editedRecipe.localRange.targetZones.size() == 1 ? "" : "s");
+        TooltipIfHovered(
+            "These image-targeted zones are preserved here and can be edited from the RAW Lab Zones tool.");
     }
-    TooltipIfHovered("Open Diagnostics for Local Range candidate evidence, action readiness, suggestions, and warnings.");
 
     const float actionGap = 6.0f;
     const float resetButtonWidth =
@@ -479,15 +472,24 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
             targetButtonWidth,
             0.0f)) {
         if (m_RawWorkspaceLocalRangeTargetMode) {
-            m_RawWorkspaceLocalRangeTargetMode = false;
-            m_RawWorkspaceLocalRangeTargetDragging = false;
-            m_RawWorkspaceLocalRangeTargetSamplePending = false;
-            m_RawWorkspaceLocalRangeTargetApplyWhenSampled = false;
+            m_RawWorkspaceLocalRangeOverlayMode =
+                m_RawWorkspaceLocalRangeTargetPreviousOverlayMode;
+            ClearRawWorkspaceLocalRangeOverlayState();
+            ClearRawWorkspaceLocalRangeTargetState(false);
+            MarkRenderRefreshDirty();
         } else {
+            m_RawWorkspaceLocalRangeTargetPreviousOverlayMode =
+                m_RawWorkspaceLocalRangeOverlayMode;
             m_RawWorkspaceLocalRangeTargetMode = true;
+            m_RawWorkspaceLocalRangeOverlayMode = "target-outline";
+            ClearRawWorkspaceLocalRangeOverlayState();
+            MarkRenderRefreshDirty();
         }
     }
-    TooltipIfHovered("Click the preview and drag up/down to add or edit a Local Range point. Target samples scene EV and color together; Color Target uses the color only when enabled.");
+    TooltipIfHovered(
+        "Drag the preview for exposure. Ctrl-drag creates a new zone. Wheel changes tonal reach, "
+        "Shift-wheel changes feather, Shift-click adds an area, Alt-click removes one, and "
+        "right-click refines the target.");
     ImGui::SameLine(0.0f, actionGap);
     if (ImGui::SmallButton("Reset##RawLocalRangeReset")) {
         editedRecipe.localRange = BuildLocalRangeUiRecipe(

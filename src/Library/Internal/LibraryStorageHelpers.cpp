@@ -85,8 +85,14 @@ bool IsSupportedAssetExtension(const std::filesystem::path& path) {
 }
 
 bool IsSupportedProjectExtension(const std::filesystem::path& path) {
-    const std::string extension = path.extension().string();
-    return extension == ".stack";
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    if (extension == ".stack") return true;
+    if (extension != ".stackbundle") return false;
+    std::error_code error;
+    return std::filesystem::is_directory(path, error);
 }
 
 bool IsSupportedAssetMetadataExtension(const std::filesystem::path& path) {

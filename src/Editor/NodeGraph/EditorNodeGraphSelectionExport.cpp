@@ -55,6 +55,7 @@ bool GroupIntersectsSelection(
 
 std::string SocketTypeToString(EditorNodeGraph::SocketType type) {
     switch (type) {
+        case EditorNodeGraph::SocketType::ImageOrChannel: return "image-or-channel";
         case EditorNodeGraph::SocketType::Mask: return "mask";
         case EditorNodeGraph::SocketType::Value: return "value";
         case EditorNodeGraph::SocketType::Analysis: return "analysis";
@@ -96,12 +97,19 @@ void AddBoundarySocket(
 
 namespace EditorNodeGraphSelectionExport {
 
-ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, bool includeState, bool wholeGraph) {
+ExportResult BuildExport(
+    EditorModule* editor,
+    const std::vector<int>& nodeIds,
+    bool includeState,
+    bool wholeGraph,
+    LayoutMode layoutMode) {
     ExportResult result;
     result.clipboardPayload["format"] = "stack-node-graph";
     result.clipboardPayload["version"] = 1;
     result.clipboardPayload["scope"] = wholeGraph ? "fullGraph" : "selection";
     result.clipboardPayload["mode"] = includeState ? "tree+state" : "tree";
+    result.clipboardPayload["layout"] =
+        layoutMode == LayoutMode::Omit ? "omitted" : "preserved";
 
     if (!editor) {
         return result;
@@ -148,7 +156,7 @@ ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, 
             nodeCopy.layerIndex = remappedLayerIndex;
         }
 
-        exportGraph.GetNodes().push_back(std::move(nodeCopy));
+        exportGraph.EditNodes().push_back(std::move(nodeCopy));
         maxNodeId = std::max(maxNodeId, sourceNode->id);
     }
 
@@ -157,7 +165,7 @@ ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, 
         const bool fromIncluded = includedNodeIds.count(link.fromNodeId) > 0;
         const bool toIncluded = includedNodeIds.count(link.toNodeId) > 0;
         if (fromIncluded && toIncluded) {
-            exportGraph.GetLinks().push_back(link);
+            exportGraph.EditLinks().push_back(link);
         } else if (!fromIncluded && toIncluded) {
             AddBoundarySocket(
                 graph,
@@ -177,9 +185,11 @@ ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, 
         }
     }
 
-    for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
-        if (wholeGraph || GroupIntersectsSelection(group, graph, includedNodeIds)) {
-            exportGraph.GetGroups().push_back(group);
+    if (layoutMode == LayoutMode::Preserve) {
+        for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
+            if (wholeGraph || GroupIntersectsSelection(group, graph, includedNodeIds)) {
+                exportGraph.GetGroups().push_back(group);
+            }
         }
     }
 
@@ -208,7 +218,12 @@ ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, 
     }
 
     result.nodeCount = static_cast<std::uint32_t>(exportGraph.GetNodes().size());
-    result.clipboardPayload["payload"] = EditorNodeGraph::SerializeGraphPayload(layerArray, exportGraph);
+    nlohmann::json serializedPayload =
+        EditorNodeGraph::SerializeGraphPayload(layerArray, exportGraph);
+    if (layoutMode == LayoutMode::Omit) {
+        EditorNodeGraph::RemoveGraphLayoutFromPayload(serializedPayload);
+    }
+    result.clipboardPayload["payload"] = std::move(serializedPayload);
     result.exportedGraph = exportGraph;
     return result;
 }

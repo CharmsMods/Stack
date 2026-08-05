@@ -1,8 +1,11 @@
 #include "ToneLayers.h"
+#include "Renderer/GLStateGuards.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <new>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -35,30 +38,13 @@ std::size_t HashToneCurveJson(const json& value) {
     return std::hash<std::string>{}(value.dump());
 }
 
-struct ScopedFramebufferState {
-    GLint framebuffer = 0;
-    GLint readFbo = 0;
-    GLint drawFbo = 0;
-    GLint readBuffer = 0;
-    GLint drawBuffer = 0;
-    GLint viewport[4] = { 0, 0, 0, 0 };
-
-    ScopedFramebufferState() {
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
-        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
-        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
-        glGetIntegerv(GL_VIEWPORT, viewport);
-    }
+struct ScopedFramebufferState
+    : Stack::Renderer::GLState::FramebufferState {
+    ScopedFramebufferState()
+        : Stack::Renderer::GLState::FramebufferState(true) {}
 
     void Restore() const {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
-        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
-        glReadBuffer(static_cast<GLenum>(readBuffer));
-        glDrawBuffer(static_cast<GLenum>(drawBuffer));
-        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        Stack::Renderer::GLState::FramebufferState::Restore(true);
     }
 };
 
@@ -165,6 +151,25 @@ void ToneCurveLayer::UpdateAutoSceneAnalysis(unsigned int inputTexture, int widt
 
     const int statsWidth = std::clamp(width / 32, 64, 160);
     const int statsHeight = std::clamp(height / 32, 36, 120);
+    const std::size_t statsPixelCount =
+        static_cast<std::size_t>(statsWidth) *
+        static_cast<std::size_t>(statsHeight);
+    std::vector<float> pixels;
+    std::vector<float> lumas;
+    std::vector<float> lumGrid;
+    try {
+        pixels.assign(statsPixelCount * 4u, 0.0f);
+        lumas.reserve(statsPixelCount);
+        lumGrid.assign(statsPixelCount, 0.0f);
+    } catch (const std::bad_alloc&) {
+        m_AutoSceneStatsValid = false;
+        m_AutoSceneStats.valid = false;
+        return;
+    } catch (const std::length_error&) {
+        m_AutoSceneStatsValid = false;
+        m_AutoSceneStats.valid = false;
+        return;
+    }
     const unsigned int statsTexture = GLHelpers::CreateEmptyTexture(statsWidth, statsHeight);
     const unsigned int sourceFbo = GLHelpers::CreateFBO(inputTexture);
     const unsigned int statsFbo = GLHelpers::CreateFBO(statsTexture);
@@ -192,16 +197,33 @@ void ToneCurveLayer::UpdateAutoSceneAnalysis(unsigned int inputTexture, int widt
         return;
     }
 
-    glBlitFramebuffer(0, 0, width, height, 0, 0, statsWidth, statsHeight, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    while (glGetError() != GL_NO_ERROR) {}
+    glBlitFramebuffer(
+        0, 0, width, height,
+        0, 0, statsWidth, statsHeight,
+        GL_COLOR_BUFFER_BIT,
+        GL_LINEAR);
+    const bool blitOk = glGetError() == GL_NO_ERROR;
+    if (!blitOk) {
+        m_AutoSceneStatsValid = false;
+        m_AutoSceneStats.valid = false;
+        savedState.Restore();
+        glDeleteFramebuffers(1, &sourceFbo);
+        glDeleteFramebuffers(1, &statsFbo);
+        glDeleteTextures(1, &statsTexture);
+        return;
+    }
 
-    std::vector<float> pixels(static_cast<std::size_t>(statsWidth) * static_cast<std::size_t>(statsHeight) * 4u, 0.0f);
     glBindFramebuffer(GL_FRAMEBUFFER, statsFbo);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glViewport(0, 0, statsWidth, statsHeight);
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
     while (glGetError() != GL_NO_ERROR) {}
     glReadPixels(0, 0, statsWidth, statsHeight, GL_RGBA, GL_FLOAT, pixels.data());
     const bool readbackOk = glGetError() == GL_NO_ERROR;
 
+    savedPackState.Restore();
     savedState.Restore();
     glDeleteFramebuffers(1, &sourceFbo);
     glDeleteFramebuffers(1, &statsFbo);
@@ -212,9 +234,6 @@ void ToneCurveLayer::UpdateAutoSceneAnalysis(unsigned int inputTexture, int widt
         return;
     }
 
-    std::vector<float> lumas;
-    lumas.reserve(static_cast<std::size_t>(statsWidth * statsHeight));
-    std::vector<float> lumGrid(static_cast<std::size_t>(statsWidth * statsHeight), 0.0f);
     float clipped = 0.0f;
     float saturated = 0.0f;
     for (int y = 0; y < statsHeight; ++y) {

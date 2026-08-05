@@ -23,6 +23,7 @@ private:
     unsigned int m_LinearProgram = 0;
     unsigned int m_RawTexture = 0;
     unsigned int m_CorrectedRawTexture = 0;
+    unsigned int m_RawNoiseVarianceTexture = 0;
     unsigned int m_LinearTexture = 0;
     unsigned int m_OutputTexture = 0;
     unsigned int m_OutputFbo = 0;
@@ -34,6 +35,7 @@ private:
     int m_OutputHeight = 0;
     std::size_t m_RawFingerprint = 0;
     std::size_t m_CorrectedRawFingerprint = 0;
+    std::size_t m_RawNoiseVarianceFingerprint = 0;
     std::size_t m_LinearFingerprint = 0;
     std::string m_LastError;
 
@@ -41,6 +43,10 @@ private:
     bool EnsureLinearProgram();
     bool UploadRawTexture(const RawImageData& raw);
     bool UploadCorrectedRawTexture(const RawImageData& raw, const RawDevelopSettings& settings, bool& outHasCorrectedRaw);
+    bool UploadRawNoiseVarianceTexture(
+        const RawImageData& raw,
+        const RawDevelopSettings& settings,
+        bool& outHasNoiseVariance);
     bool UploadLinearTexture(const RawImageData& raw, const RawDevelopSettings& settings);
     bool EnsureOutput(int width, int height);
     bool EnsureFullscreenQuad();

@@ -422,6 +422,177 @@ SpectrumViewLut SpectrumViewLutFromString(const std::string& value) {
     return SpectrumViewLut::Turbo;
 }
 
+std::string SpectrumViewModeToString(SpectrumViewMode mode) {
+    switch (mode) {
+        case SpectrumViewMode::Magnitude: return "Magnitude";
+        case SpectrumViewMode::Phase: return "Phase";
+        case SpectrumViewMode::Real: return "Real";
+        case SpectrumViewMode::Imaginary: return "Imaginary";
+    }
+    return "Magnitude";
+}
+
+SpectrumViewMode SpectrumViewModeFromString(const std::string& value) {
+    if (value == "Phase") return SpectrumViewMode::Phase;
+    if (value == "Real") return SpectrumViewMode::Real;
+    if (value == "Imaginary") return SpectrumViewMode::Imaginary;
+    return SpectrumViewMode::Magnitude;
+}
+
+std::string FrequencyFilterModeToString(FrequencyFilterMode mode) {
+    switch (mode) {
+        case FrequencyFilterMode::AllPass: return "AllPass";
+        case FrequencyFilterMode::LowPass: return "LowPass";
+        case FrequencyFilterMode::HighPass: return "HighPass";
+        case FrequencyFilterMode::BandPass: return "BandPass";
+        case FrequencyFilterMode::BandStop: return "BandStop";
+        case FrequencyFilterMode::NotchReject: return "NotchReject";
+    }
+    return "AllPass";
+}
+
+FrequencyFilterMode FrequencyFilterModeFromString(const std::string& value) {
+    if (value == "LowPass") return FrequencyFilterMode::LowPass;
+    if (value == "HighPass") return FrequencyFilterMode::HighPass;
+    if (value == "BandPass") return FrequencyFilterMode::BandPass;
+    if (value == "BandStop") return FrequencyFilterMode::BandStop;
+    if (value == "NotchReject") return FrequencyFilterMode::NotchReject;
+    return FrequencyFilterMode::AllPass;
+}
+
+std::string FrequencyTransitionProfileToString(FrequencyTransitionProfile profile) {
+    switch (profile) {
+        case FrequencyTransitionProfile::Smooth: return "Smooth";
+        case FrequencyTransitionProfile::Gaussian: return "Gaussian";
+        case FrequencyTransitionProfile::Butterworth: return "Butterworth";
+        case FrequencyTransitionProfile::Hard: return "Hard";
+    }
+    return "Smooth";
+}
+
+FrequencyTransitionProfile FrequencyTransitionProfileFromString(const std::string& value) {
+    if (value == "Gaussian") return FrequencyTransitionProfile::Gaussian;
+    if (value == "Butterworth") return FrequencyTransitionProfile::Butterworth;
+    if (value == "Hard") return FrequencyTransitionProfile::Hard;
+    return FrequencyTransitionProfile::Smooth;
+}
+
+std::string FrequencyEdgePolicyToString(FrequencyEdgePolicy policy) {
+    switch (policy) {
+        case FrequencyEdgePolicy::Mirror: return "Mirror";
+        case FrequencyEdgePolicy::Wrap: return "Wrap";
+        case FrequencyEdgePolicy::ZeroPad: return "ZeroPad";
+    }
+    return "Mirror";
+}
+
+FrequencyEdgePolicy FrequencyEdgePolicyFromString(const std::string& value) {
+    if (value == "Wrap") return FrequencyEdgePolicy::Wrap;
+    if (value == "ZeroPad") return FrequencyEdgePolicy::ZeroPad;
+    return FrequencyEdgePolicy::Mirror;
+}
+
+std::string SpectrumCombineModeToString(SpectrumCombineMode mode) {
+    return mode == SpectrumCombineMode::Subtract ? "Subtract" : "Add";
+}
+
+SpectrumCombineMode SpectrumCombineModeFromString(const std::string& value) {
+    return value == "Subtract" ? SpectrumCombineMode::Subtract : SpectrumCombineMode::Add;
+}
+
+nlohmann::json SerializeFrequencyResponseSettings(const FrequencyResponseSettings& settings) {
+    nlohmann::json notches = nlohmann::json::array();
+    for (const FrequencyNotch& notch : settings.notches) {
+        notches.push_back({
+            { "id", notch.id },
+            { "frequency", notch.frequency },
+            { "directionDegrees", notch.directionDegrees },
+            { "width", notch.width }
+        });
+    }
+    return {
+        { "mode", FrequencyFilterModeToString(settings.mode) },
+        { "profile", FrequencyTransitionProfileToString(settings.profile) },
+        { "lowCutoff", settings.lowCutoff },
+        { "highCutoff", settings.highCutoff },
+        { "transitionWidth", settings.transitionWidth },
+        { "butterworthOrder", settings.butterworthOrder },
+        { "notches", std::move(notches) }
+    };
+}
+
+FrequencyResponseSettings DeserializeFrequencyResponseSettings(const nlohmann::json& value) {
+    FrequencyResponseSettings settings;
+    if (!value.is_object()) return settings;
+    settings.mode = FrequencyFilterModeFromString(value.value("mode", std::string("AllPass")));
+    settings.profile = FrequencyTransitionProfileFromString(value.value("profile", std::string("Smooth")));
+    settings.lowCutoff = std::clamp(value.value("lowCutoff", settings.lowCutoff), 0.0f, 0.5f);
+    settings.highCutoff = std::clamp(value.value("highCutoff", settings.highCutoff), 0.0f, 0.5f);
+    if (settings.highCutoff < settings.lowCutoff) std::swap(settings.lowCutoff, settings.highCutoff);
+    settings.transitionWidth = std::clamp(value.value("transitionWidth", settings.transitionWidth), 0.0f, 0.5f);
+    settings.butterworthOrder = std::clamp(value.value("butterworthOrder", settings.butterworthOrder), 1.0f, 12.0f);
+    const nlohmann::json notches = value.value("notches", nlohmann::json::array());
+    if (notches.is_array()) {
+        for (const nlohmann::json& item : notches) {
+            if (!item.is_object() || settings.notches.size() >= 16) continue;
+            FrequencyNotch notch;
+            notch.id = item.value("id", std::string());
+            const bool duplicateId = std::any_of(
+                settings.notches.begin(),
+                settings.notches.end(),
+                [&](const FrequencyNotch& existing) {
+                    return existing.id == notch.id;
+                });
+            if (notch.id.empty() || duplicateId) {
+                notch.id = Stack::NodeMath::GenerateCanonicalUuid();
+            }
+            notch.frequency = std::clamp(item.value("frequency", notch.frequency), 0.0f, 0.5f);
+            notch.directionDegrees = item.value("directionDegrees", notch.directionDegrees);
+            notch.width = std::clamp(item.value("width", notch.width), 0.001f, 0.25f);
+            settings.notches.push_back(std::move(notch));
+        }
+    }
+    return settings;
+}
+
+nlohmann::json SerializeFrequencyFilterSettings(const FrequencyFilterSettings& settings) {
+    return {
+        { "localResponse", SerializeFrequencyResponseSettings(settings.localResponse) },
+        { "edgePolicy", FrequencyEdgePolicyToString(settings.edgePolicy) },
+        { "strength", settings.strength }
+    };
+}
+
+FrequencyFilterSettings DeserializeFrequencyFilterSettings(const nlohmann::json& value) {
+    FrequencyFilterSettings settings;
+    if (!value.is_object()) return settings;
+    settings.localResponse = DeserializeFrequencyResponseSettings(
+        value.value("localResponse", nlohmann::json::object()));
+    settings.edgePolicy = FrequencyEdgePolicyFromString(value.value("edgePolicy", std::string("Mirror")));
+    settings.strength = std::clamp(value.value("strength", settings.strength), 0.0f, 1.0f);
+    return settings;
+}
+
+nlohmann::json SerializeApplyFrequencyResponseSettings(const ApplyFrequencyResponseSettings& settings) {
+    return { { "strength", settings.strength } };
+}
+
+ApplyFrequencyResponseSettings DeserializeApplyFrequencyResponseSettings(const nlohmann::json& value) {
+    ApplyFrequencyResponseSettings settings;
+    if (value.is_object()) settings.strength = std::clamp(value.value("strength", settings.strength), 0.0f, 1.0f);
+    return settings;
+}
+
+nlohmann::json SerializeCombineSpectraSettings(const CombineSpectraSettings& settings) {
+    return { { "mode", SpectrumCombineModeToString(settings.mode) } };
+}
+
+CombineSpectraSettings DeserializeCombineSpectraSettings(const nlohmann::json& value) {
+    CombineSpectraSettings settings;
+    if (value.is_object()) settings.mode = SpectrumCombineModeFromString(value.value("mode", std::string("Add")));
+    return settings;
+}
+
 std::string FrequencyMaskShapeToString(FrequencyMaskShape shape) {
     switch (shape) {
         case FrequencyMaskShape::LowPass: return "LowPass";
@@ -494,19 +665,21 @@ SpectrumAnalyzerMode SpectrumAnalyzerModeFromString(const std::string& value) {
 
 nlohmann::json SerializeFrequencyFftSettings(const FrequencyFftSettings& settings) {
     return {
-        { "luminanceOnly", settings.luminanceOnly }
+        { "edgePolicy", FrequencyEdgePolicyToString(settings.edgePolicy) }
     };
 }
 
 FrequencyFftSettings DeserializeFrequencyFftSettings(const nlohmann::json& value) {
     FrequencyFftSettings settings;
     if (!value.is_object()) return settings;
-    settings.luminanceOnly = value.value("luminanceOnly", settings.luminanceOnly);
+    settings.edgePolicy = FrequencyEdgePolicyFromString(
+        value.value("edgePolicy", std::string("Mirror")));
     return settings;
 }
 
 nlohmann::json SerializeSpectrumViewSettings(const SpectrumViewSettings& settings) {
     return {
+        { "mode", SpectrumViewModeToString(settings.mode) },
         { "lut", SpectrumViewLutToString(settings.lut) },
         { "exposure", settings.exposure },
         { "gamma", settings.gamma },
@@ -517,6 +690,7 @@ nlohmann::json SerializeSpectrumViewSettings(const SpectrumViewSettings& setting
 SpectrumViewSettings DeserializeSpectrumViewSettings(const nlohmann::json& value) {
     SpectrumViewSettings settings;
     if (!value.is_object()) return settings;
+    settings.mode = SpectrumViewModeFromString(value.value("mode", std::string("Magnitude")));
     settings.lut = SpectrumViewLutFromString(value.value("lut", SpectrumViewLutToString(settings.lut)));
     settings.exposure = std::clamp(value.value("exposure", settings.exposure), 0.01f, 32.0f);
     settings.gamma = std::clamp(value.value("gamma", settings.gamma), 0.1f, 4.0f);
@@ -582,15 +756,17 @@ MagnitudePhaseSettings DeserializeMagnitudePhaseSettings(const nlohmann::json& v
 nlohmann::json SerializeSpectrumAnalyzerSettings(const SpectrumAnalyzerSettings& settings) {
     return {
         { "innerRadius", settings.innerRadius },
-        { "outerRadius", settings.outerRadius }
+        { "outerRadius", settings.outerRadius },
+        { "excludeDc", settings.excludeDc }
     };
 }
 
 SpectrumAnalyzerSettings DeserializeSpectrumAnalyzerSettings(const nlohmann::json& value) {
     SpectrumAnalyzerSettings settings;
     if (!value.is_object()) return settings;
-    settings.innerRadius = std::clamp(value.value("innerRadius", settings.innerRadius), 0.0f, 1.0f);
-    settings.outerRadius = std::clamp(value.value("outerRadius", settings.outerRadius), 0.0f, 1.0f);
+    settings.innerRadius = std::clamp(value.value("innerRadius", settings.innerRadius), 0.0f, 0.70710678f);
+    settings.outerRadius = std::clamp(value.value("outerRadius", settings.outerRadius), 0.0f, 0.70710678f);
+    settings.excludeDc = value.value("excludeDc", settings.excludeDc);
     if (settings.outerRadius < settings.innerRadius) {
         std::swap(settings.innerRadius, settings.outerRadius);
     }

@@ -1,6 +1,6 @@
 # Node Graph Interaction Guide
 
-This guide documents the current custom Dear ImGui node graph behavior after the interaction and sizing stabilization work. It is intended for future developers and AI agents working on the graph so they can extend it without accidentally reintroducing the old bugs around sliders, dropdowns, dragging, pin connections, and clipped node content.
+This guide documents the current custom Dear ImGui node graph behavior after the fixed-scale layout cutover. It is intended for future developers and AI agents working on the graph so they can extend it without accidentally reintroducing the old bugs around zoom-dependent reflow, sliders, dropdowns, dragging, pin connections, and clipped node content.
 
 ## Current Architecture
 
@@ -94,25 +94,88 @@ Link behavior:
 - Double left click a link removes it.
 - Right click a link opens the link context menu.
 
-Links are rendered behind nodes, but after nodes have refreshed their measured layout. This lets link endpoints follow resized nodes immediately while still drawing visually behind node bodies.
+Links are rendered behind nodes from the same immutable projected layout used
+to draw their source and destination sockets. A content measurement made while
+rendering can invalidate the next frame's logical layout, but it must not move a
+link endpoint during the current frame.
 
 ## Node Content And Sizing
 
-Expanded node height is content-driven.
+Node geometry is defined in zoom-independent logical units. `BuildLogicalNodeLayout`
+resolves the node body, header, content region, title lines, control region,
+sockets, and bounds. `ProjectNodeLayout` then applies the graph origin and zoom
+once. Child rectangles must not be rounded independently after projection.
 
-The old static max-height clamp was removed. Node height now uses:
+The canonical width classes are:
+
+- Tile: 104
+- RAW source: 144
+- Media: 200
+- Compact: 264
+- Standard: 280
+- Wide: 304
+- Complex: 336
+
+`DefaultWidthClassForKind` is exhaustive. A new `NodeKind` must be added there
+and to the layout tests; it must not silently inherit a fallback width.
+
+Expanded node height is content-driven:
 
 ```text
-header height + measured ImGui content height + bottom padding
+logical header height + logical ImGui content height + logical bottom padding
 ```
 
-The measured content height is stored per node in `m_NodeMeasuredBaseHeights`. `NodeSize` uses that measurement when available, falling back to `ExpandedContractHeight` only before a node has been measured.
+The normalized logical content height is stored per node in
+`m_NodeMeasuredBaseHeights`. Every expanded node kind participates. The current
+frame uses one immutable projected layout; a new measurement is committed for a
+subsequent layout pass so node chrome, sockets, and links cannot disagree within
+one frame.
 
-Node content is measured from the actual ImGui-rendered controls. The node content region should not be a fixed-height child that clips itself before measurement. If the content is constrained by the old node height, the graph cannot know that controls were clipped.
+Control rows decide inline versus stacked form from canonical logical width.
+Graph zoom must never participate in that decision. Long control labels are
+ellipsized deliberately and expose their full text in a tooltip. Titles use
+precomputed logical wrap points, at most two centered lines, and expose the full
+title when pathological overflow requires an ellipsis.
 
-`contentUsedRect` is the source of truth for the real content bounds. It is used for hit testing and debug overflow reporting. If content would exceed the current frame, the measured height should cause the node to grow on the next layout pass.
+Node content is measured from the actual ImGui-rendered controls. The content
+region must not be a fixed-height child that clips itself before measurement.
+`contentUsedRect` remains the source of truth for the real content bounds and
+debug overflow reporting.
 
 Combo boxes, color pickers, and other ImGui popups are allowed to escape the node frame. These are popups, not normal node contents. Closed controls and non-popup node content should fit inside the node frame.
+
+## Bounds Ownership
+
+Each node has four separate bounds:
+
+- Body bounds control body selection, dragging, and box selection.
+- Persistent visual bounds include detached sockets and are used by culling,
+  autofocus, fit-to-graph, captures, groups, and viewport-edge handling.
+- Overlay bounds extend to socket-label pills that are visible this frame.
+- Interaction bounds include enlarged invisible socket hit targets.
+
+Bounds are rectangles, not only sizes. This is required because input sockets
+extend to the left of the node origin. Do not reconstruct graph footprints from
+`NodeSize` when the caller needs the complete persistent visual extent.
+
+Socket centers sit outside the body. The visible socket radius is 5.5 logical
+units and the clear gap between the socket edge and the node body is 6 logical
+units. Visible socket geometry scales rigidly with zoom; only the invisible hit
+target may retain a screen-space minimum.
+
+Socket labels are non-interactive overlays beyond their sockets: input labels
+extend left and output labels extend right. All labels show while the node is
+hovered. During connection dragging, the source and compatible targets show
+their labels. These labels render above links and must not create an ImGui item
+or capture mouse ownership. Wire labels are a separate feature.
+
+## Appearance Modes
+
+Classic, Black, and Spotlight share the exact same logical layout and projected
+bounds. Appearance modes may change colors, borders, shadows, and non-layout
+halos only. They must not change widths, padding, typography metrics, sockets,
+control stacking, culling, or hit testing. Classic is the default for new and
+reset settings.
 
 ## Rendering Order
 
@@ -121,16 +184,19 @@ The graph render order is:
 1. Reserve passive canvas space.
 2. Draw canvas background and grid.
 3. Clamp node positions.
-4. Build initial node layout cache.
+4. Build and project the immutable logical node layouts.
 5. Render nodes and measure content.
-6. Refresh layout after measurement.
-7. Render links behind nodes using draw-list channels.
-8. Process interactions using the current `GraphMouseOwner`.
-9. Render validation status, debug overlay, context menus, and node browser.
+6. Commit changed logical measurements for the next layout pass.
+7. Render links behind nodes using draw-list channels and the current layout.
+8. Render transient socket-label overlays above links.
+9. Process interactions using the current `GraphMouseOwner`.
+10. Render validation status, debug overlay, context menus, and node browser.
 
-Draw-list channels are used so links can be drawn visually behind nodes while still using up-to-date measured node layout.
+Draw-list channels are used so links draw visually behind node bodies while
+socket-label overlays remain above the links.
 
-Do not move link rendering back before node measurement unless you also provide another way to ensure socket anchors are refreshed before links draw.
+Do not allow render-time control measurement to update only one of the node
+body, socket anchors, or links during the current frame.
 
 ## Debug Overlay
 
@@ -165,7 +231,15 @@ These rules are the important part. Breaking any of them is likely to reintroduc
 - Once node dragging starts, it must continue until mouse release.
 - Node content measurement must not be constrained by the old node height.
 - Expanded node height must be derived from measured content height, not a static cap.
-- Links must use refreshed layout data after node measurement.
+- Zoom must transform the complete node rigidly; it must not alter layout,
+  title wrap points, control stacking, clipping, or content visibility.
+- Floating-point child geometry must survive projection without independent
+  pixel snapping.
+- Socket centers and link endpoints must stay outside the body.
+- Body, persistent visual, overlay, and interaction bounds must retain their
+  separate ownership.
+- Classic, Black, and Spotlight must produce identical geometry and bounds.
+- Links must use the same immutable layout as their sockets for the frame.
 - Popups may escape node bounds; normal node content should not.
 - Debug overlay should continue to expose owner, drag state, measured height, final height, and overflow status.
 
@@ -196,12 +270,22 @@ If content is clipped:
 - Check measured height versus final height in the debug overlay.
 - Make sure the node content is not rendered inside a fixed-height child.
 - Make sure new controls contribute to the ImGui group measurement.
-- Avoid hard-coded node heights except as first-frame fallback estimates.
+- Check that the control was assigned a canonical logical slot and that its
+  label height contributes to the row.
 
 If links lag behind resized nodes:
 
-- Check that node measurement refreshes `m_NodeLayoutCache`.
-- Check that links render after layout refresh, even if visually behind nodes via draw-list channels.
+- Check that node bodies, socket anchors, and links all use the same projected
+  layout for the frame.
+
+If content moves, stacks differently, hides, or clips while zooming:
+
+- Check for a screen-space minimum or zoom-scaled input in layout code.
+- Check for `SetWindowFontScale`, responsive decisions based on projected
+  width, or independently rounded child rectangles.
+- Check that text wrap points were measured in logical units.
+- Confirm only the root projection translation is eligible for framebuffer
+  alignment.
 
 ## Adding New Node UI Safely
 
@@ -212,7 +296,10 @@ When adding new controls to a node:
 3. Call the existing capture helper after custom controls if they do not go through `ImGuiExtras`.
 4. Do not wrap them in fixed-height children unless the node is intentionally designed to scroll.
 5. If a preview or custom visualization has a known size, reserve that exact size with `Dummy`, `Image`, or another measurable ImGui item.
-6. Test with `Ctrl+Alt+G` and verify owner state over the new controls.
+6. Assign the node kind an explicit canonical width class.
+7. Test the logical layout at every supported zoom and verify that its hash and
+   title wrap points do not change.
+8. Test with `Ctrl+Alt+G` and verify owner state over the new controls.
 
 When adding new graph interactions:
 
@@ -227,6 +314,9 @@ Primary files:
 
 - `src/Editor/NodeGraph/EditorNodeGraphUI.h`
 - `src/Editor/NodeGraph/EditorNodeGraphUI.cpp`
+- `src/Editor/NodeGraph/UI/EditorNodeGraphUILayout.h`
+- `src/Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h`
+- `src/Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.cpp`
 - `src/Utils/ImGuiExtras.h`
 - `src/Utils/ImGuiExtras.cpp`
 
@@ -238,4 +328,3 @@ Related split files:
 - `src/Editor/NodeGraph/EditorNodeGraph.h`
 
 Layer node contents can come from individual layer `RenderUI` implementations under `src/Editor/Layers/`. Those UIs may change height dynamically, so layer node sizing must remain measurement-driven.
-

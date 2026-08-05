@@ -1,7 +1,6 @@
 #include "Editor/EditorModule.h"
 
 #include "Editor/Internal/EditorModuleRawControlShared.h"
-#include "NeuralDenoise/NeuralDenoiseManager.h"
 #include "Raw/RawImageData.h"
 #include "Utils/ImGuiExtras.h"
 
@@ -98,6 +97,28 @@ void EditorModule::RenderRawSourceControls(EditorNodeGraph::Node& node, float co
     } else {
         ImGui::TextDisabled("Status: ready");
     }
+    const int unsupportedDngOpcodes =
+        metadata.dngUnsupportedOpcodeCountByList[0] +
+        metadata.dngUnsupportedOpcodeCountByList[1] +
+        metadata.dngUnsupportedOpcodeCountByList[2];
+    if (unsupportedDngOpcodes > 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.68f, 0.24f, 1.0f));
+        ImGui::TextWrapped(
+            "DNG corrections omitted: OpcodeList1 %d, OpcodeList2 %d, OpcodeList3 %d unsupported. "
+            "Truthful output may be incomplete for this camera.",
+            metadata.dngUnsupportedOpcodeCountByList[0],
+            metadata.dngUnsupportedOpcodeCountByList[1],
+            metadata.dngUnsupportedOpcodeCountByList[2]);
+        ImGui::PopStyleColor();
+    }
+    if (advanced && metadata.isDng) {
+        ImGui::TextDisabled(
+            "DNG opcodes applied: List2 GainMap %d",
+            metadata.dngAppliedOpcodeCountByList[1]);
+        for (const std::string& warning : metadata.warnings) {
+            ImGui::TextWrapped("Metadata warning: %s", warning.c_str());
+        }
+    }
     ImGui::TextDisabled("Output: RAW sensor data. Baseline path: RAW Decode -> Tone Curve -> View Transform.");
 
     if (advanced) {
@@ -127,159 +148,18 @@ void EditorModule::RenderRawNeuralDenoiseControls(EditorNodeGraph::Node& node, f
         return;
     }
 
-    using namespace NeuralDenoise;
-    NeuralDenoiseManager& manager = NeuralDenoiseManager::Instance();
-    NeuralDenoiseSettings& settings = node.rawNeuralDenoise.settings;
-    const nlohmann::json before = SerializeSettings(settings);
-    const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSource(m_NodeGraph, node);
-    const Raw::RawMetadata* metadata = rawSourceNode ? &rawSourceNode->rawSource.metadata : nullptr;
-    const bool hasMosaicedCfa = metadata &&
-        metadata->pixelLayout == Raw::RawPixelLayout::MosaicBayer &&
-        metadata->mosaiced &&
-        metadata->cfaPattern != Raw::CfaPattern::Unknown;
+    (void)controlWidth;
+    (void)advanced;
+    const NeuralDenoise::NeuralDenoiseSettings& settings = node.rawNeuralDenoise.settings;
 
-    std::vector<const NeuralDenoiseModelInfo*> models = manager.ModelsOfType(ModelType::RawBayerPacked4Ch);
-    if (settings.selectedModelId.empty() && !models.empty()) {
-        settings.selectedModelId = models.front()->id;
+    ImGuiExtras::RichSectionLabel("LEGACY RAW/CFA NEURAL DENOISE", 4.0f);
+    ImGui::TextWrapped(
+        "This retired node is preserved only so older Stack projects continue "
+        "to load. RAW data passes through unchanged.");
+    if (!settings.selectedModelId.empty()) {
+        ImGui::TextDisabled("Preserved model id: %s", settings.selectedModelId.c_str());
     }
-    const NeuralDenoiseModelInfo* selected = manager.FindModel(settings.selectedModelId);
-    const ModelAvailability availability = manager.GetAvailability(selected);
-
-    ImGuiExtras::RichSectionLabel("RAW/CFA NEURAL DENOISE", 4.0f);
-    ImGuiExtras::NodeCheckbox("Enable", "##RawNeuralEnabled", &settings.enabled, controlWidth);
-    if (!rawSourceNode) {
-        ImGui::TextWrapped("RAW neural denoise unavailable: connect a RAW source before this node.");
-    } else if (!hasMosaicedCfa) {
-        ImGui::TextWrapped("RAW neural denoise unavailable: current input is not mosaiced CFA RAW.");
-    } else {
-        ImGui::TextDisabled("Input: mosaiced CFA RAW, %s", Raw::CfaPatternName(metadata->cfaPattern));
-    }
-    ImGui::TextDisabled("Execution: bypass / pass-through until real inference is implemented.");
-    ImGui::TextDisabled("Status: %s", availability.status.c_str());
-
-    if (advanced) {
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGuiExtras::RichSectionLabel("MODEL", 4.0f);
-        const std::string currentLabel = selected ? selected->displayName : std::string("No model selected");
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::BeginCombo("Selected Model", currentLabel.c_str())) {
-            for (const NeuralDenoiseModelInfo* model : models) {
-                const bool isSelected = model && model->id == settings.selectedModelId;
-                if (model && ImGui::Selectable(model->displayName.c_str(), isSelected)) {
-                    settings.selectedModelId = model->id;
-                }
-                if (isSelected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            if (models.empty()) {
-                ImGui::TextDisabled("No RAW Bayer neural models in manifest.");
-            }
-            ImGui::EndCombo();
-        }
-
-        const char* runtimeLabels[] = { "Auto", "CUDA", "CPU placeholder", "DirectML future", "TensorRT future" };
-        int runtime = static_cast<int>(settings.runtimePreference);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Runtime / Provider", &runtime, runtimeLabels, 5)) {
-            settings.runtimePreference = static_cast<RuntimePreference>(std::clamp(runtime, 0, 4));
-        }
-        const char* qualityLabels[] = { "Quality", "Balanced", "Fast" };
-        int quality = static_cast<int>(settings.qualityMode);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Quality Mode", &quality, qualityLabels, 3)) {
-            settings.qualityMode = static_cast<QualityMode>(std::clamp(quality, 0, 2));
-        }
-        if (selected) {
-            ImGui::TextDisabled("Model type: %s", ModelTypeLabel(selected->type));
-            ImGui::TextDisabled("Packed layout: Bayer 2x2 -> 4 channels");
-            ImGui::TextDisabled("File: %s", selected->relativeFile.c_str());
-            if (!selected->license.empty()) {
-                ImGui::TextWrapped("License: %s", selected->license.c_str());
-            }
-        }
-        for (const std::string& warning : availability.warnings) {
-            ImGui::TextWrapped("%s", warning.c_str());
-        }
-
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGuiExtras::RichSectionLabel("BLEND", 4.0f);
-        ImGuiExtras::NodeSliderFloat("Overall Strength", "##RawNeuralStrength", &settings.strength, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Detail Preservation", "##RawNeuralDetail", &settings.detailPreservation, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Shadows Strength", "##RawNeuralShadows", &settings.shadowsStrength, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Highlight Protection", "##RawNeuralHighlights", &settings.highlightProtection, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Difference Amount", "##RawNeuralDifference", &settings.differenceAmount, 0.0f, 2.0f, "%.2f", controlWidth);
-
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGuiExtras::RichSectionLabel("NOISE TARGETING", 4.0f);
-        ImGuiExtras::NodeSliderFloat("Chroma Noise", "##RawNeuralChroma", &settings.chromaStrength, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Luma Noise", "##RawNeuralLuma", &settings.lumaStrength, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Fine Grain", "##RawNeuralFine", &settings.fineGrainStrength, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeSliderFloat("Blotch / Splotch", "##RawNeuralBlotch", &settings.blotchStrength, 0.0f, 1.0f, "%.2f", controlWidth);
-        ImGuiExtras::NodeCheckbox("Hot / Dead Pixel Cleanup", "##RawNeuralHotDead", &settings.hotDeadPixelCleanup, controlWidth);
-        ImGuiExtras::NodeCheckbox("Shadow-Biased Denoise", "##RawNeuralShadowBias", &settings.shadowBiasedDenoise, controlWidth);
-
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGuiExtras::RichSectionLabel("RAW / DNG", 4.0f);
-        const char* cfaLabels[] = { "From metadata", "RGGB", "BGGR", "GRBG", "GBRG" };
-        int cfa = static_cast<int>(settings.cfaOverride);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("CFA Override", &cfa, cfaLabels, 5)) {
-            settings.cfaOverride = static_cast<CfaOverride>(std::clamp(cfa, 0, 4));
-        }
-        if (metadata) {
-            ImGui::TextDisabled("Metadata CFA: %s", Raw::CfaPatternName(metadata->cfaPattern));
-            ImGui::TextDisabled("Black / white: %.1f / %.1f", metadata->blackLevel, metadata->whiteLevel);
-            ImGui::TextDisabled("ISO metadata: not exposed by current RAW pipeline");
-        }
-        ImGuiExtras::NodeCheckbox("Override Black", "##RawNeuralOverrideBlack", &settings.overrideBlackLevel, controlWidth);
-        if (settings.overrideBlackLevel) {
-            ImGuiExtras::NodeInputFloat("Black Level", "##RawNeuralBlack", &settings.blackLevel, 1.0f, 16.0f, "%.1f", controlWidth);
-        }
-        ImGuiExtras::NodeCheckbox("Override White", "##RawNeuralOverrideWhite", &settings.overrideWhiteLevel, controlWidth);
-        if (settings.overrideWhiteLevel) {
-            ImGuiExtras::NodeInputFloat("White Level", "##RawNeuralWhite", &settings.whiteLevel, 16.0f, 256.0f, "%.1f", controlWidth);
-        }
-        const char* noiseLabels[] = { "Auto from metadata", "Manual" };
-        int noise = static_cast<int>(settings.noiseEstimateMode);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Noise Estimate", &noise, noiseLabels, 2)) {
-            settings.noiseEstimateMode = static_cast<NoiseEstimateMode>(std::clamp(noise, 0, 1));
-        }
-        if (settings.noiseEstimateMode == NoiseEstimateMode::Manual) {
-            ImGuiExtras::NodeSliderFloat("Manual Noise", "##RawNeuralManualNoise", &settings.manualNoiseEstimate, 0.0f, 1.0f, "%.3f", controlWidth);
-        }
-        const char* wbLabels[] = { "Before white balance", "After white balance" };
-        int wbStage = static_cast<int>(settings.rawWhiteBalanceStage);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("WB Stage", &wbStage, wbLabels, 2)) {
-            settings.rawWhiteBalanceStage = static_cast<RawWhiteBalanceStage>(std::clamp(wbStage, 0, 1));
-        }
-        const char* outputLabels[] = { "Denoised CFA", "Continue to demosaic" };
-        int outputMode = static_cast<int>(settings.rawOutputMode);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Output Mode", &outputMode, outputLabels, 2)) {
-            settings.rawOutputMode = static_cast<RawOutputMode>(std::clamp(outputMode, 0, 1));
-        }
-
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGuiExtras::RichSectionLabel("PREVIEW / TILING", 4.0f);
-        const char* previewLabels[] = { "Denoised", "Original", "Difference", "Split view", "Chroma-only difference", "Luma-only difference" };
-        int preview = static_cast<int>(settings.previewMode);
-        ImGui::SetNextItemWidth(controlWidth);
-        if (ImGui::Combo("Preview", &preview, previewLabels, 6)) {
-            settings.previewMode = static_cast<PreviewMode>(std::clamp(preview, 0, 5));
-        }
-        ImGuiExtras::NodeSliderInt("Tile Size", "##RawNeuralTile", &settings.tilePlan.tileSize, 128, 2048, "%d px", controlWidth);
-        ImGuiExtras::NodeSliderInt("Overlap", "##RawNeuralOverlap", &settings.tilePlan.overlap, 0, 512, "%d px", controlWidth);
-        ImGuiExtras::NodeCheckbox("Feather Merge", "##RawNeuralFeather", &settings.tilePlan.featherMerge, controlWidth);
-        settings.tilePlan.tileSize = std::clamp(settings.tilePlan.tileSize, 64, 4096);
-        settings.tilePlan.overlap = std::clamp(settings.tilePlan.overlap, 0, settings.tilePlan.tileSize / 2);
-    }
-
-    if (before.dump() != SerializeSettings(settings).dump()) {
-        MarkRenderDirty(node.id);
-    }
+    ImGui::TextDisabled("External model and runtime loading is disabled.");
 }
 
 void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float controlWidth, bool advanced) {
@@ -342,12 +222,10 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW COLOR", 4.0f);
-    const char* wbLabels[] = { "Camera WB", "Auto WB", "Neutral", "Manual" };
-    int wbMode = static_cast<int>(settings.whiteBalanceMode);
-    ImGui::SetNextItemWidth(controlWidth);
-    if (ImGui::Combo("White Balance", &wbMode, wbLabels, 4)) {
-        settings.whiteBalanceMode = static_cast<Raw::WhiteBalanceMode>(std::clamp(wbMode, 0, 3));
-    }
+    Stack::Editor::RawControls::RenderManualWhiteBalanceModeCombo(
+        "White Balance",
+        settings.whiteBalanceMode,
+        controlWidth);
     ImGui::BeginDisabled(settings.whiteBalanceMode != Raw::WhiteBalanceMode::Manual);
     resettableDecodeSliderFloat("Red Mult", "##RawDecodeWbR", &settings.manualWhiteBalance[0], defaultSettings.manualWhiteBalance[0], 0.05f, 16.0f, "%.3f");
     resettableDecodeSliderFloat("Green Mult", "##RawDecodeWbG", &settings.manualWhiteBalance[1], defaultSettings.manualWhiteBalance[1], 0.05f, 16.0f, "%.3f");
@@ -410,11 +288,15 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
     if (demosaicEnabled) {
-        if (settings.demosaicMethod != Raw::DemosaicMethod::Bilinear) {
-            settings.demosaicMethod = Raw::DemosaicMethod::Bilinear;
+        const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5" };
+        int demosaicMethod = static_cast<int>(settings.demosaicMethod);
+        ImGui::SetNextItemWidth(controlWidth);
+        if (ImGui::Combo("Method", &demosaicMethod, demosaicLabels, IM_ARRAYSIZE(demosaicLabels))) {
+            settings.demosaicMethod = static_cast<Raw::DemosaicMethod>(
+                std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
         }
         ImGui::TextDisabled("Method: %s", Raw::DemosaicMethodName(settings.demosaicMethod));
-        ImGui::TextDisabled("Status: preview-safe bilinear decode in this build.");
+        ImGui::TextDisabled("MHC is the high-quality 5x5 path; Bilinear is the fast draft path.");
     } else {
         ImGui::TextDisabled("Method: skipped");
         ImGui::TextDisabled("Status: source is already linear RGB, so demosaic is not used.");

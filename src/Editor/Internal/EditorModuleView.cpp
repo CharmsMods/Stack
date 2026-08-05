@@ -263,8 +263,15 @@ void EditorModule::RenderDetachedPreviewWindow() {
     }
 }
 
-bool EditorModule::QueryDetachedPreviewNativeWindow(DetachedPreviewNativeWindowRequest& request) const {
-    request = DetachedPreviewNativeWindowRequest{};
+bool EditorModule::QueryDetachedNativeWindow(
+    DetachedSurfaceKind kind,
+    DetachedNativeWindowRequest& request) const {
+    if (kind == DetachedSurfaceKind::RawGallery) {
+        return QueryRawWorkspaceLabNativeGalleryWindow(request);
+    }
+
+    request = DetachedNativeWindowRequest{};
+    request.kind = DetachedSurfaceKind::EditorPreview;
     if (!m_DetachedPreviewActive) {
         return false;
     }
@@ -308,10 +315,14 @@ bool EditorModule::QueryDetachedPreviewNativeWindow(DetachedPreviewNativeWindowR
     return true;
 }
 
-void EditorModule::CompleteDetachedPreviewNativeWindowRequest(
-    const DetachedPreviewNativeWindowRequest& request,
+void EditorModule::CompleteDetachedNativeWindowRequest(
+    const DetachedNativeWindowRequest& request,
     bool themeApplied,
     bool focused) {
+    if (request.kind == DetachedSurfaceKind::RawGallery) {
+        CompleteRawWorkspaceLabNativeGalleryWindowRequest(request, themeApplied, focused);
+        return;
+    }
     if (!m_DetachedPreviewActive || !request.hasPlatformWindow || request.window == nullptr) {
         return;
     }
@@ -331,9 +342,13 @@ void EditorModule::CompleteDetachedPreviewNativeWindowRequest(
     }
 }
 
-void EditorModule::MarkDetachedPreviewNativeWindowShown(
-    const DetachedPreviewNativeWindowRequest& request,
+void EditorModule::MarkDetachedNativeWindowShown(
+    const DetachedNativeWindowRequest& request,
     bool focused) {
+    if (request.kind == DetachedSurfaceKind::RawGallery) {
+        MarkRawWorkspaceLabNativeGalleryWindowShown(request, focused);
+        return;
+    }
     if (!m_DetachedPreviewActive || !request.hasPlatformWindow || request.window == nullptr) {
         return;
     }
@@ -344,7 +359,13 @@ void EditorModule::MarkDetachedPreviewNativeWindowShown(
     }
 }
 
-void EditorModule::MarkDetachedPreviewPlatformPresented(GLFWwindow* window) {
+void EditorModule::MarkDetachedPlatformPresented(
+    DetachedSurfaceKind kind,
+    GLFWwindow* window) {
+    if (kind == DetachedSurfaceKind::RawGallery) {
+        MarkRawWorkspaceLabNativeGalleryPlatformPresented(window);
+        return;
+    }
     if (!m_DetachedPreviewActive || window == nullptr) {
         return;
     }

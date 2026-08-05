@@ -15,24 +15,43 @@
 namespace AppSettingsPopup {
 namespace {
 
+constexpr float kSettingsItemGap = 7.0f;
+constexpr float kSettingsGroupGap = 14.0f;
+constexpr float kSettingsControlWidth = 280.0f;
+
+void RenderSectionIntro(const char* label, const char* description) {
+    ImGuiExtras::RichSectionLabel(label);
+    ImGui::TextWrapped("%s", description);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
+}
+
+void RenderSubsectionLabel(const char* label) {
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kSettingsGroupGap - kSettingsItemGap);
+    ImGuiExtras::RichSectionLabel(label);
+}
+
 bool SeamlessSurfaceStylingEnabled(const StackAppearance::AppearanceManager* appearance) {
     return appearance && appearance->GetSeamlessSurfaceStylingEnabled();
 }
 
-StackAppearance::RuntimeSurfacePalette GetSurfacePalette(const StackAppearance::AppearanceManager* appearance) {
-    return appearance ? appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
-}
-
-int GetResponsiveCardColumnCount(const float contentWidth, const float minCardWidth, const float gap, const int maxColumns = 2) {
-    const float availableWidth = std::max(0.0f, contentWidth);
-    for (int columns = maxColumns; columns > 1; --columns) {
-        const float totalGapWidth = gap * static_cast<float>(columns - 1);
-        const float cardWidth = (availableWidth - totalGapWidth) / static_cast<float>(columns);
-        if (cardWidth >= minCardWidth) {
-            return columns;
+std::string TruncateToWidth(const std::string& value, const float maxWidth) {
+    if (ImGui::CalcTextSize(value.c_str()).x <= maxWidth) {
+        return value;
+    }
+    constexpr const char* suffix = "...";
+    std::string truncated = value;
+    while (!truncated.empty()) {
+        truncated.pop_back();
+        while (!truncated.empty() &&
+               (static_cast<unsigned char>(truncated.back()) & 0xC0u) == 0x80u) {
+            truncated.pop_back();
+        }
+        const std::string candidate = truncated + suffix;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+            return candidate;
         }
     }
-    return 1;
+    return suffix;
 }
 
 void ApplyTheme(StackAppearance::AppearanceManager* appearance) {
@@ -47,27 +66,22 @@ bool RenderCategoryButton(
     const char* label,
     const bool selected,
     const ImVec2& size) {
-    const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(appearance);
-    const StackAppearance::RuntimeSurfacePalette surfacePalette = GetSurfacePalette(appearance);
-    const ImVec4 buttonColor = wallpaperSurfaces
-        ? (selected ? surfacePalette.controlSurfaceActive : surfacePalette.controlSurface)
-        : (selected
-            ? ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive)
-            : ImGui::GetStyleColorVec4(ImGuiCol_Button));
-    const ImVec4 hoveredColor = wallpaperSurfaces
-        ? (selected ? surfacePalette.controlSurfaceActive : surfacePalette.controlSurfaceHovered)
-        : (selected
-            ? ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered)
-            : ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
-    const ImVec4 activeColor = wallpaperSurfaces
-        ? surfacePalette.controlSurfaceActive
-        : ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive);
-
-    ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hoveredColor);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, activeColor);
-    const bool pressed = ImGui::Button(label, size);
-    ImGui::PopStyleColor(3);
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 actualSize(
+        size.x < 0.0f ? std::max(1.0f, ImGui::GetContentRegionAvail().x) : size.x,
+        size.y);
+    const bool pressed = ImGui::InvisibleButton(label, actualSize);
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const ImU32 textColor = ImGui::GetColorU32(
+        selected
+            ? ImGuiCol_CheckMark
+            : (hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+    const ImVec2 textSize = ImGui::CalcTextSize(label);
+    drawList->AddText(
+        ImVec2(start.x + 4.0f, start.y + (actualSize.y - textSize.y) * 0.5f),
+        textColor,
+        label);
     return pressed;
 }
 
@@ -80,91 +94,45 @@ void RenderThemeCards(StackAppearance::AppearanceManager* appearance, const floa
     const std::string activePresetId = appearance->GetActivePresetId();
     const std::vector<StackAppearance::ThemeDefinition>& factoryThemes = appearance->GetFactoryThemes();
     const std::vector<StackAppearance::ThemeDefinition>& customThemes = appearance->GetLibrary().customPresets;
+    std::vector<const StackAppearance::ThemeDefinition*> themes;
+    themes.reserve(factoryThemes.size() + customThemes.size());
+    for (const auto& theme : factoryThemes) themes.push_back(&theme);
+    for (const auto& theme : customThemes) themes.push_back(&theme);
+
+    constexpr float columnGap = 48.0f;
+    const int columns = contentWidth >= 420.0f ? 2 : 1;
+    const float listWidth = std::min(contentWidth, columns == 2 ? 520.0f : 260.0f);
+    const float cellWidth = columns == 2
+        ? (listWidth - columnGap) * 0.5f
+        : listWidth;
+    const float startX = ImGui::GetCursorPosX() + std::max(0.0f, (contentWidth - listWidth) * 0.5f);
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-
-    constexpr float gap = 16.0f;
-    const int cardColumns = GetResponsiveCardColumnCount(contentWidth, 220.0f, gap);
-    const float cardWidth = cardColumns > 1
-        ? std::max(1.0f, (std::max(0.0f, contentWidth) - gap) * 0.5f)
-        : std::max(1.0f, contentWidth);
-    constexpr float cardHeight = 128.0f;
-
-    auto renderThemeGroup = [&](const std::vector<StackAppearance::ThemeDefinition>& themes) {
-        for (size_t i = 0; i < themes.size(); ++i) {
-            const auto& theme = themes[i];
-            if (cardColumns > 1 && i > 0 && (i % cardColumns) != 0) {
-                ImGui::SameLine(0.0f, gap);
-            }
-
-            const bool isActive = activePresetId == theme.id;
-            ImGui::PushID(theme.id.c_str());
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, isActive ? 2.0f : 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
-            ImGui::PushStyleColor(
-                ImGuiCol_Border,
-                isActive
-                    ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark)
-                    : ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
-
-            ImGui::BeginChild("##ThemeCard", ImVec2(cardWidth, cardHeight), true, ImGuiWindowFlags_NoScrollbar);
-
-            ImGui::TextUnformatted(theme.displayName.c_str());
-            ImGui::Dummy(ImVec2(0.0f, 4.0f));
-
-            const ImGuiCol swatchCols[] = {
-                ImGuiCol_WindowBg,
-                ImGuiCol_ChildBg,
-                ImGuiCol_FrameBg,
-                ImGuiCol_Header,
-                ImGuiCol_ButtonActive
-            };
-            const ImVec2 swatchStart = ImGui::GetCursorScreenPos();
-            constexpr float radius = 7.0f;
-            constexpr float swatchGap = 20.0f;
-            for (int c = 0; c < IM_ARRAYSIZE(swatchCols); ++c) {
-                const ImVec4 col = theme.colors[swatchCols[c]];
-                const ImVec2 center(swatchStart.x + radius + c * swatchGap, swatchStart.y + radius);
-                drawList->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(col));
-                drawList->AddCircle(center, radius, IM_COL32(0, 0, 0, 40), 0, 1.0f);
-            }
-            ImGui::Dummy(ImVec2(0.0f, 22.0f));
-
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", isActive ? "Current theme" : "Click to apply");
-            ImGui::PopStyleColor();
-
-            const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-            ImGui::EndChild();
-
-            if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                if (appearance->SelectPresetById(theme.id)) {
-                    ApplyTheme(appearance);
-                }
-            }
-
-            if (hovered && !isActive) {
-                drawList->AddRect(
-                    ImGui::GetItemRectMin(),
-                    ImGui::GetItemRectMax(),
-                    ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered)),
-                    10.0f,
-                    0,
-                    1.2f);
-            }
-
-            ImGui::PopStyleColor(2);
-            ImGui::PopStyleVar(2);
-            ImGui::PopID();
+    for (std::size_t index = 0; index < themes.size(); ++index) {
+        if (columns == 2 && (index % 2) == 1) {
+            ImGui::SameLine(0.0f, columnGap);
+        } else {
+            ImGui::SetCursorPosX(startX);
         }
-    };
-
-    renderThemeGroup(factoryThemes);
-    if (!customThemes.empty()) {
-        ImGui::Dummy(ImVec2(0.0f, 12.0f));
-        ImGuiExtras::RichSectionLabel("CUSTOM PRESETS", 4.0f);
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        renderThemeGroup(customThemes);
+        const auto& theme = *themes[index];
+        const bool active = activePresetId == theme.id;
+        ImGui::PushID(theme.id.c_str());
+        const ImVec2 itemMin = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##ThemeChoice", ImVec2(cellWidth, 42.0f));
+        const bool hovered = ImGui::IsItemHovered();
+        const ImVec2 textSize = ImGui::CalcTextSize(theme.displayName.c_str());
+        drawList->AddText(
+            ImVec2(
+                itemMin.x + (cellWidth - textSize.x) * 0.5f,
+                itemMin.y + (42.0f - textSize.y) * 0.5f),
+            ImGui::GetColorU32(
+                active
+                    ? ImGuiCol_CheckMark
+                    : (hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled)),
+            theme.displayName.c_str());
+        if (ImGui::IsItemClicked() && !active && appearance->SelectPresetById(theme.id)) {
+            ApplyTheme(appearance);
+        }
+        ImGui::PopID();
     }
 }
 
@@ -174,11 +142,26 @@ void RenderAppearanceSection(StackAppearance::AppearanceManager* appearance, con
         return;
     }
 
-    ImGuiExtras::RichSectionLabel("APPEARANCE", 4.0f);
-    ImGui::TextWrapped("Choose the app theme. Theme changes ease between palettes instead of snapping.");
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
-
     RenderThemeCards(appearance, contentWidth);
+}
+
+void RenderExperimentalSection(
+    StackAppearance::AppearanceManager* appearance,
+    const float contentWidth) {
+    if (!appearance) {
+        ImGui::TextDisabled("Experimental settings are unavailable.");
+        return;
+    }
+
+    bool islandEnabled = appearance->GetExperimentalIslandEnabled();
+    const float checkboxWidth =
+        ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+        ImGui::CalcTextSize("Island").x;
+    ImGui::SetCursorPosX(
+        ImGui::GetCursorPosX() + std::max(0.0f, (contentWidth - checkboxWidth) * 0.5f));
+    if (ImGui::Checkbox("Island", &islandEnabled)) {
+        appearance->SetExperimentalIslandEnabled(islandEnabled);
+    }
 }
 
 void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, State& state, const float contentWidth) {
@@ -187,21 +170,22 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
         return;
     }
 
-    ImGuiExtras::RichSectionLabel("BACKGROUND", 4.0f);
-    ImGui::TextWrapped("Import wallpapers once, then switch between them from this library without reopening Explorer.");
-    ImGui::Dummy(ImVec2(0.0f, 18.0f));
-
+    const float startX = ImGui::GetCursorPosX();
+    const float controlBlockWidth = std::min(contentWidth, 520.0f);
+    const float controlX = startX + std::max(0.0f, (contentWidth - controlBlockWidth) * 0.5f);
     bool backgroundImageEnabled = appearance->GetBackgroundImageEnabled();
+    ImGui::SetCursorPosX(controlX);
     if (ImGui::Checkbox("Background image", &backgroundImageEnabled)) {
         appearance->SetBackgroundImageEnabled(backgroundImageEnabled);
     }
 
     const std::string managedPath = appearance->GetBackgroundImagePath();
     const bool hasManagedImage = !managedPath.empty();
-    const bool stackImageActions = contentWidth < 350.0f;
-    const float imageActionButtonWidth = stackImageActions ? std::max(1.0f, contentWidth) : 170.0f;
-
-    if (ImGui::Button("Add Image", ImVec2(imageActionButtonWidth, 0.0f))) {
+    ImGui::SetCursorPosX(controlX);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (ImGui::Button("Add Image")) {
         const std::string path = FileDialogs::OpenImageFileDialog("Add Background Image");
         if (!path.empty()) {
             std::string errorMessage;
@@ -212,96 +196,79 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
             }
         }
     }
-    if (stackImageActions) {
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    } else {
-        ImGui::SameLine(0.0f, 10.0f);
-    }
-    ImGui::BeginDisabled(!hasManagedImage && !backgroundImageEnabled);
-    if (ImGui::Button("Disable Background", ImVec2(imageActionButtonWidth, 0.0f))) {
-        std::string errorMessage;
-        if (!appearance->ClearBackgroundImage(&errorMessage)) {
-            state.lastActionError = errorMessage;
-        } else {
-            state.lastActionError.clear();
-        }
-    }
-    ImGui::EndDisabled();
+    ImGui::PopStyleColor(3);
 
     float backgroundStrength = appearance->GetBackgroundImageStrength();
-    ImGui::SetNextItemWidth(std::min(contentWidth, 340.0f));
+    ImGui::SetCursorPosX(controlX);
+    ImGui::SetNextItemWidth(std::min(controlBlockWidth, kSettingsControlWidth));
     if (ImGui::SliderFloat("Background Image Strength", &backgroundStrength, 0.0f, 1.0f, "%.2f")) {
         appearance->SetBackgroundImageStrength(backgroundStrength);
     }
 
     float uiSurfaceTransparency = appearance->GetUiSurfaceTransparency();
-    ImGui::SetNextItemWidth(std::min(contentWidth, 340.0f));
+    ImGui::SetCursorPosX(controlX);
+    ImGui::SetNextItemWidth(std::min(controlBlockWidth, kSettingsControlWidth));
     if (ImGui::SliderFloat("UI Surface Transparency", &uiSurfaceTransparency, 0.0f, 1.0f, "%.2f")) {
         if (appearance->SetUiSurfaceTransparency(uiSurfaceTransparency)) {
             ApplyTheme(appearance);
         }
     }
 
-    ImGui::Dummy(ImVec2(0.0f, 14.0f));
-    ImGuiExtras::RichSectionLabel("LIBRARY", 4.0f);
+    ImGui::Dummy(ImVec2(0.0f, 12.0f));
     const std::vector<StackAppearance::BackgroundImageEntry>& images = appearance->GetBackgroundImages();
     if (images.empty()) {
+        ImGui::SetCursorPosX(controlX);
         ImGui::TextDisabled("No background images have been added yet.");
     } else {
-        constexpr float gap = 10.0f;
-        const int cardColumns = GetResponsiveCardColumnCount(contentWidth, 180.0f, gap);
-        const float cardWidth = cardColumns > 1
-            ? (std::max(0.0f, contentWidth) - gap) * 0.5f
-            : std::max(1.0f, contentWidth);
-        constexpr float cardHeight = 92.0f;
+        constexpr float columnGap = 16.0f;
+        constexpr float rowHeight = 27.0f;
+        const float listWidth = std::min(contentWidth, 520.0f);
+        const float listX = startX + std::max(0.0f, (contentWidth - listWidth) * 0.5f);
+        const float itemWidth = (listWidth - columnGap) * 0.5f;
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         for (std::size_t index = 0; index < images.size(); ++index) {
             const StackAppearance::BackgroundImageEntry& image = images[index];
-            if (cardColumns > 1 && index > 0 && (index % cardColumns) != 0) {
-                ImGui::SameLine(0.0f, gap);
+            if ((index % 2) == 1) {
+                ImGui::SameLine(0.0f, columnGap);
+            } else {
+                ImGui::SetCursorPosX(listX);
             }
 
             const bool selected = image.path == managedPath;
             ImGui::PushID(image.id.c_str());
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, selected ? 2.0f : 1.0f);
-            ImGui::PushStyleColor(
-                ImGuiCol_Border,
-                selected
-                    ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark)
-                    : ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
-            ImGui::BeginChild("##BackgroundCard", ImVec2(cardWidth, cardHeight), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::TextUnformatted(image.displayName.c_str());
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", std::filesystem::path(image.path).filename().string().c_str());
-            ImGui::TextUnformatted(selected ? (backgroundImageEnabled ? "Active" : "Selected, disabled") : "Click to use");
-            ImGui::PopStyleColor();
-            const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-            ImGui::EndChild();
-            const ImVec2 min = ImGui::GetItemRectMin();
-            const ImVec2 max = ImGui::GetItemRectMax();
-            if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                if (appearance->SelectBackgroundImageById(image.id)) {
-                    state.lastActionError.clear();
-                }
+            const ImVec2 itemMin = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##BackgroundChoice", ImVec2(itemWidth, rowHeight));
+            const bool hovered = ImGui::IsItemHovered();
+            const std::string label = image.displayName.empty()
+                ? std::filesystem::path(image.path).filename().string()
+                : image.displayName;
+            const std::string visibleLabel = TruncateToWidth(label, itemWidth - 8.0f);
+            drawList->AddText(
+                ImVec2(itemMin.x + 4.0f, itemMin.y + (rowHeight - ImGui::GetTextLineHeight()) * 0.5f),
+                ImGui::GetColorU32(
+                    selected
+                        ? ImGuiCol_CheckMark
+                        : (hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled)),
+                visibleLabel.c_str());
+            if (ImGui::IsItemClicked() && appearance->SelectBackgroundImageById(image.id)) {
+                state.lastActionError.clear();
             }
-            if (hovered && !selected) {
-                drawList->AddRect(
-                    min,
-                    max,
-                    ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered)),
-                    12.0f,
-                    0,
-                    1.2f);
+            if (hovered) {
+                ImGui::SetTooltip(
+                    "%s%s",
+                    label.c_str(),
+                    selected ? (backgroundImageEnabled ? "\nSelected" : "\nSelected, disabled") : "");
             }
-            ImGui::PopStyleColor();
-            ImGui::PopStyleVar(2);
             ImGui::PopID();
         }
 
         if (hasManagedImage) {
-            ImGui::Dummy(ImVec2(0.0f, 10.0f));
-            if (ImGui::Button("Remove Selected From Library", ImVec2(std::min(220.0f, std::max(1.0f, contentWidth)), 0.0f))) {
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            ImGui::SetCursorPosX(controlX);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            if (ImGui::Button("Remove Selected")) {
                 const auto activeIt = std::find_if(
                     images.begin(),
                     images.end(),
@@ -317,20 +284,9 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
                     }
                 }
             }
+            ImGui::PopStyleColor(3);
         }
     }
-
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    const std::string runtimeStatus = appearance->GetBackgroundImageRuntimeStatus();
-    if (!runtimeStatus.empty()) {
-        ImGui::TextWrapped("%s", runtimeStatus.c_str());
-    } else if (!managedPath.empty()) {
-        const std::string fileName = std::filesystem::path(managedPath).filename().string();
-        ImGui::TextWrapped("Managed image: %s", fileName.c_str());
-    } else {
-        ImGui::TextUnformatted("No background image selected.");
-    }
-    ImGui::PopStyleColor();
 
     if (!state.lastActionError.empty()) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -348,17 +304,12 @@ void RenderGraphModeButtons(StackAppearance::AppearanceManager* appearance, cons
         StackAppearance::GraphVisualMode::SpotlightPrototype
     };
 
-    const float buttonGap = 10.0f;
-    const float rowButtonWidth = (contentWidth - buttonGap * 2.0f) / 3.0f;
-    const bool stackButtons = rowButtonWidth < 150.0f;
-    const float buttonWidth = stackButtons ? std::max(1.0f, contentWidth) : rowButtonWidth;
+    const float buttonGap = 8.0f;
+    constexpr float buttonWidth = 166.0f;
+    const bool stackButtons = contentWidth < buttonWidth * 3.0f + buttonGap * 2.0f;
     for (int i = 0; i < IM_ARRAYSIZE(graphModes); ++i) {
-        if (i > 0) {
-            if (stackButtons) {
-                ImGui::Dummy(ImVec2(0.0f, 6.0f));
-            } else {
-                ImGui::SameLine(0.0f, buttonGap);
-            }
+        if (i > 0 && !stackButtons) {
+            ImGui::SameLine(0.0f, buttonGap);
         }
         const StackAppearance::GraphVisualMode candidate = graphModes[i];
         const bool selected = graphMode == candidate;
@@ -380,7 +331,6 @@ void RenderGraphModeButtons(StackAppearance::AppearanceManager* appearance, cons
         }
     }
 
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("%s", StackAppearance::GraphVisualModeDescription(graphMode));
     ImGui::PopStyleColor();
@@ -403,15 +353,12 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
         return;
     }
 
-    ImGuiExtras::RichSectionLabel("GRAPH", 4.0f);
-    ImGui::TextWrapped("Choose how graph nodes render and which live graph diagnostics stay available while you work.");
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    RenderSectionIntro("GRAPH", "Choose how graph nodes render and which live graph diagnostics stay available while you work.");
 
-    ImGui::TextUnformatted("Graph Visual Mode");
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    ImGuiExtras::RichSectionLabel("VISUAL MODE");
     RenderGraphModeButtons(appearance, contentWidth);
 
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    RenderSubsectionLabel("CONNECTIONS");
 
     bool dottedMaskLinks = appearance->GetGraphDottedMaskLinks();
     if (ImGui::Checkbox("Dotted mask-endpoint links", &dottedMaskLinks)) {
@@ -429,23 +376,9 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
         ImGui::SetTooltip("Render graph links as direct straight lines instead of curved connections.");
     }
 
-    StackAppearance::GraphConnectionLabelVisibility connectionLabels =
-        appearance->GetGraphConnectionLabels();
-    const char* connectionLabelNames[] = {
-        "Adaptive", "Always", "Interaction Only", "Off"
-    };
-    int connectionLabelIndex = static_cast<int>(connectionLabels);
-    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
-    if (ImGui::Combo(
-            "Connection labels",
-            &connectionLabelIndex,
-            connectionLabelNames,
-            IM_ARRAYSIZE(connectionLabelNames))) {
-        appearance->SetGraphConnectionLabels(
-            static_cast<StackAppearance::GraphConnectionLabelVisibility>(connectionLabelIndex));
-    }
+    ImGui::TextDisabled("Hold F to reveal connection labels.");
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Adaptive shows typed wire text when space permits; interaction always reveals the selected or hovered connection.");
+        ImGui::SetTooltip("The informational text above and below each connection fades in while F is held, then quickly fades out when it is released.");
     }
 
     StackAppearance::GraphConnectionTextLayout connectionTextLayout =
@@ -504,54 +437,7 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
         ImGui::SetTooltip("Draw a subtle dark readability edge around connection text.");
     }
 
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    ImGui::TextUnformatted("Node sizing");
-    StackAppearance::GraphNodeSizing nodeSizing = appearance->GetGraphNodeSizing();
-    const char* nodeSizePresetNames[] = { "Compact", "Comfortable", "Spacious", "Custom" };
-    int nodeSizePresetIndex = static_cast<int>(nodeSizing.preset);
-    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
-    if (ImGui::Combo(
-            "Node size preset",
-            &nodeSizePresetIndex,
-            nodeSizePresetNames,
-            IM_ARRAYSIZE(nodeSizePresetNames))) {
-        appearance->SetGraphNodeSizePreset(
-            static_cast<StackAppearance::GraphNodeSizePreset>(nodeSizePresetIndex));
-        nodeSizing = appearance->GetGraphNodeSizing();
-    }
-
-    float nodeWidthPercent = nodeSizing.widthScale * 100.0f;
-    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
-    if (ImGui::SliderFloat(
-            "Node width",
-            &nodeWidthPercent,
-            StackAppearance::kGraphNodeWidthScaleMin * 100.0f,
-            StackAppearance::kGraphNodeWidthScaleMax * 100.0f,
-            "%.0f%%")) {
-        appearance->SetGraphNodeWidthScale(nodeWidthPercent / 100.0f);
-    }
-    float nodeUiPercent = nodeSizing.uiScale * 100.0f;
-    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
-    if (ImGui::SliderFloat(
-            "Node UI scale",
-            &nodeUiPercent,
-            StackAppearance::kGraphNodeUiScaleMin * 100.0f,
-            StackAppearance::kGraphNodeUiScaleMax * 100.0f,
-            "%.0f%%")) {
-        appearance->SetGraphNodeUiScale(nodeUiPercent / 100.0f);
-    }
-    ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
-    if (ImGui::SliderFloat(
-            "Node grab-area height",
-            &nodeSizing.grabAreaHeight,
-            StackAppearance::kGraphNodeGrabAreaHeightMin,
-            StackAppearance::kGraphNodeGrabAreaHeightMax,
-            "%.0f px")) {
-        appearance->SetGraphNodeGrabAreaHeight(nodeSizing.grabAreaHeight);
-    }
-    if (ImGui::Button("Reset node sizing")) {
-        appearance->ResetGraphNodeSizing();
-    }
+    RenderSubsectionLabel("INTERACTION & DIAGNOSTICS");
 
     float graphLineOpacity = appearance->GetGraphLineOpacity();
     ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
@@ -602,9 +488,7 @@ void RenderViewportSection(StackAppearance::AppearanceManager* appearance, const
         return;
     }
 
-    ImGuiExtras::RichSectionLabel("VIEWPORT RENDERING", 4.0f);
-    ImGui::TextWrapped("Control tile-first rendering for the main single-output viewport.");
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    RenderSectionIntro("VIEWPORT RENDERING", "Control tile-first rendering for the main single-output viewport.");
 
     ViewportTilingSettings settings = appearance->GetViewportTilingSettings();
     ViewportTilingMode mode = settings.mode;
@@ -684,9 +568,7 @@ const char* CompositeSnapPresetLabel(EditorModule::CompositeSnapModePreset prese
 }
 
 void RenderCanvasCompositionSection(EditorModule* editor, const float contentWidth) {
-    ImGuiExtras::RichSectionLabel("CANVAS COMPOSITION", 4.0f);
-    ImGui::TextWrapped("Control snapping and transform stepping for the composition canvas.");
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    RenderSectionIntro("CANVAS COMPOSITION", "Control snapping and transform stepping for the composition canvas.");
 
     if (!editor || editor->GetCompletedChainCount() < 2) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -811,9 +693,7 @@ void RenderUpdateInstallPopup(AppUpdate::UpdateManager* updateManager, State& st
 }
 
 void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state, const float contentWidth) {
-    ImGuiExtras::RichSectionLabel("APP UPDATES", 4.0f);
-    ImGui::TextWrapped("Check GitHub Releases for new Stack installers, download them in the background, and hand off safely to the installer when you're ready.");
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    RenderSectionIntro("APP UPDATES", "Check GitHub Releases for new Stack installers, download them in the background, and hand off safely to the installer when you're ready.");
 
     if (updateManager == nullptr) {
         ImGui::TextDisabled("Update services are unavailable.");
@@ -845,34 +725,29 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     }
     ImGui::PopStyleColor();
 
-    ImGui::Dummy(ImVec2(0.0f, 12.0f));
-
-    const float topActionRowWidth = 170.0f + 190.0f + 220.0f + 20.0f;
+    RenderSubsectionLabel("ACTIONS");
+    const float topActionRowWidth = 150.0f + 174.0f + 204.0f + 20.0f;
     const bool stackTopActions = contentWidth < topActionRowWidth;
 
     ImGui::BeginDisabled(!updateManager->CanCheckForUpdates());
-    if (ImGui::Button("Check for Updates", ImVec2(stackTopActions ? std::max(1.0f, contentWidth) : 170.0f, 0.0f))) {
+    if (ImGui::Button("Check for Updates", ImVec2(150.0f, 0.0f))) {
         state.lastActionError.clear();
         updateManager->StartManualCheck();
     }
     ImGui::EndDisabled();
 
-    if (stackTopActions) {
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    } else {
+    if (!stackTopActions) {
         ImGui::SameLine(0.0f, 10.0f);
     }
-    if (ImGui::Button("Open GitHub Releases", ImVec2(stackTopActions ? std::max(1.0f, contentWidth) : 190.0f, 0.0f))) {
+    if (ImGui::Button("Open GitHub Releases", ImVec2(174.0f, 0.0f))) {
         state.lastActionError.clear();
         updateManager->OpenReleasesPage(&state.lastActionError);
     }
 
-    if (stackTopActions) {
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    } else {
+    if (!stackTopActions) {
         ImGui::SameLine(0.0f, 10.0f);
     }
-    if (ImGui::Button("Open Website Download Page", ImVec2(stackTopActions ? std::max(1.0f, contentWidth) : 220.0f, 0.0f))) {
+    if (ImGui::Button("Open Website Download Page", ImVec2(204.0f, 0.0f))) {
         state.lastActionError.clear();
         updateManager->OpenWebsiteDownloadPage(&state.lastActionError);
     }
@@ -929,7 +804,7 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
 }
 
 void RenderFooter() {
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 5.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextUnformatted("Stack Image Editor");
     ImGui::SameLine(0.0f, 16.0f);
@@ -948,63 +823,108 @@ void RenderContents(
     State& state) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(appearance);
-    const StackAppearance::RuntimeSurfacePalette surfacePalette = GetSurfacePalette(appearance);
-    const float footerHeight = 42.0f;
-    const float railWidth = 184.0f;
+    const float footerHeight = 32.0f;
+    const float railWidth = 176.0f;
     const float contentHeight = std::max(120.0f, avail.y - footerHeight);
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f, 10.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, wallpaperSurfaces ? 10.0f : ImGui::GetStyle().FrameRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, kSettingsItemGap));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, wallpaperSurfaces ? 8.0f : ImGui::GetStyle().FrameRounding);
+    ImGui::PushStyleColor(
+        ImGuiCol_ChildBg,
+        ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::BeginChild("SettingsPopupBody", ImVec2(0.0f, contentHeight), false, ImGuiWindowFlags_NoScrollbar);
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 14.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, wallpaperSurfaces ? 14.0f : ImGui::GetStyle().ChildRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2.0f, 4.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
     if (wallpaperSurfaces) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, surfacePalette.drawerSurface);
-        ImGui::PushStyleColor(ImGuiCol_Border, surfacePalette.border);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     }
-    ImGui::BeginChild("SettingsPopupRail", ImVec2(railWidth, 0.0f), wallpaperSurfaces, ImGuiWindowFlags_NoScrollbar);
-    if (RenderCategoryButton(appearance, "Appearance", state.activeCategory == Category::Appearance, ImVec2(-1.0f, 38.0f))) {
+    ImGui::BeginChild(
+        "SettingsPopupRail",
+        ImVec2(railWidth, 0.0f),
+        ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar);
+    constexpr float categoryHeights[] = { 32.0f, 32.0f, 32.0f, 32.0f, 36.0f, 32.0f, 32.0f };
+    float categoryListHeight = 0.0f;
+    for (float height : categoryHeights) categoryListHeight += height;
+    categoryListHeight += kSettingsItemGap * 6.0f;
+    ImGui::SetCursorPosY(std::max(
+        ImGui::GetCursorPosY(),
+        (ImGui::GetWindowHeight() - categoryListHeight) * 0.5f));
+    if (RenderCategoryButton(appearance, "Appearance", state.activeCategory == Category::Appearance, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Appearance;
     }
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    if (RenderCategoryButton(appearance, "Background", state.activeCategory == Category::Background, ImVec2(-1.0f, 38.0f))) {
+    if (RenderCategoryButton(appearance, "Background", state.activeCategory == Category::Background, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Background;
     }
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    if (RenderCategoryButton(appearance, "Graph", state.activeCategory == Category::Graph, ImVec2(-1.0f, 38.0f))) {
+    if (RenderCategoryButton(appearance, "Graph", state.activeCategory == Category::Graph, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Graph;
     }
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    if (RenderCategoryButton(appearance, "Viewport", state.activeCategory == Category::Viewport, ImVec2(-1.0f, 38.0f))) {
+    if (RenderCategoryButton(appearance, "Viewport", state.activeCategory == Category::Viewport, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Viewport;
     }
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    if (RenderCategoryButton(appearance, "Canvas Composition", state.activeCategory == Category::CanvasComposition, ImVec2(-1.0f, 44.0f))) {
+    if (RenderCategoryButton(appearance, "Canvas Composition", state.activeCategory == Category::CanvasComposition, ImVec2(-1.0f, 36.0f))) {
         state.activeCategory = Category::CanvasComposition;
     }
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-    if (RenderCategoryButton(appearance, "Updates", state.activeCategory == Category::Updates, ImVec2(-1.0f, 38.0f))) {
+    if (RenderCategoryButton(appearance, "Experimental", state.activeCategory == Category::Experimental, ImVec2(-1.0f, 32.0f))) {
+        state.activeCategory = Category::Experimental;
+    }
+    if (RenderCategoryButton(appearance, "Updates", state.activeCategory == Category::Updates, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Updates;
     }
     ImGui::EndChild();
     if (wallpaperSurfaces) {
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor();
     }
     ImGui::PopStyleVar(2);
 
-    ImGui::SameLine(0.0f, 20.0f);
+    ImGui::SameLine(0.0f, 24.0f);
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::BeginChild("SettingsPopupDetail", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2.0f, 4.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 4.0f));
     if (wallpaperSurfaces) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     }
-    ImGui::BeginChild("SettingsPopupScroll", ImVec2(0.0f, 0.0f), false);
-    const float detailWidth = ImGui::GetContentRegionAvail().x;
+    ImGui::BeginChild(
+        "SettingsPopupScroll",
+        ImVec2(0.0f, 0.0f),
+        ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_None);
+    const float fullDetailWidth = ImGui::GetContentRegionAvail().x;
+    const float detailWidth = std::min(fullDetailWidth, 720.0f);
+    ImGui::SetCursorPosX(
+        ImGui::GetCursorPosX() + std::max(0.0f, (fullDetailWidth - detailWidth) * 0.5f));
+    if (state.activeCategory == Category::Appearance) {
+        const std::size_t themeCount = appearance
+            ? appearance->GetFactoryThemes().size() +
+                appearance->GetLibrary().customPresets.size()
+            : 0;
+        const int columns = detailWidth >= 420.0f ? 2 : 1;
+        const std::size_t rows = columns > 1 ? (themeCount + 1) / 2 : themeCount;
+        const float listHeight = static_cast<float>(rows) * 42.0f +
+            (rows > 0 ? static_cast<float>(rows - 1) * kSettingsItemGap : 0.0f);
+        ImGui::SetCursorPosY(std::max(
+            ImGui::GetCursorPosY(),
+            (ImGui::GetWindowHeight() - listHeight) * 0.5f));
+    } else if (state.activeCategory == Category::Background && appearance) {
+        const std::size_t imageCount = appearance->GetBackgroundImages().size();
+        const std::size_t rows = (imageCount + 1) / 2;
+        const float estimatedControlsHeight = 150.0f;
+        const float estimatedListHeight = static_cast<float>(rows) *
+            (27.0f + kSettingsItemGap);
+        const float estimatedHeight = estimatedControlsHeight + estimatedListHeight;
+        ImGui::SetCursorPosY(std::max(
+            ImGui::GetCursorPosY(),
+            (ImGui::GetWindowHeight() - estimatedHeight) * 0.5f));
+    } else if (state.activeCategory == Category::Experimental) {
+        ImGui::SetCursorPosY(std::max(
+            ImGui::GetCursorPosY(),
+            (ImGui::GetWindowHeight() - ImGui::GetFrameHeight()) * 0.5f));
+    }
     switch (state.activeCategory) {
     case Category::Appearance:
         RenderAppearanceSection(appearance, detailWidth);
@@ -1021,6 +941,9 @@ void RenderContents(
     case Category::CanvasComposition:
         RenderCanvasCompositionSection(editor, detailWidth);
         break;
+    case Category::Experimental:
+        RenderExperimentalSection(appearance, detailWidth);
+        break;
     case Category::Updates:
         RenderUpdatesSection(updateManager, state, detailWidth);
         break;
@@ -1035,7 +958,8 @@ void RenderContents(
     ImGui::EndChild();
 
     RenderFooter();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
 }
 
 } // namespace AppSettingsPopup

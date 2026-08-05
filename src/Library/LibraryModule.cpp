@@ -1,18 +1,34 @@
 #include "LibraryModule.h"
+#include "App/AppPaths.h"
 #include "App/settings/AppearanceTheme.h"
 #include "LibraryManager.h"
 #include "Library/Internal/LibraryModuleUIHelpers.h"
+#include "Persistence/StackBinaryFormat.h"
 #include "Async/TaskSystem.h"
 
 #include "Utils/ImGuiExtras.h"
 #include "Renderer/GLLoader.h"
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <utility>
 
 using namespace Stack::Library::ModuleUI;
+
+namespace {
+
+constexpr float kLibraryViewScaleMin = 0.55f;
+constexpr float kLibraryViewScaleMax = 1.80f;
+
+std::filesystem::path GetLibraryViewStatePath() {
+    return AppPaths::GetSettingsDirectory() / "LibraryViewState.json";
+}
+
+} // namespace
 
 LibraryModule::LibraryModule() {}
 LibraryModule::~LibraryModule() {
@@ -31,7 +47,43 @@ LibraryModule::~LibraryModule() {
 }
 
 void LibraryModule::Initialize() {
+    LoadViewState();
     LibraryManager::Get().RequestRefreshLibraryAsync();
+}
+
+void LibraryModule::LoadViewState() {
+    std::ifstream file(GetLibraryViewStatePath());
+    if (!file) {
+        return;
+    }
+
+    const StackBinaryFormat::json root = StackBinaryFormat::json::parse(file, nullptr, false);
+    if (!root.is_object()) {
+        return;
+    }
+
+    const auto scaleIt = root.find("gridScale");
+    if (scaleIt == root.end() || !scaleIt->is_number()) {
+        return;
+    }
+
+    const float savedScale = scaleIt->get<float>();
+    if (std::isfinite(savedScale)) {
+        m_LibraryViewScale = std::clamp(savedScale, kLibraryViewScaleMin, kLibraryViewScaleMax);
+    }
+}
+
+void LibraryModule::SaveViewState() const {
+    AppPaths::EnsureRuntimeDirectories();
+    std::ofstream file(GetLibraryViewStatePath(), std::ios::trunc);
+    if (!file) {
+        return;
+    }
+
+    StackBinaryFormat::json root = StackBinaryFormat::json::object();
+    root["version"] = 1;
+    root["gridScale"] = m_LibraryViewScale;
+    file << root.dump(2);
 }
 
 void LibraryModule::SyncRenameBuffer() {

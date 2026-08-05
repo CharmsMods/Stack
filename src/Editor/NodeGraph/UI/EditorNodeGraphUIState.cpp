@@ -57,6 +57,9 @@ bool EditorNodeGraphUI::ResolveNodeHasDedicatedComplexEditor(
         case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
             return true;
         default:
             return false;

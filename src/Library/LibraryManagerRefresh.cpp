@@ -33,6 +33,24 @@ struct LibraryScanResult {
     int totalItems = 0;
 };
 
+void SortProjectsNewestFirst(std::vector<std::shared_ptr<ProjectEntry>>& projects) {
+    std::sort(projects.begin(), projects.end(), [](const auto& lhs, const auto& rhs) {
+        if (!lhs || !rhs) {
+            return static_cast<bool>(lhs) > static_cast<bool>(rhs);
+        }
+        if (lhs->timestamp != rhs->timestamp) {
+            if (lhs->timestamp == "Unknown") {
+                return false;
+            }
+            if (rhs->timestamp == "Unknown") {
+                return true;
+            }
+            return lhs->timestamp > rhs->timestamp;
+        }
+        return lhs->fileName > rhs->fileName;
+    });
+}
+
 std::filesystem::path GetStartupTracePath() {
     return AppPaths::GetStartupLogPath();
 }
@@ -73,7 +91,9 @@ std::uintmax_t LibraryManager::BuildLibrarySignature() const {
     const auto accumulateEntry = [&](const std::filesystem::directory_entry& entry) {
         std::error_code ec;
         ++fileCount;
-        totalSize += std::filesystem::file_size(entry.path(), ec);
+        if (entry.is_regular_file(ec)) {
+            totalSize += std::filesystem::file_size(entry.path(), ec);
+        }
         if (ec) ec.clear();
 
         const auto writeTime = std::filesystem::last_write_time(entry.path(), ec);
@@ -190,6 +210,8 @@ void LibraryManager::RefreshLibrary(
             activeAssetFiles.insert(activeAssetFiles.end(), projectAssets.begin(), projectAssets.end());
         }
     }
+
+    SortProjectsNewestFirst(m_Projects);
 
     if (syncEmbeddedProjectAssets) {
         CleanupOrphanedAssets(activeAssetFiles);
@@ -355,6 +377,8 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
                     activeAssetFiles.insert(activeAssetFiles.end(), projectAssets.begin(), projectAssets.end());
                 }
             }
+
+            SortProjectsNewestFirst(result.projects);
 
             if (syncEmbeddedProjectAssets) {
                 CleanupOrphanedAssets(activeAssetFiles);

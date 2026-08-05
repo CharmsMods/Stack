@@ -1,61 +1,32 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GLStateGuards.h"
+#include "Utils/PixelBufferUtils.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <cstring>
 #include <iostream>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
 
-struct ScopedFramebufferState {
-    GLint framebuffer = 0;
-    GLint readFbo = 0;
-    GLint drawFbo = 0;
-    GLint readBuffer = 0;
-    GLint drawBuffer = 0;
-    GLint viewport[4] = { 0, 0, 0, 0 };
+using ScopedFramebufferState =
+    Stack::Renderer::GLState::FramebufferState;
+using ScopedPixelPackState =
+    Stack::Renderer::GLState::PixelPackState;
 
-    explicit ScopedFramebufferState(bool captureViewport = false) {
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
-        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
-        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
-        if (captureViewport) {
-            glGetIntegerv(GL_VIEWPORT, viewport);
-        }
-    }
-
-    void Restore(bool restoreViewport = false) const {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
-        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
-        glReadBuffer(static_cast<GLenum>(readBuffer));
-        glDrawBuffer(static_cast<GLenum>(drawBuffer));
-        if (restoreViewport) {
-            glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-        }
-    }
-};
-
-void FlipRgbaRows(std::vector<unsigned char>& pixels, int width, int height) {
-    if (width <= 0 || height <= 1 || pixels.empty()) {
-        return;
-    }
-    const int rowSize = width * 4;
-    std::vector<unsigned char> tempRow(static_cast<std::size_t>(rowSize));
-    for (int y = 0; y < height / 2; y++) {
-        unsigned char* row1 = &pixels[static_cast<std::size_t>(y * rowSize)];
-        unsigned char* row2 = &pixels[static_cast<std::size_t>((height - 1 - y) * rowSize)];
-        std::memcpy(tempRow.data(), row1, static_cast<std::size_t>(rowSize));
-        std::memcpy(row1, row2, static_cast<std::size_t>(rowSize));
-        std::memcpy(row2, tempRow.data(), static_cast<std::size_t>(rowSize));
-    }
+bool FlipInterleavedRows(
+    std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int channels) {
+    return Stack::PixelBuffer::FlipInterleavedRowsInPlace(
+        pixels, width, height, channels);
 }
 
 std::vector<unsigned char> ReadTexturePixelsRgba8(
@@ -65,7 +36,8 @@ std::vector<unsigned char> ReadTexturePixelsRgba8(
     int& outW,
     int& outH,
     int maxDimension,
-    const char* context) {
+    const char* context,
+    bool flipRows = true) {
     outW = 0;
     outH = 0;
     if (texture == 0 || sourceWidth <= 0 || sourceHeight <= 0) {
@@ -79,34 +51,44 @@ std::vector<unsigned char> ReadTexturePixelsRgba8(
     outW = std::max(1, static_cast<int>(std::round(static_cast<float>(sourceWidth) * scale)));
     outH = std::max(1, static_cast<int>(std::round(static_cast<float>(sourceHeight) * scale)));
 
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 4u);
+    std::size_t byteCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            outW, outH, 4, byteCount)) {
+        outW = 0;
+        outH = 0;
+        return {};
+    }
+    std::vector<unsigned char> pixels;
+    try {
+        pixels.resize(byteCount);
+    } catch (const std::bad_alloc&) {
+        outW = 0;
+        outH = 0;
+        return {};
+    } catch (const std::length_error&) {
+        outW = 0;
+        outH = 0;
+        return {};
+    }
 
-    GLint prevReadFBO = 0;
-    GLint prevDrawFBO = 0;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
-
-    unsigned int readFBO = 0;
+    const ScopedFramebufferState savedState(true);
+    const ScopedPixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
+    unsigned int readFBO = GLHelpers::CreateFBO(texture);
     unsigned int targetFBO = 0;
     unsigned int targetTex = 0;
+    bool readbackReady = readFBO != 0;
 
-    glGenFramebuffers(1, &readFBO);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    if (outW != sourceWidth || outH != sourceHeight) {
+    if (readbackReady &&
+        (outW != sourceWidth || outH != sourceHeight)) {
         targetTex = GLHelpers::CreateEmptyTexture(outW, outH);
-        glGenFramebuffers(1, &targetFBO);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFBO);
-        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, targetTex, 0);
-        glDrawBuffer(GL_COLOR_ATTACHMENT0);
-
-        if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
-            glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            std::cerr << "[RenderPipeline] " << context << " FBO incomplete during downsampled readback." << std::endl;
-            pixels.clear();
-        } else {
+        targetFBO = GLHelpers::CreateFBO(targetTex);
+        readbackReady = targetTex != 0 && targetFBO != 0;
+        if (readbackReady) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFBO);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
             while (glGetError() != GL_NO_ERROR) {}
             glBlitFramebuffer(
                 0, 0, sourceWidth, sourceHeight,
@@ -115,35 +97,29 @@ std::vector<unsigned char> ReadTexturePixelsRgba8(
                 GL_LINEAR);
             if (GLenum err = glGetError(); err != GL_NO_ERROR) {
                 std::cerr << "[RenderPipeline] glBlitFramebuffer error in " << context << ": " << err << std::endl;
-                pixels.clear();
+                readbackReady = false;
             }
         }
+    }
 
-        if (!pixels.empty()) {
-            glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-        }
-    } else {
-        glBindFramebuffer(GL_FRAMEBUFFER, readFBO);
+    if (readbackReady) {
+        glBindFramebuffer(
+            GL_FRAMEBUFFER,
+            targetFBO != 0 ? targetFBO : readFBO);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-    }
-
-    if (!pixels.empty()) {
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            std::cerr << "[RenderPipeline] " << context << " FBO incomplete." << std::endl;
-            pixels.clear();
-        } else {
-            while (glGetError() != GL_NO_ERROR) {}
-            glReadPixels(0, 0, outW, outH, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-            if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-                std::cerr << "[RenderPipeline] glReadPixels error in " << context << ": " << err << std::endl;
-                pixels.clear();
-            }
+        while (glGetError() != GL_NO_ERROR) {}
+        glReadPixels(
+            0, 0, outW, outH,
+            GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
+            std::cerr << "[RenderPipeline] glReadPixels error in "
+                      << context << ": " << err << std::endl;
+            readbackReady = false;
         }
     }
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFBO);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFBO);
+    savedPackState.Restore();
+    savedState.Restore(true);
     if (readFBO != 0) {
         glDeleteFramebuffers(1, &readFBO);
     }
@@ -154,13 +130,134 @@ std::vector<unsigned char> ReadTexturePixelsRgba8(
         glDeleteTextures(1, &targetTex);
     }
 
-    if (pixels.empty()) {
+    if (!readbackReady) {
         outW = 0;
         outH = 0;
         return {};
     }
 
-    FlipRgbaRows(pixels, outW, outH);
+    if (flipRows) {
+        if (!FlipInterleavedRows(pixels, outW, outH, 4)) {
+            outW = 0;
+            outH = 0;
+            return {};
+        }
+    }
+    return pixels;
+}
+
+std::vector<float> ReadTexturePixelsRgbaFloat(
+    unsigned int texture,
+    int sourceWidth,
+    int sourceHeight,
+    int& outW,
+    int& outH,
+    int maxDimension,
+    const char* context) {
+    outW = 0;
+    outH = 0;
+    if (texture == 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+        return {};
+    }
+
+    const int targetMax = maxDimension > 0
+        ? std::max(1, maxDimension)
+        : std::max(sourceWidth, sourceHeight);
+    const float scale = std::min(
+        1.0f,
+        static_cast<float>(targetMax) /
+            static_cast<float>(std::max(sourceWidth, sourceHeight)));
+    outW = std::max(
+        1,
+        static_cast<int>(
+            std::round(static_cast<float>(sourceWidth) * scale)));
+    outH = std::max(
+        1,
+        static_cast<int>(
+            std::round(static_cast<float>(sourceHeight) * scale)));
+
+    std::size_t elementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            outW, outH, 4, elementCount)) {
+        outW = 0;
+        outH = 0;
+        return {};
+    }
+    std::vector<float> pixels;
+    try {
+        pixels.resize(elementCount);
+    } catch (const std::bad_alloc&) {
+        outW = 0;
+        outH = 0;
+        return {};
+    } catch (const std::length_error&) {
+        outW = 0;
+        outH = 0;
+        return {};
+    }
+
+    const ScopedFramebufferState savedState(true);
+    const ScopedPixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
+    unsigned int readFbo = GLHelpers::CreateFBO(texture);
+    unsigned int probeTexture = 0;
+    unsigned int probeFbo = 0;
+    bool ready = readFbo != 0;
+    if (ready && (outW != sourceWidth || outH != sourceHeight)) {
+        probeTexture = GLHelpers::CreateEmptyTexture(outW, outH);
+        probeFbo = GLHelpers::CreateFBO(probeTexture);
+        ready = probeTexture != 0 && probeFbo != 0;
+        if (ready) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, probeFbo);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            while (glGetError() != GL_NO_ERROR) {}
+            glBlitFramebuffer(
+                0, 0, sourceWidth, sourceHeight,
+                0, 0, outW, outH,
+                GL_COLOR_BUFFER_BIT,
+                GL_LINEAR);
+            if (const GLenum error = glGetError();
+                error != GL_NO_ERROR) {
+                std::cerr
+                    << "[RenderPipeline] glBlitFramebuffer error in "
+                    << (context ? context : "ReadTexturePixelsRgbaFloat")
+                    << ": " << error << std::endl;
+                ready = false;
+            }
+        }
+    }
+
+    if (ready) {
+        glBindFramebuffer(
+            GL_FRAMEBUFFER,
+            probeFbo != 0 ? probeFbo : readFbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        while (glGetError() != GL_NO_ERROR) {}
+        glReadPixels(
+            0, 0, outW, outH,
+            GL_RGBA, GL_FLOAT, pixels.data());
+        if (const GLenum error = glGetError();
+            error != GL_NO_ERROR) {
+            std::cerr
+                << "[RenderPipeline] glReadPixels error in "
+                << (context ? context : "ReadTexturePixelsRgbaFloat")
+                << ": " << error << std::endl;
+            ready = false;
+        }
+    }
+
+    savedPackState.Restore();
+    savedState.Restore(true);
+    if (probeFbo != 0) glDeleteFramebuffers(1, &probeFbo);
+    if (probeTexture != 0) glDeleteTextures(1, &probeTexture);
+    if (readFbo != 0) glDeleteFramebuffers(1, &readFbo);
+    if (!ready) {
+        outW = 0;
+        outH = 0;
+        return {};
+    }
     return pixels;
 }
 } // namespace
@@ -190,70 +287,21 @@ bool RenderPipeline::RecordConsumerBoundary(
 }
 
 std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH) {
-    outW = m_Width;
-    outH = m_Height;
+    outW = 0;
+    outH = 0;
     if (m_OutputTexture == 0 || m_Width == 0 || m_Height == 0) return {};
     if (!RecordConsumerBoundary(Stack::NodeMath::SpecializedStageKind::ExportReadback)) {
         return {};
     }
-
-    std::vector<unsigned char> pixels(m_Width * m_Height * 4);
-    const ScopedFramebufferState savedState;
-
-    // Create a temporary FBO for reading
-    unsigned int tempFBO;
-    glGenFramebuffers(1, &tempFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_OutputTexture, 0);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    GLenum fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (fboStatus != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "[RenderPipeline] Warning: GetOutputPixels FBO incomplete (status " << fboStatus << "). Texture: " << m_OutputTexture << ". Attempting read anyway." << std::endl;
-    }
-
-    // Clear previous errors
-    while (glGetError() != GL_NO_ERROR) {}
-
-    glReadPixels(0, 0, m_Width, m_Height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-
-    if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-        std::cerr << "[RenderPipeline] glReadPixels error in GetOutputPixels: " << err << std::endl;
-        savedState.Restore();
-        glDeleteFramebuffers(1, &tempFBO);
-
-        // Before our strict error checking, the code would just return the zeroed pixels array
-        // on failure. Return the zeroed array instead of empty {} so downstream doesn't completely abort.
-        return pixels;
-    }
-
-    // Validate that we didn't just read empty pixels (if alpha is completely 0 for the entire image)
-    bool hasData = false;
-    for (size_t i = 3; i < pixels.size(); i += 4) {
-        if (pixels[i] > 0) {
-            hasData = true;
-            break;
-        }
-    }
-    if (!hasData) {
-        std::cerr << "[RenderPipeline] Warning: GetOutputPixels read completely transparent image." << std::endl;
-    }
-
-    // Flip vertically
-    int rowSize = m_Width * 4;
-    std::vector<unsigned char> tempRow(rowSize);
-    for (int y = 0; y < m_Height / 2; y++) {
-        unsigned char* row1 = &pixels[y * rowSize];
-        unsigned char* row2 = &pixels[(m_Height - 1 - y) * rowSize];
-        std::memcpy(tempRow.data(), row1, rowSize);
-        std::memcpy(row1, row2, rowSize);
-        std::memcpy(row2, tempRow.data(), rowSize);
-    }
-
-    savedState.Restore();
-    glDeleteFramebuffers(1, &tempFBO);
-
-    return pixels;
+    return ReadTexturePixelsRgba8(
+        m_OutputTexture,
+        m_Width,
+        m_Height,
+        outW,
+        outH,
+        0,
+        "GetOutputPixels",
+        true);
 }
 
 std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH, int maxDimension) {
@@ -289,7 +337,9 @@ std::vector<unsigned char> RenderPipeline::GetRawDevelopmentLocalRangeOverlayPix
 
 bool RenderPipeline::CaptureRawDevelopmentLocalRangeTargetSample(
     unsigned int texture,
-    const Stack::RawRecipe::RawLocalRangeRecipe& localRange) {
+    const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
+    Raw::RawWorkingSpace workingSpace,
+    std::size_t inputStageFingerprint) {
     m_RawDevelopmentLocalRangeTargetSampleValid = false;
     if (!m_RawDevelopmentLocalRangeTargetSampleRequested ||
         texture == 0 ||
@@ -320,26 +370,40 @@ bool RenderPipeline::CaptureRawDevelopmentLocalRangeTargetSample(
         return false;
     }
 
-    std::vector<float> rgba(static_cast<std::size_t>(readW) * static_cast<std::size_t>(readH) * 4u, 0.0f);
+    std::size_t rgbaElementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            readW, readH, 4, rgbaElementCount)) {
+        return false;
+    }
+    std::vector<float> rgba;
+    try {
+        rgba.assign(rgbaElementCount, 0.0f);
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
     const ScopedFramebufferState savedState;
+    const ScopedPixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
 
-    unsigned int readFBO = 0;
-    glGenFramebuffers(1, &readFBO);
+    const unsigned int readFBO = GLHelpers::CreateFBO(texture);
+    if (readFBO == 0) {
+        savedPackState.Restore();
+        return false;
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
 
-    bool readOk = false;
-    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(minX, minY, readW, readH, GL_RGBA, GL_FLOAT, rgba.data());
-        readOk = glGetError() == GL_NO_ERROR;
-    }
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(
+        minX, minY, readW, readH,
+        GL_RGBA, GL_FLOAT, rgba.data());
+    const bool readOk = glGetError() == GL_NO_ERROR;
 
+    savedPackState.Restore();
     savedState.Restore();
-    if (readFBO != 0) {
-        glDeleteFramebuffers(1, &readFBO);
-    }
+    glDeleteFramebuffers(1, &readFBO);
     if (!readOk) {
         return false;
     }
@@ -407,16 +471,139 @@ bool RenderPipeline::CaptureRawDevelopmentLocalRangeTargetSample(
         robustB = static_cast<float>(bSum / sampleCount);
     }
 
-    const float middleGrey = std::clamp(localRange.middleGrey, 0.01f, 1.0f);
+    const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
+        Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
+    const float middleGrey = std::clamp(sanitized.middleGrey, 0.01f, 1.0f);
+    const float robustSceneEv =
+        std::log2(std::max(robustLuma, 0.00000001f) / middleGrey);
+    std::uint32_t authoredZoneHitBits = 0;
+    const unsigned int selectionBitsTexture =
+        BuildRawDevelopmentLocalRangeSelectionBits(
+            texture,
+            sanitized,
+            workingSpace,
+            inputStageFingerprint);
+    if (selectionBitsTexture != 0 &&
+        m_RawDevelopmentLocalRangeSelectionBitsTextureWidth > 0 &&
+        m_RawDevelopmentLocalRangeSelectionBitsTextureHeight > 0) {
+        const int maskWidth = m_RawDevelopmentLocalRangeSelectionBitsTextureWidth;
+        const int maskHeight = m_RawDevelopmentLocalRangeSelectionBitsTextureHeight;
+        const int maskCenterX = std::clamp(
+            static_cast<int>(std::lround(sampleU * static_cast<float>(maskWidth - 1))),
+            0,
+            maskWidth - 1);
+        const int maskDisplayY = std::clamp(
+            static_cast<int>(std::lround(sampleV * static_cast<float>(maskHeight - 1))),
+            0,
+            maskHeight - 1);
+        const int maskCenterY = maskHeight - 1 - maskDisplayY;
+        const int radiusX = std::max(
+            1,
+            static_cast<int>(std::ceil(
+                std::max(
+                    m_RawDevelopmentLocalRangeTargetPreviewRequest.hitRadiusU,
+                    12.0f / static_cast<float>(std::max(1, m_Width))) *
+                static_cast<float>(maskWidth))));
+        const int radiusY = std::max(
+            1,
+            static_cast<int>(std::ceil(
+                std::max(
+                    m_RawDevelopmentLocalRangeTargetPreviewRequest.hitRadiusV,
+                    12.0f / static_cast<float>(std::max(1, m_Height))) *
+                static_cast<float>(maskHeight))));
+        const int hitMinX = std::max(0, maskCenterX - radiusX);
+        const int hitMaxX = std::min(maskWidth - 1, maskCenterX + radiusX);
+        const int hitMinY = std::max(0, maskCenterY - radiusY);
+        const int hitMaxY = std::min(maskHeight - 1, maskCenterY + radiusY);
+        const int hitWidth = hitMaxX - hitMinX + 1;
+        const int hitHeight = hitMaxY - hitMinY + 1;
+        std::size_t hitPixelCount = 0;
+        if (!Stack::PixelBuffer::TryComputePixelElementCount(
+                hitWidth, hitHeight, 1, hitPixelCount)) {
+            return false;
+        }
+        std::vector<std::uint32_t> hitPixels;
+        try {
+            hitPixels.assign(hitPixelCount, 0u);
+        } catch (const std::bad_alloc&) {
+            return false;
+        } catch (const std::length_error&) {
+            return false;
+        }
+        const ScopedFramebufferState hitSavedState;
+        const ScopedPixelPackState hitSavedPackState;
+        hitSavedPackState.ConfigureTightCpuReadback();
+        const unsigned int hitFbo =
+            GLHelpers::CreateFBO(selectionBitsTexture);
+        if (hitFbo == 0) {
+            hitSavedPackState.Restore();
+            return false;
+        }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, hitFbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        while (glGetError() != GL_NO_ERROR) {}
+        glReadPixels(
+            hitMinX,
+            hitMinY,
+            hitWidth,
+            hitHeight,
+            GL_RED_INTEGER,
+            GL_UNSIGNED_INT,
+            hitPixels.data());
+        const bool hitReadOk = glGetError() == GL_NO_ERROR;
+        hitSavedPackState.Restore();
+        hitSavedState.Restore();
+        glDeleteFramebuffers(1, &hitFbo);
+        if (hitReadOk) {
+            for (const std::uint32_t bits : hitPixels) {
+                authoredZoneHitBits |= bits;
+            }
+        }
+    }
+
+    float strongestAuthoredZoneWeight = 0.0f;
+    const int zoneCount = std::min<int>(
+        static_cast<int>(sanitized.targetZones.size()),
+        static_cast<int>(Stack::RawRecipe::kMaxRawLocalRangeTargetZones));
+    for (int zoneIndex = 0; zoneIndex < zoneCount; ++zoneIndex) {
+        const Stack::RawRecipe::RawLocalRangeTargetZone& zone =
+            sanitized.targetZones[static_cast<std::size_t>(zoneIndex)];
+        if (!zone.enabled) {
+            continue;
+        }
+        const float effectiveWeight =
+            Stack::RawRecipe::EvaluateLocalRangeTargetZoneTonalWeight(
+                zone,
+                robustSceneEv) *
+            Stack::RawRecipe::EvaluateLocalRangeTargetZoneColorWeight(
+                zone,
+                robustR,
+                robustG,
+                robustB,
+                workingSpace);
+        const std::uint32_t zoneBit = std::uint32_t(1u) << zoneIndex;
+        if (zone.scope == Stack::RawRecipe::RawLocalRangeTargetScope::AllMatches &&
+            effectiveWeight >= 0.10f) {
+            authoredZoneHitBits |= zoneBit;
+        }
+        if ((authoredZoneHitBits & zoneBit) != 0u) {
+            strongestAuthoredZoneWeight =
+                std::max(strongestAuthoredZoneWeight, effectiveWeight);
+        }
+    }
+
     m_RawDevelopmentLocalRangeTargetSampleValid = true;
     m_RawDevelopmentLocalRangeTargetSampleSceneLuma = robustLuma;
     m_RawDevelopmentLocalRangeTargetSampleSceneR = robustR;
     m_RawDevelopmentLocalRangeTargetSampleSceneG = robustG;
     m_RawDevelopmentLocalRangeTargetSampleSceneB = robustB;
-    m_RawDevelopmentLocalRangeTargetSampleSceneEv =
-        std::log2(std::max(robustLuma, 0.00000001f) / middleGrey);
+    m_RawDevelopmentLocalRangeTargetSampleSceneEv = robustSceneEv;
     m_RawDevelopmentLocalRangeTargetSampleU = sampleU;
     m_RawDevelopmentLocalRangeTargetSampleV = sampleV;
+    m_RawDevelopmentLocalRangeTargetSampleAuthoredZoneHitBits =
+        authoredZoneHitBits;
+    m_RawDevelopmentLocalRangeTargetSampleStrongestAuthoredZoneWeight =
+        strongestAuthoredZoneWeight;
     return true;
 }
 
@@ -425,7 +612,9 @@ bool RenderPipeline::GetRawDevelopmentLocalRangeTargetSample(
     float& outSceneLuma,
     float& outU,
     float& outV,
-    std::array<float, 3>* outSceneRgb) const {
+    std::array<float, 3>* outSceneRgb,
+    std::uint32_t* outAuthoredZoneHitBits,
+    float* outStrongestAuthoredZoneWeight) const {
     outSceneEv = m_RawDevelopmentLocalRangeTargetSampleSceneEv;
     outSceneLuma = m_RawDevelopmentLocalRangeTargetSampleSceneLuma;
     outU = m_RawDevelopmentLocalRangeTargetSampleU;
@@ -436,6 +625,14 @@ bool RenderPipeline::GetRawDevelopmentLocalRangeTargetSample(
             m_RawDevelopmentLocalRangeTargetSampleSceneG,
             m_RawDevelopmentLocalRangeTargetSampleSceneB
         };
+    }
+    if (outAuthoredZoneHitBits) {
+        *outAuthoredZoneHitBits =
+            m_RawDevelopmentLocalRangeTargetSampleAuthoredZoneHitBits;
+    }
+    if (outStrongestAuthoredZoneWeight) {
+        *outStrongestAuthoredZoneWeight =
+            m_RawDevelopmentLocalRangeTargetSampleStrongestAuthoredZoneWeight;
     }
     return m_RawDevelopmentLocalRangeTargetSampleValid;
 }
@@ -457,48 +654,19 @@ std::vector<unsigned char> RenderPipeline::GetCachedGraphImagePixels(
         return {};
     }
 
-    outW = cached->second.width > 0 ? cached->second.width : m_Width;
-    outH = cached->second.height > 0 ? cached->second.height : m_Height;
-    if (outW <= 0 || outH <= 0) {
-        return {};
-    }
-
-    std::vector<unsigned char> pixels(outW * outH * 4);
-    const ScopedFramebufferState savedState;
-
-    unsigned int tempFBO = 0;
-    glGenFramebuffers(1, &tempFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cached->second.texture, 0);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        savedState.Restore();
-        glDeleteFramebuffers(1, &tempFBO);
-        return {};
-    }
-
-    while (glGetError() != GL_NO_ERROR) {}
-    glReadPixels(0, 0, outW, outH, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    if (glGetError() != GL_NO_ERROR) {
-        savedState.Restore();
-        glDeleteFramebuffers(1, &tempFBO);
-        return {};
-    }
-
-    const int rowSize = outW * 4;
-    std::vector<unsigned char> tempRow(rowSize);
-    for (int y = 0; y < outH / 2; y++) {
-        unsigned char* row1 = &pixels[y * rowSize];
-        unsigned char* row2 = &pixels[(outH - 1 - y) * rowSize];
-        std::memcpy(tempRow.data(), row1, rowSize);
-        std::memcpy(row1, row2, rowSize);
-        std::memcpy(row2, tempRow.data(), rowSize);
-    }
-
-    savedState.Restore();
-    glDeleteFramebuffers(1, &tempFBO);
-    return pixels;
+    const int sourceWidth =
+        cached->second.width > 0 ? cached->second.width : m_Width;
+    const int sourceHeight =
+        cached->second.height > 0 ? cached->second.height : m_Height;
+    return ReadTexturePixelsRgba8(
+        cached->second.texture,
+        sourceWidth,
+        sourceHeight,
+        outW,
+        outH,
+        0,
+        "GetCachedGraphImagePixels",
+        true);
 }
 
 std::vector<unsigned char> RenderPipeline::GetCachedGraphImagePixels(
@@ -550,52 +718,23 @@ bool RenderPipeline::WasGraphImageCacheHit(int nodeId, const std::string& socket
 }
 
 std::vector<unsigned char> RenderPipeline::GetCompareSourcePixels(int& outW, int& outH) {
-    outW = m_Width;
-    outH = m_Height;
+    outW = 0;
+    outH = 0;
     unsigned int compareTex = GetCompareSourceTexture();
-    if (compareTex == 0 || m_Width == 0 || m_Height == 0) return {};
-
-    std::vector<unsigned char> pixels(m_Width * m_Height * 4);
-    const ScopedFramebufferState savedState;
-
-    unsigned int tempFBO;
-    glGenFramebuffers(1, &tempFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, compareTex, 0);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "[RenderPipeline] GetCompareSourcePixels FBO incomplete. Texture: " << compareTex << std::endl;
-        savedState.Restore();
-        glDeleteFramebuffers(1, &tempFBO);
-        return {};
-    }
-
-    while (glGetError() != GL_NO_ERROR) {}
-
-    glReadPixels(0, 0, m_Width, m_Height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-
-    if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-        std::cerr << "[RenderPipeline] glReadPixels error in GetCompareSourcePixels: " << err << std::endl;
-        savedState.Restore();
-        glDeleteFramebuffers(1, &tempFBO);
-        return {};
-    }
-
-    int rowSize = m_Width * 4;
-    std::vector<unsigned char> tempRow(rowSize);
-    for (int y = 0; y < m_Height / 2; y++) {
-        unsigned char* row1 = &pixels[y * rowSize];
-        unsigned char* row2 = &pixels[(m_Height - 1 - y) * rowSize];
-        std::memcpy(tempRow.data(), row1, rowSize);
-        std::memcpy(row1, row2, rowSize);
-        std::memcpy(row2, tempRow.data(), rowSize);
-    }
-
-    savedState.Restore();
-    glDeleteFramebuffers(1, &tempFBO);
-
-    return pixels;
+    const int compareWidth =
+        m_GraphSourceTexture != 0 ? m_GraphSourceWidth : m_BaseCanvasWidth;
+    const int compareHeight =
+        m_GraphSourceTexture != 0 ? m_GraphSourceHeight : m_BaseCanvasHeight;
+    if (compareTex == 0 || compareWidth <= 0 || compareHeight <= 0) return {};
+    return ReadTexturePixelsRgba8(
+        compareTex,
+        compareWidth,
+        compareHeight,
+        outW,
+        outH,
+        0,
+        "GetCompareSourcePixels",
+        true);
 }
 
 bool RenderPipeline::SampleOutputPixel(float u, float v, std::array<float, 4>& outRgba) const {
@@ -611,24 +750,24 @@ bool RenderPipeline::SampleOutputPixel(float u, float v, std::array<float, 4>& o
     const int readY = std::clamp(m_Height - 1 - py, 0, m_Height - 1);
 
     const ScopedFramebufferState savedState;
+    const ScopedPixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
 
-    unsigned int readFBO = 0;
-    glGenFramebuffers(1, &readFBO);
+    const unsigned int readFBO = GLHelpers::CreateFBO(m_OutputTexture);
+    if (readFBO == 0) {
+        savedPackState.Restore();
+        return false;
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_OutputTexture, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
 
-    bool success = false;
-    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(px, readY, 1, 1, GL_RGBA, GL_FLOAT, outRgba.data());
-        success = glGetError() == GL_NO_ERROR;
-    }
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(px, readY, 1, 1, GL_RGBA, GL_FLOAT, outRgba.data());
+    const bool success = glGetError() == GL_NO_ERROR;
 
+    savedPackState.Restore();
     savedState.Restore();
-    if (readFBO != 0) {
-        glDeleteFramebuffers(1, &readFBO);
-    }
+    glDeleteFramebuffers(1, &readFBO);
     return success;
 }
 
@@ -656,80 +795,51 @@ void RenderPipeline::CaptureRawDevelopmentStageImageReadback(
     readback.sourceWidth = width;
     readback.sourceHeight = height;
 
-    const int targetMax = std::max(1, m_RawDevelopmentStageImageReadbackMaxDimension);
-    const float scale = std::min(
-        1.0f,
-        static_cast<float>(targetMax) / static_cast<float>(std::max(width, height)));
-    readback.width = std::max(1, static_cast<int>(std::round(static_cast<float>(width) * scale)));
-    readback.height = std::max(1, static_cast<int>(std::round(static_cast<float>(height) * scale)));
-
-    const ScopedFramebufferState savedState(true);
-    unsigned int sourceFbo = GLHelpers::CreateFBO(texture);
-    unsigned int probeTexture = 0;
-    unsigned int probeFbo = 0;
-    bool targetReady = sourceFbo != 0;
-    if (targetReady && (readback.width != width || readback.height != height)) {
-        probeTexture = GLHelpers::CreateEmptyTexture(readback.width, readback.height);
-        probeFbo = GLHelpers::CreateFBO(probeTexture);
-        targetReady = probeTexture != 0 && probeFbo != 0;
-    }
-
-    std::vector<float> rgba;
-    if (targetReady) {
-        if (probeFbo != 0) {
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, probeFbo);
-            glBlitFramebuffer(
-                0, 0, width, height,
-                0, 0, readback.width, readback.height,
-                GL_COLOR_BUFFER_BIT,
-                GL_LINEAR);
-            glBindFramebuffer(GL_FRAMEBUFFER, probeFbo);
-        } else {
-            glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
-        }
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glViewport(0, 0, readback.width, readback.height);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-            rgba.assign(
-                static_cast<std::size_t>(readback.width) *
-                    static_cast<std::size_t>(readback.height) * 4u,
-                0.0f);
-            while (glGetError() != GL_NO_ERROR) {}
-            glReadPixels(
-                0, 0, readback.width, readback.height,
-                GL_RGBA, GL_FLOAT, rgba.data());
-            if (glGetError() != GL_NO_ERROR) {
-                rgba.clear();
-            }
-        }
-    }
-
-    savedState.Restore(true);
-    if (probeFbo != 0) glDeleteFramebuffers(1, &probeFbo);
-    if (probeTexture != 0) glDeleteTextures(1, &probeTexture);
-    if (sourceFbo != 0) glDeleteFramebuffers(1, &sourceFbo);
+    std::vector<float> rgba = ReadTexturePixelsRgbaFloat(
+        texture,
+        width,
+        height,
+        readback.width,
+        readback.height,
+        m_RawDevelopmentStageImageReadbackMaxDimension,
+        "CaptureRawDevelopmentStageImageReadback");
 
     if (!rgba.empty()) {
-        readback.pixels.assign(
-            static_cast<std::size_t>(readback.width) *
-                static_cast<std::size_t>(readback.height) * 3u,
-            0.0f);
-        for (int y = 0; y < readback.height; ++y) {
-            const int sourceY = readback.height - 1 - y;
-            for (int x = 0; x < readback.width; ++x) {
-                const std::size_t source =
-                    (static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(readback.width) +
-                        static_cast<std::size_t>(x)) * 4u;
-                const std::size_t destination =
-                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(readback.width) +
-                        static_cast<std::size_t>(x)) * 3u;
-                readback.pixels[destination] = rgba[source];
-                readback.pixels[destination + 1] = rgba[source + 1];
-                readback.pixels[destination + 2] = rgba[source + 2];
+        std::size_t rgbElementCount = 0;
+        if (Stack::PixelBuffer::TryComputePixelElementCount(
+                readback.width,
+                readback.height,
+                3,
+                rgbElementCount)) {
+            try {
+                readback.pixels.assign(rgbElementCount, 0.0f);
+            } catch (const std::bad_alloc&) {
+                readback.pixels.clear();
+            } catch (const std::length_error&) {
+                readback.pixels.clear();
             }
         }
-        readback.valid = true;
+        if (!readback.pixels.empty()) {
+            for (int y = 0; y < readback.height; ++y) {
+                const int sourceY = readback.height - 1 - y;
+                for (int x = 0; x < readback.width; ++x) {
+                    const std::size_t source =
+                        (static_cast<std::size_t>(sourceY) *
+                             static_cast<std::size_t>(readback.width) +
+                         static_cast<std::size_t>(x)) *
+                        4u;
+                    const std::size_t destination =
+                        (static_cast<std::size_t>(y) *
+                             static_cast<std::size_t>(readback.width) +
+                         static_cast<std::size_t>(x)) *
+                        3u;
+                    readback.pixels[destination] = rgba[source];
+                    readback.pixels[destination + 1] = rgba[source + 1];
+                    readback.pixels[destination + 2] = rgba[source + 2];
+                }
+            }
+            readback.valid = true;
+        }
     }
 
     const auto existing = std::find_if(
@@ -743,6 +853,96 @@ void RenderPipeline::CaptureRawDevelopmentStageImageReadback(
     }
 }
 
+void RenderPipeline::CaptureRawDevelopmentGraphScopeReadback(
+    RawDevelopmentGraphScopeStage stage,
+    unsigned int texture,
+    int width,
+    int height,
+    const std::string& measurementDomain,
+    bool sceneLinearBeforeViewTransform,
+    const std::string& controlSignalDomain) {
+    if (stage == RawDevelopmentGraphScopeStage::None ||
+        stage != m_RawDevelopmentGraphScopeStage ||
+        m_RawDevelopmentGraphScopeReadbackMaxDimension <= 0 ||
+        texture == 0 || width <= 0 || height <= 0) {
+        return;
+    }
+
+    RawDevelopmentGraphScopeReadback readback;
+    readback.stage = stage;
+    readback.measurementDomain = measurementDomain;
+    readback.controlSignalDomain = controlSignalDomain;
+    readback.sceneLinearBeforeViewTransform = sceneLinearBeforeViewTransform;
+    readback.sourceWidth = width;
+    readback.sourceHeight = height;
+
+    std::vector<float> rgba = ReadTexturePixelsRgbaFloat(
+        texture,
+        width,
+        height,
+        readback.width,
+        readback.height,
+        m_RawDevelopmentGraphScopeReadbackMaxDimension,
+        "CaptureRawDevelopmentGraphScopeReadback");
+
+    if (!rgba.empty()) {
+        std::size_t rgbElementCount = 0;
+        if (Stack::PixelBuffer::TryComputePixelElementCount(
+                readback.width,
+                readback.height,
+                3,
+                rgbElementCount)) {
+            try {
+                readback.pixels.assign(rgbElementCount, 0.0f);
+            } catch (const std::bad_alloc&) {
+                readback.pixels.clear();
+            } catch (const std::length_error&) {
+                readback.pixels.clear();
+            }
+        }
+        if (!readback.pixels.empty()) {
+            const std::size_t pixelCount =
+                static_cast<std::size_t>(readback.width) *
+                static_cast<std::size_t>(readback.height);
+            if (!controlSignalDomain.empty()) {
+                try {
+                    readback.controlSignal.assign(pixelCount, 0.0f);
+                } catch (const std::bad_alloc&) {
+                    readback.controlSignal.clear();
+                } catch (const std::length_error&) {
+                    readback.controlSignal.clear();
+                }
+            }
+            for (int y = 0; y < readback.height; ++y) {
+                const int sourceY = readback.height - 1 - y;
+                for (int x = 0; x < readback.width; ++x) {
+                    const std::size_t source =
+                        (static_cast<std::size_t>(sourceY) *
+                             static_cast<std::size_t>(readback.width) +
+                         static_cast<std::size_t>(x)) *
+                        4u;
+                    const std::size_t destination =
+                        (static_cast<std::size_t>(y) *
+                             static_cast<std::size_t>(readback.width) +
+                         static_cast<std::size_t>(x)) *
+                        3u;
+                    readback.pixels[destination] = rgba[source];
+                    readback.pixels[destination + 1] = rgba[source + 1];
+                    readback.pixels[destination + 2] = rgba[source + 2];
+                    if (!readback.controlSignal.empty()) {
+                        readback.controlSignal[destination / 3u] =
+                            rgba[source + 3];
+                    }
+                }
+            }
+            readback.valid = controlSignalDomain.empty() ||
+                readback.controlSignal.size() == pixelCount;
+        }
+    }
+
+    m_RawDevelopmentGraphScopeReadback = std::move(readback);
+}
+
 RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int width, int height, const char* context) {
     RenderTextureStats stats;
     if (texture == 0 || width <= 0 || height <= 0) {
@@ -750,65 +950,16 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     }
 
     constexpr int kMaxProbeEdge = 512;
-    const float scale = std::min(
-        1.0f,
-        static_cast<float>(kMaxProbeEdge) / static_cast<float>(std::max(width, height)));
-    const int probeW = std::max(1, static_cast<int>(std::round(static_cast<float>(width) * scale)));
-    const int probeH = std::max(1, static_cast<int>(std::round(static_cast<float>(height) * scale)));
-
-    const ScopedFramebufferState savedState;
-
-    unsigned int readFBO = 0;
-    unsigned int probeFBO = 0;
-    unsigned int probeTex = 0;
-    glGenFramebuffers(1, &readFBO);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    if (probeW == width && probeH == height) {
-        glBindFramebuffer(GL_FRAMEBUFFER, readFBO);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-    } else {
-        probeTex = GLHelpers::CreateEmptyTexture(probeW, probeH);
-        glGenFramebuffers(1, &probeFBO);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, probeFBO);
-        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, probeTex, 0);
-        glDrawBuffer(GL_COLOR_ATTACHMENT0);
-        glBlitFramebuffer(
-            0, 0, width, height,
-            0, 0, probeW, probeH,
-            GL_COLOR_BUFFER_BIT,
-            GL_LINEAR);
-        glBindFramebuffer(GL_FRAMEBUFFER, probeFBO);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-    }
-
-    std::vector<float> pixels(static_cast<std::size_t>(probeW) * static_cast<std::size_t>(probeH) * 4u, 0.0f);
-
-    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(0, 0, probeW, probeH, GL_RGBA, GL_FLOAT, pixels.data());
-        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-            std::cerr << "[RenderPipeline] glReadPixels error in " << (context ? context : "ReadTextureStats") << ": " << err << std::endl;
-            pixels.clear();
-        }
-    } else {
-        std::cerr << "[RenderPipeline] " << (context ? context : "ReadTextureStats") << " FBO incomplete." << std::endl;
-        pixels.clear();
-    }
-
-    savedState.Restore();
-    if (probeFBO != 0) {
-        glDeleteFramebuffers(1, &probeFBO);
-    }
-    if (readFBO != 0) {
-        glDeleteFramebuffers(1, &readFBO);
-    }
-    if (probeTex != 0) {
-        glDeleteTextures(1, &probeTex);
-    }
-
+    int probeW = 0;
+    int probeH = 0;
+    const std::vector<float> pixels = ReadTexturePixelsRgbaFloat(
+        texture,
+        width,
+        height,
+        probeW,
+        probeH,
+        kMaxProbeEdge,
+        context ? context : "ReadTextureStats");
     if (pixels.empty()) {
         return stats;
     }
@@ -820,7 +971,15 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     stats.maxLuma = -std::numeric_limits<float>::max();
 
     std::vector<float> lumas;
-    lumas.reserve(static_cast<std::size_t>(probeW) * static_cast<std::size_t>(probeH));
+    try {
+        lumas.reserve(
+            static_cast<std::size_t>(probeW) *
+            static_cast<std::size_t>(probeH));
+    } catch (const std::bad_alloc&) {
+        return RenderTextureStats {};
+    } catch (const std::length_error&) {
+        return RenderTextureStats {};
+    }
     float logLumaSum = 0.0f;
     int hdrPixels = 0;
     int displayEdgePixels = 0;
@@ -909,90 +1068,40 @@ Stack::RawAutoBase::LocalSuggestionAnalysisImage RenderPipeline::ReadLocalSugges
         return image;
     }
 
-    const int targetMax = maxDimension > 0
-        ? std::max(1, maxDimension)
-        : std::max(width, height);
-    const float scale = std::min(
-        1.0f,
-        static_cast<float>(targetMax) / static_cast<float>(std::max(width, height)));
-    const int probeW = std::max(1, static_cast<int>(std::round(static_cast<float>(width) * scale)));
-    const int probeH = std::max(1, static_cast<int>(std::round(static_cast<float>(height) * scale)));
-
-    const ScopedFramebufferState savedState(true);
-
-    unsigned int readFBO = 0;
-    unsigned int probeFBO = 0;
-    unsigned int probeTex = 0;
-    glGenFramebuffers(1, &readFBO);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    bool framebufferReady = true;
-    if (probeW == width && probeH == height) {
-        glBindFramebuffer(GL_FRAMEBUFFER, readFBO);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-    } else {
-        probeTex = GLHelpers::CreateEmptyTexture(probeW, probeH);
-        if (probeTex == 0) {
-            framebufferReady = false;
-            image.statusMessage = "Local suggestion readback could not allocate a scene-linear probe texture.";
-        } else {
-            glGenFramebuffers(1, &probeFBO);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, probeFBO);
-            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, probeTex, 0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                0, 0, width, height,
-                0, 0, probeW, probeH,
-                GL_COLOR_BUFFER_BIT,
-                GL_LINEAR);
-            glBindFramebuffer(GL_FRAMEBUFFER, probeFBO);
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-        }
-    }
-
-    std::vector<float> rgba;
-    if (framebufferReady && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        rgba.assign(static_cast<std::size_t>(probeW) * static_cast<std::size_t>(probeH) * 4u, 0.0f);
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(0, 0, probeW, probeH, GL_RGBA, GL_FLOAT, rgba.data());
-        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-            std::cerr << "[RenderPipeline] glReadPixels error in "
-                      << (context ? context : "ReadLocalSuggestionAnalysisImage")
-                      << ": " << err << std::endl;
-            rgba.clear();
-            image.statusMessage = "Local suggestion readback failed.";
-        }
-    } else if (framebufferReady) {
-        std::cerr << "[RenderPipeline] "
-                  << (context ? context : "ReadLocalSuggestionAnalysisImage")
-                  << " FBO incomplete." << std::endl;
-        image.statusMessage = "Local suggestion readback framebuffer was incomplete.";
-    }
-
-    savedState.Restore(true);
-    if (probeFBO != 0) {
-        glDeleteFramebuffers(1, &probeFBO);
-    }
-    if (readFBO != 0) {
-        glDeleteFramebuffers(1, &readFBO);
-    }
-    if (probeTex != 0) {
-        glDeleteTextures(1, &probeTex);
-    }
-
+    int probeW = 0;
+    int probeH = 0;
+    const std::vector<float> rgba = ReadTexturePixelsRgbaFloat(
+        texture,
+        width,
+        height,
+        probeW,
+        probeH,
+        maxDimension,
+        context ? context : "ReadLocalSuggestionAnalysisImage");
     if (rgba.empty()) {
-        if (image.statusMessage.empty()) {
-            image.statusMessage = "Local suggestion readback produced no pixels.";
-        }
+        image.statusMessage = "Local suggestion readback produced no pixels.";
         return image;
     }
 
-    image.valid = true;
     image.width = probeW;
     image.height = probeH;
-    image.pixels.resize(static_cast<std::size_t>(probeW) * static_cast<std::size_t>(probeH));
+    std::size_t pixelCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            probeW, probeH, 1, pixelCount)) {
+        image.statusMessage = "Local suggestion dimensions exceed CPU buffer limits.";
+        return image;
+    }
+    try {
+        image.pixels.resize(pixelCount);
+    } catch (const std::bad_alloc&) {
+        image.pixels.clear();
+        image.statusMessage = "Local suggestion readback ran out of memory.";
+        return image;
+    } catch (const std::length_error&) {
+        image.pixels.clear();
+        image.statusMessage = "Local suggestion dimensions exceed CPU buffer limits.";
+        return image;
+    }
     image.statusMessage = "Scene-linear pre-Local-Range analysis image ready.";
     for (int y = 0; y < probeH; ++y) {
         const int sourceY = probeH - 1 - y;
@@ -1011,6 +1120,7 @@ Stack::RawAutoBase::LocalSuggestionAnalysisImage RenderPipeline::ReadLocalSugges
                 std::isfinite(pixel.b);
         }
     }
+    image.valid = true;
     return image;
 }
 
@@ -1019,64 +1129,23 @@ RenderTextureStats RenderPipeline::GetOutputTextureStats() {
 }
 
 std::vector<unsigned char> RenderPipeline::GetScopesPixels(int& outW, int& outH) {
+    outW = 0;
+    outH = 0;
     if (m_OutputTexture == 0 || m_Width == 0 || m_Height == 0) return {};
     if (!RecordConsumerBoundary(
             Stack::NodeMath::SpecializedStageKind::ScopeAnalysis,
             256)) {
         return {};
     }
-
-    // Target a small size for analysis efficiency
-    outW = 256;
-    outH = 256;
-    if (m_Width < outW) outW = m_Width;
-    if (m_Height < outH) outH = m_Height;
-
-    std::vector<unsigned char> pixels(outW * outH * 4);
-
-    // Create a temporary FBO/Texture for downsampling
-    unsigned int tempTex = GLHelpers::CreateEmptyTexture(outW, outH);
-    unsigned int tempFBO;
-    glGenFramebuffers(1, &tempFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tempTex, 0);
-
-    // Blit from current output to small target (GPU downsample)
-    GLint prevReadFBO, prevDrawFBO;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
-
-    unsigned int srcFBO;
-    glGenFramebuffers(1, &srcFBO);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_OutputTexture, 0);
-
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, tempFBO);
-    glBlitFramebuffer(0, 0, m_Width, m_Height, 0, 0, outW, outH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-    // Read small pixels
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "[RenderPipeline] GetScopesPixels FBO incomplete." << std::endl;
-        pixels.clear();
-    } else {
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(0, 0, outW, outH, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-            std::cerr << "[RenderPipeline] glReadPixels error in GetScopesPixels: " << err << std::endl;
-            pixels.clear();
-        }
-    }
-
-    // Cleanup
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFBO);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFBO);
-    glDeleteFramebuffers(1, &srcFBO);
-    glDeleteFramebuffers(1, &tempFBO);
-    glDeleteTextures(1, &tempTex);
-
-    return pixels;
+    return ReadTexturePixelsRgba8(
+        m_OutputTexture,
+        m_Width,
+        m_Height,
+        outW,
+        outH,
+        256,
+        "GetScopesPixels",
+        false);
 }
 
 std::vector<unsigned char> RenderPipeline::GetPreviewPixels(int& outW, int& outH, int maxDimension) {
@@ -1090,81 +1159,47 @@ std::vector<unsigned char> RenderPipeline::GetPreviewPixels(int& outW, int& outH
             maxDimension)) {
         return {};
     }
-
-    const int targetMax = std::max(1, maxDimension);
-    const float scale = std::min(
-        1.0f,
-        static_cast<float>(targetMax) / static_cast<float>(std::max(m_Width, m_Height)));
-    outW = std::max(1, static_cast<int>(std::round(static_cast<float>(m_Width) * scale)));
-    outH = std::max(1, static_cast<int>(std::round(static_cast<float>(m_Height) * scale)));
-
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(outW * outH * 4));
-
-    GLint prevReadFBO = 0;
-    GLint prevDrawFBO = 0;
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFBO);
-
-    unsigned int tempTex = GLHelpers::CreateEmptyTexture(outW, outH);
-    unsigned int tempFBO = 0;
-    glGenFramebuffers(1, &tempFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tempTex, 0);
-
-    unsigned int srcFBO = 0;
-    glGenFramebuffers(1, &srcFBO);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFBO);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_OutputTexture, 0);
-
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, tempFBO);
-    glBlitFramebuffer(0, 0, m_Width, m_Height, 0, 0, outW, outH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "[RenderPipeline] GetPreviewPixels FBO incomplete." << std::endl;
-        pixels.clear();
-    } else {
-        while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(0, 0, outW, outH, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-            std::cerr << "[RenderPipeline] glReadPixels error in GetPreviewPixels: " << err << std::endl;
-            pixels.clear();
-        }
-    }
-
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFBO);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFBO);
-    glDeleteFramebuffers(1, &srcFBO);
-    glDeleteFramebuffers(1, &tempFBO);
-    glDeleteTextures(1, &tempTex);
-
-    if (pixels.empty()) {
-        outW = 0;
-        outH = 0;
-    }
-    return pixels;
+    return ReadTexturePixelsRgba8(
+        m_OutputTexture,
+        m_Width,
+        m_Height,
+        outW,
+        outH,
+        maxDimension,
+        "GetPreviewPixels",
+        false);
 }
 
 std::vector<unsigned char> RenderPipeline::GetSourcePixels(int& outW, int& outH) {
     const std::vector<unsigned char>& sourcePixels = GetSourcePixelsRaw();
-    if (m_SourceTexture == 0 || m_Width == 0 || m_Height == 0 || sourcePixels.empty()) {
+    if (m_SourceTexture == 0 ||
+        m_BaseCanvasWidth <= 0 ||
+        m_BaseCanvasHeight <= 0 ||
+        sourcePixels.empty()) {
         outW = outH = 0;
         return {};
     }
 
-    outW = m_Width;
-    outH = m_Height;
+    outW = m_BaseCanvasWidth;
+    outH = m_BaseCanvasHeight;
 
-    std::vector<unsigned char> pixels = sourcePixels;
-    const int rowSize = m_Width * std::max(1, m_SourceChannels);
-    std::vector<unsigned char> tempRow(rowSize);
-    for (int y = 0; y < m_Height / 2; ++y) {
-        unsigned char* row1 = &pixels[y * rowSize];
-        unsigned char* row2 = &pixels[(m_Height - 1 - y) * rowSize];
-        std::memcpy(tempRow.data(), row1, rowSize);
-        std::memcpy(row1, row2, rowSize);
-        std::memcpy(row2, tempRow.data(), rowSize);
+    std::vector<unsigned char> pixels;
+    try {
+        pixels = sourcePixels;
+    } catch (const std::bad_alloc&) {
+        outW = outH = 0;
+        return {};
+    } catch (const std::length_error&) {
+        outW = outH = 0;
+        return {};
     }
-
+    if (!FlipInterleavedRows(
+            pixels,
+            m_BaseCanvasWidth,
+            m_BaseCanvasHeight,
+            m_SourceChannels)) {
+        outW = outH = 0;
+        return {};
+    }
     return pixels;
 }

@@ -132,8 +132,12 @@ void TestDescriptorContract(TestContext& test) {
         LogicalValueType::Lut,
         LogicalValueType::ColorImage,
         LogicalValueType::Mask,
+        LogicalValueType::Channel,
         LogicalValueType::DataImage,
         LogicalValueType::ComplexSpectrum,
+        LogicalValueType::FrequencyResponse,
+        LogicalValueType::SpectrumMagnitude,
+        LogicalValueType::SpectrumPhase,
         LogicalValueType::Histogram,
         LogicalValueType::Statistics,
         LogicalValueType::Metadata,
@@ -263,7 +267,7 @@ void TestDefinitions(TestContext& test) {
         "deliberately rehashed implementation and definition validate together");
 
     const NodeDefinition* external = FindDefinition(definitions, "stack:external/model-process");
-    test.Check(external != nullptr && external->externalFieldPolicy.size() == 11,
+    test.Check(external != nullptr && external->externalFieldPolicy.size() == 12,
         "external definition declares every descriptor field");
     if (external) {
         NodeDefinition incomplete = *external;

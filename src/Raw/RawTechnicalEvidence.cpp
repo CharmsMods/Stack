@@ -272,11 +272,10 @@ double LinearizedValue(
     if (!options.applyLinearizationTable || metadata.dngLinearizationTable.empty()) {
         return stored;
     }
-    if (stored >= metadata.dngLinearizationTable.size()) {
-        valid = false;
-        return 0.0;
-    }
-    return metadata.dngLinearizationTable[stored];
+    const std::size_t index = std::min<std::size_t>(
+        static_cast<std::size_t>(stored),
+        metadata.dngLinearizationTable.size() - 1u);
+    return metadata.dngLinearizationTable[index];
 }
 
 double Quantile(std::vector<double>& values, double q) {

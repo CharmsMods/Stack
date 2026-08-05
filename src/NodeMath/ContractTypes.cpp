@@ -44,7 +44,8 @@ bool IsDefinitionSegment(const std::string& value, bool allowSlash) {
 }
 
 bool IsApplicableImageType(LogicalValueType type) {
-    return type == LogicalValueType::ScalarField ||
+    return type == LogicalValueType::Channel ||
+        type == LogicalValueType::ScalarField ||
         type == LogicalValueType::Vector2Field ||
         type == LogicalValueType::Vector3Field ||
         type == LogicalValueType::Vector4Field ||
@@ -52,6 +53,8 @@ bool IsApplicableImageType(LogicalValueType type) {
         type == LogicalValueType::Mask ||
         type == LogicalValueType::DataImage ||
         type == LogicalValueType::ComplexSpectrum ||
+        type == LogicalValueType::SpectrumMagnitude ||
+        type == LogicalValueType::SpectrumPhase ||
         type == LogicalValueType::Raw;
 }
 
@@ -227,6 +230,111 @@ bool operator==(const ChannelDescriptor& left, const ChannelDescriptor& right) {
     return left.layout == right.layout && left.roles == right.roles;
 }
 
+bool operator==(const ImageComponentSet& left, const ImageComponentSet& right) {
+    return left.bits == right.bits;
+}
+
+bool operator!=(const ImageComponentSet& left, const ImageComponentSet& right) {
+    return !(left == right);
+}
+
+bool HasImageComponent(
+    const ImageComponentSet& components,
+    ImageComponent component) {
+    return (components.bits & static_cast<std::uint8_t>(component)) != 0;
+}
+
+bool AddImageComponent(
+    ImageComponentSet& components,
+    ImageComponent component) {
+    const std::uint8_t componentBit = static_cast<std::uint8_t>(component);
+    const std::uint8_t previous = components.bits;
+    components.bits = static_cast<std::uint8_t>(components.bits | componentBit);
+    return previous != components.bits;
+}
+
+std::size_t ImageComponentCount(const ImageComponentSet& components) {
+    std::size_t count = 0;
+    std::uint8_t bits = components.bits;
+    while (bits != 0) {
+        count += bits & 1u;
+        bits = static_cast<std::uint8_t>(bits >> 1u);
+    }
+    return count;
+}
+
+std::vector<ImageComponent> OrderedImageComponents(
+    const ImageComponentSet& components) {
+    std::vector<ImageComponent> ordered;
+    ordered.reserve(ImageComponentCount(components));
+    for (const ImageComponent component : {
+             ImageComponent::Red,
+             ImageComponent::Green,
+             ImageComponent::Blue,
+             ImageComponent::Alpha }) {
+        if (HasImageComponent(components, component)) {
+            ordered.push_back(component);
+        }
+    }
+    return ordered;
+}
+
+std::string ImageComponentToken(ImageComponent component) {
+    switch (component) {
+    case ImageComponent::Red: return "R";
+    case ImageComponent::Green: return "G";
+    case ImageComponent::Blue: return "B";
+    case ImageComponent::Alpha: return "A";
+    }
+    return {};
+}
+
+std::optional<ImageComponent> ParseImageComponentToken(
+    const std::string& token) {
+    if (token == "R") return ImageComponent::Red;
+    if (token == "G") return ImageComponent::Green;
+    if (token == "B") return ImageComponent::Blue;
+    if (token == "A") return ImageComponent::Alpha;
+    return std::nullopt;
+}
+
+ImageComponentSet MakeImageComponentSet(
+    std::initializer_list<ImageComponent> components) {
+    ImageComponentSet result;
+    for (const ImageComponent component : components) {
+        AddImageComponent(result, component);
+    }
+    return result;
+}
+
+ChannelDescriptor MakeImageChannelDescriptor(
+    const ImageComponentSet& components) {
+    ChannelDescriptor result;
+    const ImageComponentSet rgb = MakeImageComponentSet({
+        ImageComponent::Red,
+        ImageComponent::Green,
+        ImageComponent::Blue
+    });
+    const ImageComponentSet rgba = MakeImageComponentSet({
+        ImageComponent::Red,
+        ImageComponent::Green,
+        ImageComponent::Blue,
+        ImageComponent::Alpha
+    });
+    result.layout = components == rgb
+        ? ChannelLayout::RGB
+        : (components == rgba ? ChannelLayout::RGBA : ChannelLayout::NamedData);
+    for (const ImageComponent component : OrderedImageComponents(components)) {
+        switch (component) {
+        case ImageComponent::Red: result.roles.push_back("red"); break;
+        case ImageComponent::Green: result.roles.push_back("green"); break;
+        case ImageComponent::Blue: result.roles.push_back("blue"); break;
+        case ImageComponent::Alpha: result.roles.push_back("alpha"); break;
+        }
+    }
+    return result;
+}
+
 bool operator==(const ColorIdentity& left, const ColorIdentity& right) {
     return left.identity == right.identity && left.profileHash == right.profileHash &&
         left.relation == right.relation;
@@ -274,6 +382,7 @@ bool operator==(const ProvenanceDescriptor& left, const ProvenanceDescriptor& ri
 bool operator==(const ValueDescriptor& left, const ValueDescriptor& right) {
     return left.schemaVersion == right.schemaVersion &&
         left.logicalType == right.logicalType && left.channels == right.channels &&
+        left.presentImageComponents == right.presentImageComponents &&
         left.color == right.color && left.transfer == right.transfer &&
         left.reference == right.reference && left.alpha == right.alpha &&
         left.range == right.range && left.precision == right.precision &&
@@ -300,6 +409,9 @@ bool StrictSemanticDescriptorMatch(
     return left.schemaVersion == right.schemaVersion &&
         left.logicalType == right.logicalType &&
         strictFieldMatch(left.channels, right.channels) &&
+        strictFieldMatch(
+            left.presentImageComponents,
+            right.presentImageComponents) &&
         strictFieldMatch(left.color, right.color) &&
         strictFieldMatch(left.transfer, right.transfer) &&
         strictFieldMatch(left.reference, right.reference) &&
@@ -328,10 +440,14 @@ bool IsNumericLike(LogicalValueType type) {
     case LogicalValueType::Coordinate2:
     case LogicalValueType::Curve1D:
     case LogicalValueType::Lut:
+    case LogicalValueType::Channel:
     case LogicalValueType::ColorImage:
     case LogicalValueType::Mask:
     case LogicalValueType::DataImage:
     case LogicalValueType::ComplexSpectrum:
+    case LogicalValueType::FrequencyResponse:
+    case LogicalValueType::SpectrumMagnitude:
+    case LogicalValueType::SpectrumPhase:
     case LogicalValueType::Histogram:
     case LogicalValueType::Statistics:
     case LogicalValueType::ScalarField:
@@ -355,6 +471,7 @@ ValueDescriptor MakeUnknownDescriptor(LogicalValueType type) {
         type == LogicalValueType::Vector2 || type == LogicalValueType::Vector3 ||
         type == LogicalValueType::Vector4 || type == LogicalValueType::Matrix3 ||
         type == LogicalValueType::Matrix4 || type == LogicalValueType::Coordinate2 ||
+        type == LogicalValueType::Channel ||
         type == LogicalValueType::ScalarField || type == LogicalValueType::Vector2Field ||
         type == LogicalValueType::Vector3Field || type == LogicalValueType::Vector4Field ||
         type == LogicalValueType::Statistics;
@@ -363,6 +480,9 @@ ValueDescriptor MakeUnknownDescriptor(LogicalValueType type) {
 
     descriptor.channels = imageLike ? SemanticField<ChannelDescriptor>::Unknown()
         : SemanticField<ChannelDescriptor>::NotApplicable();
+    descriptor.presentImageComponents = colorImage
+        ? SemanticField<ImageComponentSet>::Unknown()
+        : SemanticField<ImageComponentSet>::NotApplicable();
     descriptor.color = colorImage ? SemanticField<ColorIdentity>::Unknown()
         : SemanticField<ColorIdentity>::NotApplicable();
     descriptor.transfer = colorImage ? SemanticField<TransferDescriptor>::Unknown()
@@ -397,13 +517,21 @@ ValueDescriptor MakeTaggedColorImageDescriptor(
     LogicalPrecision precision,
     std::string sourceIdentity) {
     ValueDescriptor descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
-    descriptor.channels = SemanticField<ChannelDescriptor>::Known({
+    const ImageComponentSet components =
         alpha == AlphaMode::Absent || alpha == AlphaMode::Opaque
-            ? ChannelLayout::RGB : ChannelLayout::RGBA,
-        alpha == AlphaMode::Absent || alpha == AlphaMode::Opaque
-            ? std::vector<std::string>{ "red", "green", "blue" }
-            : std::vector<std::string>{ "red", "green", "blue", "alpha" }
-    });
+        ? MakeImageComponentSet({
+            ImageComponent::Red,
+            ImageComponent::Green,
+            ImageComponent::Blue })
+        : MakeImageComponentSet({
+            ImageComponent::Red,
+            ImageComponent::Green,
+            ImageComponent::Blue,
+            ImageComponent::Alpha });
+    descriptor.channels = SemanticField<ChannelDescriptor>::Known(
+        MakeImageChannelDescriptor(components));
+    descriptor.presentImageComponents =
+        SemanticField<ImageComponentSet>::Known(components);
     descriptor.color = SemanticField<ColorIdentity>::Known({
         std::move(colorIdentity), std::move(profileHash), ColorRelation::Standard });
     descriptor.transfer = SemanticField<TransferDescriptor>::Known(std::move(transfer));
@@ -425,13 +553,21 @@ ValueDescriptor MakeUntaggedColorImageDescriptor(
     LogicalPrecision precision,
     std::string sourceIdentity) {
     ValueDescriptor descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
-    descriptor.channels = SemanticField<ChannelDescriptor>::Known({
+    const ImageComponentSet components =
         alpha == AlphaMode::Absent || alpha == AlphaMode::Opaque
-            ? ChannelLayout::RGB : ChannelLayout::RGBA,
-        alpha == AlphaMode::Absent || alpha == AlphaMode::Opaque
-            ? std::vector<std::string>{ "red", "green", "blue" }
-            : std::vector<std::string>{ "red", "green", "blue", "alpha" }
-    });
+        ? MakeImageComponentSet({
+            ImageComponent::Red,
+            ImageComponent::Green,
+            ImageComponent::Blue })
+        : MakeImageComponentSet({
+            ImageComponent::Red,
+            ImageComponent::Green,
+            ImageComponent::Blue,
+            ImageComponent::Alpha });
+    descriptor.channels = SemanticField<ChannelDescriptor>::Known(
+        MakeImageChannelDescriptor(components));
+    descriptor.presentImageComponents =
+        SemanticField<ImageComponentSet>::Known(components);
     descriptor.color = SemanticField<ColorIdentity>::Unknown();
     descriptor.transfer = SemanticField<TransferDescriptor>::Unknown();
     descriptor.reference = SemanticField<ReferenceState>::Unknown();
@@ -464,6 +600,7 @@ std::vector<ContractIssue> ValidateDescriptor(const ValueDescriptor& descriptor)
         descriptor.logicalType == LogicalValueType::Matrix3 ||
         descriptor.logicalType == LogicalValueType::Matrix4 ||
         descriptor.logicalType == LogicalValueType::Coordinate2 ||
+        descriptor.logicalType == LogicalValueType::Channel ||
         descriptor.logicalType == LogicalValueType::ScalarField ||
         descriptor.logicalType == LogicalValueType::Vector2Field ||
         descriptor.logicalType == LogicalValueType::Vector3Field ||
@@ -473,6 +610,11 @@ std::vector<ContractIssue> ValidateDescriptor(const ValueDescriptor& descriptor)
         descriptor.logicalType != LogicalValueType::Failure;
 
     RequireState(issues, "channels", descriptor.channels.state, imageLike);
+    RequireState(
+        issues,
+        "presentImageComponents",
+        descriptor.presentImageComponents.state,
+        colorImage);
     RequireState(issues, "color", descriptor.color.state, colorImage);
     RequireState(issues, "transfer", descriptor.transfer.state, colorImage);
     RequireState(issues, "reference", descriptor.reference.state, colorImage);
@@ -508,6 +650,45 @@ std::vector<ContractIssue> ValidateDescriptor(const ValueDescriptor& descriptor)
             std::any_of(channels.roles.begin(), channels.roles.end(),
                 [](const std::string& role) { return role.empty(); })) {
             issues.push_back({ "channels", "known channel layout requires one explicit role per channel" });
+        }
+    }
+    if (descriptor.presentImageComponents.state == KnowledgeState::Known) {
+        constexpr std::uint8_t kAllComponentBits =
+            static_cast<std::uint8_t>(ImageComponent::Red) |
+            static_cast<std::uint8_t>(ImageComponent::Green) |
+            static_cast<std::uint8_t>(ImageComponent::Blue) |
+            static_cast<std::uint8_t>(ImageComponent::Alpha);
+        const ImageComponentSet& components =
+            descriptor.presentImageComponents.value;
+        if (components.bits == 0 ||
+            (components.bits & static_cast<std::uint8_t>(~kAllComponentBits)) != 0) {
+            issues.push_back({
+                "presentImageComponents",
+                "known Image component presence must contain one or more of R, G, B, and A"
+            });
+        }
+        if (colorImage &&
+            descriptor.channels.state == KnowledgeState::Known &&
+            !(descriptor.channels.value ==
+                MakeImageChannelDescriptor(components))) {
+            issues.push_back({
+                "presentImageComponents",
+                "known Image components must agree with the declared channel layout and roles"
+            });
+        }
+        if (colorImage &&
+            descriptor.alpha.state == KnowledgeState::Known) {
+            const bool hasAlpha =
+                HasImageComponent(components, ImageComponent::Alpha);
+            const bool alphaClaimsNoStoredComponent =
+                descriptor.alpha.value == AlphaMode::Absent ||
+                descriptor.alpha.value == AlphaMode::Opaque;
+            if (hasAlpha == alphaClaimsNoStoredComponent) {
+                issues.push_back({
+                    "presentImageComponents",
+                    "stored alpha-component presence contradicts the declared alpha mode"
+                });
+            }
         }
     }
     if (descriptor.range.state == KnowledgeState::Known) {
@@ -663,10 +844,16 @@ const std::vector<DiagnosticRule>& BuiltInDiagnosticRules() {
         { "nmr.semantic.alpha-mismatch", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "Alpha representation contradicts the declared formula." },
         { "nmr.semantic.alpha-formula-mismatch", DiagnosticStage::Semantic, DiagnosticSeverity::Warning, "An explicitly selected alpha formula received a different declared representation but remains numerically executable." },
         { "nmr.semantic.extent-policy-missing", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "Multi-input extent policy is undeclared." },
+        { "nmr.semantic.image-component-missing", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "A requested Image component is semantically absent." },
+        { "nmr.semantic.image-component-set-invalid", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "An Image component-presence set is malformed or empty." },
+        { "nmr.semantic.image-combine-color-missing", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "Image Combine requires at least one color Channel." },
+        { "nmr.semantic.image-combine-extent-unknown", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "Image Combine requires known finite Channel extents." },
+        { "nmr.semantic.image-combine-extent-mismatch", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "Image Combine Channel extents do not match." },
         { "nmr.semantic.precision-risk", DiagnosticStage::Semantic, DiagnosticSeverity::Warning, "Precision may be inadequate for declared behavior." },
         { "nmr.semantic.metadata-missing", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "Execution-critical metadata is unknown." },
         { "nmr.semantic.external-policy-missing", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "External operation omits a field disposition." },
         { "nmr.output.type-mismatch", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "The direct output file type cannot represent this logical value." },
+        { "nmr.output.channel-export-unsupported", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "PNG export requires an Image rather than a Channel inspection value." },
         { "nmr.output.png-premultiplied", DiagnosticStage::Semantic, DiagnosticSeverity::HardError, "PNG requires straight rather than premultiplied alpha." },
         { "nmr.output.color-unknown", DiagnosticStage::Semantic, DiagnosticSeverity::Warning, "Direct output has Unknown color state and is not silently tagged." },
         { "nmr.output.profile-unavailable", DiagnosticStage::Semantic, DiagnosticSeverity::Warning, "Declared output profile bytes are unavailable." },

@@ -1,6 +1,6 @@
 #include "App/Validation/ValidationImageUtils.h"
 
-#include "Renderer/GLLoader.h"
+#include "Renderer/GLStateGuards.h"
 #include "ThirdParty/stb_image_write.h"
 
 #include <algorithm>
@@ -9,29 +9,8 @@
 namespace Stack::Validation {
 namespace {
 
-struct ScopedFramebufferState {
-    GLint framebuffer = 0;
-    GLint readFbo = 0;
-    GLint drawFbo = 0;
-    GLint readBuffer = 0;
-    GLint drawBuffer = 0;
-
-    ScopedFramebufferState() {
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
-        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
-        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
-    }
-
-    void Restore() const {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
-        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
-        glReadBuffer(static_cast<GLenum>(readBuffer));
-        glDrawBuffer(static_cast<GLenum>(drawBuffer));
-    }
-};
+using ScopedFramebufferState =
+    Stack::Renderer::GLState::FramebufferState;
 
 } // namespace
 

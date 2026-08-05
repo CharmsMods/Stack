@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class EditorModule;
@@ -136,6 +137,11 @@ public:
     int GetProjectCount() const;
 
     void RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName = "", std::function<void(bool)> onComplete = {});
+    void RequestSaveProjectToPath(
+        const std::string& name,
+        EditorModule* editor,
+        const std::filesystem::path& absoluteDestination,
+        std::function<void(bool)> onComplete = {});
     void RequestPersistNodeBrowserThumbnails(
         const std::string& fileName,
         std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry> entries);
@@ -234,6 +240,12 @@ public:
     bool ConsumeSavedProjectEvent(std::string& outFileName, std::string& outProjectKind);
 
 private:
+    void RequestSaveProjectImpl(
+        const std::string& name,
+        EditorModule* editor,
+        const std::string& existingFileName,
+        const std::filesystem::path& absoluteDestination,
+        std::function<void(bool)> onComplete);
     void InitializeThumbnail(std::shared_ptr<ProjectEntry> project);
     void InitializeAssetThumbnail(std::shared_ptr<AssetEntry> asset);
     void QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEntry>& project);
@@ -247,6 +259,11 @@ private:
         const std::string& fileName,
         StackBinaryFormat::ProjectDocument& outDocument,
         const StackBinaryFormat::ProjectLoadOptions& options);
+    std::uint64_t BumpNodeBrowserThumbnailPersistRevision(
+        const std::filesystem::path& projectPath);
+    bool IsNodeBrowserThumbnailPersistRevisionCurrent(
+        const std::filesystem::path& projectPath,
+        std::uint64_t revision) const;
 
     bool WriteLibraryBundle(const std::string& destinationPath);
     bool ImportLibraryBundle(const std::string& sourcePath);
@@ -262,6 +279,9 @@ private:
     std::vector<std::shared_ptr<AssetEntry>> m_Assets;
     mutable std::mutex m_ProjectsMutex;
     std::mutex m_ProjectFileIoMutex;
+    mutable std::mutex m_NodeBrowserThumbnailPersistMutex;
+    std::unordered_map<std::filesystem::path, std::uint64_t>
+        m_NodeBrowserThumbnailPersistRevisions;
     mutable std::mutex m_RefreshMutex;
 
     std::filesystem::path m_LibraryPath;

@@ -101,7 +101,7 @@ bool DeserializeToneCurveAutoAuthoredState(const json& value, ToneCurveLayer::Au
 } // namespace
 
 json ToneCurveLayer::Serialize() const {
-    return json{
+    json result{
         { "type", "ToneCurve" },
         { "mode", static_cast<int>(m_Mode) },
         { "domain", static_cast<int>(m_Domain) },
@@ -170,6 +170,10 @@ json ToneCurveLayer::Serialize() const {
         { "lastAutoAuthoredStateValid", m_LastAutoAuthoredStateValid },
         { "lastAutoAuthoredState", m_LastAutoAuthoredStateValid ? SerializeToneCurveAutoAuthoredState(m_LastAutoAuthoredState) : json::object() }
     };
+    if (m_PointCurveSetEnabled) {
+        Stack::RawRecipe::StorePointCurveSetInFinishToneJson(result, m_PointCurveSet);
+    }
+    return result;
 }
 
 void ToneCurveLayer::Deserialize(const json& j) {
@@ -178,6 +182,13 @@ void ToneCurveLayer::Deserialize(const json& j) {
         ResetLinear();
         return;
     }
+    m_PointCurveSetEnabled =
+        j.value("pointCurveSetVersion", 0) == 1 &&
+        j.contains("pointCurves") &&
+        j["pointCurves"].is_object();
+    m_PointCurveSet = m_PointCurveSetEnabled
+        ? Stack::RawRecipe::PointCurveSetFromFinishToneJson(j)
+        : Stack::RawRecipe::RawPointCurveSet {};
     if (j.contains("mode")) {
         m_Mode = static_cast<ToneCurveMode>(std::clamp(j["mode"].get<int>(), 0, 4));
     }

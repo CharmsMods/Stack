@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NodeMath/ContractTypes.h"
+#include "NodeMath/OutputInspection.h"
 
 #include <string>
 
@@ -25,6 +26,39 @@ inline constexpr const char* kRawOutputSocketId = "rawOut";
 inline constexpr const char* kMaskOutputSocketId = "maskOut";
 inline constexpr const char* kValueOutputSocketId = "valueOut";
 inline constexpr const char* kExposureValueInputSocketId = "evIn";
+inline constexpr const char* kChannelInputSocketId = "channelIn";
+inline constexpr const char* kChannelOutputSocketId = "channelOut";
+inline constexpr const char* kMatchExtentInputSocketId = "matchExtent";
+inline constexpr const char* kSpectrumInputSocketId = "spectrumIn";
+inline constexpr const char* kSpectrumOutputSocketId = "spectrumOut";
+inline constexpr const char* kSpectrumInputASocketId = "spectrumA";
+inline constexpr const char* kSpectrumInputBSocketId = "spectrumB";
+inline constexpr const char* kFrequencyResponseInputSocketId = "responseIn";
+inline constexpr const char* kFrequencyResponseOutputSocketId = "responseOut";
+inline constexpr const char* kSpectrumMagnitudeInputSocketId = "magnitudeIn";
+inline constexpr const char* kSpectrumMagnitudeOutputSocketId = "magnitudeOut";
+inline constexpr const char* kSpectrumPhaseInputSocketId = "phaseIn";
+inline constexpr const char* kSpectrumPhaseOutputSocketId = "phaseOut";
+inline constexpr const char* kRadialPowerOutputSocketId = "radialPowerOut";
+inline constexpr const char* kBandPowerOutputSocketId = "bandPowerOut";
+inline constexpr const char* kPeakFrequencyOutputSocketId = "peakFrequencyOut";
+inline constexpr const char* kPeakDirectionOutputSocketId = "peakDirectionOut";
+inline constexpr const char* kStrengthParameterId = "strength";
+inline constexpr const char* kLowCutoffParameterId = "lowCutoff";
+inline constexpr const char* kHighCutoffParameterId = "highCutoff";
+inline constexpr const char* kTransitionWidthParameterId = "transitionWidth";
+inline constexpr const char* kButterworthOrderParameterId = "butterworthOrder";
+inline constexpr const char* kAnalyzerLowParameterId = "bandLow";
+inline constexpr const char* kAnalyzerHighParameterId = "bandHigh";
+
+inline std::string ParameterInputSocketId(const std::string& parameterId) {
+    return "param:" + parameterId;
+}
+inline std::string FrequencyNotchParameterId(
+    const std::string& notchId,
+    const std::string& field) {
+    return "notch." + notchId + "." + field;
+}
 inline constexpr const char* kReductionFieldInputSocketId = "fieldIn";
 inline constexpr const char* kReformatInputSocketId = "imageIn";
 inline constexpr const char* kMaskUtilityInputSocketId = "maskIn";
@@ -133,9 +167,18 @@ inline std::string MfsrInputSocketLabel(int index) {
     return "Frame";
 }
 
+inline std::string MfdFrameInputSocketId(const std::string& frameId) {
+    return frameId.empty() ? std::string() : "frame/" + frameId;
+}
+
 struct Vec2 {
     float x = 0.0f;
     float y = 0.0f;
+};
+
+struct GraphRect {
+    Vec2 min;
+    Vec2 max;
 };
 
 enum class NodeKind {
@@ -163,20 +206,31 @@ enum class NodeKind {
     ImageGenerator,
     ChannelSplit,
     ChannelCombine,
+    ConstantChannel,
     CustomMask,
     DataMath,
     Value,
     TechnicalImage,
     Compound,
+    FrequencyFilter,
+    FrequencyResponse,
     FrequencyFft,
     FrequencyIfft,
     SpectrumView,
+    ApplyFrequencyResponse,
+    CombineSpectra,
+    SpectrumSeparate,
+    SpectrumRecombine,
     FrequencyMask,
     SpectrumMath,
     MagnitudePhase,
     SpectrumAnalyzer,
     FieldMean,
-    Reformat
+    Reformat,
+    RawProjectFrame,
+    MultiFrameDenoise,
+    RawProjectSourceSet,
+    Count
 };
 
 enum class ScopeKind {
@@ -306,8 +360,48 @@ enum class SpectrumAnalyzerMode {
     DominantFrequency
 };
 
+enum class FrequencyFilterMode {
+    AllPass,
+    LowPass,
+    HighPass,
+    BandPass,
+    BandStop,
+    NotchReject
+};
+
+enum class FrequencyTransitionProfile {
+    Smooth,
+    Gaussian,
+    Butterworth,
+    Hard
+};
+
+enum class FrequencyEdgePolicy {
+    Mirror,
+    Wrap,
+    ZeroPad
+};
+
+enum class SpectrumCombineMode {
+    Add,
+    Subtract
+};
+
+enum class SpectrumViewMode {
+    Magnitude,
+    Phase,
+    Real,
+    Imaginary
+};
+
 enum class SocketType {
     Image,
+    ImageOrChannel,
+    Channel,
+    Spectrum,
+    FrequencyResponse,
+    SpectrumMagnitude,
+    SpectrumPhase,
     Mask,
     ScalarField,
     Boolean,
@@ -327,6 +421,26 @@ enum class SocketType {
     Value,
     Analysis,
     Raw
+};
+
+struct OutputSettings {
+    static constexpr int kSchemaVersion = 1;
+
+    Stack::NodeMath::OutputChannelViewMode channelViewMode =
+        Stack::NodeMath::OutputChannelViewMode::Neutral;
+};
+
+struct ConstantChannelSettings {
+    static constexpr int kSchemaVersion = 1;
+
+    float value = 1.0f;
+    bool generatedOpaqueAlpha = false;
+};
+
+struct ImageCombineSettings {
+    static constexpr int kSchemaVersion = 1;
+
+    bool autoAlphaSuppressed = false;
 };
 
 enum class SocketDirection {

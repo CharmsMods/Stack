@@ -76,7 +76,7 @@ void DrawSplitHandle(ImDrawList* drawList, const ImRect& rect, float split, ImGu
 
 bool ProjectMatchesFilter(const ProjectEntry& project, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly);
 bool AssetMatchesFilter(const AssetEntry& asset, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly);
-ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight);
+ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight, float viewScale = 1.0f);
 std::vector<LibraryPackedCard> PackLibraryCards(const std::vector<LibraryPackedCard>& inputCards, float contentWidth, float gap);
 std::uint64_t HashCombine(std::uint64_t seed, std::uint64_t value);
 std::uint64_t HashString(const std::string& value);

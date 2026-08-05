@@ -6,16 +6,30 @@
 #include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
 #include "ThirdParty/stb_image.h"
-#include "ThirdParty/stb_image_write.h"
 #include "Utils/FileDialogs.h"
+#include "Utils/PixelBufferUtils.h"
+#include "Utils/PngEncodingUtils.h"
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <new>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
+
+void SetImportStatusNoThrow(
+    std::string& target,
+    std::string_view message) noexcept {
+    try {
+        target.assign(message.data(), message.size());
+    } catch (...) {
+        target.clear();
+    }
+}
 
 struct DecodedImageData {
     std::vector<unsigned char> pixels;
@@ -41,9 +55,13 @@ bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
     outImage.height = height;
     outImage.channels = 4;
     outImage.originalChannels = channels;
-    outImage.pixels.assign(pixels, pixels + (width * height * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, width, height, 4, outImage.pixels);
     stbi_image_free(pixels);
-    return true;
+    if (!copied) {
+        outImage = {};
+    }
+    return copied;
 }
 
 bool ReadImageInfoFromFile(const std::string& path, int& outWidth, int& outHeight, int& outChannels) {
@@ -54,21 +72,9 @@ bool ReadImageInfoFromFile(const std::string& path, int& outWidth, int& outHeigh
         outWidth > 0 && outHeight > 0;
 }
 
-void PngWriteCallback(void* context, void* data, int size) {
-    auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-    const auto* begin = static_cast<unsigned char*>(data);
-    bytes->insert(bytes->end(), begin, begin + size);
-}
-
 std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    std::vector<unsigned char> pngBytes;
-    if (pixels.empty() || width <= 0 || height <= 0) {
-        return pngBytes;
-    }
-
-    const int safeChannels = std::max(1, channels);
-    stbi_write_png_to_func(PngWriteCallback, &pngBytes, width, height, safeChannels, pixels.data(), width * safeChannels);
-    return pngBytes;
+    return Stack::PngEncoding::EncodeInterleaved(
+        pixels, width, height, channels);
 }
 
 std::string FileNameFromPath(const std::string& path) {
@@ -84,13 +90,8 @@ std::vector<unsigned char> EncodePngBytesForImageStorage(
     int width,
     int height,
     int channels) {
-    if (bottomLeftPixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
-        return {};
-    }
-
-    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
-    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
-    return EncodePngBytes(topLeftPixels, width, height, channels);
+    return EditorNodeGraph::EncodeImagePayloadPngForStorage(
+        bottomLeftPixels, width, height, channels);
 }
 
 std::vector<unsigned char> EncodePngBytesForImageStorageOwned(
@@ -128,49 +129,14 @@ std::vector<unsigned char> RotateBottomLeftImagePixels(
     int quarterTurnsClockwise,
     int& outWidth,
     int& outHeight) {
-    outWidth = width;
-    outHeight = height;
-    const int safeChannels = std::max(1, channels);
-    const int normalizedTurns = NormalizeQuarterTurnsClockwise(quarterTurnsClockwise);
-    if (pixels.empty() || width <= 0 || height <= 0 || normalizedTurns == 0) {
-        return pixels;
-    }
-
-    if (normalizedTurns == 2) {
-        std::vector<unsigned char> rotated(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(safeChannels));
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int srcX = width - 1 - x;
-                const int srcY = height - 1 - y;
-                const std::size_t dstIndex = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * static_cast<std::size_t>(safeChannels);
-                const std::size_t srcIndex = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * static_cast<std::size_t>(safeChannels);
-                std::copy_n(pixels.data() + srcIndex, safeChannels, rotated.data() + dstIndex);
-            }
-        }
-        return rotated;
-    }
-
-    outWidth = height;
-    outHeight = width;
-    std::vector<unsigned char> rotated(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight) * static_cast<std::size_t>(safeChannels));
-    for (int y = 0; y < outHeight; ++y) {
-        for (int x = 0; x < outWidth; ++x) {
-            int srcX = 0;
-            int srcY = 0;
-            if (normalizedTurns == 1) {
-                srcX = width - 1 - y;
-                srcY = x;
-            } else {
-                srcX = y;
-                srcY = height - 1 - x;
-            }
-            const std::size_t dstIndex = (static_cast<std::size_t>(y) * static_cast<std::size_t>(outWidth) + static_cast<std::size_t>(x)) * static_cast<std::size_t>(safeChannels);
-            const std::size_t srcIndex = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * static_cast<std::size_t>(safeChannels);
-            std::copy_n(pixels.data() + srcIndex, safeChannels, rotated.data() + dstIndex);
-        }
-    }
-
-    return rotated;
+    return Stack::PixelBuffer::RotateInterleavedQuarterTurnsClockwise(
+        pixels,
+        width,
+        height,
+        channels,
+        quarterTurnsClockwise,
+        outWidth,
+        outHeight);
 }
 
 EditorNodeGraph::ImagePayload BuildImagePayloadFromDecoded(
@@ -254,6 +220,8 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         return AddImageNodeFromFile(path, graphPosition);
     }
 
+    const std::vector<int> selectionBefore =
+        m_NodeGraph.GetSelectedNodeIds();
     const std::uint64_t requestId = m_NextGraphImageImportRequestId++;
     EditorNodeGraph::ImagePayload pendingPayload;
     pendingPayload.label = FileNameFromPath(path);
@@ -273,12 +241,11 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
     MarkDirty();
 
     const auto queuedAt = std::chrono::steady_clock::now();
-    Async::TaskSystem::Get().SubmitHighPriority([this, path, nodeId, requestId, queuedAt]() {
-        const double queueMs = MillisecondsSince(queuedAt);
-        const auto decodeBegin = std::chrono::steady_clock::now();
-        DecodedImageData decoded;
-        if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
-            Async::TaskSystem::Get().PostToMain([this, nodeId, requestId]() {
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().SubmitHighPriority([this, path, nodeId, requestId, queuedAt]() {
+        auto postImportFailure = [this, nodeId, requestId]() {
+            return Async::TaskSystem::Get().PostToMain([this, nodeId, requestId]() {
                 EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
                 if (node && node->kind == EditorNodeGraph::NodeKind::Image &&
                     node->image.isLoading && node->image.importRequestId == requestId) {
@@ -290,6 +257,31 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
                     "Failed to load the selected slice.",
                     "editor-graph-image-import");
             });
+        };
+        auto postEmbeddingFailure = [this, nodeId, requestId]() {
+            return Async::TaskSystem::Get().PostToMain([this, nodeId, requestId]() {
+                EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+                if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
+                    !node->image.isEmbedding ||
+                    node->image.embeddingRequestId != requestId) {
+                    return;
+                }
+                node->image.isEmbedding = false;
+                node->image.embeddingRequestId = 0;
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    "The slice loaded, but Stack could not embed it for project storage.",
+                    "editor-graph-image-embed");
+                MarkDirty();
+            });
+        };
+        bool payloadQueued = false;
+        try {
+        const double queueMs = MillisecondsSince(queuedAt);
+        const auto decodeBegin = std::chrono::steady_clock::now();
+        DecodedImageData decoded;
+        if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) {
+            postImportFailure();
             return;
         }
         const double decodeMs = MillisecondsSince(decodeBegin);
@@ -313,7 +305,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         const int channels = payload.channels;
         const std::size_t pixelBytes = storagePixels.size();
 
-        Async::TaskSystem::Get().PostToMain([
+        payloadQueued = Async::TaskSystem::Get().PostToMain([
             this,
             nodeId,
             requestId,
@@ -341,6 +333,9 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
             m_GraphPerformanceStats.lastSliceImportPixelBytes = pixelBytes;
             MarkDirty();
         });
+        if (!payloadQueued) {
+            return;
+        }
 
         const auto embedBegin = std::chrono::steady_clock::now();
         std::vector<unsigned char> pngBytes =
@@ -377,7 +372,34 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
             node->image.embeddingRequestId = 0;
             MarkDirty();
         });
-    });
+        } catch (...) {
+            if (payloadQueued) {
+                postEmbeddingFailure();
+            } else {
+                postImportFailure();
+            }
+        }
+        });
+    } catch (const std::bad_alloc&) {
+        submitted = false;
+    } catch (const std::length_error&) {
+        submitted = false;
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted) {
+        m_NodeGraph.RemoveNode(nodeId);
+        m_NodeGraph.ClearSelection();
+        for (const int selectedNodeId : selectionBefore) {
+            m_NodeGraph.SelectNode(selectedNodeId, true);
+        }
+        MarkDirty();
+        QueueUiNotification(
+            UiNotificationSeverity::Error,
+            "The image import could not be queued.",
+            "editor-graph-image-import");
+        return false;
+    }
 
     return true;
 }
@@ -471,7 +493,10 @@ bool EditorModule::StartGraphImageChainImport(
         ? "Loading dropped slices into the graph..."
         : "Loading dropped slice into the graph...";
 
-    Async::TaskSystem::Get().SubmitHighPriority([this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().SubmitHighPriority([this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
+        try {
         std::vector<EditorNodeGraph::ImagePayload> importedImages;
         importedImages.reserve(validPaths.size());
         std::vector<std::string> rawPaths;
@@ -579,7 +604,44 @@ bool EditorModule::StartGraphImageChainImport(
                 StartGraphImageChainImport(std::move(nextRequest.paths), nextRequest.sourcePosition);
             }
         });
-    });
+        } catch (...) {
+            Async::TaskSystem::Get().PostToMain([this, generation]() {
+                if (generation != m_GraphDropImportGeneration) {
+                    return;
+                }
+                m_GraphDropImportTaskState = Async::TaskState::Failed;
+                SetImportStatusNoThrow(
+                    m_GraphDropImportStatusText,
+                    "The dropped slices could not be decoded.");
+                QueueUiNotification(
+                    UiNotificationSeverity::Error,
+                    "The dropped slices could not be decoded.",
+                    "editor-graph-drop-import");
+                if (!m_PendingGraphDropImports.empty()) {
+                    PendingGraphDropImportRequest nextRequest =
+                        std::move(m_PendingGraphDropImports.front());
+                    m_PendingGraphDropImports.erase(m_PendingGraphDropImports.begin());
+                    StartGraphImageChainImport(
+                        std::move(nextRequest.paths),
+                        nextRequest.sourcePosition);
+                }
+            });
+        }
+        });
+    } catch (const std::bad_alloc&) {
+        submitted = false;
+    } catch (const std::length_error&) {
+        submitted = false;
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted) {
+        m_GraphDropImportTaskState = Async::TaskState::Failed;
+        SetImportStatusNoThrow(
+            m_GraphDropImportStatusText,
+            "The dropped slices could not be queued for import.");
+        return false;
+    }
 
     return true;
 }

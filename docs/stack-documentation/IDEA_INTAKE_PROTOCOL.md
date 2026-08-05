@@ -64,7 +64,7 @@ Prefer the real documentation tree first:
 
 Examples:
 
-- `docs/stack-documentation/Current/raw-tab-ui-overhaul/auto-starting-point/`
+- `docs/stack-documentation/Current/raw-tab-ui-overhaul/manual-first-raw-workflow/`
 - `docs/stack-documentation/Current/engineering/develop/`
 - `docs/stack-documentation/Current/engineering/mfsr/`
 - `docs/stack-documentation/Info/engineering/`

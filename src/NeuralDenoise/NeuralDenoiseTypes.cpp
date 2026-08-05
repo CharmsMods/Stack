@@ -30,33 +30,6 @@ nlohmann::json SerializeTilePlan(const TilePlan& plan) {
 
 } // namespace
 
-const char* ModelTypeToToken(ModelType value) {
-    switch (value) {
-        case ModelType::LinearRgb: return "linear_rgb";
-        case ModelType::GenericRgb: return "generic_rgb";
-        case ModelType::RawBayerPacked4Ch: return "raw_bayer_packed_4ch";
-        case ModelType::Unknown:
-        default: return "unknown";
-    }
-}
-
-ModelType ModelTypeFromToken(const std::string& value) {
-    if (value == "linear_rgb") return ModelType::LinearRgb;
-    if (value == "generic_rgb") return ModelType::GenericRgb;
-    if (value == "raw_bayer_packed_4ch") return ModelType::RawBayerPacked4Ch;
-    return ModelType::Unknown;
-}
-
-const char* ModelTypeLabel(ModelType value) {
-    switch (value) {
-        case ModelType::LinearRgb: return "Linear RGB";
-        case ModelType::GenericRgb: return "Generic RGB";
-        case ModelType::RawBayerPacked4Ch: return "RAW Bayer / Packed 4ch";
-        case ModelType::Unknown:
-        default: return "Unknown";
-    }
-}
-
 const char* RuntimePreferenceToToken(RuntimePreference value) {
     switch (value) {
         case RuntimePreference::Cuda: return "cuda";

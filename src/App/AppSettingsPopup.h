@@ -13,7 +13,8 @@ enum class Category {
     Graph = 2,
     Viewport = 3,
     CanvasComposition = 4,
-    Updates = 5
+    Experimental = 5,
+    Updates = 6
 };
 
 struct State {

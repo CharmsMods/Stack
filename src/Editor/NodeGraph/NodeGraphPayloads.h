@@ -13,6 +13,7 @@
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageData.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -146,6 +147,49 @@ struct MfsrPayload {
     std::string errorMessage;
 };
 
+inline constexpr const char* kRawProjectSourceSetUnavailableStatus =
+    "Result unavailable: processing is not implemented yet.";
+
+inline constexpr const char* kMfdAwaitingProcessingStatus =
+    "Process the burst to create the MFD result.";
+
+struct RawProjectFramePayload {
+    std::string sourceSetId;
+    std::string frameId;
+    std::string assetId;
+    std::string displayLabel;
+    std::string compatibilityStatus;
+    bool enabled = true;
+    bool reference = false;
+    bool managed = true;
+    bool quarantined = false;
+};
+
+struct MfdFrameBinding {
+    std::string frameId;
+    std::string socketId;
+    std::string label;
+    bool enabled = true;
+    bool reference = false;
+};
+
+struct MultiFrameDenoisePayload {
+    std::string sourceSetId;
+    std::vector<MfdFrameBinding> frameBindings;
+    std::string presentationStatus = kMfdAwaitingProcessingStatus;
+    std::string resultState = "unavailable";
+    bool internalViewTransformEnabled = true;
+    bool managed = true;
+    bool quarantined = false;
+};
+
+struct RawProjectSourceSetPayload {
+    std::string sourceSetId;
+    std::string presentationStatus = kRawProjectSourceSetUnavailableStatus;
+    bool managed = true;
+    bool quarantined = false;
+};
+
 struct MaskGeneratorSettings {
     float value = 1.0f;
     float angle = 0.0f;
@@ -180,6 +224,10 @@ struct CustomMaskObject {
     float feather = 0.0f;
     float blur = 0.0f;
 };
+
+inline constexpr int kMaximumCustomMaskDimension = 8192;
+inline constexpr std::size_t kMaximumCustomMaskObjectCount = 4096;
+inline constexpr std::size_t kMaximumCustomMaskPointsPerObject = 65536;
 
 struct CustomMaskPayload {
     int schemaVersion = 1;
@@ -269,14 +317,46 @@ struct CompoundPayload {
 };
 
 struct FrequencyFftSettings {
-    bool luminanceOnly = true;
+    FrequencyEdgePolicy edgePolicy = FrequencyEdgePolicy::Mirror;
 };
 
 struct SpectrumViewSettings {
+    SpectrumViewMode mode = SpectrumViewMode::Magnitude;
     SpectrumViewLut lut = SpectrumViewLut::Turbo;
     float exposure = 1.0f;
     float gamma = 1.0f;
     bool centerDc = true;
+};
+
+struct FrequencyNotch {
+    std::string id;
+    float frequency = 0.25f;
+    float directionDegrees = 0.0f;
+    float width = 0.025f;
+};
+
+struct FrequencyResponseSettings {
+    FrequencyFilterMode mode = FrequencyFilterMode::AllPass;
+    FrequencyTransitionProfile profile = FrequencyTransitionProfile::Smooth;
+    float lowCutoff = 0.08f;
+    float highCutoff = 0.25f;
+    float transitionWidth = 0.025f;
+    float butterworthOrder = 2.0f;
+    std::vector<FrequencyNotch> notches;
+};
+
+struct FrequencyFilterSettings {
+    FrequencyResponseSettings localResponse;
+    FrequencyEdgePolicy edgePolicy = FrequencyEdgePolicy::Mirror;
+    float strength = 1.0f;
+};
+
+struct ApplyFrequencyResponseSettings {
+    float strength = 1.0f;
+};
+
+struct CombineSpectraSettings {
+    SpectrumCombineMode mode = SpectrumCombineMode::Add;
 };
 
 struct FrequencyMaskSettings {
@@ -301,7 +381,8 @@ struct MagnitudePhaseSettings {
 
 struct SpectrumAnalyzerSettings {
     float innerRadius = 0.0f;
-    float outerRadius = 1.0f;
+    float outerRadius = 0.5f;
+    bool excludeDc = true;
 };
 
 } // namespace EditorNodeGraph

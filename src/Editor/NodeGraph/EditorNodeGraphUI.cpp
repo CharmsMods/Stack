@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <functional>
 #include <imgui.h>
 #include <string>
 #include <unordered_set>
@@ -14,14 +15,6 @@ namespace {
 
 ImVec2 ToImVec2(const EditorNodeGraph::Vec2& value) {
     return ImVec2(value.x, value.y);
-}
-
-float SnapToPixel(float value) {
-    return std::round(value);
-}
-
-ImVec2 SnapToPixel(const ImVec2& value) {
-    return ImVec2(SnapToPixel(value.x), SnapToPixel(value.y));
 }
 
 constexpr float kGraphPositionLimit = 20000.0f;
@@ -36,6 +29,13 @@ EditorNodeGraph::Vec2 ClampGraphPosition(EditorNodeGraph::Vec2 position) {
     return position;
 }
 
+void MixRevision(std::uint64_t& seed, std::uint64_t value) {
+    seed ^= value +
+        0x9e3779b97f4a7c15ull +
+        (seed << 6u) +
+        (seed >> 2u);
+}
+
 struct OrderedNodeEntry {
     int id = -1;
     bool richSurface = false;
@@ -46,119 +46,234 @@ using namespace Stack::Editor::NodeGraphUIVisuals;
 
 } // namespace
 
-EditorNodeGraphUI::NodeLayoutCache EditorNodeGraphUI::BuildNodeLayoutCache(
+void EditorNodeGraphUI::BuildNodeLayoutCache(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node,
+    NodeLayoutCache& cache) const {
+    using namespace Stack::Editor::NodeGraphUILayout;
+    const std::uint64_t logicalContentRevision =
+        LogicalNodeContentRevision(graph, node);
+    std::uint64_t logicalRevision = logicalContentRevision;
+    const auto measuredIt =
+        m_NodeMeasuredBaseHeights.find(node.id);
+    MixRevision(
+        logicalRevision,
+        std::hash<float>{}(
+            measuredIt != m_NodeMeasuredBaseHeights.end()
+                ? measuredIt->second
+                : 0.0f));
+    if (!cache.hasLogicalLayout ||
+        cache.logicalRevision != logicalRevision) {
+        cache.logicalLayout = BuildLogicalNodeLayout(graph, node);
+        cache.logicalContentRevision =
+            logicalContentRevision;
+        cache.logicalRevision = logicalRevision;
+        cache.hasLogicalLayout = true;
+    }
+    const NodeProjectedLayout projected = ProjectNodeLayout(
+        cache.logicalLayout,
+        ClampGraphPosition(node.position),
+        m_CanvasOrigin,
+        m_Pan,
+        m_Zoom);
+    const auto toCachedRect = [](const LogicalRect& rect) {
+        return CachedRect {
+            ImVec2(rect.min.x, rect.min.y),
+            ImVec2(rect.max.x, rect.max.y)
+        };
+    };
+
+    cache.frameRect = toCachedRect(projected.body);
+    cache.headerRect = toCachedRect(projected.header);
+    cache.contentRect = toCachedRect(projected.content);
+    cache.contentUsedRect = {};
+    cache.persistentVisualRect =
+        toCachedRect(projected.bounds.persistentVisual);
+    cache.overlayRect = toCachedRect(projected.bounds.overlay);
+    cache.interactionRect = toCachedRect(projected.bounds.interaction);
+    const float projectedSocketHitRadius =
+        (kSocketRadius + kSocketLogicalHitPadding) * m_Zoom;
+    const float interactionExpansion =
+        std::max(0.0f, 8.0f - projectedSocketHitRadius);
+    if (interactionExpansion > 0.0f &&
+        cache.interactionRect.IsValid()) {
+        cache.interactionRect.min.x -= interactionExpansion;
+        cache.interactionRect.min.y -= interactionExpansion;
+        cache.interactionRect.max.x += interactionExpansion;
+        cache.interactionRect.max.y += interactionExpansion;
+    }
+    cache.socketAnchors.clear();
+    cache.socketAnchors.reserve(projected.sockets.size());
+    for (std::size_t index = 0; index < projected.sockets.size(); ++index) {
+        const SocketLayout& screenSocket = projected.sockets[index];
+        const SocketLayout& logicalSocket = cache.logicalLayout.sockets[index];
+        cache.socketAnchors.push_back(SocketAnchor {
+            screenSocket.socketId,
+            screenSocket.direction,
+            logicalSocket.center,
+            ImVec2(screenSocket.center.x, screenSocket.center.y)
+        });
+    }
+}
+
+std::uint64_t EditorNodeGraphUI::LogicalNodeContentRevision(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Node& node) const {
-    const NodeLayoutMetrics metrics = MetricsForNode(node);
-    NodeLayoutMetrics adjustedMetrics = metrics;
-    ApplyModernCompactMetrics(node, adjustedMetrics);
-    ApplyLayerSurfaceMetrics(this, m_ActiveEditor, node, adjustedMetrics);
-    const float widthScale = NodeWidthScale();
-    adjustedMetrics.width *= widthScale;
-    adjustedMetrics.contentLaneWidth *= widthScale;
-    adjustedMetrics.previewWidth *= widthScale;
-    const GraphStyleTokens graphStyle = BuildGraphStyleTokens(m_ActiveEditor);
-    const NodePresentationProfile profile = BuildNodePresentationProfile(this, m_ActiveEditor, node, graphStyle);
-    const float uiScale = NodeContentScale();
-    const float pinRadius = NodePinRadius();
-    const float headerInsetX = adjustedMetrics.headerInsetX * uiScale;
-    const float headerInsetY = adjustedMetrics.headerInsetY * uiScale;
-    const float bodyInsetBottom = adjustedMetrics.bodyInsetBottom * uiScale;
-    const float sectionGap = adjustedMetrics.sectionGap * uiScale;
-    const float laneInset = std::max(
-        14.0f * uiScale,
-        ((adjustedMetrics.width - adjustedMetrics.contentLaneWidth) * 0.5f - adjustedMetrics.headerInsetX) * uiScale);
+    using namespace Stack::Editor::NodeGraphUILayout;
+    NodeLayoutMetrics metrics = MetricsForNode(node);
+    ApplyModernCompactMetrics(node, metrics);
+    ApplyLayerSurfaceMetrics(this, m_ActiveEditor, node, metrics);
+    ApplyCanonicalNodeMetrics(this, m_ActiveEditor, node, metrics);
+    const GraphStyleTokens geometryOnlyTokens {};
+    const NodePresentationProfile profile = BuildNodePresentationProfile(
+        this, m_ActiveEditor, node, geometryOnlyTokens);
+    const NodeWidthClass widthClass =
+        ResolveNodeWidthClass(this, m_ActiveEditor, node);
+    const bool compactTitle =
+        widthClass == NodeWidthClass::Tile ||
+        profile.kind == NodePresentationKind::SummaryOnly ||
+        profile.kind == NodePresentationKind::RouteSquare;
+    const std::string title = compactTitle
+        ? CompactNodeTitle(node)
+        : PrimaryNodeTitle(node);
 
-    const EditorNodeGraph::Vec2 safePosition = ClampGraphPosition(node.position);
-    const EditorNodeGraph::Vec2 nodeScreenPos = GraphToScreen(safePosition);
-    const EditorNodeGraph::Vec2 nodeSize = NodeScreenSize(node);
-    const ImVec2 frameMin = ToImVec2(nodeScreenPos);
-    const ImVec2 frameMax(frameMin.x + nodeSize.x, frameMin.y + nodeSize.y);
-
-    const bool showKindLabel = profile.showKindLabel;
-    const float kindLabelBlock = showKindLabel ? (adjustedMetrics.kindLabelHeight * uiScale) + (2.0f * uiScale) : 0.0f;
-    const float titleBlock = profile.showTitle ? (adjustedMetrics.titleHeight * uiScale) : 0.0f;
-    const float headerVisualHeight = headerInsetY + kindLabelBlock + titleBlock;
-    const float expandedHeaderHeight = std::max(
-        headerVisualHeight + std::max(6.0f, sectionGap * 0.65f),
-        NodeGrabAreaHeight() * uiScale);
-    const float collapsedHeaderHeight = std::max(headerVisualHeight + (headerInsetY * 0.45f), frameMax.y - frameMin.y);
-    const float headerBottom = std::min(
-        frameMax.y - std::max(6.0f * uiScale, bodyInsetBottom * 0.35f),
-        frameMin.y + (node.expanded ? expandedHeaderHeight : collapsedHeaderHeight));
-
-    const float contentMinX = std::min(frameMax.x - headerInsetX, frameMin.x + headerInsetX + laneInset);
-    const float contentMaxX = std::max(contentMinX + 24.0f, frameMax.x - headerInsetX - laneInset);
-    const float contentMinY = node.expanded ? headerBottom : frameMin.y + headerInsetY;
-    const float contentMaxY = std::max(contentMinY, frameMax.y - bodyInsetBottom);
-    const float inputPinX = frameMin.x + std::max(pinRadius + (6.0f * uiScale), laneInset * 0.52f);
-    const float outputPinX = frameMax.x - std::max(pinRadius + (6.0f * uiScale), laneInset * 0.52f);
-
-    NodeLayoutCache cache;
-    cache.frameRect = CachedRect{ frameMin, frameMax };
-    cache.headerRect = CachedRect{ SnapToPixel(frameMin), SnapToPixel(ImVec2(frameMax.x, headerBottom)) };
-    cache.contentRect = CachedRect{
-        SnapToPixel(ImVec2(contentMinX, contentMinY)),
-        SnapToPixel(ImVec2(contentMaxX, contentMaxY))
+    std::uint64_t seed = 1469598103934665603ull;
+    const auto mix = [&](std::size_t value) {
+        seed ^= static_cast<std::uint64_t>(value);
+        seed *= 1099511628211ull;
     };
-    if (profile.kind == NodePresentationKind::FramelessMedia) {
-        cache.headerRect = CachedRect{ frameMin, frameMax };
-        cache.contentRect = CachedRect{
-            SnapToPixel(ImVec2(frameMin.x + 2.0f * uiScale, frameMin.y + 2.0f * uiScale)),
-            SnapToPixel(ImVec2(frameMax.x - 2.0f * uiScale, frameMax.y - 2.0f * uiScale))
-        };
-    }
-
-    std::vector<EditorNodeGraph::SocketDefinition> inputSockets;
-    std::vector<EditorNodeGraph::SocketDefinition> outputSockets;
-    for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
-        if (socket.direction == EditorNodeGraph::SocketDirection::Input) {
-            inputSockets.push_back(socket);
-        } else {
-            outputSockets.push_back(socket);
-        }
-    }
-
-    auto distributeAnchors = [&](const std::vector<EditorNodeGraph::SocketDefinition>& sockets, EditorNodeGraph::SocketDirection direction) {
-        if (sockets.empty()) {
-            return;
-        }
-
-        const float top = cache.headerRect.min.y + std::max(pinRadius + (4.0f * uiScale), headerInsetY * 0.9f);
-        const float bottom = node.expanded
-            ? std::max(top, cache.contentRect.max.y - std::max(pinRadius + (2.0f * uiScale), bodyInsetBottom * 0.2f))
-            : std::max(top, cache.frameRect.max.y - std::max(pinRadius + (4.0f * uiScale), headerInsetY * 0.9f));
-
-        for (size_t index = 0; index < sockets.size(); ++index) {
-            const float y = sockets.size() == 1
-                ? (top + bottom) * 0.5f
-                : (top + ((bottom - top) * static_cast<float>(index) / static_cast<float>(sockets.size() - 1)));
-            cache.socketAnchors.push_back(SocketAnchor{
-                sockets[index].id,
-                direction,
-                ImVec2(
-                    direction == EditorNodeGraph::SocketDirection::Input ? inputPinX : outputPinX,
-                    y)
-            });
-        }
+    const auto mixFloat = [&](float value) {
+        mix(std::hash<float>{}(value));
     };
+    mix(static_cast<std::size_t>(node.kind));
+    mix(static_cast<std::size_t>(widthClass));
+    mix(static_cast<std::size_t>(profile.kind));
+    mix(node.expanded ? 1u : 0u);
+    mix(profile.showTitle ? 1u : 0u);
+    mix(profile.showKindLabel ? 1u : 0u);
+    mix(std::hash<std::string>{}(title));
+    mixFloat(metrics.width);
+    mixFloat(metrics.collapsedHeight);
+    mixFloat(metrics.minExpandedHeight);
+    mixFloat(metrics.headerInsetX);
+    mixFloat(metrics.headerInsetY);
+    mixFloat(metrics.bodyInsetBottom);
+    mixFloat(metrics.sectionGap);
+    mixFloat(metrics.kindLabelHeight);
+    mixFloat(metrics.titleHeight);
+    mixFloat(ImGui::GetStyle().FontSizeBase);
+    mix(reinterpret_cast<std::uintptr_t>(ImGui::GetFont()));
+    for (const EditorNodeGraph::SocketDefinition& socket :
+         PresentedSockets(graph, node)) {
+        mix(std::hash<std::string>{}(socket.id));
+        mix(static_cast<std::size_t>(socket.direction));
+    }
+    return seed;
+}
 
-    distributeAnchors(inputSockets, EditorNodeGraph::SocketDirection::Input);
-    distributeAnchors(outputSockets, EditorNodeGraph::SocketDirection::Output);
-    return cache;
+std::uint64_t EditorNodeGraphUI::LogicalNodeLayoutRevision(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node) const {
+    std::uint64_t revision =
+        LogicalNodeContentRevision(graph, node);
+    const auto measuredIt =
+        m_NodeMeasuredBaseHeights.find(node.id);
+    MixRevision(
+        revision,
+        std::hash<float>{}(
+            measuredIt != m_NodeMeasuredBaseHeights.end()
+                ? measuredIt->second
+                : 0.0f));
+    return revision;
+}
+
+Stack::Editor::NodeGraphUILayout::NodeLogicalLayout
+EditorNodeGraphUI::BuildLogicalNodeLayout(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node) const {
+    using namespace Stack::Editor::NodeGraphUILayout;
+    NodeLayoutMetrics metrics = MetricsForNode(node);
+    ApplyModernCompactMetrics(node, metrics);
+    ApplyLayerSurfaceMetrics(this, m_ActiveEditor, node, metrics);
+    ApplyCanonicalNodeMetrics(this, m_ActiveEditor, node, metrics);
+
+    const GraphStyleTokens geometryOnlyTokens {};
+    const NodePresentationProfile profile = BuildNodePresentationProfile(
+        this, m_ActiveEditor, node, geometryOnlyTokens);
+    const EditorNodeGraph::Vec2 nodeSize = NodeSize(node);
+    const NodeWidthClass widthClass =
+        ResolveNodeWidthClass(this, m_ActiveEditor, node);
+    const bool compactTitle =
+        widthClass == NodeWidthClass::Tile ||
+        profile.kind == NodePresentationKind::SummaryOnly ||
+        profile.kind == NodePresentationKind::RouteSquare;
+    const std::string title = compactTitle
+        ? CompactNodeTitle(node)
+        : PrimaryNodeTitle(node);
+    const float titleWrapWidth = compactTitle
+        ? std::max(1.0f, nodeSize.x - 12.0f)
+        : std::max(
+            1.0f,
+            nodeSize.x - 2.0f * metrics.headerInsetX - 6.0f);
+    const std::vector<std::string> titleLines =
+        profile.showTitle
+            ? WrapNodeTitle(title, titleWrapWidth)
+            : std::vector<std::string> {};
+    const bool titleEllipsized =
+        titleLines.size() == 2 &&
+        titleLines.back().size() >= 3 &&
+        titleLines.back().compare(
+            titleLines.back().size() - 3,
+            3,
+            "...") == 0;
+
+    NodeLayoutBuildSpec spec;
+    spec.widthClass = widthClass;
+    spec.width = nodeSize.x;
+    spec.height = nodeSize.y;
+    spec.expanded = node.expanded;
+    spec.framelessMedia =
+        profile.kind == NodePresentationKind::FramelessMedia;
+    spec.headerInsetX = metrics.headerInsetX;
+    spec.headerInsetY = metrics.headerInsetY;
+    spec.bodyInsetBottom = metrics.bodyInsetBottom;
+    spec.sectionGap = metrics.sectionGap;
+    spec.kindLabelHeight = metrics.kindLabelHeight;
+    spec.titleLineHeight = metrics.titleHeight;
+    spec.showKindLabel = profile.showKindLabel;
+    spec.titleLines = titleLines;
+    spec.titleEllipsized = titleEllipsized;
+    const std::vector<EditorNodeGraph::SocketDefinition> sockets =
+        PresentedSockets(graph, node);
+    spec.sockets.reserve(sockets.size());
+    for (const EditorNodeGraph::SocketDefinition& socket : sockets) {
+        spec.sockets.push_back(SocketLayoutSpec {
+            socket.id,
+            socket.direction
+        });
+    }
+    return Stack::Editor::NodeGraphUILayout::BuildLogicalNodeLayout(
+        spec);
 }
 
 bool EditorNodeGraphUI::IsSocketConnected(
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::SocketDefinition& socket) const {
-    for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
-        if (socket.direction == EditorNodeGraph::SocketDirection::Input) {
-            if (link.toNodeId == socket.nodeId && link.toSocketId == socket.id) return true;
-        } else if (link.fromNodeId == socket.nodeId && link.fromSocketId == socket.id) {
-            return true;
+    bool connected = false;
+    const auto matchSocket = [&](const EditorNodeGraph::Link& link) {
+        if (!connected &&
+            (socket.direction == EditorNodeGraph::SocketDirection::Input
+                ? link.toSocketId == socket.id
+                : link.fromSocketId == socket.id)) {
+            connected = true;
         }
+    };
+    if (socket.direction == EditorNodeGraph::SocketDirection::Input) {
+        graph.ForEachIncomingLink(socket.nodeId, matchSocket);
+    } else {
+        graph.ForEachOutgoingLink(socket.nodeId, matchSocket);
     }
-    return false;
+    return connected;
 }
 
 std::vector<EditorNodeGraph::SocketDefinition> EditorNodeGraphUI::PresentedSockets(
@@ -214,7 +329,7 @@ bool EditorNodeGraphUI::DetailCardDelayElapsed(const std::string& key) {
 }
 
 void EditorNodeGraphUI::RefreshNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
-    m_NodeLayoutCache[node.id] = BuildNodeLayoutCache(graph, node);
+    BuildNodeLayoutCache(graph, node, m_NodeLayoutCache[node.id]);
 }
 
 const EditorNodeGraphUI::NodeLayoutCache* EditorNodeGraphUI::FindNodeLayoutCache(int nodeId) const {
@@ -222,56 +337,12 @@ const EditorNodeGraphUI::NodeLayoutCache* EditorNodeGraphUI::FindNodeLayoutCache
     return it != m_NodeLayoutCache.end() ? &it->second : nullptr;
 }
 
-void EditorNodeGraphUI::RefreshNodeLookupCache(const EditorNodeGraph::Graph& graph, bool force) {
-    const std::vector<EditorNodeGraph::Node>& nodes = graph.GetNodes();
-    if (!force &&
-        m_NodeLookupCacheGraph == &graph &&
-        m_NodeLookupCacheGraphRevision == graph.GetStructureRevision() &&
-        m_NodeLookupCacheNodeCount == nodes.size()) {
-        return;
-    }
-
-    m_NodeLookupCache.clear();
-    m_NodeLookupCache.reserve(nodes.size());
-    for (std::size_t index = 0; index < nodes.size(); ++index) {
-        m_NodeLookupCache[nodes[index].id] = index;
-    }
-    m_NodeLookupCacheGraph = &graph;
-    m_NodeLookupCacheGraphRevision = graph.GetStructureRevision();
-    m_NodeLookupCacheNodeCount = nodes.size();
-}
-
 const EditorNodeGraph::Node* EditorNodeGraphUI::FindCachedNode(const EditorNodeGraph::Graph& graph, int nodeId) {
-    auto lookup = [&]() -> const EditorNodeGraph::Node* {
-        const std::vector<EditorNodeGraph::Node>& nodes = graph.GetNodes();
-        const auto it = m_NodeLookupCache.find(nodeId);
-        if (it == m_NodeLookupCache.end() || it->second >= nodes.size()) {
-            return nullptr;
-        }
-        const EditorNodeGraph::Node& node = nodes[it->second];
-        return node.id == nodeId ? &node : nullptr;
-    };
-
-    RefreshNodeLookupCache(graph);
-    if (const EditorNodeGraph::Node* node = lookup()) {
-        return node;
-    }
-    RefreshNodeLookupCache(graph, true);
-    return lookup();
+    return graph.FindNode(nodeId);
 }
 
 EditorNodeGraph::Node* EditorNodeGraphUI::FindCachedNode(EditorNodeGraph::Graph& graph, int nodeId) {
-    const EditorNodeGraph::Node* found = FindCachedNode(static_cast<const EditorNodeGraph::Graph&>(graph), nodeId);
-    if (!found) {
-        return nullptr;
-    }
-    std::vector<EditorNodeGraph::Node>& nodes = graph.GetNodes();
-    const auto it = m_NodeLookupCache.find(nodeId);
-    if (it == m_NodeLookupCache.end() || it->second >= nodes.size()) {
-        return nullptr;
-    }
-    EditorNodeGraph::Node& node = nodes[it->second];
-    return node.id == nodeId ? &node : nullptr;
+    return graph.FindNode(nodeId);
 }
 
 void EditorNodeGraphUI::RefreshNodeOrderCache(const EditorNodeGraph::Graph& graph) {
@@ -285,19 +356,12 @@ void EditorNodeGraphUI::RefreshNodeOrderCache(const EditorNodeGraph::Graph& grap
         return;
     }
 
-    m_NodeLookupCache.clear();
-    m_NodeLookupCache.reserve(nodes.size());
-    m_NodeLookupCacheGraph = &graph;
-    m_NodeLookupCacheGraphRevision = graph.GetStructureRevision();
-    m_NodeLookupCacheNodeCount = nodes.size();
-
     std::vector<OrderedNodeEntry> order;
     order.reserve(nodes.size());
     std::unordered_set<int> activeNodeIds;
     activeNodeIds.reserve(nodes.size());
-    for (std::size_t index = 0; index < nodes.size(); ++index) {
-        const EditorNodeGraph::Node& node = nodes[index];
-        m_NodeLookupCache[node.id] = index;
+    m_NodeFrontOrder.reserve(nodes.size());
+    for (const EditorNodeGraph::Node& node : nodes) {
         activeNodeIds.insert(node.id);
         auto frontOrderIt = m_NodeFrontOrder.find(node.id);
         if (frontOrderIt == m_NodeFrontOrder.end()) {
@@ -371,41 +435,63 @@ const EditorNodeGraphUI::SocketAnchor* EditorNodeGraphUI::FindSocketAnchor(
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeSize(const EditorNodeGraph::Node& node) const {
-    const float widthScale = NodeWidthScale();
-    const float uiPreference = NodeUiScalePreference();
-    if (node.kind == EditorNodeGraph::NodeKind::ChannelSplit ||
-        node.kind == EditorNodeGraph::NodeKind::ChannelCombine ||
-        IsSummaryOnlyNode(this, m_ActiveEditor, node)) {
-        if (node.kind == EditorNodeGraph::NodeKind::RawSource) {
-            return EditorNodeGraph::Vec2{ 128.0f * widthScale * uiPreference, 72.0f * widthScale * uiPreference };
-        }
-        return EditorNodeGraph::Vec2{ 90.0f * widthScale * uiPreference, 90.0f * widthScale * uiPreference };
-    }
-
+    using namespace Stack::Editor::NodeGraphUILayout;
     NodeLayoutMetrics metrics = MetricsForNode(node);
     ApplyModernCompactMetrics(node, metrics);
     ApplyLayerSurfaceMetrics(this, m_ActiveEditor, node, metrics);
-    metrics.width *= widthScale;
-    const float measuredLayerHeight = [&]() -> float {
+    ApplyCanonicalNodeMetrics(this, m_ActiveEditor, node, metrics);
+    const NodeWidthClass widthClass =
+        ResolveNodeWidthClass(this, m_ActiveEditor, node);
+    if (widthClass == NodeWidthClass::Tile) {
+        return { kTileNodeSize, kTileNodeSize };
+    }
+    if (widthClass == NodeWidthClass::RawSource) {
+        return { kRawSourceWidth, kRawSourceHeight };
+    }
+    if (widthClass == NodeWidthClass::Media) {
+        return { kMediaNodeWidth, kMediaNodeHeight };
+    }
+
+    const float measuredContentHeight = [&]() -> float {
         const auto it = m_NodeMeasuredBaseHeights.find(node.id);
         return it != m_NodeMeasuredBaseHeights.end() ? it->second : 0.0f;
     }();
+    const GraphStyleTokens geometryOnlyTokens {};
+    const NodePresentationProfile profile = BuildNodePresentationProfile(
+        this, m_ActiveEditor, node, geometryOnlyTokens);
+    const bool compactTitle =
+        widthClass == NodeWidthClass::Tile ||
+        profile.kind == NodePresentationKind::SummaryOnly ||
+        profile.kind == NodePresentationKind::RouteSquare;
+    const std::string title = compactTitle
+        ? CompactNodeTitle(node)
+        : PrimaryNodeTitle(node);
+    const float titleWrapWidth = compactTitle
+        ? std::max(1.0f, metrics.width - 12.0f)
+        : std::max(
+            1.0f,
+            metrics.width - 2.0f * metrics.headerInsetX - 6.0f);
+    const std::vector<std::string> titleLines = profile.showTitle
+        ? WrapNodeTitle(
+            title,
+            titleWrapWidth)
+        : std::vector<std::string>{};
+    const float extraTitleHeight = titleLines.size() > 1
+        ? metrics.titleHeight + 2.0f
+        : 0.0f;
+    const float collapsedHeight = std::max(
+        metrics.collapsedHeight,
+        kCollapsedNodeHeight + extraTitleHeight);
     const float expandedHeight = (!node.expanded)
-        ? metrics.collapsedHeight
+        ? collapsedHeight
         : std::max(
             metrics.minExpandedHeight,
-            (UsesMeasuredNodeHeight(node) && measuredLayerHeight > 0.0f)
-                ? measuredLayerHeight
-                : ExpandedContractHeight(node, metrics, measuredLayerHeight));
+            measuredContentHeight > 0.0f
+                ? measuredContentHeight
+                : ExpandedContractHeight(node, metrics, 0.0f) +
+                    extraTitleHeight);
     float logicalHeight = std::max(
-        metrics.collapsedHeight,
+        collapsedHeight,
         SanitizeFinite(expandedHeight, metrics.minExpandedHeight));
-    if (node.kind == EditorNodeGraph::NodeKind::Image ||
-        node.kind == EditorNodeGraph::NodeKind::Output) {
-        logicalHeight *= widthScale;
-    }
-    return EditorNodeGraph::Vec2{
-        metrics.width * uiPreference,
-        logicalHeight * uiPreference
-    };
+    return { metrics.width, logicalHeight };
 }

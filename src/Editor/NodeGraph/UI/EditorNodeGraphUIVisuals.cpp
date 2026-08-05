@@ -20,6 +20,9 @@ ImGuiExtras::GraphSliderRangePolicy GraphSliderRangePolicyForNodeKind(EditorNode
     switch (kind) {
         case EditorNodeGraph::NodeKind::RawSource:
         case EditorNodeGraph::NodeKind::RawDevelopment:
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
@@ -66,15 +69,22 @@ NodeFamily FamilyForNode(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::ImageGenerator:
         case EditorNodeGraph::NodeKind::Value:
         case EditorNodeGraph::NodeKind::FieldMean:
+        case EditorNodeGraph::NodeKind::ConstantChannel:
             return NodeFamily::Generator;
         case EditorNodeGraph::NodeKind::Mix:
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::ChannelSplit:
         case EditorNodeGraph::NodeKind::ChannelCombine:
+        case EditorNodeGraph::NodeKind::FrequencyFilter:
+        case EditorNodeGraph::NodeKind::FrequencyResponse:
         case EditorNodeGraph::NodeKind::FrequencyFft:
         case EditorNodeGraph::NodeKind::FrequencyIfft:
         case EditorNodeGraph::NodeKind::SpectrumView:
+        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
+        case EditorNodeGraph::NodeKind::CombineSpectra:
+        case EditorNodeGraph::NodeKind::SpectrumSeparate:
+        case EditorNodeGraph::NodeKind::SpectrumRecombine:
         case EditorNodeGraph::NodeKind::SpectrumMath:
         case EditorNodeGraph::NodeKind::MagnitudePhase:
         case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
@@ -289,6 +299,9 @@ bool IsSummaryOnlyNode(const EditorNodeGraphUI* ui, const EditorModule* editor, 
         case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Lut:
         case EditorNodeGraph::NodeKind::CustomMask:
             return true;
@@ -329,6 +342,9 @@ NodePresentationProfile BuildNodePresentationProfile(
         case EditorNodeGraph::NodeKind::RawDetailFusion:
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Lut:
         case EditorNodeGraph::NodeKind::CustomMask:
             profile.kind = NodePresentationKind::SummaryOnly;
@@ -574,6 +590,15 @@ void ApplyModernCompactMetrics(const EditorNodeGraph::Node& node, NodeLayoutMetr
             metrics.scopeHeight = 168.0f;
             metrics.minExpandedHeight = 226.0f;
             break;
+        case EditorNodeGraph::NodeKind::FrequencyFilter:
+        case EditorNodeGraph::NodeKind::FrequencyResponse:
+            metrics.width = 302.0f;
+            metrics.contentLaneWidth = 228.0f;
+            metrics.previewWidth = 180.0f;
+            metrics.previewHeight = 180.0f;
+            metrics.minExpandedHeight = 360.0f;
+            metrics.collapsedHeight = 48.0f;
+            break;
         case EditorNodeGraph::NodeKind::Composite:
             metrics.width = 270.0f;
             metrics.contentLaneWidth = 220.0f;
@@ -603,6 +628,62 @@ void ApplyLayerSurfaceMetrics(const EditorNodeGraphUI* ui, const EditorModule* e
     metrics.sliderHeight = spec.density == NodeSurfaceDensity::UltraDense ? 16.0f : 18.0f;
     metrics.colorRowHeight = spec.density == NodeSurfaceDensity::UltraDense ? 22.0f : 24.0f;
     metrics.checkboxHeight = spec.density == NodeSurfaceDensity::UltraDense ? 16.0f : 18.0f;
+}
+
+Stack::Editor::NodeGraphUILayout::NodeWidthClass ResolveNodeWidthClass(
+    const EditorNodeGraphUI* ui,
+    const EditorModule* editor,
+    const EditorNodeGraph::Node& node) {
+    const GraphStyleTokens geometryOnlyTokens {};
+    const NodePresentationProfile presentation =
+        BuildNodePresentationProfile(ui, editor, node, geometryOnlyTokens);
+    const bool richExpandedSurface =
+        node.kind == EditorNodeGraph::NodeKind::Layer &&
+        ui &&
+        ui->ResolveLayerUsesRichNodeSurface(editor, node.layerIndex);
+    return Stack::Editor::NodeGraphUILayout::ResolveWidthClass(
+        node.kind,
+        presentation.kind == NodePresentationKind::SummaryOnly,
+        presentation.kind == NodePresentationKind::RouteSquare,
+        richExpandedSurface);
+}
+
+void ApplyCanonicalNodeMetrics(
+    const EditorNodeGraphUI* ui,
+    const EditorModule* editor,
+    const EditorNodeGraph::Node& node,
+    NodeLayoutMetrics& metrics) {
+    using namespace Stack::Editor::NodeGraphUILayout;
+    const NodeWidthClass widthClass =
+        ResolveNodeWidthClass(ui, editor, node);
+    metrics.width = WidthForClass(widthClass);
+    metrics.collapsedHeight = kCollapsedNodeHeight;
+    metrics.contentLaneWidth = std::max(48.0f, metrics.width - 24.0f);
+    metrics.previewWidth = std::min(
+        std::max(1.0f, metrics.previewWidth),
+        std::max(1.0f, metrics.width - 24.0f));
+
+    switch (widthClass) {
+        case NodeWidthClass::Tile:
+            metrics.collapsedHeight = kTileNodeSize;
+            metrics.minExpandedHeight = kTileNodeSize;
+            break;
+        case NodeWidthClass::RawSource:
+            metrics.collapsedHeight = kRawSourceHeight;
+            metrics.minExpandedHeight = kRawSourceHeight;
+            break;
+        case NodeWidthClass::Media:
+            metrics.collapsedHeight = kMediaNodeHeight;
+            metrics.minExpandedHeight = kMediaNodeHeight;
+            metrics.previewWidth = kMediaNodeWidth - 4.0f;
+            metrics.previewHeight = kMediaNodeHeight - 4.0f;
+            break;
+        case NodeWidthClass::Compact:
+        case NodeWidthClass::Standard:
+        case NodeWidthClass::Wide:
+        case NodeWidthClass::Complex:
+            break;
+    }
 }
 
 ImU32 ColorWithAlpha(const ImVec4& color, float alpha) {
@@ -710,11 +791,13 @@ void RenderLayerMetadataNotes(
 }
 
 float NodeControlWidthForScale(float logicalWidth, float uiScale) {
-    return std::max(1.0f, logicalWidth * uiScale);
+    return logicalWidth * uiScale;
 }
 
 ImVec2 NodePreviewSizeForScale(const NodeLayoutMetrics& metrics, float uiScale) {
-    return ImVec2(std::max(1.0f, metrics.previewWidth * uiScale), std::max(1.0f, metrics.previewHeight * uiScale));
+    return ImVec2(
+        metrics.previewWidth * uiScale,
+        metrics.previewHeight * uiScale);
 }
 
 ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& familyStyle) {
@@ -723,9 +806,20 @@ ImU32 TypedSocketColor(EditorNodeGraph::SocketType type, const NodeFamilyStyle& 
     const ImVec4 analysisBase(0.76f, 0.68f, 0.57f, 1.0f);
     const ImVec4 valueBase(0.66f, 0.73f, 0.73f, 1.0f);
     const ImVec4 rawBase(0.62f, 0.77f, 0.66f, 1.0f);
+    const ImVec4 channelBase(0.40f, 0.82f, 0.76f, 1.0f);
+    const ImVec4 spectrumBase(0.76f, 0.48f, 0.96f, 1.0f);
+    const ImVec4 responseBase(0.96f, 0.68f, 0.28f, 1.0f);
     ImVec4 base = imageBase;
     switch (type) {
         case EditorNodeGraph::SocketType::Image: base = imageBase; break;
+        case EditorNodeGraph::SocketType::ImageOrChannel:
+            base = BlendColor(imageBase, channelBase, 0.5f);
+            break;
+        case EditorNodeGraph::SocketType::Channel: base = channelBase; break;
+        case EditorNodeGraph::SocketType::Spectrum:
+        case EditorNodeGraph::SocketType::SpectrumMagnitude:
+        case EditorNodeGraph::SocketType::SpectrumPhase: base = spectrumBase; break;
+        case EditorNodeGraph::SocketType::FrequencyResponse: base = responseBase; break;
         case EditorNodeGraph::SocketType::Mask:
         case EditorNodeGraph::SocketType::ScalarField: base = maskBase; break;
         case EditorNodeGraph::SocketType::Analysis: base = analysisBase; break;
@@ -778,6 +872,7 @@ LinkVisualStyle ResolveLinkVisualStyle(
     }
     style.scalarStream = fromSocket.type == EditorNodeGraph::SocketType::Mask ||
         fromSocket.type == EditorNodeGraph::SocketType::ScalarField ||
+        fromSocket.type == EditorNodeGraph::SocketType::Channel ||
         graph.IsScalarSocketStream(fromNodeId, fromSocketId);
 
     const EditorNodeGraph::Link probeLink { fromNodeId, fromSocketId, toNodeId, toSocketId };
@@ -834,6 +929,7 @@ LinkVisualStyle ResolvePendingLinkVisualStyle(
     style.scalarStream = direction == EditorNodeGraph::SocketDirection::Output &&
         (socket.type == EditorNodeGraph::SocketType::Mask ||
          socket.type == EditorNodeGraph::SocketType::ScalarField ||
+         socket.type == EditorNodeGraph::SocketType::Channel ||
          graph.IsScalarSocketStream(nodeId, socketId));
 
     if (socket.type == EditorNodeGraph::SocketType::Analysis) {
@@ -874,6 +970,16 @@ ImVec4 SocketColorVec(
     }
     switch (socket.type) {
         case EditorNodeGraph::SocketType::Image: return BlendColor(tokens.socketImage, familyStyle.accent, 0.16f);
+        case EditorNodeGraph::SocketType::ImageOrChannel:
+            return BlendColor(
+                BlendColor(tokens.socketImage, ImVec4(0.40f, 0.82f, 0.76f, 1.0f), 0.5f),
+                familyStyle.accent,
+                0.14f);
+        case EditorNodeGraph::SocketType::Channel: return BlendColor(ImVec4(0.40f, 0.82f, 0.76f, 1.0f), familyStyle.accent, 0.12f);
+        case EditorNodeGraph::SocketType::Spectrum:
+        case EditorNodeGraph::SocketType::SpectrumMagnitude:
+        case EditorNodeGraph::SocketType::SpectrumPhase: return BlendColor(ImVec4(0.76f, 0.48f, 0.96f, 1.0f), familyStyle.accent, 0.12f);
+        case EditorNodeGraph::SocketType::FrequencyResponse: return BlendColor(ImVec4(0.96f, 0.68f, 0.28f, 1.0f), familyStyle.accent, 0.12f);
         case EditorNodeGraph::SocketType::Mask:
         case EditorNodeGraph::SocketType::ScalarField: return BlendColor(tokens.socketMask, familyStyle.accent, 0.12f);
         case EditorNodeGraph::SocketType::Analysis: return BlendColor(tokens.socketAnalysis, familyStyle.accent, 0.10f);
@@ -1159,7 +1265,7 @@ void DrawGraphNodeSpotlightSurface(
             max,
             ColorWithAlpha(tokens.spotlightHalo, 0.28f),
             feather * 0.42f,
-            std::max(0.65f, 0.85f * uiScale),
+            0.85f * uiScale,
             3.2f);
     }
 }
@@ -1202,14 +1308,15 @@ void DrawSocketPin(
         radius * ringRadiusScale,
         ColorWithAlpha(hovered || emphasis > 0.001f ? tokens.selected : tokens.spotlightHalo, 0.52f + emphasis * 0.22f + hoverBoost * 0.20f + activePulse * emphasis * 0.16f),
         16,
-        std::max(0.8f, radius * (0.18f + emphasis * 0.03f + hoverBoost * 0.02f)));
+        radius *
+            (0.18f + emphasis * 0.03f + hoverBoost * 0.02f));
     if (emphasis > 0.01f) {
         drawList->AddCircle(
             pin,
             radius * (1.34f + emphasis * 0.16f + activePulse * 0.05f),
             ColorWithAlpha(tokens.selected, 0.12f + emphasis * 0.20f),
             18,
-            std::max(0.75f, radius * 0.12f));
+            radius * 0.12f);
     }
 }
 
@@ -1217,8 +1324,14 @@ void DrawPreviewFrame(ImDrawList* drawList, const ImVec2& min, const ImVec2& max
     if (!tokens.enabled || max.x <= min.x || max.y <= min.y) {
         return;
     }
-    const float rounding = std::max(2.0f, 4.0f * uiScale);
-    drawList->AddRect(min, max, ColorWithAlpha(tokens.spotlightHalo, 0.075f), rounding, 0, std::max(0.45f, 0.55f * uiScale));
+    const float rounding = 4.0f * uiScale;
+    drawList->AddRect(
+        min,
+        max,
+        ColorWithAlpha(tokens.spotlightHalo, 0.075f),
+        rounding,
+        0,
+        0.55f * uiScale);
 }
 
 float ChannelLaneOffset(const std::string& channel, float zoom) {
@@ -1283,6 +1396,9 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             return headerBlock + sectionGap + row + gap + row + gap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::MaskCombine:
             return headerBlock + sectionGap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::ConstantChannel:
+            return headerBlock + sectionGap +
+                row * 3.0f + gap * 2.0f + bottomPadding;
         case EditorNodeGraph::NodeKind::DataMath:
             if (node.dataMathMode == EditorNodeGraph::DataMathMode::Clamp) {
                 return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + bottomPadding;
@@ -1299,10 +1415,42 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             return headerBlock + sectionGap + row + gap + row + gap + row + gap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::FrequencyFft:
         case EditorNodeGraph::NodeKind::FrequencyIfft:
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
             return headerBlock + sectionGap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::FrequencyFilter: {
+            const float notchRows =
+                node.frequencyFilterSettings.localResponse.mode ==
+                        EditorNodeGraph::FrequencyFilterMode::NotchReject
+                    ? static_cast<float>(
+                        std::max<std::size_t>(
+                            1, node.frequencyFilterSettings.localResponse.notches.size())) * 3.0f
+                    : 0.0f;
+            return headerBlock + sectionGap + row + gap + 180.0f +
+                sectionGap + (6.0f + notchRows) * row +
+                (5.0f + notchRows) * gap + bottomPadding;
+        }
+        case EditorNodeGraph::NodeKind::FrequencyResponse: {
+            const float notchRows =
+                node.frequencyResponseSettings.mode ==
+                        EditorNodeGraph::FrequencyFilterMode::NotchReject
+                    ? static_cast<float>(
+                        node.frequencyResponseSettings.notches.size()) * 3.0f + 1.0f
+                    : 0.0f;
+            return headerBlock + sectionGap + row + gap + row + gap + 180.0f +
+                sectionGap + (5.0f + notchRows) * row +
+                (5.0f + notchRows) * gap + bottomPadding;
+        }
+        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
+        case EditorNodeGraph::NodeKind::CombineSpectra:
+            return headerBlock + sectionGap + row + gap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::SpectrumSeparate:
+        case EditorNodeGraph::NodeKind::SpectrumRecombine:
+            return headerBlock + sectionGap + row + bottomPadding;
+        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
+            return headerBlock + sectionGap + row + gap + row + gap +
+                checkboxRow + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::SpectrumView:
-            return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + bottomPadding;
+            return headerBlock + sectionGap + row + gap + row + gap +
+                sliderRow + gap + row + gap + sliderRow + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::FrequencyMask:
             return headerBlock + sectionGap + row + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
         case EditorNodeGraph::NodeKind::SpectrumMath:
@@ -1327,6 +1475,12 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             const float inputRows = 5.0f;
             return headerBlock + sectionGap + inputRows * row + gap * (inputRows - 1.0f) + bottomPadding;
         }
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+            return headerBlock + sectionGap + row * 3.0f + gap * 2.0f + bottomPadding;
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+            return headerBlock + sectionGap + row * 3.0f + gap * 2.0f + bottomPadding;
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
+            return headerBlock + sectionGap + row + gap + row + bottomPadding;
         case EditorNodeGraph::NodeKind::ImageGenerator:
             if (node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::SolidColor ||
                 node.imageGeneratorKind == EditorNodeGraph::ImageGeneratorKind::Square ||
@@ -1342,44 +1496,19 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
             return headerBlock + sectionGap + row + gap + row + gap + sliderRow + bottomPadding;
         case EditorNodeGraph::NodeKind::Preview:
             return headerBlock + sectionGap + row + gap + metrics.previewHeight + bottomPadding;
+        case EditorNodeGraph::NodeKind::TechnicalImage:
+            return headerBlock + sectionGap +
+                row * 3.0f + gap * 2.0f + bottomPadding;
+        case EditorNodeGraph::NodeKind::Compound:
+            // Compound definitions can promote a variable number of controls.
+            // Reserve a conservative first-layout surface; the canonical
+            // logical measurement replaces it on the following frame.
+            return std::max(
+                metrics.minExpandedHeight,
+                headerBlock + sectionGap +
+                    row * 8.0f + gap * 7.0f + bottomPadding);
     }
     return metrics.minExpandedHeight;
-}
-
-bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node) {
-    switch (node.kind) {
-        case EditorNodeGraph::NodeKind::Layer:
-        case EditorNodeGraph::NodeKind::Composite:
-            return true;
-        case EditorNodeGraph::NodeKind::Image:
-        case EditorNodeGraph::NodeKind::Output:
-        case EditorNodeGraph::NodeKind::Scope:
-        case EditorNodeGraph::NodeKind::MaskGenerator:
-        case EditorNodeGraph::NodeKind::Mix:
-        case EditorNodeGraph::NodeKind::Preview:
-        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
-        case EditorNodeGraph::NodeKind::HdrMerge:
-        case EditorNodeGraph::NodeKind::Mfsr:
-        case EditorNodeGraph::NodeKind::Lut:
-        case EditorNodeGraph::NodeKind::MaskCombine:
-        case EditorNodeGraph::NodeKind::MaskUtility:
-        case EditorNodeGraph::NodeKind::CustomMask:
-        case EditorNodeGraph::NodeKind::ImageToMask:
-        case EditorNodeGraph::NodeKind::ImageGenerator:
-        case EditorNodeGraph::NodeKind::DataMath:
-        case EditorNodeGraph::NodeKind::Value:
-        case EditorNodeGraph::NodeKind::FieldMean:
-        case EditorNodeGraph::NodeKind::Reformat:
-        case EditorNodeGraph::NodeKind::FrequencyFft:
-        case EditorNodeGraph::NodeKind::FrequencyIfft:
-        case EditorNodeGraph::NodeKind::SpectrumView:
-        case EditorNodeGraph::NodeKind::FrequencyMask:
-        case EditorNodeGraph::NodeKind::SpectrumMath:
-        case EditorNodeGraph::NodeKind::MagnitudePhase:
-        case EditorNodeGraph::NodeKind::SpectrumAnalyzer:
-            return false;
-    }
-    return false;
 }
 
 bool ShouldShowKindLabel(const EditorNodeGraph::Node& node) {
@@ -1398,7 +1527,14 @@ std::string EllipsizeLabel(const std::string& value, float maxWidth) {
     static constexpr const char* kEllipsis = "...";
     std::string trimmed = value;
     while (!trimmed.empty()) {
-        trimmed.pop_back();
+        std::size_t codePointStart = trimmed.size() - 1;
+        while (codePointStart > 0 &&
+               (static_cast<unsigned char>(
+                    trimmed[codePointStart]) &
+                0xC0u) == 0x80u) {
+            --codePointStart;
+        }
+        trimmed.erase(codePointStart);
         const std::string candidate = trimmed + kEllipsis;
         if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
             return candidate;
@@ -1419,6 +1555,9 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::RawDetailFusion: return "Pre-Local Exposure";
         case EditorNodeGraph::NodeKind::HdrMerge: return "HDR Merge";
         case EditorNodeGraph::NodeKind::Mfsr: return "MFSR";
+        case EditorNodeGraph::NodeKind::RawProjectFrame: return "RAW Frame";
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise: return "MFD";
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet: return "RAW Project Source Set";
         case EditorNodeGraph::NodeKind::Lut: return "LUT";
         case EditorNodeGraph::NodeKind::Layer: return "Layer";
         case EditorNodeGraph::NodeKind::Output: return "Output";
@@ -1438,15 +1577,22 @@ const char* NodeKindLabel(EditorNodeGraph::NodeKind kind) {
         case EditorNodeGraph::NodeKind::Reformat: return "Geometry";
         case EditorNodeGraph::NodeKind::TechnicalImage: return "Technical Image";
         case EditorNodeGraph::NodeKind::Compound: return "Compound";
-        case EditorNodeGraph::NodeKind::FrequencyFft: return "FFT";
-        case EditorNodeGraph::NodeKind::FrequencyIfft: return "Inverse FFT";
+        case EditorNodeGraph::NodeKind::FrequencyFilter: return "Frequency Filter";
+        case EditorNodeGraph::NodeKind::FrequencyResponse: return "Frequency Response";
+        case EditorNodeGraph::NodeKind::FrequencyFft: return "Fourier Transform";
+        case EditorNodeGraph::NodeKind::FrequencyIfft: return "Inverse Fourier Transform";
         case EditorNodeGraph::NodeKind::SpectrumView: return "Spectrum View";
+        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse: return "Apply Response";
+        case EditorNodeGraph::NodeKind::CombineSpectra: return "Combine Spectra";
+        case EditorNodeGraph::NodeKind::SpectrumSeparate: return "Separate Spectrum";
+        case EditorNodeGraph::NodeKind::SpectrumRecombine: return "Recombine Spectrum";
         case EditorNodeGraph::NodeKind::FrequencyMask: return "Frequency Mask";
         case EditorNodeGraph::NodeKind::SpectrumMath: return "Spectrum Math";
         case EditorNodeGraph::NodeKind::MagnitudePhase: return "Magnitude / Phase";
         case EditorNodeGraph::NodeKind::SpectrumAnalyzer: return "Spectrum Analyzer";
         case EditorNodeGraph::NodeKind::ChannelSplit: return "Channel Split";
-        case EditorNodeGraph::NodeKind::ChannelCombine: return "Channel Combine";
+        case EditorNodeGraph::NodeKind::ChannelCombine: return "Image Combine";
+        case EditorNodeGraph::NodeKind::ConstantChannel: return "Constant Channel";
     }
     return "Node";
 }
@@ -1545,6 +1691,140 @@ const char* DataMathLabel(EditorNodeGraph::DataMathMode mode) {
         case EditorNodeGraph::DataMathMode::ImageAverage: return "Average Images";
     }
     return "Clamp";
+}
+
+std::string PrimaryNodeTitle(const EditorNodeGraph::Node& node) {
+    switch (node.kind) {
+        case EditorNodeGraph::NodeKind::Layer:
+            return std::to_string(node.layerIndex + 1) + ". " +
+                (node.title.empty() ? "Layer" : node.title);
+        case EditorNodeGraph::NodeKind::MaskGenerator:
+            return MaskLabel(node.maskKind);
+        case EditorNodeGraph::NodeKind::CustomMask:
+            return node.title.empty() ? "Custom Mask" : node.title;
+        case EditorNodeGraph::NodeKind::MaskCombine:
+            return node.title.empty() ? "Intersect Mask" : node.title;
+        case EditorNodeGraph::NodeKind::MaskUtility:
+            return MaskUtilityLabel(node.maskUtilityKind);
+        case EditorNodeGraph::NodeKind::ImageToMask:
+            return node.imageToMaskKind ==
+                    EditorNodeGraph::ImageToMaskKind::SampledRange
+                ? "Sampled Range Mask"
+                : "Luminance Mask";
+        case EditorNodeGraph::NodeKind::ImageGenerator:
+            return ImageGeneratorLabel(node.imageGeneratorKind);
+        case EditorNodeGraph::NodeKind::Scope:
+            return ScopeLabel(node.scopeKind);
+        case EditorNodeGraph::NodeKind::Mix:
+            return node.title.empty() ? "Blend Images" : node.title;
+        case EditorNodeGraph::NodeKind::DataMath:
+            return node.title.empty() ? DataMathLabel(node.dataMathMode)
+                                      : node.title;
+        case EditorNodeGraph::NodeKind::Compound:
+            return node.title.empty() ? "Compound" : node.title;
+        case EditorNodeGraph::NodeKind::Preview:
+            return node.title.empty() ? "Preview" : node.title;
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            return node.title.empty() ? "RAW Detail Auto Mask" : node.title;
+        default:
+            return node.title.empty() ? NodeKindLabel(node.kind) : node.title;
+    }
+}
+
+std::string CompactNodeTitle(const EditorNodeGraph::Node& node) {
+    switch (node.kind) {
+        case EditorNodeGraph::NodeKind::Layer:
+            return CompactAdvancedLayerLabel(node);
+        case EditorNodeGraph::NodeKind::RawSource:
+            return "RAW";
+        case EditorNodeGraph::NodeKind::RawDevelopment:
+            return "RAW Dev";
+        case EditorNodeGraph::NodeKind::RawNeuralDenoise:
+            return "RAW Denoise";
+        case EditorNodeGraph::NodeKind::RawDecode:
+            return "RAW Decode";
+        case EditorNodeGraph::NodeKind::RawDevelop:
+            return "Develop";
+        case EditorNodeGraph::NodeKind::RawDetailAutoMask:
+            return "Auto Mask";
+        case EditorNodeGraph::NodeKind::RawDetailFusion:
+            return "Pre-Local";
+        case EditorNodeGraph::NodeKind::HdrMerge:
+            return "HDR Merge";
+        case EditorNodeGraph::NodeKind::Mfsr:
+            return "MFSR";
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+            return "RAW Frame";
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+            return "MFD";
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
+            return "Source Set";
+        case EditorNodeGraph::NodeKind::Lut:
+            return "LUT";
+        case EditorNodeGraph::NodeKind::CustomMask:
+            return "Mask Edit";
+        case EditorNodeGraph::NodeKind::Output:
+            return node.outputEnabled ? "Output" : "Deactivated";
+        case EditorNodeGraph::NodeKind::ChannelSplit:
+            return "Split";
+        case EditorNodeGraph::NodeKind::ChannelCombine:
+            return "Combine";
+        default:
+            return PrimaryNodeTitle(node);
+    }
+}
+
+std::vector<std::string> WrapNodeTitle(
+    const std::string& title,
+    float maxLogicalWidth) {
+    if (title.empty()) {
+        return {};
+    }
+    if (maxLogicalWidth <= 1.0f ||
+        ImGui::CalcTextSize(title.c_str()).x <= maxLogicalWidth) {
+        return { title };
+    }
+
+    std::string firstLine;
+    std::string secondLine;
+    std::size_t cursor = 0;
+    while (cursor < title.size()) {
+        while (cursor < title.size() && title[cursor] == ' ') {
+            ++cursor;
+        }
+        if (cursor >= title.size()) {
+            break;
+        }
+        const std::size_t wordEnd = title.find(' ', cursor);
+        const std::string word = title.substr(
+            cursor,
+            wordEnd == std::string::npos
+                ? std::string::npos
+                : wordEnd - cursor);
+        const std::string candidate =
+            firstLine.empty() ? word : firstLine + " " + word;
+        if (firstLine.empty() ||
+            ImGui::CalcTextSize(candidate.c_str()).x <= maxLogicalWidth) {
+            firstLine = candidate;
+        } else {
+            secondLine = title.substr(cursor);
+            break;
+        }
+        cursor = wordEnd == std::string::npos
+            ? title.size()
+            : wordEnd + 1;
+    }
+
+    if (firstLine.empty()) {
+        return { EllipsizeLabel(title, maxLogicalWidth) };
+    }
+    if (secondLine.empty()) {
+        return { EllipsizeLabel(firstLine, maxLogicalWidth) };
+    }
+    return {
+        firstLine,
+        EllipsizeLabel(secondLine, maxLogicalWidth)
+    };
 }
 
 } // namespace Stack::Editor::NodeGraphUIVisuals

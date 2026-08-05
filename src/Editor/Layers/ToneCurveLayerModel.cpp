@@ -22,6 +22,8 @@ std::vector<ToneCurvePoint> BuildLinearToneCurvePoints() {
 } // namespace
 
 void ToneCurveLayer::ResetLinear() {
+    m_PointCurveSetEnabled = false;
+    m_PointCurveSet = {};
     m_PreparedPoints = BuildLinearToneCurvePoints();
     m_Points = BuildLinearToneCurvePoints();
     m_ActiveGraphView = ToneCurveGraphView::Finish;

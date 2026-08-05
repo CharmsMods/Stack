@@ -2,9 +2,11 @@
 
 #include "Editor/EditorModule.h"
 #include "ThirdParty/stb_image.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
-#include <cstring>
+#include <new>
+#include <stdexcept>
 #include <utility>
 
 namespace Stack::Library::ImageHelpers {
@@ -88,12 +90,26 @@ std::vector<unsigned char> ResizePixelsNearest(
     outWidth = sourceWidth;
     outHeight = sourceHeight;
 
-    if (sourcePixels.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
+    if (maxDimension <= 0 ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            sourcePixels.size(), sourceWidth, sourceHeight, 4)) {
+        outWidth = 0;
+        outHeight = 0;
         return {};
     }
 
     if (sourceWidth <= maxDimension && sourceHeight <= maxDimension) {
-        return sourcePixels;
+        try {
+            return sourcePixels;
+        } catch (const std::bad_alloc&) {
+            outWidth = 0;
+            outHeight = 0;
+            return {};
+        } catch (const std::length_error&) {
+            outWidth = 0;
+            outHeight = 0;
+            return {};
+        }
     }
 
     if (sourceWidth > sourceHeight) {
@@ -107,13 +123,41 @@ std::vector<unsigned char> ResizePixelsNearest(
     outWidth = std::max(outWidth, 1);
     outHeight = std::max(outHeight, 1);
 
-    std::vector<unsigned char> resizedPixels(outWidth * outHeight * 4);
+    std::size_t resizedByteCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            outWidth, outHeight, 4, resizedByteCount)) {
+        outWidth = 0;
+        outHeight = 0;
+        return {};
+    }
+    std::vector<unsigned char> resizedPixels;
+    try {
+        resizedPixels.resize(resizedByteCount);
+    } catch (const std::bad_alloc&) {
+        outWidth = 0;
+        outHeight = 0;
+        return {};
+    } catch (const std::length_error&) {
+        outWidth = 0;
+        outHeight = 0;
+        return {};
+    }
     for (int y = 0; y < outHeight; ++y) {
         for (int x = 0; x < outWidth; ++x) {
-            const int srcX = (x * sourceWidth) / outWidth;
-            const int srcY = (y * sourceHeight) / outHeight;
-            const int srcIdx = (srcY * sourceWidth + srcX) * 4;
-            const int dstIdx = (y * outWidth + x) * 4;
+            const int srcX = static_cast<int>(
+                (static_cast<long long>(x) * sourceWidth) / outWidth);
+            const int srcY = static_cast<int>(
+                (static_cast<long long>(y) * sourceHeight) / outHeight);
+            const std::size_t srcIdx =
+                (static_cast<std::size_t>(srcY) *
+                     static_cast<std::size_t>(sourceWidth) +
+                 static_cast<std::size_t>(srcX)) *
+                4u;
+            const std::size_t dstIdx =
+                (static_cast<std::size_t>(y) *
+                     static_cast<std::size_t>(outWidth) +
+                 static_cast<std::size_t>(x)) *
+                4u;
             for (int channel = 0; channel < 4; ++channel) {
                 resizedPixels[dstIdx + channel] = sourcePixels[srcIdx + channel];
             }
@@ -139,9 +183,14 @@ bool LoadRgbaImageFromFile(const std::filesystem::path& path, std::vector<unsign
         return false;
     }
 
-    outPixels.assign(pixels, pixels + (outW * outH * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, outW, outH, 4, outPixels);
     stbi_image_free(pixels);
-    return true;
+    if (!copied) {
+        outW = 0;
+        outH = 0;
+    }
+    return copied;
 }
 
 bool ReadImageInfo(const std::filesystem::path& path, int& outW, int& outH, int& outChannels) {
@@ -179,22 +228,20 @@ bool DecodeImageBytes(
     }
 
     outChannels = 4;
-    outPixels.assign(pixels, pixels + (outW * outH * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, outW, outH, 4, outPixels);
     stbi_image_free(pixels);
-    return true;
+    if (!copied) {
+        outW = 0;
+        outH = 0;
+        outChannels = 0;
+    }
+    return copied;
 }
 
 void FlipImageRowsInPlace(std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0) return;
-    const std::size_t rowSize = static_cast<std::size_t>(width * channels);
-    std::vector<unsigned char> temp(rowSize);
-    for (int y = 0; y < height / 2; ++y) {
-        unsigned char* top = pixels.data() + static_cast<std::size_t>(y) * rowSize;
-        unsigned char* bottom = pixels.data() + static_cast<std::size_t>(height - 1 - y) * rowSize;
-        std::memcpy(temp.data(), top, rowSize);
-        std::memcpy(top, bottom, rowSize);
-        std::memcpy(bottom, temp.data(), rowSize);
-    }
+    (void)Stack::PixelBuffer::FlipInterleavedRowsInPlace(
+        pixels, width, height, channels);
 }
 
 bool DecodePreviewBytes(

@@ -1,4 +1,5 @@
 #include "Raw/RawWorkspace.h"
+#include "Raw/RawTechnicalEvidence.h"
 
 #include <algorithm>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <limits>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Stack::RawWorkspace {
 namespace {
@@ -225,11 +227,11 @@ nlohmann::json BuildRawProjectData(
     bool linkedRaw) {
     nlohmann::json value = nlohmann::json::object();
     value["schema"] = "stack.rawWorkspace.project";
-    value["rawWorkspaceSchemaVersion"] = 1;
+    value["rawWorkspaceSchemaVersion"] = 2;
     value["rawWorkspaceMode"] = RawProjectModeToString(mode);
     value["rawSourceRef"] = BuildRawSourceRefJson(source, linkedRaw);
     value["rawRecipe"] = Stack::RawRecipe::SerializeRecipe(recipe);
-    value["downstreamGraph"] = downstreamGraph.is_null() ? nlohmann::json::object() : downstreamGraph;
+    (void)downstreamGraph;
     value["managedRawSection"] = nullptr;
     value["customRawSection"] = nullptr;
     value["readOnlyReason"] = nullptr;
@@ -244,15 +246,17 @@ bool ApplyRawWorkspaceDataToProjectDocument(
     StackBinaryFormat::ProjectDocument& document,
     RawProjectMode mode,
     bool linkedRaw) {
+    document.metadata.projectKind = StackBinaryFormat::kRawProjectKind;
+    document.pipelineData = downstreamGraph;
     nlohmann::json value = document.rawWorkspaceData.is_object()
         ? document.rawWorkspaceData
         : nlohmann::json::object();
     value["schema"] = "stack.rawWorkspace.project";
-    value["rawWorkspaceSchemaVersion"] = 1;
+    value["rawWorkspaceSchemaVersion"] = 2;
     value["rawWorkspaceMode"] = RawProjectModeToString(mode);
     value["rawSourceRef"] = BuildRawSourceRefJson(source, linkedRaw);
     value["rawRecipe"] = Stack::RawRecipe::SerializeRecipe(recipe);
-    value["downstreamGraph"] = downstreamGraph.is_null() ? nlohmann::json::object() : downstreamGraph;
+    value.erase("downstreamGraph");
     if (!value.contains("managedRawSection")) {
         value["managedRawSection"] = nullptr;
     }
@@ -432,6 +436,141 @@ bool DiscoverProjects(
                 "source-fingerprint");
         }
     }
+    return true;
+}
+
+bool DiscoverSourceSetProjects(
+    const ManagedLayout& layout,
+    std::vector<SourceRecord>& sources,
+    std::vector<SourceSetProjectCatalogEntry>& projects,
+    CancellationPredicate shouldCancel) {
+    projects.clear();
+    std::unordered_map<std::string, std::size_t> originPathToSource;
+    std::unordered_map<std::uint64_t, std::vector<std::size_t>> byteLengthToSources;
+    std::unordered_map<std::size_t, Stack::RawEvidence::SourceIdentity> sourceIdentities;
+    for (std::size_t index = 0; index < sources.size(); ++index) {
+        SourceRecord& source = sources[index];
+        source.sourceSetProjectMemberships.clear();
+        originPathToSource[LowerGenericPathKey(NormalizePath(source.absolutePath))] = index;
+        byteLengthToSources[static_cast<std::uint64_t>(source.fileSizeBytes)].push_back(index);
+    }
+
+    std::error_code iteratorError;
+    if (!std::filesystem::exists(layout.projectsDirectory, iteratorError) || iteratorError) {
+        return true;
+    }
+
+    const auto inspectProject = [&](const std::filesystem::path& candidate) {
+        Stack::Project::ProjectStoreOpenResult opened =
+            Stack::Project::OpenProjectStore(candidate);
+        if (!opened) {
+            SourceSetProjectCatalogEntry invalid;
+            invalid.absolutePath = NormalizePath(candidate);
+            invalid.relativePath = candidate.filename();
+            invalid.status = ProjectStatus::Invalid;
+            invalid.errorMessage = opened.message;
+            projects.push_back(std::move(invalid));
+            return;
+        }
+
+        SourceSetProjectCatalogEntry entry;
+        entry.projectId = opened.snapshot.projectId;
+        entry.projectName = opened.snapshot.projectName;
+        entry.absolutePath = NormalizePath(candidate);
+        std::error_code relativeError;
+        entry.relativePath = std::filesystem::relative(
+            entry.absolutePath, layout.projectsDirectory, relativeError);
+        if (relativeError) entry.relativePath = candidate.filename();
+        entry.storageKind = opened.store->StorageKind();
+        entry.status = opened.store->IsReadOnlyRecovery()
+            ? ProjectStatus::Conflict
+            : ProjectStatus::Existing;
+        entry.readOnlyRecovery = opened.store->IsReadOnlyRecovery();
+        entry.sourceSetCount = static_cast<std::uint64_t>(opened.snapshot.sourceSets.size());
+
+        std::unordered_map<std::string, std::vector<std::size_t>> assetSources;
+        for (const Stack::Project::EmbeddedAssetRecord& asset : opened.snapshot.embeddedAssets) {
+            if (!asset.informationalOriginPath.empty()) {
+                const auto source = originPathToSource.find(
+                    LowerGenericPathKey(NormalizePath(asset.informationalOriginPath)));
+                if (source != originPathToSource.end()) {
+                    assetSources[asset.assetId].push_back(source->second);
+                }
+            }
+            if (!assetSources[asset.assetId].empty()) continue;
+
+            const auto sameSize = byteLengthToSources.find(asset.byteLength);
+            if (sameSize == byteLengthToSources.end()) continue;
+            for (std::size_t sourceIndex : sameSize->second) {
+                auto identity = sourceIdentities.find(sourceIndex);
+                if (identity == sourceIdentities.end()) {
+                    identity = sourceIdentities.emplace(
+                        sourceIndex,
+                        Stack::RawEvidence::ComputeSourceIdentity(
+                            sources[sourceIndex].absolutePath)).first;
+                }
+                if (identity->second.valid && identity->second.sha256 == asset.sha256) {
+                    assetSources[asset.assetId].push_back(sourceIndex);
+                }
+            }
+        }
+
+        for (const Stack::Project::MultiFrameSourceSet& sourceSet : opened.snapshot.sourceSets) {
+            entry.totalFrameCount += static_cast<std::uint64_t>(sourceSet.frames.size());
+            if (sourceSet.inputFamily == Stack::Project::MultiFrameInputFamily::Raw) {
+                ++entry.rawSetCount;
+            } else {
+                ++entry.rasterSetCount;
+            }
+            std::unordered_set<std::size_t> attachedSources;
+            for (const Stack::Project::SourceSetFrame& frame : sourceSet.frames) {
+                const auto matches = assetSources.find(frame.assetId);
+                if (matches == assetSources.end()) continue;
+                for (std::size_t sourceIndex : matches->second) {
+                    if (!attachedSources.insert(sourceIndex).second) continue;
+                    SourceSetProjectMembership membership;
+                    membership.projectId = entry.projectId;
+                    membership.projectName = entry.projectName;
+                    membership.projectPath = entry.absolutePath;
+                    membership.sourceSetId = sourceSet.sourceSetId;
+                    membership.sourceSetName = sourceSet.name;
+                    sources[sourceIndex].sourceSetProjectMemberships.push_back(
+                        std::move(membership));
+                }
+            }
+        }
+        projects.push_back(std::move(entry));
+    };
+
+    std::filesystem::recursive_directory_iterator iterator(
+        layout.projectsDirectory,
+        std::filesystem::directory_options::skip_permission_denied,
+        iteratorError);
+    const std::filesystem::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(iteratorError)) {
+        if (shouldCancel && shouldCancel()) return false;
+        if (iteratorError) {
+            iteratorError.clear();
+            continue;
+        }
+        const std::filesystem::path candidate = iterator->path();
+        std::error_code kindError;
+        if (iterator->is_directory(kindError) && !kindError &&
+            ToLowerAscii(candidate.extension().string()) == ".stackbundle") {
+            iterator.disable_recursion_pending();
+            inspectProject(candidate);
+            continue;
+        }
+        kindError.clear();
+        if (iterator->is_regular_file(kindError) && !kindError &&
+            ToLowerAscii(candidate.extension().string()) == ".stack" &&
+            Stack::Project::IsPortableV3Project(candidate)) {
+            inspectProject(candidate);
+        }
+    }
+    std::sort(projects.begin(), projects.end(), [](const auto& lhs, const auto& rhs) {
+        return ToLowerAscii(lhs.projectName) < ToLowerAscii(rhs.projectName);
+    });
     return true;
 }
 

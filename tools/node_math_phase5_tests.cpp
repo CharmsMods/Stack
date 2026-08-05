@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -193,6 +194,44 @@ bool RunTests() {
     ok &= Check(HasIssue(recursiveIssues, "catalog.missingDependency") ||
         HasIssue(recursiveIssues, "catalog.recursion"),
         "recursive or hash-inconsistent dependency catalogs are rejected");
+
+    constexpr int kDeepDependencyCount = 2048;
+    std::vector<CompoundDefinition> deepCatalog;
+    deepCatalog.reserve(kDeepDependencyCount);
+    DefinitionReference downstreamReference;
+    for (int index = kDeepDependencyCount - 1; index >= 0; --index) {
+        char uuid[37];
+        std::snprintf(
+            uuid,
+            sizeof(uuid),
+            "%08x-0000-4000-8000-%012llx",
+            0x10000000 + index,
+            static_cast<unsigned long long>(index + 1));
+        CompoundDefinition definition = BuildDefinition(
+            "stack:test/deep-compound-" + std::to_string(index),
+            uuid);
+        if (!downstreamReference.id.empty()) {
+            definition.dependencies.push_back(downstreamReference);
+            RefreshCompoundDefinitionContentHash(definition);
+        }
+        downstreamReference = definition.identity;
+        deepCatalog.push_back(std::move(definition));
+    }
+    ok &= Check(
+        ValidateCompoundCatalog(deepCatalog).empty(),
+        "deep acyclic compound catalogs validate without recursive traversal");
+    const std::vector<DefinitionReference> deepClosure =
+        CollectCompoundDependencyClosure(
+            deepCatalog,
+            { downstreamReference },
+            &error);
+    ok &= Check(
+        deepClosure.size() ==
+            static_cast<std::size_t>(kDeepDependencyCount) &&
+            SameDefinitionReference(
+                deepClosure.back(),
+                downstreamReference),
+        "deep compound dependency closure uses an explicit postorder stack");
 
     return ok;
 }

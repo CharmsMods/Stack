@@ -58,6 +58,7 @@ void(APIENTRY* glTexStorage2D_)(GLenum, GLsizei, GLenum, GLsizei, GLsizei) = nul
 void(APIENTRY* glTexStorage3D_)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLsizei) = nullptr;
 void(APIENTRY* glTexSubImage3D_)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void*) = nullptr;
 void(APIENTRY* glBindImageTexture_)(GLuint, GLuint, GLint, GLboolean, GLint, GLenum, GLenum) = nullptr;
+void(APIENTRY* glGetIntegeri_v_)(GLenum, GLuint, GLint*) = nullptr;
 void(APIENTRY* glDrawBuffers_)(GLsizei, const GLenum*) = nullptr;
 
 void(APIENTRY* glDispatchCompute_)(GLuint, GLuint, GLuint) = nullptr;
@@ -133,6 +134,7 @@ bool LoadGLFunctions() {
     LOAD(glTexStorage3D_, "glTexStorage3D");
     LOAD(glTexSubImage3D_, "glTexSubImage3D");
     LOAD(glBindImageTexture_, "glBindImageTexture");
+    LOAD(glGetIntegeri_v_, "glGetIntegeri_v");
     LOAD(glDrawBuffers_, "glDrawBuffers");
 
     LOAD(glDispatchCompute_, "glDispatchCompute");

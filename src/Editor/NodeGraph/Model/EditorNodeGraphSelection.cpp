@@ -94,6 +94,45 @@ void Graph::SelectNodesInRect(
     m_SelectedNodeId = m_SelectedNodeIds.empty() ? -1 : m_SelectedNodeIds.back();
 }
 
+void Graph::SelectNodesInBounds(
+    Vec2 min,
+    Vec2 max,
+    const std::function<GraphRect(const Node&)>& boundsResolver,
+    bool additive) {
+    if (!additive) {
+        m_SelectedNodeIds.clear();
+    }
+    ClearSelectedLink();
+
+    const float left = std::min(min.x, max.x);
+    const float right = std::max(min.x, max.x);
+    const float top = std::min(min.y, max.y);
+    const float bottom = std::max(min.y, max.y);
+
+    for (const Node& node : m_Nodes) {
+        const GraphRect bounds = boundsResolver
+            ? boundsResolver(node)
+            : GraphRect {
+                node.position,
+                {
+                    node.position.x + DefaultSelectionSize(node).x,
+                    node.position.y + DefaultSelectionSize(node).y
+                }
+            };
+        const bool overlaps =
+            bounds.min.x <= right &&
+            bounds.max.x >= left &&
+            bounds.min.y <= bottom &&
+            bounds.max.y >= top;
+        if (overlaps && !IsNodeSelected(node.id)) {
+            m_SelectedNodeIds.push_back(node.id);
+        }
+    }
+
+    m_SelectedNodeId =
+        m_SelectedNodeIds.empty() ? -1 : m_SelectedNodeIds.back();
+}
+
 void Graph::SelectLink(int fromNodeId, int toNodeId) {
     const Node* from = FindNode(fromNodeId);
     const Node* to = FindNode(toNodeId);

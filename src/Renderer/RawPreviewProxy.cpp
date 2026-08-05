@@ -1,16 +1,29 @@
 #include "Renderer/RawPreviewProxy.h"
 
+#include "Raw/RawProcessingMath.h"
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
 int VisibleWidth(const Raw::RawMetadata& metadata) {
+    if (metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer) {
+        const Raw::RawSensorRect active = Raw::Processing::ResolveActiveArea(metadata);
+        return std::max(0, active.right - active.left);
+    }
     return metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
 }
 
 int VisibleHeight(const Raw::RawMetadata& metadata) {
+    if (metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer) {
+        const Raw::RawSensorRect active = Raw::Processing::ResolveActiveArea(metadata);
+        return std::max(0, active.bottom - active.top);
+    }
     return metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
 }
 
@@ -98,6 +111,42 @@ int NearestSourceCoordinateWithParity(
     return std::clamp(coordinate, 0, sourceSize - 1);
 }
 
+std::vector<std::pair<int, double>> CfaSublatticeContributions(
+    int destination,
+    int destinationSize,
+    int sourceSize) {
+    std::vector<std::pair<int, double>> contributions;
+    const int parity = destination & 1;
+    const int destinationCount = parity == 0 ? (destinationSize + 1) / 2 : destinationSize / 2;
+    const int sourceCount = parity == 0 ? (sourceSize + 1) / 2 : sourceSize / 2;
+    if (destinationCount <= 0 || sourceCount <= 0) {
+        return contributions;
+    }
+
+    const int destinationIndex = destination / 2;
+    const double sourceStart =
+        static_cast<double>(destinationIndex) * static_cast<double>(sourceCount) /
+        static_cast<double>(destinationCount);
+    const double sourceEnd =
+        static_cast<double>(destinationIndex + 1) * static_cast<double>(sourceCount) /
+        static_cast<double>(destinationCount);
+    const int first = std::max(0, static_cast<int>(std::floor(sourceStart)));
+    const int last = std::min(sourceCount, static_cast<int>(std::ceil(sourceEnd)));
+    for (int sourceIndex = first; sourceIndex < last; ++sourceIndex) {
+        const double overlap =
+            std::max(0.0, std::min(sourceEnd, static_cast<double>(sourceIndex + 1)) -
+                std::max(sourceStart, static_cast<double>(sourceIndex)));
+        if (overlap <= 0.0) {
+            continue;
+        }
+        const int coordinate = parity + sourceIndex * 2;
+        if (coordinate >= 0 && coordinate < sourceSize) {
+            contributions.emplace_back(coordinate, overlap);
+        }
+    }
+    return contributions;
+}
+
 void NormalizePreviewMetadata(
     const Raw::RawMetadata& sourceMetadata,
     int previewWidth,
@@ -112,6 +161,11 @@ void NormalizePreviewMetadata(
     previewMetadata.topMargin = 0;
     previewMetadata.dngGainMaps.clear();
     previewMetadata.dngGainMapCount = 0;
+    previewMetadata.dngBlackLevelDeltaH.clear();
+    previewMetadata.dngBlackLevelDeltaV.clear();
+    previewMetadata.dngActiveArea = { 0, 0, previewHeight, previewWidth };
+    previewMetadata.hasDngActiveArea = true;
+    previewMetadata.dngMaskedAreas.clear();
 }
 
 bool BuildMosaicPreviewRawData(
@@ -121,7 +175,16 @@ bool BuildMosaicPreviewRawData(
     if (source.metadata.pixelLayout != Raw::RawPixelLayout::MosaicBayer) {
         return false;
     }
-    if (source.metadata.dngGainMapCount > 0 || !source.metadata.dngGainMaps.empty()) {
+    if (source.metadata.dngGainMapCount > 0 ||
+        !source.metadata.dngGainMaps.empty() ||
+        !source.metadata.dngLinearizationTable.empty() ||
+        !source.metadata.dngBlackLevelDeltaH.empty() ||
+        !source.metadata.dngBlackLevelDeltaV.empty() ||
+        source.metadata.dngBlackLevelRepeatDim[0] > 2 ||
+        source.metadata.dngBlackLevelRepeatDim[1] > 2 ||
+        (source.metadata.dngCfaRepeatPatternDim[0] > 0 &&
+            (source.metadata.dngCfaRepeatPatternDim[0] != 2 ||
+                source.metadata.dngCfaRepeatPatternDim[1] != 2))) {
         return false;
     }
 
@@ -146,32 +209,74 @@ bool BuildMosaicPreviewRawData(
     }
 
     NormalizePreviewMetadata(source.metadata, previewWidth, previewHeight, preview.metadata);
+    if (preview.metadata.hasDngNoiseProfile &&
+        sourceVisibleWidth > 0 &&
+        sourceVisibleHeight > 0) {
+        // Each proxy CFA sample is an area-weighted average of same-plane
+        // sensor samples. For independent sensor noise, averaging N samples
+        // divides both S and O in variance = S*x + O by N. A single global
+        // coefficient cannot represent fractional edge footprints exactly,
+        // so use the image-area ratio as the deterministic proxy estimate.
+        const double varianceScale = std::clamp(
+            static_cast<double>(previewWidth) *
+                static_cast<double>(previewHeight) /
+                (static_cast<double>(sourceVisibleWidth) *
+                    static_cast<double>(sourceVisibleHeight)),
+            0.0,
+            1.0);
+        for (Raw::DngNoiseProfilePlane& plane :
+             preview.metadata.dngNoiseProfile) {
+            plane.shotScale *= varianceScale;
+            plane.readNoiseVariance *= varianceScale;
+        }
+    }
     preview.rawBuffer.assign(
         static_cast<std::size_t>(previewWidth) * static_cast<std::size_t>(previewHeight),
         0);
     preview.linearUInt16Buffer.clear();
     preview.linearFloatBuffer.clear();
 
-    const int cropX = std::max(0, source.metadata.leftMargin);
-    const int cropY = std::max(0, source.metadata.topMargin);
+    const Raw::RawSensorRect activeArea = Raw::Processing::ResolveActiveArea(source.metadata);
+    const int cropX = activeArea.left;
+    const int cropY = activeArea.top;
     for (int y = 0; y < previewHeight; ++y) {
-        const int sourceY = NearestSourceCoordinateWithParity(
-            y,
-            previewHeight,
-            sourceVisibleHeight,
-            y & 1);
-        const int rawY = std::clamp(cropY + sourceY, 0, sourceRawHeight - 1);
+        const std::vector<std::pair<int, double>> sourceRows =
+            CfaSublatticeContributions(y, previewHeight, sourceVisibleHeight);
         for (int x = 0; x < previewWidth; ++x) {
-            const int sourceX = NearestSourceCoordinateWithParity(
-                x,
-                previewWidth,
-                sourceVisibleWidth,
-                x & 1);
-            const int rawX = std::clamp(cropX + sourceX, 0, sourceRawWidth - 1);
+            const std::vector<std::pair<int, double>> sourceColumns =
+                CfaSublatticeContributions(x, previewWidth, sourceVisibleWidth);
+            double weightedSum = 0.0;
+            double weightSum = 0.0;
+            for (const auto& [sourceY, rowWeight] : sourceRows) {
+                const int rawY = std::clamp(cropY + sourceY, 0, sourceRawHeight - 1);
+                for (const auto& [sourceX, columnWeight] : sourceColumns) {
+                    const int rawX = std::clamp(cropX + sourceX, 0, sourceRawWidth - 1);
+                    const double weight = rowWeight * columnWeight;
+                    weightedSum +=
+                        static_cast<double>(source.rawBuffer[
+                            static_cast<std::size_t>(rawY) * static_cast<std::size_t>(sourceRawWidth) +
+                            static_cast<std::size_t>(rawX)]) *
+                        weight;
+                    weightSum += weight;
+                }
+            }
+            if (weightSum <= 0.0) {
+                const int sourceY = NearestSourceCoordinateWithParity(
+                    y, previewHeight, sourceVisibleHeight, y & 1);
+                const int sourceX = NearestSourceCoordinateWithParity(
+                    x, previewWidth, sourceVisibleWidth, x & 1);
+                weightedSum = source.rawBuffer[
+                    static_cast<std::size_t>(std::clamp(cropY + sourceY, 0, sourceRawHeight - 1)) *
+                        static_cast<std::size_t>(sourceRawWidth) +
+                    static_cast<std::size_t>(std::clamp(cropX + sourceX, 0, sourceRawWidth - 1))];
+                weightSum = 1.0;
+            }
             preview.rawBuffer[static_cast<std::size_t>(y) * static_cast<std::size_t>(previewWidth) +
                 static_cast<std::size_t>(x)] =
-                source.rawBuffer[static_cast<std::size_t>(rawY) * static_cast<std::size_t>(sourceRawWidth) +
-                    static_cast<std::size_t>(rawX)];
+                static_cast<std::uint16_t>(std::clamp(
+                    std::lround(weightedSum / weightSum),
+                    0l,
+                    static_cast<long>(std::numeric_limits<std::uint16_t>::max())));
         }
     }
     return true;
@@ -270,7 +375,9 @@ namespace Stack::Renderer::RawPreviewProxy {
 bool HasPixels(const Raw::RawImageData& rawData) {
     return !rawData.rawBuffer.empty() ||
         !rawData.linearUInt16Buffer.empty() ||
-        !rawData.linearFloatBuffer.empty();
+        !rawData.linearFloatBuffer.empty() ||
+        (rawData.normalizedMosaicBuffer &&
+         !rawData.normalizedMosaicBuffer->empty());
 }
 
 bool BuildPreviewRawData(const Raw::RawImageData& source, int previewMaxDimension, Raw::RawImageData& preview) {
@@ -305,12 +412,28 @@ std::string BuildCacheKey(
     key += std::to_string(metadata.leftMargin);
     key += ",";
     key += std::to_string(metadata.topMargin);
+    key += ":active:";
+    key += metadata.hasDngActiveArea ? "1:" : "0:";
+    key += std::to_string(metadata.dngActiveArea.top);
+    key += ",";
+    key += std::to_string(metadata.dngActiveArea.left);
+    key += ",";
+    key += std::to_string(metadata.dngActiveArea.bottom);
+    key += ",";
+    key += std::to_string(metadata.dngActiveArea.right);
     key += ":samples:";
     key += std::to_string(rawData.rawBuffer.size());
     key += ",";
     key += std::to_string(rawData.linearUInt16Buffer.size());
     key += ",";
     key += std::to_string(rawData.linearFloatBuffer.size());
+    key += ",";
+    key += std::to_string(
+        rawData.normalizedMosaicBuffer
+            ? rawData.normalizedMosaicBuffer->size()
+            : 0u);
+    key += ":normalized-hash:";
+    key += std::to_string(rawData.normalizedMosaicContentHash);
     return key;
 }
 
@@ -324,6 +447,10 @@ Summary Summarize(const Raw::RawImageData& rawData, bool usedProxy) {
     summary.rawSampleCount = rawData.rawBuffer.size();
     summary.linearUInt16SampleCount = rawData.linearUInt16Buffer.size();
     summary.linearFloatSampleCount = rawData.linearFloatBuffer.size();
+    summary.normalizedMosaicSampleCount =
+        rawData.normalizedMosaicBuffer
+            ? rawData.normalizedMosaicBuffer->size()
+            : 0u;
     summary.dngGainMapCount = rawData.metadata.dngGainMapCount;
     return summary;
 }

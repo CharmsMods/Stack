@@ -74,11 +74,17 @@ inline bool HasLut3D(const LutPayload& payload) {
     const std::size_t edge = payload.lut3D.size > 0
         ? static_cast<std::size_t>(payload.lut3D.size)
         : 0u;
-    const std::size_t expected = edge > 0
-        ? edge * edge * edge * 3u
-        : 0u;
-    return payload.lut3D.size > 0 &&
-        payload.lut3D.values.size() == expected;
+    if (edge == 0 ||
+        edge > std::numeric_limits<std::size_t>::max() / edge) {
+        return false;
+    }
+    const std::size_t square = edge * edge;
+    if (square > std::numeric_limits<std::size_t>::max() / edge) {
+        return false;
+    }
+    const std::size_t cube = square * edge;
+    return cube <= std::numeric_limits<std::size_t>::max() / 3u &&
+        payload.lut3D.values.size() == cube * 3u;
 }
 
 inline bool HasShaper1D(const LutPayload& payload) {

@@ -88,12 +88,28 @@ void TiltShiftBlurLayer::InitializeGL() {
     m_ShaderProgram = GLHelpers::CreateShaderProgram(s_TiltShiftBlurVert, s_TiltShiftBlurFrag);
 }
 
-void TiltShiftBlurLayer::EnsureIntermediateTarget(int width, int height) {
+bool TiltShiftBlurLayer::EnsureIntermediateTarget(int width, int height) {
     if (m_IntermediateTexture != 0 &&
         m_IntermediateFbo != 0 &&
         m_IntermediateWidth == width &&
         m_IntermediateHeight == height) {
-        return;
+        return true;
+    }
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    const unsigned int newTexture =
+        GLHelpers::CreateEmptyTexture(width, height);
+    const unsigned int newFbo = GLHelpers::CreateFBO(newTexture);
+    if (newTexture == 0 || newFbo == 0) {
+        if (newFbo != 0) {
+            glDeleteFramebuffers(1, &newFbo);
+        }
+        if (newTexture != 0) {
+            glDeleteTextures(1, &newTexture);
+        }
+        return false;
     }
 
     if (m_IntermediateFbo) {
@@ -105,14 +121,18 @@ void TiltShiftBlurLayer::EnsureIntermediateTarget(int width, int height) {
         m_IntermediateTexture = 0;
     }
 
-    m_IntermediateTexture = GLHelpers::CreateEmptyTexture(width, height);
-    m_IntermediateFbo = GLHelpers::CreateFBO(m_IntermediateTexture);
+    m_IntermediateTexture = newTexture;
+    m_IntermediateFbo = newFbo;
     m_IntermediateWidth = width;
     m_IntermediateHeight = height;
+    return true;
 }
 
 void TiltShiftBlurLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {
-    EnsureIntermediateTarget(width, height);
+    if (inputTexture == 0 || m_ShaderProgram == 0 ||
+        !EnsureIntermediateTarget(width, height)) {
+        return;
+    }
 
     GLint previousViewport[4] {};
     GLint targetFbo = 0;

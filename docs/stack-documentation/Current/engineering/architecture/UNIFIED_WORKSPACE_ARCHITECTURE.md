@@ -1,5 +1,10 @@
 # Unified Workspace Architecture
 
+> Channel and node-value semantics are owned by
+> `../../ideas/general/Node Math Re-Write/02-channel-based-design/accepted-product-direction.md`.
+> This document owns the workspace, canvas, and object architecture. It must not
+> independently redefine the channel type system.
+
 ## 1. Current State
 
 ### Editor Tab
@@ -56,24 +61,40 @@ To bridge the graph and the canvas, we introduce a specific node type: the **Can
 
 ## 5. Channel And Texture System
 
-The Node Graph will be expanded to support channel-level manipulation.
+The Node Graph supports channel-level manipulation while keeping logical meaning
+separate from GPU storage.
 
-- **Internal Representation:** Image sockets carry RGBA data. Mask/Value sockets carry single-channel (grayscale) data. When converting RGBA to Mask, luminance is used by default.
-- **Split/Combine:** `Channel Split` node takes RGBA and outputs 4 Mask sockets (R, G, B, A). `Channel Combine` takes 4 Mask sockets and outputs an RGBA Image.
-- **Channel Operations:**
-  - **Swap/Remap:** Route the R output into the B input of a Combine node.
-  - **Alpha Management:** `Remove Alpha`, `Premultiply`, `Unpremultiply`.
-  - **Masking:** Use the Alpha channel socket directly as a Mask input for a Mix node.
-- **UI:** Sockets should be color-coded (e.g., Yellow for RGBA, Gray for Mask/Grayscale, Green for Data/Channels).
+- **Logical values:** The user-facing families are Value, Channel, Image, Data,
+  and Specialized. A fixed RGBA texture may be used internally without implying
+  that every logical Image contains all four components.
+- **Split:** `Channel Split` takes an Image and exposes its present R, G, B, and
+  A components as Channels with contextual component roles.
+- **Combine:** `Image Combine` accepts R, G, B, and A Channels. It may produce a
+  partial Image; an absent component is not the same as a connected constant-zero
+  Channel.
+- **Explicit extraction:** A full Image does not automatically become a Mask or
+  Channel through luminance. Luminance, Alpha, and component extraction are
+  visible authored operations.
+- **Alpha:** Alpha is an ordinary editable Channel with an Alpha role. Individual
+  compositing and image-adjustment nodes declare how they use or preserve it.
+- **Presentation:** Pins and wires show the mathematical family first and add
+  compact role/component detail where useful. Exact presentation belongs to the
+  channel-first contract rather than this workspace architecture.
 
 ## 6. Mask System
 
-Masks are single-channel data streams used to control factors, opacities, and effect strengths.
+Mask is a semantic role for a Channel used to control application strength or
+selection coverage. It is not a separate mathematical container.
 
 - **Generators:** Procedural nodes like `Noise`, `Linear Gradient`, `Radial Gradient`, `Solid Value`.
 - **Image-to-Mask:** `Luminance Key`, `Hue Key`, `Alpha Extract`.
 - **Modifiers (Utility Nodes):** `Invert`, `Levels/Remap`, `Threshold`, `Blur/Feather`, `Transform/UV Map`.
-- **Usage:** A mask output connects to the `Mask In` socket of a Layer/Effect node, or the `Factor` socket of a Mix node. 
+- **Usage:** The normal pin may say `Mask`; detailed information says
+  `Channel · Mask`. A Mask blends between the original and processed results.
+  A spatial `Amount · Value/Channel` instead changes an operation parameter per
+  pixel; the two can share Channel storage without sharing formula semantics.
+- **Range:** Masks conventionally use 0–1, but the graph does not forcibly clamp
+  every Mask. Each receiving node declares its exact interpretation.
 - **Painting:** Later, a `Paint Mask` node can store internal bitmap data allowing direct brush strokes on the canvas, outputting the result as a mask stream.
 
 ## 7. Generated Textures
@@ -81,7 +102,9 @@ Masks are single-channel data streams used to control factors, opacities, and ef
 Generated textures are procedural sources that live inside the project file, avoiding external dependencies.
 
 - **Generators:** `Solid Color`, `Checker/Pattern`, `Noise`, `Scanlines`, `Film Grain`, `Light Leaks`, `Gradients`.
-- **Usage:** They output RGBA or Mask data. They can be plugged directly into a `Canvas Object Node` to be arranged spatially, or into a `Mix Node` to act as an overlay (e.g., blending film grain over a photo).
+- **Usage:** They output an Image or Channel with declared roles. They can be
+  plugged directly into a `Canvas Object Node` when an Image is available, or
+  into processing and mixing nodes according to their declared port contracts.
 - **Storage:** Generator configurations are serialized in the JSON graph state. No external files are saved.
 
 ## 8. Composite Panel Role

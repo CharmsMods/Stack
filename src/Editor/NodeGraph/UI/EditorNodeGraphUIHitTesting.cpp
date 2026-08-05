@@ -46,24 +46,29 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::OutputPinScreenPos(const EditorNodeGrap
 }
 
 EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
-    const float hitRadius = std::max(1.0f, NodePinRadius() + (8.0f * NodeContentScale()));
+    const float hitRadius = std::max(
+        8.0f,
+        NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
-        const EditorNodeGraph::Node* nodePtr = FindCachedNode(graph, nodeId);
-        if (!nodePtr) {
+        const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
+        if (!layout) {
             continue;
         }
-        const EditorNodeGraph::Node& node = *nodePtr;
-        for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
-            if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
+        if (layout->interactionRect.IsValid() &&
+            !layout->interactionRect.Contains(ToImVec2(screenPos))) {
+            continue;
+        }
+        for (const SocketAnchor& anchor : layout->socketAnchors) {
+            if (anchor.direction !=
+                EditorNodeGraph::SocketDirection::Input) {
                 continue;
             }
-            const EditorNodeGraph::Vec2 pin = InputPinScreenPos(node, socket.id);
-            const float dx = pin.x - screenPos.x;
-            const float dy = pin.y - screenPos.y;
+            const float dx = anchor.screenPos.x - screenPos.x;
+            const float dy = anchor.screenPos.y - screenPos.y;
             if ((dx * dx + dy * dy) <= hitRadiusSq) {
-                return SocketHit{ node.id, socket.id };
+                return SocketHit{ nodeId, anchor.socketId };
             }
         }
     }
@@ -71,24 +76,29 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
 }
 
 EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
-    const float hitRadius = std::max(1.0f, NodePinRadius() + (8.0f * NodeContentScale()));
+    const float hitRadius = std::max(
+        8.0f,
+        NodePinRadius() + (8.0f * NodeContentScale()));
     const float hitRadiusSq = hitRadius * hitRadius;
     const std::vector<int>& orderedNodes = GetNodeHitTestOrder(graph);
     for (const int nodeId : orderedNodes) {
-        const EditorNodeGraph::Node* nodePtr = FindCachedNode(graph, nodeId);
-        if (!nodePtr) {
+        const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
+        if (!layout) {
             continue;
         }
-        const EditorNodeGraph::Node& node = *nodePtr;
-        for (const EditorNodeGraph::SocketDefinition& socket : PresentedSockets(graph, node)) {
-            if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
+        if (layout->interactionRect.IsValid() &&
+            !layout->interactionRect.Contains(ToImVec2(screenPos))) {
+            continue;
+        }
+        for (const SocketAnchor& anchor : layout->socketAnchors) {
+            if (anchor.direction !=
+                EditorNodeGraph::SocketDirection::Output) {
                 continue;
             }
-            const EditorNodeGraph::Vec2 pin = OutputPinScreenPos(node, socket.id);
-            const float dx = pin.x - screenPos.x;
-            const float dy = pin.y - screenPos.y;
+            const float dx = anchor.screenPos.x - screenPos.x;
+            const float dy = anchor.screenPos.y - screenPos.y;
             if ((dx * dx + dy * dy) <= hitRadiusSq) {
-                return SocketHit{ node.id, socket.id };
+                return SocketHit{ nodeId, anchor.socketId };
             }
         }
     }
@@ -120,12 +130,24 @@ int EditorNodeGraphUI::FindNodeAt(const EditorNodeGraph::Graph& graph, const Edi
 }
 
 EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos) {
+    const int frame =
+        ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
+    if (frame >= 0 &&
+        m_LinkHitTestFrame == frame &&
+        m_LinkHitTestGraph == &graph &&
+        m_LinkHitTestGraphRevision == graph.GetStructureRevision() &&
+        m_LinkHitTestScreenPos.x == screenPos.x &&
+        m_LinkHitTestScreenPos.y == screenPos.y) {
+        return m_LinkHitTestResult;
+    }
+
     const auto& links = graph.GetLinks();
     for (auto it = links.rbegin(); it != links.rend(); ++it) {
         const EditorNodeGraph::Link& link = *it;
         const auto labelRect = m_LinkLabelHitRects.find(LinkAnimationKey(link));
         if (labelRect != m_LinkLabelHitRects.end() &&
             labelRect->second.Contains(ToImVec2(screenPos))) {
+            CacheLinkHitTest(graph, screenPos, link);
             return link;
         }
         const EditorNodeGraph::Node* from = FindCachedNode(graph, link.fromNodeId);
@@ -142,10 +164,24 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
         toPos.y += laneOffset;
 
         if (IsPointNearLink(screenPos, fromPos, toPos)) {
+            CacheLinkHitTest(graph, screenPos, link);
             return link;
         }
     }
+    CacheLinkHitTest(graph, screenPos, {});
     return {};
+}
+
+void EditorNodeGraphUI::CacheLinkHitTest(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Vec2& screenPos,
+    const EditorNodeGraph::Link& link) {
+    m_LinkHitTestFrame =
+        ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
+    m_LinkHitTestGraph = &graph;
+    m_LinkHitTestGraphRevision = graph.GetStructureRevision();
+    m_LinkHitTestScreenPos = screenPos;
+    m_LinkHitTestResult = link;
 }
 
 bool EditorNodeGraphUI::IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const {

@@ -1,7 +1,6 @@
 #include "Editor/EditorModule.h"
 
 #include "Editor/Layers/ToneLayers.h"
-#include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 
 #include <algorithm>
 #include <array>
@@ -56,10 +55,6 @@ void EditorModule::AddCustomMaskNodeAt(EditorNodeGraph::Vec2 graphPosition) {
         payload.width = std::clamp(m_Pipeline.GetCanvasWidth(), 1, 4096);
         payload.height = std::clamp(m_Pipeline.GetCanvasHeight(), 1, 4096);
     }
-    payload.rasterLayer.assign(
-        static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height),
-        0.0f);
-
     if (EditorNodeGraph::Node* node = m_NodeGraph.AddCustomMaskNode(std::move(payload), graphPosition)) {
         SelectGraphNode(node->id);
         MarkRenderDirty(node->id);
@@ -95,10 +90,23 @@ bool EditorModule::CreateToneCurveSelectionMask(
         return false;
     }
 
+    const bool ownerIsRawDevelop =
+        toneCurveNode->kind == EditorNodeGraph::NodeKind::RawDevelop;
+    const EditorNodeGraph::Vec2 toneCurvePosition = toneCurveNode->position;
     int maskOwnerNodeId = toneCurveNodeId;
     int sourceImageNodeId = -1;
     std::string sourceImageSocketId;
-    const EditorNodeGraph::Link* maskInput = nullptr;
+    EditorNodeGraph::Link maskInput;
+    bool hasMaskInput = false;
+    const auto captureMaskInput = [&]() {
+        if (const EditorNodeGraph::Link* input =
+                m_NodeGraph.FindInputLink(
+                    toneCurveNodeId,
+                    EditorNodeGraph::kMaskInputSocketId)) {
+            maskInput = *input;
+            hasMaskInput = true;
+        }
+    };
     if (toneCurveNode->kind == EditorNodeGraph::NodeKind::Layer &&
         toneCurveNode->layerType == LayerType::ToneCurve) {
         const EditorNodeGraph::Link* imageInput = m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kImageInputSocketId);
@@ -111,8 +119,8 @@ bool EditorModule::CreateToneCurveSelectionMask(
         }
         sourceImageNodeId = imageInput->fromNodeId;
         sourceImageSocketId = imageInput->fromSocketId;
-        maskInput = m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kMaskInputSocketId);
-    } else if (toneCurveNode->kind == EditorNodeGraph::NodeKind::RawDevelop) {
+        captureMaskInput();
+    } else if (ownerIsRawDevelop) {
         if (!toneCurveNode->rawDevelop.integratedToneEnabled) {
             QueueUiNotification(
                 UiNotificationSeverity::Error,
@@ -129,80 +137,114 @@ bool EditorModule::CreateToneCurveSelectionMask(
         }
         sourceImageNodeId = toneCurveNodeId;
         sourceImageSocketId = EditorNodeGraph::kPreFinishImageOutputSocketId;
-        maskInput = m_NodeGraph.FindInputLink(toneCurveNodeId, EditorNodeGraph::kMaskInputSocketId);
+        captureMaskInput();
     } else {
         return false;
     }
 
-    EditorNodeGraph::Node* maskNode = nullptr;
-    EditorNodeGraph::Node* combineNode = nullptr;
-    const bool hadExistingMaskInput = maskInput != nullptr;
+    int maskNodeId = -1;
+    int combineNodeId = -1;
+    const bool hadExistingMaskInput = hasMaskInput;
     const bool startNewScopedMask = action == ToneCurveScopeMaskAction::NewMask;
     const EditorNodeGraph::MaskCombineMode requestedCombineMode = ToGraphMaskCombineMode(action);
     bool reusedExistingToneScopeMask = false;
-    if (maskInput) {
-        combineNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
-        if (combineNode && combineNode->kind == EditorNodeGraph::NodeKind::MaskCombine) {
-            const EditorNodeGraph::Link* inputA = m_NodeGraph.FindInputLink(combineNode->id, EditorNodeGraph::kMaskCombineInputASocketId);
-            const EditorNodeGraph::Link* inputB = m_NodeGraph.FindInputLink(combineNode->id, EditorNodeGraph::kMaskCombineInputBSocketId);
+    if (hasMaskInput) {
+        const EditorNodeGraph::Node* combineNode =
+            m_NodeGraph.FindNode(maskInput.fromNodeId);
+        if (combineNode &&
+            combineNode->kind == EditorNodeGraph::NodeKind::MaskCombine) {
+            combineNodeId = combineNode->id;
+            const EditorNodeGraph::Link* inputA =
+                m_NodeGraph.FindInputLink(
+                    combineNodeId,
+                    EditorNodeGraph::kMaskCombineInputASocketId);
+            const EditorNodeGraph::Link* inputB =
+                m_NodeGraph.FindInputLink(
+                    combineNodeId,
+                    EditorNodeGraph::kMaskCombineInputBSocketId);
             for (const EditorNodeGraph::Link* input : { inputA, inputB }) {
                 if (!input) {
                     continue;
                 }
-                EditorNodeGraph::Node* candidate = m_NodeGraph.FindNode(input->fromNodeId);
+                const EditorNodeGraph::Node* candidate =
+                    m_NodeGraph.FindNode(input->fromNodeId);
                 if (candidate &&
                     candidate->kind == EditorNodeGraph::NodeKind::ImageToMask &&
                     candidate->title == "Tone Scope Mask") {
-                    maskNode = candidate;
+                    maskNodeId = candidate->id;
                     reusedExistingToneScopeMask = true;
                     break;
                 }
             }
         } else {
-            maskNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
-            if (!maskNode || maskNode->kind != EditorNodeGraph::NodeKind::ImageToMask || maskNode->title != "Tone Scope Mask") {
-                maskNode = nullptr;
-            } else {
+            const EditorNodeGraph::Node* candidate =
+                m_NodeGraph.FindNode(maskInput.fromNodeId);
+            if (candidate &&
+                candidate->kind == EditorNodeGraph::NodeKind::ImageToMask &&
+                candidate->title == "Tone Scope Mask") {
+                maskNodeId = candidate->id;
                 reusedExistingToneScopeMask = true;
+            } else {
+                maskNodeId = -1;
             }
         }
     } else {
         const EditorNodeGraph::Vec2 position{
-            toneCurveNode->position.x - 250.0f,
-            toneCurveNode->position.y + 135.0f
+            toneCurvePosition.x - 250.0f,
+            toneCurvePosition.y + 135.0f
         };
-        maskNode = m_NodeGraph.AddImageToMaskNode(EditorNodeGraph::ImageToMaskKind::Luminance, position);
-        if (!maskNode) {
+        const EditorNodeGraph::Node* createdMask =
+            m_NodeGraph.AddImageToMaskNode(
+                EditorNodeGraph::ImageToMaskKind::Luminance,
+                position);
+        if (!createdMask) {
             return false;
         }
+        maskNodeId = createdMask->id;
     }
 
-    if (!maskNode) {
+    if (maskNodeId <= 0) {
         const EditorNodeGraph::Vec2 position{
-            toneCurveNode->position.x - 250.0f,
-            toneCurveNode->position.y + 135.0f
+            toneCurvePosition.x - 250.0f,
+            toneCurvePosition.y + 135.0f
         };
-        maskNode = m_NodeGraph.AddImageToMaskNode(EditorNodeGraph::ImageToMaskKind::Luminance, position);
-        if (!maskNode) {
+        const EditorNodeGraph::Node* createdMask =
+            m_NodeGraph.AddImageToMaskNode(
+                EditorNodeGraph::ImageToMaskKind::Luminance,
+                position);
+        if (!createdMask) {
             return false;
         }
-        maskNode->title = "Tone Scope Mask";
-    } else if (maskNode->title.empty()) {
-        maskNode->title = "Tone Scope Mask";
+        maskNodeId = createdMask->id;
+    }
+    if (EditorNodeGraph::Node* maskNode = m_NodeGraph.FindNode(maskNodeId)) {
+        if (maskNode->title.empty()) {
+            maskNode->title = "Tone Scope Mask";
+        }
+    } else {
+        return false;
     }
 
-    const EditorNodeGraph::Link* maskImageInput = m_NodeGraph.FindInputLink(maskNode->id, EditorNodeGraph::kImageInputSocketId);
+    const EditorNodeGraph::Link* maskImageInput =
+        m_NodeGraph.FindInputLink(
+            maskNodeId,
+            EditorNodeGraph::kImageInputSocketId);
     if (!maskImageInput ||
         maskImageInput->fromNodeId != sourceImageNodeId ||
         maskImageInput->fromSocketId != sourceImageSocketId) {
         if (maskImageInput) {
-            RemoveGraphLink(maskImageInput->fromNodeId, maskImageInput->fromSocketId, maskNode->id, EditorNodeGraph::kImageInputSocketId);
+            const EditorNodeGraph::Link staleInput = *maskImageInput;
+            RemoveGraphLink(
+                staleInput.fromNodeId,
+                staleInput.fromSocketId,
+                maskNodeId,
+                EditorNodeGraph::kImageInputSocketId);
         }
         std::string errorMessage;
         if (!ConnectGraphSockets(
                 sourceImageNodeId,
                 sourceImageSocketId,
-                maskNode->id,
+                maskNodeId,
                 EditorNodeGraph::kImageInputSocketId,
                 &errorMessage)) {
             QueueUiNotification(
@@ -213,16 +255,20 @@ bool EditorModule::CreateToneCurveSelectionMask(
         }
     }
 
-    if (startNewScopedMask && maskInput) {
-        RemoveGraphLink(maskInput->fromNodeId, maskInput->fromSocketId, maskOwnerNodeId, EditorNodeGraph::kMaskInputSocketId);
-        combineNode = nullptr;
-        maskInput = nullptr;
+    if (startNewScopedMask && hasMaskInput) {
+        RemoveGraphLink(
+            maskInput.fromNodeId,
+            maskInput.fromSocketId,
+            maskOwnerNodeId,
+            EditorNodeGraph::kMaskInputSocketId);
+        combineNodeId = -1;
+        hasMaskInput = false;
     }
 
-    if (!maskInput) {
+    if (!hasMaskInput) {
         std::string errorMessage;
         if (!ConnectGraphSockets(
-                maskNode->id,
+                maskNodeId,
                 EditorNodeGraph::kMaskOutputSocketId,
                 maskOwnerNodeId,
                 EditorNodeGraph::kMaskInputSocketId,
@@ -233,35 +279,46 @@ bool EditorModule::CreateToneCurveSelectionMask(
                 "tone-curve-mask-create");
             return false;
         }
-    } else if (!combineNode && maskInput->fromNodeId != maskNode->id) {
-        const EditorNodeGraph::Node* existingMaskNode = m_NodeGraph.FindNode(maskInput->fromNodeId);
+    } else if (combineNodeId <= 0 && maskInput.fromNodeId != maskNodeId) {
+        const int existingMaskNodeId = maskInput.fromNodeId;
         const EditorNodeGraph::Vec2 combinePosition{
-            toneCurveNode->position.x - 125.0f,
-            toneCurveNode->position.y + 140.0f
+            toneCurvePosition.x - 125.0f,
+            toneCurvePosition.y + 140.0f
         };
-        combineNode = m_NodeGraph.AddMaskCombineNode(requestedCombineMode, combinePosition);
-        if (!combineNode) {
+        const EditorNodeGraph::Node* createdCombine =
+            m_NodeGraph.AddMaskCombineNode(
+                requestedCombineMode,
+                combinePosition);
+        if (!createdCombine) {
             return false;
         }
-        combineNode->title = "Tone Scope Combine";
+        combineNodeId = createdCombine->id;
+        if (EditorNodeGraph::Node* combineNode =
+                m_NodeGraph.FindNode(combineNodeId)) {
+            combineNode->title = "Tone Scope Combine";
+        }
 
-        RemoveGraphLink(maskInput->fromNodeId, maskInput->fromSocketId, maskOwnerNodeId, EditorNodeGraph::kMaskInputSocketId);
+        RemoveGraphLink(
+            maskInput.fromNodeId,
+            maskInput.fromSocketId,
+            maskOwnerNodeId,
+            EditorNodeGraph::kMaskInputSocketId);
 
         std::string errorMessage;
         if (!ConnectGraphSockets(
-                existingMaskNode ? existingMaskNode->id : maskInput->fromNodeId,
-                maskInput->fromSocketId,
-                combineNode->id,
+                existingMaskNodeId,
+                maskInput.fromSocketId,
+                combineNodeId,
                 EditorNodeGraph::kMaskCombineInputASocketId,
                 &errorMessage) ||
             !ConnectGraphSockets(
-                maskNode->id,
+                maskNodeId,
                 EditorNodeGraph::kMaskOutputSocketId,
-                combineNode->id,
+                combineNodeId,
                 EditorNodeGraph::kMaskCombineInputBSocketId,
                 &errorMessage) ||
             !ConnectGraphSockets(
-                combineNode->id,
+                combineNodeId,
                 EditorNodeGraph::kMaskOutputSocketId,
                 maskOwnerNodeId,
                 EditorNodeGraph::kMaskInputSocketId,
@@ -272,38 +329,63 @@ bool EditorModule::CreateToneCurveSelectionMask(
                 "tone-curve-mask-create");
             return false;
         }
-    } else if (combineNode &&
-               (m_NodeGraph.HasLink(maskNode->id, EditorNodeGraph::kMaskOutputSocketId, combineNode->id, EditorNodeGraph::kMaskCombineInputASocketId) ||
-                m_NodeGraph.HasLink(maskNode->id, EditorNodeGraph::kMaskOutputSocketId, combineNode->id, EditorNodeGraph::kMaskCombineInputBSocketId))) {
-        combineNode->maskCombineMode = requestedCombineMode;
-    } else if (maskInput && maskInput->fromNodeId != maskNode->id) {
+    } else if (
+        combineNodeId > 0 &&
+        (m_NodeGraph.HasLink(
+             maskNodeId,
+             EditorNodeGraph::kMaskOutputSocketId,
+             combineNodeId,
+             EditorNodeGraph::kMaskCombineInputASocketId) ||
+         m_NodeGraph.HasLink(
+             maskNodeId,
+             EditorNodeGraph::kMaskOutputSocketId,
+             combineNodeId,
+             EditorNodeGraph::kMaskCombineInputBSocketId))) {
+        if (EditorNodeGraph::Node* combineNode =
+                m_NodeGraph.FindNode(combineNodeId)) {
+            m_NodeGraph.SetMaskCombineMode(
+                combineNode->id,
+                requestedCombineMode);
+        }
+    } else if (hasMaskInput && maskInput.fromNodeId != maskNodeId) {
         const EditorNodeGraph::Vec2 combinePosition{
-            toneCurveNode->position.x - 125.0f,
-            toneCurveNode->position.y + 140.0f
+            toneCurvePosition.x - 125.0f,
+            toneCurvePosition.y + 140.0f
         };
-        EditorNodeGraph::Node* nestedCombine = m_NodeGraph.AddMaskCombineNode(requestedCombineMode, combinePosition);
+        const EditorNodeGraph::Node* nestedCombine =
+            m_NodeGraph.AddMaskCombineNode(
+                requestedCombineMode,
+                combinePosition);
         if (!nestedCombine) {
             return false;
         }
-        nestedCombine->title = "Tone Scope Combine";
+        const int nestedCombineId = nestedCombine->id;
+        if (EditorNodeGraph::Node* combineNode =
+                m_NodeGraph.FindNode(nestedCombineId)) {
+            combineNode->title = "Tone Scope Combine";
+        }
 
-        RemoveGraphLink(maskInput->fromNodeId, maskInput->fromSocketId, maskOwnerNodeId, EditorNodeGraph::kMaskInputSocketId);
+        RemoveGraphLink(
+            maskInput.fromNodeId,
+            maskInput.fromSocketId,
+            maskOwnerNodeId,
+            EditorNodeGraph::kMaskInputSocketId);
 
         std::string errorMessage;
         if (!ConnectGraphSockets(
-                maskInput->fromNodeId,
-                maskInput->fromSocketId,
-                nestedCombine->id,
+                maskInput.fromNodeId,
+                maskInput.fromSocketId,
+                nestedCombineId,
                 EditorNodeGraph::kMaskCombineInputASocketId,
                 &errorMessage) ||
             !ConnectGraphSockets(
-                maskNode->id,
+                maskNodeId,
                 EditorNodeGraph::kMaskOutputSocketId,
-                nestedCombine->id,
+                nestedCombineId,
                 EditorNodeGraph::kMaskCombineInputBSocketId,
                 &errorMessage) ||
             !ConnectGraphSockets(
-                nestedCombine->id,
+                nestedCombineId,
                 EditorNodeGraph::kMaskOutputSocketId,
                 maskOwnerNodeId,
                 EditorNodeGraph::kMaskInputSocketId,
@@ -314,9 +396,13 @@ bool EditorModule::CreateToneCurveSelectionMask(
                 "tone-curve-mask-create");
             return false;
         }
-        combineNode = nestedCombine;
+        combineNodeId = nestedCombineId;
     }
 
+    EditorNodeGraph::Node* maskNode = m_NodeGraph.FindNode(maskNodeId);
+    if (!maskNode) {
+        return false;
+    }
     const float clampedLow = std::clamp(std::min(low, high), 0.0f, 1.0f);
     const float clampedHigh = std::clamp(std::max(low, high), 0.0f, 1.0f);
     const float clampedSampleRgb[3] = {
@@ -326,8 +412,9 @@ bool EditorModule::CreateToneCurveSelectionMask(
     };
     const float clampedSampleLuma = std::clamp(sampleLuma, 0.0f, 16.0f);
 
-    maskNode->imageToMaskKind = EditorNodeGraph::ImageToMaskKind::SampledRange;
-    EditorNodeGraphDefinitions::ApplyNodeMetadata(*maskNode);
+    m_NodeGraph.SetImageToMaskKind(
+        maskNode->id,
+        EditorNodeGraph::ImageToMaskKind::SampledRange);
     maskNode->title = "Tone Scope Mask";
     maskNode->imageToMaskSettings.low = clampedLow;
     maskNode->imageToMaskSettings.high = std::max(clampedLow + 0.0001f, clampedHigh);
@@ -410,9 +497,9 @@ bool EditorModule::CreateToneCurveSelectionMask(
         resetPrimarySample(imageToMaskSettings);
     }
     SelectGraphNode(
-        toneCurveNode->kind == EditorNodeGraph::NodeKind::RawDevelop
+        ownerIsRawDevelop
             ? maskOwnerNodeId
-            : maskNode->id);
+            : maskNodeId);
     MarkRenderDirty(maskOwnerNodeId);
     if (sampleCapacityReached) {
         QueueUiNotification(

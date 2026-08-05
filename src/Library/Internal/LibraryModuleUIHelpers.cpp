@@ -303,14 +303,16 @@ bool AssetMatchesFilter(const AssetEntry& asset, const char* filter, const std::
     return haystack.find(needle) != std::string::npos;
 }
 
-ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight) {
-    const float standardWidth = 220.0f;
+ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight, float viewScale) {
+    const float clampedScale = std::clamp(viewScale, 0.55f, 1.80f);
+    const float standardWidth = 220.0f * clampedScale;
     const float aspect = (sourceHeight > 0.0f) ? (sourceWidth / sourceHeight) : 1.0f;
     ImVec2 thumbSize(standardWidth, standardWidth / std::max(aspect, 0.1f));
 
-    if (thumbSize.y > 300.0f) {
-        thumbSize.y = 300.0f;
-        thumbSize.x = 300.0f * aspect;
+    const float maxHeight = 300.0f * clampedScale;
+    if (thumbSize.y > maxHeight) {
+        thumbSize.y = maxHeight;
+        thumbSize.x = maxHeight * aspect;
     }
 
     return thumbSize;

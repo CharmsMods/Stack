@@ -2,12 +2,15 @@
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "ThirdParty/stb_image_write.h"
+#include "Utils/PngEncodingUtils.h"
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <new>
+#include <stdexcept>
 
 namespace Stack::EditorGraphCapture {
 namespace {
@@ -18,16 +21,37 @@ int RoundedPositiveDimension(double value) {
     if (!std::isfinite(value)) {
         return 1;
     }
-    return std::max(1, static_cast<int>(std::llround(value)));
+    if (value <= 1.0) {
+        return 1;
+    }
+    if (value >= static_cast<double>(std::numeric_limits<int>::max())) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(std::llround(value));
 }
 
+struct WriteContext {
+    std::vector<unsigned char>* bytes = nullptr;
+    bool failed = false;
+};
+
 void WriteToVector(void* context, void* data, int size) {
-    auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-    if (!bytes || !data || size <= 0) {
+    auto* writeContext = static_cast<WriteContext*>(context);
+    if (!writeContext || !writeContext->bytes ||
+        writeContext->failed || !data || size <= 0) {
         return;
     }
     const auto* begin = static_cast<const unsigned char*>(data);
-    bytes->insert(bytes->end(), begin, begin + size);
+    try {
+        writeContext->bytes->insert(
+            writeContext->bytes->end(),
+            begin,
+            begin + size);
+    } catch (const std::bad_alloc&) {
+        writeContext->failed = true;
+    } catch (const std::length_error&) {
+        writeContext->failed = true;
+    }
 }
 
 bool HasExpectedRgbaSize(const std::vector<unsigned char>& rgba, int width, int height) {
@@ -164,14 +188,9 @@ bool NormalizeReadbackRgba(
         return false;
     }
 
-    const std::size_t rowBytes = static_cast<std::size_t>(width) * 4u;
-    std::vector<unsigned char> scratch(rowBytes);
-    for (int y = 0; y < height / 2; ++y) {
-        unsigned char* top = pixels.data() + static_cast<std::size_t>(y) * rowBytes;
-        unsigned char* bottom = pixels.data() + static_cast<std::size_t>(height - 1 - y) * rowBytes;
-        std::copy(top, top + rowBytes, scratch.begin());
-        std::copy(bottom, bottom + rowBytes, top);
-        std::copy(scratch.begin(), scratch.end(), bottom);
+    if (!Stack::PixelBuffer::FlipInterleavedRowsInPlace(
+            pixels, width, height, 4)) {
+        return false;
     }
 
     if (unpremultiplyAlpha) {
@@ -202,14 +221,9 @@ bool EncodePng(
     if (!HasExpectedRgbaSize(rgba, width, height)) {
         return false;
     }
-    return stbi_write_png_to_func(
-        WriteToVector,
-        &encoded,
-        width,
-        height,
-        4,
-        rgba.data(),
-        width * 4) != 0 && !encoded.empty();
+    encoded = Stack::PngEncoding::EncodeInterleaved(
+        rgba, width, height, 4);
+    return !encoded.empty();
 }
 
 bool EncodeBmp(
@@ -221,13 +235,19 @@ bool EncodeBmp(
     if (!HasExpectedRgbaSize(rgba, width, height)) {
         return false;
     }
-    return stbi_write_bmp_to_func(
+    WriteContext context { &encoded, false };
+    const int result = stbi_write_bmp_to_func(
         WriteToVector,
-        &encoded,
+        &context,
         width,
         height,
         4,
-        rgba.data()) != 0 && !encoded.empty();
+        rgba.data());
+    if (result == 0 || context.failed) {
+        encoded.clear();
+        return false;
+    }
+    return !encoded.empty();
 }
 
 bool WriteEncodedFile(

@@ -6,11 +6,17 @@
 #include "Editor/Layers/ToneLayers.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 #include "Renderer/RawPreviewProxy.h"
+#include "Renderer/RawDevelopmentStageCachePolicy.h"
+#include "Renderer/ScopedGLObjects.h"
+#include "Restormer/RestormerClient.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -124,6 +130,33 @@ float SafeHeadroomEv(float value, float limit = 1.0f) {
     return std::clamp(std::log2(safeLimit / safeValue), -8.0f, 12.0f);
 }
 
+int RawSafetySampleStep(int extent) {
+    constexpr int kMaximumSamplesPerAxis = 512;
+    if (extent <= 1) {
+        return 1;
+    }
+    return (extent - 1) / kMaximumSamplesPerAxis + 1;
+}
+
+float RawSafetyEstimatedCoverage(
+    int sampledPixels,
+    int stepX,
+    int stepY,
+    int width,
+    int height) {
+    const double expectedPixels = std::max(
+        1.0,
+        static_cast<double>(width) * static_cast<double>(height));
+    const double representedPixels =
+        static_cast<double>(sampledPixels) *
+        static_cast<double>(stepX) *
+        static_cast<double>(stepY);
+    return static_cast<float>(std::clamp(
+        representedPixels / expectedPixels,
+        0.0,
+        1.0));
+}
+
 std::array<float, 3> ResolveRawSafetyWhiteBalance(
     const Raw::RawMetadata& metadata,
     const Raw::RawDevelopSettings& settings) {
@@ -206,15 +239,36 @@ Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats BuildRawSafetyStats(
         return safeNormalized >= 0.999f;
     };
 
+    std::size_t requiredMosaicElements = 0;
+    const bool hasNormalizedMosaic =
+        rawData.normalizedMosaicBuffer &&
+        !rawData.normalizedMosaicBuffer->empty();
+    const bool hasCompleteMosaic =
+        Stack::PixelBuffer::TryComputePixelElementCount(
+            metadata.rawWidth,
+            metadata.rawHeight,
+            1,
+            requiredMosaicElements) &&
+        (rawData.rawBuffer.size() >= requiredMosaicElements ||
+         (hasNormalizedMosaic &&
+          rawData.normalizedMosaicBuffer->size() >=
+              requiredMosaicElements));
     if (metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer &&
         metadata.rawWidth > 0 &&
         metadata.rawHeight > 0 &&
-        rawData.rawBuffer.size() >=
-            static_cast<std::size_t>(metadata.rawWidth) * static_cast<std::size_t>(metadata.rawHeight)) {
+        hasCompleteMosaic) {
         int left = std::max(0, metadata.leftMargin);
         int top = std::max(0, metadata.topMargin);
-        int right = std::min(metadata.rawWidth, left + std::max(1, metadata.visibleWidth));
-        int bottom = std::min(metadata.rawHeight, top + std::max(1, metadata.visibleHeight));
+        const std::int64_t requestedRight =
+            static_cast<std::int64_t>(left) +
+            static_cast<std::int64_t>(std::max(1, metadata.visibleWidth));
+        const std::int64_t requestedBottom =
+            static_cast<std::int64_t>(top) +
+            static_cast<std::int64_t>(std::max(1, metadata.visibleHeight));
+        int right = static_cast<int>(std::min<std::int64_t>(
+            metadata.rawWidth, requestedRight));
+        int bottom = static_cast<int>(std::min<std::int64_t>(
+            metadata.rawHeight, requestedBottom));
         if (right <= left || bottom <= top) {
             left = 0;
             top = 0;
@@ -223,53 +277,64 @@ Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats BuildRawSafetyStats(
         }
         const int width = std::max(1, right - left);
         const int height = std::max(1, bottom - top);
-        const int stepX = std::max(1, (width + 511) / 512);
-        const int stepY = std::max(1, (height + 511) / 512);
-        for (int y = top; y < bottom; y += stepY) {
-            for (int x = left; x < right; x += stepX) {
-                const int plane = RawPlaneAt(metadata.cfaPattern, x - left, y - top);
+        const int stepX = RawSafetySampleStep(width);
+        const int stepY = RawSafetySampleStep(height);
+        for (std::int64_t y = top; y < bottom; y += stepY) {
+            for (std::int64_t x = left; x < right; x += stepX) {
+                const int sampleX = static_cast<int>(x);
+                const int sampleY = static_cast<int>(y);
+                const int plane = RawPlaneAt(
+                    metadata.cfaPattern, sampleX - left, sampleY - top);
                 if (plane < 0) {
                     continue;
                 }
                 const int channel = RawSafetyChannelFromPlane(plane);
                 const float black = RawSafetyBlackForPlane(metadata, plane);
-                const float value = static_cast<float>(
-                    rawData.rawBuffer[static_cast<std::size_t>(y) *
+                const std::size_t sampleIndex =
+                    static_cast<std::size_t>(sampleY) *
                         static_cast<std::size_t>(metadata.rawWidth) +
-                        static_cast<std::size_t>(x)]);
+                    static_cast<std::size_t>(sampleX);
+                const float value = hasNormalizedMosaic
+                    ? (*rawData.normalizedMosaicBuffer)[sampleIndex]
+                    : static_cast<float>(rawData.rawBuffer[sampleIndex]);
                 const bool clipped = recordChannel(
                     channel,
-                    NormalizeRawSafetyValue(value, black, metadataWhite));
+                    hasNormalizedMosaic
+                        ? value
+                        : NormalizeRawSafetyValue(
+                              value, black, metadataWhite));
                 ++sampledPixels;
                 if (clipped) {
                     ++singleClipPixels;
                 }
             }
         }
-        const float expectedActive = static_cast<float>(std::max(1, width * height));
-        stats.activeValidFraction = std::clamp(
-            static_cast<float>(sampledPixels * stepX * stepY) / expectedActive,
-            0.0f,
-            1.0f);
-        stats.statusMessage =
-            "Partial raw safety ledger from active Bayer samples and metadata levels. "
-            "Masked optical-black drift, true linear response limits, and noise profiles are not captured yet; multi-channel clip fractions are unavailable for single-photosite mosaic samples.";
+        stats.activeValidFraction = RawSafetyEstimatedCoverage(
+            sampledPixels, stepX, stepY, width, height);
+        stats.statusMessage = hasNormalizedMosaic
+            ? "Partial raw safety ledger from the normalized multi-frame Bayer result and reference metadata. Multi-channel clip fractions remain unavailable for single-photosite mosaic samples."
+            : "Partial raw safety ledger from active Bayer samples and metadata levels. Masked optical-black drift, true linear response limits, and noise profiles are not captured yet; multi-channel clip fractions are unavailable for single-photosite mosaic samples.";
     } else {
         const int width = std::max(1, metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth);
         const int height = std::max(1, metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight);
         const int channels = std::clamp(metadata.linearChannels > 0 ? metadata.linearChannels : 3, 3, 4);
-        const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        std::size_t requiredLinearElements = 0;
+        const bool validLinearExtent =
+            Stack::PixelBuffer::TryComputePixelElementCount(
+                width, height, channels, requiredLinearElements);
         const bool useUInt16 =
-            rawData.linearUInt16Buffer.size() >= pixelCount * static_cast<std::size_t>(channels);
+            validLinearExtent &&
+            rawData.linearUInt16Buffer.size() >= requiredLinearElements;
         const bool useFloat =
-            rawData.linearFloatBuffer.size() >= pixelCount * static_cast<std::size_t>(channels);
-        const int stepX = std::max(1, (width + 511) / 512);
-        const int stepY = std::max(1, (height + 511) / 512);
+            validLinearExtent &&
+            rawData.linearFloatBuffer.size() >= requiredLinearElements;
+        const int stepX = RawSafetySampleStep(width);
+        const int stepY = RawSafetySampleStep(height);
         if (useUInt16 || useFloat) {
             const bool floatLooksUnitScale =
                 useFloat && metadata.rawMaximum > 0.0f && metadata.rawMaximum <= 4.0f;
-            for (int y = 0; y < height; y += stepY) {
-                for (int x = 0; x < width; x += stepX) {
+            for (std::int64_t y = 0; y < height; y += stepY) {
+                for (std::int64_t x = 0; x < width; x += stepX) {
                     const std::size_t base =
                         (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
                             static_cast<std::size_t>(x)) *
@@ -296,11 +361,8 @@ Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats BuildRawSafetyStats(
                     }
                 }
             }
-            const float expectedActive = static_cast<float>(std::max(1, width * height));
-            stats.activeValidFraction = std::clamp(
-                static_cast<float>(sampledPixels * stepX * stepY) / expectedActive,
-                0.0f,
-                1.0f);
+            stats.activeValidFraction = RawSafetyEstimatedCoverage(
+                sampledPixels, stepX, stepY, width, height);
             stats.statusMessage =
                 "Partial raw safety ledger from active linear RGB samples and metadata levels. "
                 "Masked optical-black drift, true linear response limits, and noise profiles are not captured yet.";
@@ -393,33 +455,42 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     const RenderGraphNode& node,
     std::size_t fingerprint) {
     GraphNodeRenderResult result;
+    Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup
+        resultExceptionCleanup(result.texture, result.owned);
 
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe = node.rawDevelopment.recipe;
     const std::string& sourcePath = recipe.source.sourcePath;
-    if (sourcePath.empty()) {
+    const std::shared_ptr<const Raw::RawImageData>& embeddedRawData =
+        node.rawDevelopment.embeddedRawData;
+    if (sourcePath.empty() && !embeddedRawData) {
         return result;
     }
 
-    Raw::RawImageData& rawData = m_RawDataCache[node.nodeId];
-    std::string& cachedPath = m_RawDataCachePaths[node.nodeId];
     const std::string cacheKeyPath =
-        sourcePath + "#" + recipe.source.fingerprint + "#" + std::to_string(recipe.source.fileSizeBytes);
-    if (cachedPath != cacheKeyPath ||
-        (rawData.rawBuffer.empty() && rawData.linearUInt16Buffer.empty() && rawData.linearFloatBuffer.empty())) {
-        Raw::RawImageData loadedRaw;
-        if (Raw::RawLoader::LoadFile(sourcePath, loadedRaw)) {
-            rawData = std::move(loadedRaw);
-            cachedPath = cacheKeyPath;
-        } else {
-            rawData = std::move(loadedRaw);
+        Stack::Renderer::RawDevelopmentCache::BuildSourceDataIdentity(
+            recipe.source);
+    const Raw::RawImageData* rawData = embeddedRawData.get();
+    if (!rawData) {
+        Raw::RawImageData& cachedRawData = m_RawDataCache[node.nodeId];
+        std::string& cachedPath = m_RawDataCachePaths[node.nodeId];
+        if (cachedPath != cacheKeyPath ||
+            (cachedRawData.rawBuffer.empty() &&
+             cachedRawData.linearUInt16Buffer.empty() &&
+             cachedRawData.linearFloatBuffer.empty() &&
+             !cachedRawData.normalizedMosaicBuffer)) {
+            Raw::RawImageData loadedRaw;
+            Raw::RawLoader::LoadFile(sourcePath, loadedRaw);
+            cachedRawData = std::move(loadedRaw);
             cachedPath = cacheKeyPath;
         }
+        rawData = &cachedRawData;
     }
 
-    const bool rawDataHasPixels = Stack::Renderer::RawPreviewProxy::HasPixels(rawData);
-    if (!rawDataHasPixels || !rawData.metadata.error.empty()) {
-        const std::string error = !rawData.metadata.error.empty()
-            ? rawData.metadata.error
+    const bool rawDataHasPixels =
+        Stack::Renderer::RawPreviewProxy::HasPixels(*rawData);
+    if (!rawDataHasPixels || !rawData->metadata.error.empty()) {
+        const std::string error = !rawData->metadata.error.empty()
+            ? rawData->metadata.error
             : "LibRaw did not produce a usable raw buffer.";
         std::cerr << "[RAW] Load failed for RAW Development node " << node.nodeId
                   << " (" << sourcePath << "): " << error << "\n";
@@ -427,8 +498,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     }
 
     const Raw::RawDevelopSettings settings = Stack::RawRecipe::ToRawDevelopSettings(recipe);
-    const Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats rawSafetyStats =
-        BuildRawSafetyStats(rawData, settings);
+    const bool captureAnalysis = m_RawDevelopmentAnalysisEnabled;
+    Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats rawSafetyStats;
+    if (captureAnalysis) {
+        rawSafetyStats = BuildRawSafetyStats(*rawData, settings);
+    }
     const bool localExposureEnabled = Stack::RawRecipe::IsLocalExposureEnabled(recipe);
     if (!localExposureEnabled) {
         m_PreLocalExposureSummaries.erase(node.nodeId);
@@ -436,7 +510,57 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     Raw::RawDevelopSettings rawRenderSettings = settings;
     rawRenderSettings.toneCurvePoints.clear();
     const Raw::RawImageData& renderRawData =
-        ResolveRawPreviewRenderData(node.nodeId, rawData, cacheKeyPath);
+        rawData->normalizedMosaicBuffer
+            ? *rawData
+            : ResolveRawPreviewRenderData(
+                  node.nodeId, *rawData, cacheKeyPath);
+    const std::string rawPlacementCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPlacement";
+    const std::string neutralPlacementCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentNeutral";
+    const std::string rawBaseCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentRgbBase";
+    const std::string rgbDenoiseCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentRgbDenoise";
+    const std::string postLocalExposureCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPostLocalExposure";
+    const std::string postLocalRangeCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPostLocalRange";
+    const std::string postFinishToneCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPostFinishTone";
+    const std::size_t rawPlacementFingerprint =
+        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
+            recipe,
+            m_PreviewMaxDimension,
+            Stack::Renderer::RawDevelopmentCache::Stage::RawPlacement);
+    const std::size_t neutralPlacementFingerprint =
+        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
+            recipe,
+            m_PreviewMaxDimension,
+            Stack::Renderer::RawDevelopmentCache::Stage::NeutralPlacement);
+    const std::size_t rawBaseFingerprint =
+        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
+            recipe,
+            m_PreviewMaxDimension,
+            Stack::Renderer::RawDevelopmentCache::Stage::RawBase);
+    const std::size_t postLocalExposureFingerprint =
+        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
+            recipe,
+            m_PreviewMaxDimension,
+            Stack::Renderer::RawDevelopmentCache::Stage::PostLocalExposure);
+    const std::size_t postLocalRangeFingerprint =
+        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
+            recipe,
+            m_PreviewMaxDimension,
+            Stack::Renderer::RawDevelopmentCache::Stage::PostLocalRange);
+    const std::size_t postFinishToneFingerprint =
+        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
+            recipe,
+            m_PreviewMaxDimension,
+            Stack::Renderer::RawDevelopmentCache::Stage::PostFinishTone);
+    const Stack::RawRecipe::RawRgbDenoiseRecipe rgbDenoiseSettings =
+        Stack::RawRecipe::SanitizeRgbDenoiseRecipe(recipe.rgbDenoise);
+    const bool rgbDenoiseEnabled = rgbDenoiseSettings.enabled;
     Raw::RawDevelopSettings neutralSceneSettings = rawRenderSettings;
     neutralSceneSettings.exposureStops = 0.0f;
     neutralSceneSettings.toneCurvePoints.clear();
@@ -444,13 +568,188 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         std::fabs(rawRenderSettings.exposureStops) <= 0.0001f &&
         rawRenderSettings.toneCurvePoints.empty();
     RenderTextureStats neutralSceneStats;
-    if (!currentRawRenderIsNeutralScene) {
-        if (const unsigned int neutralTexture =
-                m_RawPipelines[node.nodeId].Render(renderRawData, neutralSceneSettings, m_PreviewMaxDimension)) {
-            const int neutralWidth = m_RawPipelines[node.nodeId].GetOutputWidth();
-            const int neutralHeight = m_RawPipelines[node.nodeId].GetOutputHeight();
+    if (!rgbDenoiseEnabled) {
+        if (captureAnalysis && !currentRawRenderIsNeutralScene) {
+            const CachedGraphTexture cachedNeutral =
+                FindRawDevelopStageCacheEntry(neutralPlacementCacheKey, neutralPlacementFingerprint);
+            unsigned int neutralTexture = cachedNeutral.texture;
+            int neutralWidth = cachedNeutral.width;
+            int neutralHeight = cachedNeutral.height;
+            if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
+                ++m_LastGraphExecutionStats.rawStageCacheHits;
+            } else {
+                ++m_LastGraphExecutionStats.rawStageCacheMisses;
+                neutralTexture =
+                    m_RawPipelines[node.nodeId].Render(
+                        renderRawData,
+                        neutralSceneSettings,
+                        m_PreviewMaxDimension);
+                neutralWidth = m_RawPipelines[node.nodeId].GetOutputWidth();
+                neutralHeight = m_RawPipelines[node.nodeId].GetOutputHeight();
+                if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
+                    m_Width = neutralWidth;
+                    m_Height = neutralHeight;
+                    StoreRawDevelopStageCacheEntry(
+                        neutralPlacementCacheKey,
+                        neutralTexture,
+                        neutralPlacementFingerprint);
+                }
+            }
+            if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
+                neutralSceneStats =
+                    ReadTextureStats(neutralTexture, neutralWidth, neutralHeight, "RawDevelopmentNeutralSceneStats");
+                CaptureRawDevelopmentStageImageReadback(
+                    Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
+                    Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
+                    neutralTexture,
+                    neutralWidth,
+                    neutralHeight,
+                    "scene-linear-neutral-srgb",
+                    true,
+                    false);
+            }
+        }
+
+        const CachedGraphTexture cachedRawPlacement =
+            FindRawDevelopStageCacheEntry(rawPlacementCacheKey, rawPlacementFingerprint);
+        if (cachedRawPlacement.texture != 0 &&
+            cachedRawPlacement.width > 0 &&
+            cachedRawPlacement.height > 0) {
+            ++m_LastGraphExecutionStats.rawStageCacheHits;
+            result.texture = cachedRawPlacement.texture;
+            m_Width = cachedRawPlacement.width;
+            m_Height = cachedRawPlacement.height;
+        } else {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            result.texture =
+                m_RawPipelines[node.nodeId].Render(
+                    renderRawData,
+                    rawRenderSettings,
+                    m_PreviewMaxDimension);
+            m_Width = m_RawPipelines[node.nodeId].GetOutputWidth();
+            m_Height = m_RawPipelines[node.nodeId].GetOutputHeight();
+            if (result.texture != 0 && m_Width > 0 && m_Height > 0) {
+                StoreRawDevelopStageCacheEntry(
+                    rawPlacementCacheKey,
+                    result.texture,
+                    rawPlacementFingerprint);
+            }
+        }
+        result.owned = false;
+    } else {
+        const bool aiDenoiseMethod =
+            rgbDenoiseSettings.method !=
+            Stack::RawRecipe::RawRgbDenoiseMethod::ClassicalMultiscaleV1;
+        if (aiDenoiseMethod) {
+            const Stack::Restormer::ValidationResult package =
+                Stack::Restormer::Client::Instance().Validate(
+                    rgbDenoiseSettings);
+            if (!package.ok) {
+                m_LastRawRgbDenoiseError = package.error;
+                std::cerr
+                    << "[RAW] Restormer RGB denoise blocked RAW Development "
+                    << "node " << node.nodeId << ": " << package.error << "\n";
+                return result;
+            }
+        }
+        const CachedGraphTexture cachedDenoise =
+            FindRawDevelopStageCacheEntry(
+                rgbDenoiseCacheKey,
+                neutralPlacementFingerprint);
+        unsigned int neutralTexture = cachedDenoise.texture;
+        Stack::Renderer::ScopedGLTexture neutralTextureOwner;
+        int neutralWidth = cachedDenoise.width;
+        int neutralHeight = cachedDenoise.height;
+        if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
+            ++m_LastGraphExecutionStats.rawStageCacheHits;
+            m_Width = neutralWidth;
+            m_Height = neutralHeight;
+        } else {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            const CachedGraphTexture cachedBase =
+                FindRawDevelopStageCacheEntry(rawBaseCacheKey, rawBaseFingerprint);
+            unsigned int baseTexture = cachedBase.texture;
+            int baseWidth = cachedBase.width;
+            int baseHeight = cachedBase.height;
+            if (baseTexture != 0 && baseWidth > 0 && baseHeight > 0) {
+                ++m_LastGraphExecutionStats.rawStageCacheHits;
+                m_Width = baseWidth;
+                m_Height = baseHeight;
+            } else {
+                ++m_LastGraphExecutionStats.rawStageCacheMisses;
+                baseTexture =
+                    m_RawPipelines[node.nodeId].Render(
+                        renderRawData,
+                        neutralSceneSettings,
+                        m_PreviewMaxDimension);
+                baseWidth = m_RawPipelines[node.nodeId].GetOutputWidth();
+                baseHeight = m_RawPipelines[node.nodeId].GetOutputHeight();
+                m_Width = baseWidth;
+                m_Height = baseHeight;
+                if (baseTexture != 0 && baseWidth > 0 && baseHeight > 0) {
+                    StoreRawDevelopStageCacheEntry(
+                        rawBaseCacheKey,
+                        baseTexture,
+                        rawBaseFingerprint);
+                }
+            }
+
+            if (baseTexture != 0 && m_Width > 0 && m_Height > 0) {
+                neutralTexture = RenderRawDevelopmentRgbDenoise(
+                    baseTexture,
+                    rgbDenoiseSettings,
+                    recipe.technical.workingSpace,
+                    rawBaseFingerprint);
+                if (neutralTexture != 0) {
+                    neutralTextureOwner.Reset(neutralTexture);
+                    neutralWidth = m_Width;
+                    neutralHeight = m_Height;
+                    StoreRawDevelopStageCacheEntry(
+                        rgbDenoiseCacheKey,
+                        neutralTexture,
+                        neutralPlacementFingerprint);
+                } else {
+                    const bool aiMethod =
+                        rgbDenoiseSettings.method !=
+                        Stack::RawRecipe::RawRgbDenoiseMethod::
+                            ClassicalMultiscaleV1;
+                    if (aiMethod) {
+                        neutralTexture = 0;
+                        neutralWidth = 0;
+                        neutralHeight = 0;
+                        std::cerr
+                            << "[RAW] Restormer RGB denoise blocked RAW "
+                            << "Development node " << node.nodeId << ": "
+                            << (m_LastRawRgbDenoiseError.empty()
+                                ? "external model inference failed"
+                                : m_LastRawRgbDenoiseError)
+                            << "\n";
+                    } else {
+                        // The built-in method may fail open because it does
+                        // not represent an authored external model identity.
+                        neutralTexture = baseTexture;
+                        neutralWidth = m_Width;
+                        neutralHeight = m_Height;
+                        std::cerr
+                            << "[RAW] Classical RGB denoise failed for RAW "
+                            << "Development node " << node.nodeId
+                            << "; passing neutral demosaic through.\n";
+                    }
+                }
+            }
+        }
+
+        if (captureAnalysis &&
+            neutralTexture != 0 &&
+            neutralWidth > 0 &&
+            neutralHeight > 0 &&
+            !currentRawRenderIsNeutralScene) {
             neutralSceneStats =
-                ReadTextureStats(neutralTexture, neutralWidth, neutralHeight, "RawDevelopmentNeutralSceneStats");
+                ReadTextureStats(
+                    neutralTexture,
+                    neutralWidth,
+                    neutralHeight,
+                    "RawDevelopmentNeutralSceneStats");
             CaptureRawDevelopmentStageImageReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
                 Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
@@ -461,9 +760,47 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 true,
                 false);
         }
+
+        const CachedGraphTexture cachedRawPlacement =
+            FindRawDevelopStageCacheEntry(
+                rawPlacementCacheKey,
+                rawPlacementFingerprint);
+        if (cachedRawPlacement.texture != 0 &&
+            cachedRawPlacement.width > 0 &&
+            cachedRawPlacement.height > 0) {
+            ++m_LastGraphExecutionStats.rawStageCacheHits;
+            result.texture = cachedRawPlacement.texture;
+            result.owned = false;
+            m_Width = cachedRawPlacement.width;
+            m_Height = cachedRawPlacement.height;
+        } else if (neutralTexture != 0) {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            m_Width = neutralWidth;
+            m_Height = neutralHeight;
+            result.texture = RenderRawDevelopmentExposure(
+                neutralTexture,
+                recipe.preToneExposureEv);
+            result.owned = result.texture != 0;
+            if (result.texture != 0) {
+                StoreRawDevelopStageCacheEntry(
+                    rawPlacementCacheKey,
+                    result.texture,
+                    rawPlacementFingerprint);
+            } else {
+                // The exposure pass is deliberately simple, but preserve a
+                // last-resort path through the established RAW renderer.
+                result.texture =
+                    m_RawPipelines[node.nodeId].Render(
+                        renderRawData,
+                        rawRenderSettings,
+                        m_PreviewMaxDimension);
+                m_Width = m_RawPipelines[node.nodeId].GetOutputWidth();
+                m_Height = m_RawPipelines[node.nodeId].GetOutputHeight();
+                result.owned = false;
+            }
+        }
+
     }
-    result.texture = m_RawPipelines[node.nodeId].Render(renderRawData, rawRenderSettings, m_PreviewMaxDimension);
-    result.owned = false;
     if (result.texture == 0) {
         const std::string& error = m_RawPipelines[node.nodeId].GetLastError();
         std::cerr << "[RAW] Render failed for RAW Development node " << node.nodeId
@@ -473,30 +810,48 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         return result;
     }
 
-    m_Width = m_RawPipelines[node.nodeId].GetOutputWidth();
-    m_Height = m_RawPipelines[node.nodeId].GetOutputHeight();
-    const RenderTextureStats rawPlacementStats =
-        ReadTextureStats(result.texture, m_Width, m_Height, "RawDevelopmentRawPlacementStats");
-    CaptureRawDevelopmentStageImageReadback(
-        Stack::RawAutoStartPoint::RawAutoStartPointStage::RawPlacement,
-        Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
-        result.texture,
-        m_Width,
-        m_Height,
-        "scene-linear-raw-placement-srgb",
-        true,
-        false);
-    if (currentRawRenderIsNeutralScene) {
-        neutralSceneStats = rawPlacementStats;
+    const auto adoptCachedStage = [&](const CachedGraphTexture& cached) {
+        if (cached.texture == 0 || cached.width <= 0 || cached.height <= 0) {
+            return false;
+        }
+        if (result.owned &&
+            result.texture != 0 &&
+            result.texture != cached.texture) {
+            glDeleteTextures(1, &result.texture);
+        }
+        result.texture = cached.texture;
+        result.owned = false;
+        m_Width = cached.width;
+        m_Height = cached.height;
+        ++m_LastGraphExecutionStats.rawStageCacheHits;
+        return true;
+    };
+
+    RenderTextureStats rawPlacementStats;
+    if (captureAnalysis) {
+        rawPlacementStats =
+            ReadTextureStats(result.texture, m_Width, m_Height, "RawDevelopmentRawPlacementStats");
         CaptureRawDevelopmentStageImageReadback(
-            Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
+            Stack::RawAutoStartPoint::RawAutoStartPointStage::RawPlacement,
             Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
             result.texture,
             m_Width,
             m_Height,
-            "scene-linear-neutral-srgb",
+            "scene-linear-raw-placement-srgb",
             true,
             false);
+        if (currentRawRenderIsNeutralScene) {
+            neutralSceneStats = rawPlacementStats;
+            CaptureRawDevelopmentStageImageReadback(
+                Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
+                Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
+                result.texture,
+                m_Width,
+                m_Height,
+                "scene-linear-neutral-srgb",
+                true,
+                false);
+        }
     }
     if (localExposureEnabled && result.texture != 0) {
         Raw::RawDetailFusionSettings localSettings = Stack::RawRecipe::ToRawDetailFusionSettings(recipe);
@@ -512,42 +867,71 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             localSettings.overrideBaseEv = true;
         }
 
-        m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
-            result.texture,
-            localSettings,
-            false,
-            !localSettings.autoSafetyEnabled);
-
-        RenderGraphNode localMapNode;
-        localMapNode.nodeId = node.nodeId;
-        localMapNode.kind = RenderGraphNodeKind::RawDetailFusion;
-        localMapNode.rawDetailFusion.settings = localSettings;
-
-        const unsigned int preLocalTexture = result.texture;
-        unsigned int exposureMap = RenderRawDetailAutoMask(preLocalTexture, localMapNode, 0, false);
-        if (unsigned int localResult = exposureMap != 0
-            ? RenderRawDetailFusion(preLocalTexture, exposureMap, localSettings)
-            : 0) {
-            const QuickTextureStats inputStats = ProbeTextureStats(preLocalTexture, m_Width, m_Height);
-            const QuickTextureStats outputStats = ProbeTextureStats(localResult, m_Width, m_Height);
-            const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-            const bool outputIsBlank =
-                outputStats.valid &&
-                outputStats.p99Luma <= 0.000001f &&
-                outputStats.maxRgb <= 0.00001f;
-            if (inputHasSignal && outputIsBlank) {
-                glDeleteTextures(1, &localResult);
-                std::cerr << "[RenderPipeline] RAW Workspace local exposure produced a blank output for RAW Development node "
-                          << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                          << ", output p99 luma " << outputStats.p99Luma
-                          << "); passing pre-local texture through.\n";
-            } else {
-                result.texture = localResult;
-                result.owned = true;
-            }
+        if (captureAnalysis) {
+            m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
+                result.texture,
+                localSettings,
+                false,
+                !localSettings.autoSafetyEnabled);
         }
-        if (exposureMap != 0) {
-            glDeleteTextures(1, &exposureMap);
+
+        const CachedGraphTexture cachedPostLocalExposure =
+            FindRawDevelopStageCacheEntry(
+                postLocalExposureCacheKey,
+                postLocalExposureFingerprint);
+        if (!adoptCachedStage(cachedPostLocalExposure)) {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            RenderGraphNode localMapNode;
+            localMapNode.nodeId = node.nodeId;
+            localMapNode.kind = RenderGraphNodeKind::RawDetailFusion;
+            localMapNode.rawDetailFusion.settings = localSettings;
+
+            const unsigned int preLocalTexture = result.texture;
+            const bool preLocalTextureOwned = result.owned;
+            Stack::Renderer::ScopedGLTexture exposureMap(
+                RenderRawDetailAutoMask(
+                    preLocalTexture,
+                    localMapNode,
+                    0,
+                    false));
+            Stack::Renderer::ScopedGLTexture localResult(
+                exposureMap
+                    ? RenderRawDetailFusion(
+                        preLocalTexture,
+                        exposureMap.Get(),
+                        localSettings)
+                    : 0);
+            if (localResult) {
+                QuickTextureStats inputStats;
+                QuickTextureStats outputStats;
+                if (captureAnalysis) {
+                    inputStats = ProbeTextureStats(preLocalTexture, m_Width, m_Height);
+                    outputStats = ProbeTextureStats(localResult.Get(), m_Width, m_Height);
+                }
+                const bool inputHasSignal =
+                    captureAnalysis && inputStats.valid && inputStats.p99Luma > 0.00001f;
+                const bool outputIsBlank =
+                    captureAnalysis &&
+                    outputStats.valid &&
+                    outputStats.p99Luma <= 0.000001f &&
+                    outputStats.maxRgb <= 0.00001f;
+                if (inputHasSignal && outputIsBlank) {
+                    std::cerr << "[RenderPipeline] RAW Workspace local exposure produced a blank output for RAW Development node "
+                              << node.nodeId << " (input p99 luma " << inputStats.p99Luma
+                              << ", output p99 luma " << outputStats.p99Luma
+                              << "); passing pre-local texture through.\n";
+                } else {
+                    if (preLocalTextureOwned && preLocalTexture != 0) {
+                        glDeleteTextures(1, &preLocalTexture);
+                    }
+                    result.texture = localResult.Release();
+                    result.owned = true;
+                    StoreRawDevelopStageCacheEntry(
+                        postLocalExposureCacheKey,
+                        result.texture,
+                        postLocalExposureFingerprint);
+                }
+            }
         }
     }
 
@@ -556,7 +940,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     bool hasPreLocalRangeStats = false;
     bool localRangeApplied = false;
 
-    if (result.texture != 0) {
+    if (captureAnalysis && result.texture != 0) {
         m_RawDevelopmentLocalSuggestionImage =
             ReadLocalSuggestionAnalysisImage(
                 result.texture,
@@ -564,7 +948,6 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 m_Height,
                 512,
                 "RawDevelopmentLocalSuggestionImage");
-        CaptureRawDevelopmentLocalRangeTargetSample(result.texture, recipe.localRange);
         preLocalRangeStats =
             ReadTextureStats(result.texture, m_Width, m_Height, "RawDevelopmentPreLocalRangeStats");
         hasPreLocalRangeStats = true;
@@ -573,7 +956,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             MakeStageStatsReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
                 neutralSceneStats,
-                "Neutral scene analysis render using the current WB policy at 0 EV RAW Exposure before Local Exposure, Local Range, Finish Tone, and View Transform.",
+                "Neutral scene analysis render using the current WB policy and optional RGB Denoise at 0 EV authored RAW Exposure before Local Exposure, Local Range, Finish Tone, and View Transform.",
                 "scene-linear-neutral-rgb",
                 true,
                 false));
@@ -581,7 +964,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             MakeStageStatsReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::RawPlacement,
                 rawPlacementStats,
-                "Current RAW Exposure/WB texture immediately after RAW GPU render and before legacy Local Exposure, Local Range, Finish Tone, and View Transform.",
+                "Current converted RAW texture after optional RGB Denoise and authored RAW Exposure, before legacy Local Exposure, Local Range, Finish Tone, and View Transform.",
                 "scene-linear-raw-placement-rgb",
                 true,
                 false));
@@ -606,54 +989,106 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                     Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Fallback));
         }
     }
+    if (result.texture != 0 && m_RawDevelopmentLocalRangeTargetSampleRequested) {
+        CaptureRawDevelopmentLocalRangeTargetSample(
+            result.texture,
+            recipe.localRange,
+            recipe.technical.workingSpace,
+            postLocalExposureFingerprint);
+    }
+    if (captureAnalysis && result.texture != 0) {
+        CaptureRawDevelopmentLocalRangeGraphScopeReadback(
+            result.texture,
+            recipe.localRange,
+            m_Width,
+            m_Height);
+    }
 
     const bool regionMaskOverlayActive =
         m_RawDevelopmentLocalRangeOverlayRequestMode == "region-mask" &&
         (Stack::RawRecipe::SanitizeLocalRangeRecipe(recipe.localRange).regionMaskEnabled ||
-            Stack::RawRecipe::SanitizeLocalRangeRecipe(recipe.localRange).colorMaskEnabled);
-    if ((localRangeActive || regionMaskOverlayActive) && result.texture != 0) {
+            Stack::RawRecipe::SanitizeLocalRangeRecipe(recipe.localRange).colorMaskEnabled ||
+            !Stack::RawRecipe::SanitizeLocalRangeRecipe(recipe.localRange).targetZones.empty());
+    const bool targetOutlineOverlayActive =
+        m_RawDevelopmentLocalRangeOverlayRequestMode == "target-outline" &&
+        m_RawDevelopmentLocalRangeTargetPreviewRequest.enabled;
+    if ((localRangeActive ||
+            regionMaskOverlayActive ||
+            targetOutlineOverlayActive) &&
+        result.texture != 0) {
         const unsigned int preLocalRangeTexture = result.texture;
         if (!m_RawDevelopmentLocalRangeOverlayRequestMode.empty() &&
             m_RawDevelopmentLocalRangeOverlayRequestMode != "none") {
-            if (const unsigned int overlayTexture = RenderRawDevelopmentLocalRangeOverlay(
+            std::string replacementOverlayMode =
+                m_RawDevelopmentLocalRangeOverlayRequestMode;
+            Stack::Renderer::ScopedGLTexture overlayTexture(
+                RenderRawDevelopmentLocalRangeOverlay(
                     preLocalRangeTexture,
                     recipe.localRange,
-                    m_RawDevelopmentLocalRangeOverlayRequestMode)) {
+                    recipe.technical.workingSpace,
+                    replacementOverlayMode,
+                    postLocalExposureFingerprint));
+            if (overlayTexture) {
                 ClearRawDevelopmentLocalRangeOverlay();
-                m_RawDevelopmentLocalRangeOverlayTexture = overlayTexture;
                 m_RawDevelopmentLocalRangeOverlayWidth = m_Width;
                 m_RawDevelopmentLocalRangeOverlayHeight = m_Height;
-                m_RawDevelopmentLocalRangeOverlayMode = m_RawDevelopmentLocalRangeOverlayRequestMode;
+                m_RawDevelopmentLocalRangeOverlayMode =
+                    std::move(replacementOverlayMode);
+                m_RawDevelopmentLocalRangeOverlayTexture =
+                    overlayTexture.Release();
             }
         }
         if (localRangeActive) {
-            if (const unsigned int localRangeResult =
-                    RenderRawDevelopmentLocalRange(preLocalRangeTexture, recipe.localRange)) {
-                const QuickTextureStats inputStats = ProbeTextureStats(preLocalRangeTexture, m_Width, m_Height);
-                const QuickTextureStats outputStats = ProbeTextureStats(localRangeResult, m_Width, m_Height);
-                const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-                const bool outputIsBlank =
-                    outputStats.valid &&
-                    outputStats.p99Luma <= 0.000001f &&
-                    outputStats.maxRgb <= 0.00001f;
-                if (inputHasSignal && outputIsBlank) {
-                    glDeleteTextures(1, &localRangeResult);
-                    std::cerr << "[RenderPipeline] RAW Development local range produced a blank output for node "
-                              << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                              << ", output p99 luma " << outputStats.p99Luma
-                              << "); passing pre-local-range texture through.\n";
-                } else {
-                    if (result.owned && preLocalRangeTexture != 0) {
-                        glDeleteTextures(1, &preLocalRangeTexture);
+            const CachedGraphTexture cachedPostLocalRange =
+                FindRawDevelopStageCacheEntry(
+                    postLocalRangeCacheKey,
+                    postLocalRangeFingerprint);
+            if (adoptCachedStage(cachedPostLocalRange)) {
+                localRangeApplied = true;
+            } else {
+                ++m_LastGraphExecutionStats.rawStageCacheMisses;
+                Stack::Renderer::ScopedGLTexture localRangeResult(
+                    RenderRawDevelopmentLocalRange(
+                        preLocalRangeTexture,
+                        recipe.localRange,
+                        recipe.technical.workingSpace,
+                        postLocalExposureFingerprint));
+                if (localRangeResult) {
+                    QuickTextureStats inputStats;
+                    QuickTextureStats outputStats;
+                    if (captureAnalysis) {
+                        inputStats = ProbeTextureStats(preLocalRangeTexture, m_Width, m_Height);
+                        outputStats = ProbeTextureStats(localRangeResult.Get(), m_Width, m_Height);
                     }
-                    result.texture = localRangeResult;
-                    result.owned = true;
-                    localRangeApplied = true;
+                    const bool inputHasSignal =
+                        captureAnalysis && inputStats.valid && inputStats.p99Luma > 0.00001f;
+                    const bool outputIsBlank =
+                        captureAnalysis &&
+                        outputStats.valid &&
+                        outputStats.p99Luma <= 0.000001f &&
+                        outputStats.maxRgb <= 0.00001f;
+                    if (inputHasSignal && outputIsBlank) {
+                        std::cerr << "[RenderPipeline] RAW Development local range produced a blank output for node "
+                                  << node.nodeId << " (input p99 luma " << inputStats.p99Luma
+                                  << ", output p99 luma " << outputStats.p99Luma
+                                  << "); passing pre-local-range texture through.\n";
+                    } else {
+                        if (result.owned && preLocalRangeTexture != 0) {
+                            glDeleteTextures(1, &preLocalRangeTexture);
+                        }
+                        result.texture = localRangeResult.Release();
+                        result.owned = true;
+                        localRangeApplied = true;
+                        StoreRawDevelopStageCacheEntry(
+                            postLocalRangeCacheKey,
+                            result.texture,
+                            postLocalRangeFingerprint);
+                    }
                 }
             }
         }
     }
-    if (localRangeActive && result.texture != 0) {
+    if (captureAnalysis && localRangeActive && result.texture != 0) {
         if (localRangeApplied) {
             CaptureRawDevelopmentStageImageReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::LocalCandidate,
@@ -698,36 +1133,75 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
 
     auto renderRecipeLayer = [&](const nlohmann::json& layerJson, const char* fallbackType) {
         if (result.texture == 0) {
-            return;
+            return false;
         }
-        nlohmann::json layerPayload = layerJson.is_object() ? layerJson : nlohmann::json::object();
-        const std::string type = layerPayload.value("type", std::string(fallbackType));
-        layerPayload["type"] = type;
-        std::shared_ptr<LayerBase> layer = LayerRegistry::CreateLayerFromTypeId(type);
-        if (!layer) {
-            return;
-        }
+        const nlohmann::json authoredPayload =
+            layerJson.is_object() ? layerJson : nlohmann::json::object();
+        const std::string type =
+            authoredPayload.contains("type") && authoredPayload["type"].is_string()
+                ? authoredPayload["type"].get<std::string>()
+                : std::string(fallbackType);
+        const std::string layerCacheKey =
+            std::to_string(node.nodeId) + ":__rawDevelopmentRecipeLayer:" + fallbackType;
+        std::shared_ptr<LayerBase> layer;
+        nlohmann::json layerPayload;
+        try {
+            auto cacheIt = m_RawDevelopmentRecipeLayerCache.find(layerCacheKey);
+            if (cacheIt == m_RawDevelopmentRecipeLayerCache.end() ||
+                !cacheIt->second.layer ||
+                cacheIt->second.type != type) {
+                std::shared_ptr<LayerBase> replacement =
+                    LayerRegistry::CreateLayerFromTypeId(type);
+                if (!replacement) {
+                    return false;
+                }
 
-        layer->InitializeGL();
-        layer->Deserialize(layerPayload);
+                CachedRawDevelopmentRecipeLayer replacementEntry;
+                replacementEntry.type = type;
+                replacement->InitializeGL();
+                // Canonicalize the state produced by a fresh instance receiving
+                // only its type. This preserves Deserialize's legacy missing-field
+                // defaults (which are not always identical to member initializers)
+                // while giving later retained-instance renders a complete reset.
+                replacement->Deserialize(nlohmann::json{{ "type", type }});
+                replacementEntry.defaultPayload = replacement->Serialize();
+                replacementEntry.layer = std::move(replacement);
+                cacheIt = m_RawDevelopmentRecipeLayerCache.insert_or_assign(
+                    layerCacheKey,
+                    std::move(replacementEntry)).first;
+            }
+
+            layer = cacheIt->second.layer;
+            layerPayload = cacheIt->second.defaultPayload;
+            for (auto authoredIt = authoredPayload.begin();
+                 authoredIt != authoredPayload.end();
+                 ++authoredIt) {
+                layerPayload[authoredIt.key()] = authoredIt.value();
+            }
+            layerPayload["type"] = type;
+            layer->Deserialize(layerPayload);
+        } catch (const std::exception& error) {
+            std::cerr << "[RenderPipeline] RAW Development " << type
+                      << " recipe layer setup failed for node " << node.nodeId
+                      << ": " << error.what() << "; passing input texture through.\n";
+            return false;
+        }
         if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get())) {
             toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
         }
 
         const unsigned int inputTexture = result.texture;
-        unsigned int processed = CreateGraphRenderTargetTexture();
+        Stack::Renderer::ScopedGLTexture processed(
+            CreateGraphRenderTargetTexture());
         const unsigned int sourceTexture = m_SourceTexture != 0 ? m_SourceTexture : inputTexture;
-        const bool renderedLayer = RenderIntoGraphTargetTexture(processed, [&](unsigned int) {
+        const bool renderedLayer = RenderIntoGraphTargetTexture(processed.Get(), [&](unsigned int) {
             layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
         });
-        if (!renderedLayer || processed == 0) {
-            if (processed != 0) {
-                glDeleteTextures(1, &processed);
-            }
+        if (!renderedLayer || !processed) {
             std::cerr << "[RenderPipeline] RAW Development " << type
                       << " finish pass failed for node " << node.nodeId
                       << "; passing input texture through.\n";
-            return;
+            return false;
         }
 
         if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get());
@@ -735,33 +1209,63 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
         }
 
-        if (type == "ToneCurve" && IsDefaultToneCurvePayload(layerPayload)) {
+        if (captureAnalysis && type == "ToneCurve" && IsDefaultToneCurvePayload(layerPayload)) {
             const QuickTextureStats inputStats = ProbeTextureStats(inputTexture, m_Width, m_Height);
-            const QuickTextureStats outputStats = ProbeTextureStats(processed, m_Width, m_Height);
+            const QuickTextureStats outputStats = ProbeTextureStats(processed.Get(), m_Width, m_Height);
             const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
             const bool outputIsBlank =
                 outputStats.valid &&
                 outputStats.p99Luma <= 0.000001f &&
                 outputStats.maxRgb <= 0.00001f;
             if (inputHasSignal && outputIsBlank) {
-                glDeleteTextures(1, &processed);
                 std::cerr << "[RenderPipeline] RAW Development default Tone Curve produced a blank output for node "
                           << node.nodeId << " (input p99 luma " << inputStats.p99Luma
                           << ", output p99 luma " << outputStats.p99Luma
                           << "); passing input texture through.\n";
-                return;
+                return false;
             }
         }
 
         if (result.owned && inputTexture != 0) {
             glDeleteTextures(1, &inputTexture);
         }
-        result.texture = processed;
+        result.texture = processed.Release();
         result.owned = true;
+        return true;
     };
 
-    renderRecipeLayer(recipe.finishTone.layerJson, "ToneCurve");
-    if (result.texture != 0) {
+    if (captureAnalysis && result.texture != 0) {
+        CaptureRawDevelopmentGraphScopeReadback(
+            RawDevelopmentGraphScopeStage::FinishToneInput,
+            result.texture,
+            m_Width,
+            m_Height,
+            "scene-linear-pre-finish-tone-rgb",
+            true);
+    }
+    const bool finishToneHasPendingAutoCalibration =
+        recipe.finishTone.layerJson.is_object() &&
+        recipe.finishTone.layerJson.contains("autoCalibratePending") &&
+        recipe.finishTone.layerJson["autoCalibratePending"].is_boolean() &&
+        recipe.finishTone.layerJson["autoCalibratePending"].get<bool>();
+    const CachedGraphTexture cachedPostFinishTone =
+        finishToneHasPendingAutoCalibration
+            ? CachedGraphTexture{}
+            : FindRawDevelopStageCacheEntry(
+                  postFinishToneCacheKey,
+                  postFinishToneFingerprint);
+    if (!adoptCachedStage(cachedPostFinishTone)) {
+        ++m_LastGraphExecutionStats.rawStageCacheMisses;
+        if (renderRecipeLayer(recipe.finishTone.layerJson, "ToneCurve")) {
+            if (!finishToneHasPendingAutoCalibration) {
+                StoreRawDevelopStageCacheEntry(
+                    postFinishToneCacheKey,
+                    result.texture,
+                    postFinishToneFingerprint);
+            }
+        }
+    }
+    if (captureAnalysis && result.texture != 0) {
         CaptureRawDevelopmentStageImageReadback(
             Stack::RawAutoStartPoint::RawAutoStartPointStage::FinishToneCandidate,
             Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
@@ -782,15 +1286,25 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 true,
                 false));
     }
-    renderRecipeLayer(recipe.viewTransform.layerJson, "ViewTransform");
-    if (result.texture != 0) {
+    const bool viewTransformEnabled =
+        Stack::RawRecipe::IsViewTransformEnabled(recipe);
+    if (viewTransformEnabled) {
+        (void)renderRecipeLayer(recipe.viewTransform.layerJson, "ViewTransform");
+    }
+    if (viewTransformEnabled && captureAnalysis && result.texture != 0) {
+        const bool encodedSrgbOutput = recipe.viewTransform.layerJson.value(
+            "encodeSrgbOutput",
+            recipe.technical.encodeSrgbOutput);
+        const char* displayMeasurementDomain = encodedSrgbOutput
+            ? "display-mapped-srgb-encoded"
+            : "display-mapped-linear-srgb";
         CaptureRawDevelopmentStageImageReadback(
             Stack::RawAutoStartPoint::RawAutoStartPointStage::DisplayCandidate,
             Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
             result.texture,
             m_Width,
             m_Height,
-            "display-mapped-linear-srgb",
+            displayMeasurementDomain,
             false,
             true);
         m_RawDevelopmentFinalDisplayStats =
@@ -800,7 +1314,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::DisplayCandidate,
                 m_RawDevelopmentFinalDisplayStats,
                 "Post-View-Transform texture used for the RAW workspace preview.",
-                "display-mapped-linear-rgb",
+                displayMeasurementDomain,
                 false,
                 true));
     }

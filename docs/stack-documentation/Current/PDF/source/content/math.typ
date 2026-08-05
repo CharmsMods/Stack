@@ -1,7 +1,7 @@
 = Math <ch-math>
 
 // Future transform catalog source:
-// docs/stack-documentation/Current/ideas/general/Node Math Re-Write/Full Operation Tables.txt
+// docs/stack-documentation/Current/ideas/general/Node Math Re-Write/05-research/image-operations/
 #include "math-foundations.typ"
 #pagebreak()
 #include "math-transition.typ"

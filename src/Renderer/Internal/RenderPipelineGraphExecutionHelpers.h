@@ -1,16 +1,18 @@
 #pragma once
 
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GLStateGuards.h"
+#include "Renderer/Internal/RenderPipelineGraphSchedule.h"
 #include "Renderer/MaskRenderTypes.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Stack::Renderer::GraphExecution {
@@ -25,6 +27,8 @@ inline constexpr std::uint64_t kRawDevelopStageCacheLargeEntryBytes = 128ull * 1
 inline constexpr std::uint64_t kRawDevelopStageCacheHugeEntryBytes = 256ull * 1024ull * 1024ull;
 inline constexpr std::uint64_t kRawDevelopStageCacheSingleEntryByteLimit = 384ull * 1024ull * 1024ull;
 inline constexpr std::uint64_t kGraphPersistentCacheSoftByteBudget = 512ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t kGraphTransientTargetSoftByteBudget = 256ull * 1024ull * 1024ull;
+inline constexpr std::size_t kGraphTransientTargetMaximumEntries = 8;
 inline constexpr std::uint64_t kGraphRgba16fBytesPerPixel = 8;
 
 inline void HashCombine(std::size_t& seed, std::size_t value) {
@@ -46,17 +50,8 @@ float SafeLog2(float value);
 float PercentileFromSorted(const std::vector<float>& sorted, float percentile);
 float MedianFloat(std::vector<float> values);
 
-struct ScopedFramebufferState {
-    GLint framebuffer = 0;
-    GLint readFbo = 0;
-    GLint drawFbo = 0;
-    GLint readBuffer = 0;
-    GLint drawBuffer = 0;
-    GLint viewport[4] = { 0, 0, 0, 0 };
-
-    explicit ScopedFramebufferState(bool captureViewport = false);
-    void Restore(bool restoreViewport = false) const;
-};
+using ScopedFramebufferState =
+    Stack::Renderer::GLState::FramebufferState;
 
 struct QuickTextureStats {
     bool valid = false;
@@ -85,24 +80,28 @@ struct DataMathInputLinkInfo {
 };
 
 struct GraphExecutionContext {
-    explicit GraphExecutionContext(const RenderGraphSnapshot& graphSnapshot);
+    GraphExecutionContext(
+        const RenderGraphSnapshot& graphSnapshot,
+        const GraphTopologyIndex& topologyIndex,
+        std::size_t executionEntryCapacity);
 
     const RenderGraphLink* FindInputLink(int nodeId, std::string_view socketId) const;
     bool IsActiveNode(int nodeId) const;
     int OutputUseCount(int nodeId, std::string_view socketId) const;
 
     const RenderGraphSnapshot& graph;
-    std::unordered_map<int, const RenderGraphNode*> nodes;
-    std::unordered_map<int, std::unordered_map<std::string_view, const RenderGraphLink*>> inputLinks;
-    std::unordered_map<std::string, int> outputUseCounts;
+    const GraphTopologyIndex::NodeLookup& nodes;
+    const GraphTopologyIndex::InputLinkLookup& inputLinks;
+    const GraphTopologyIndex::OutputUseCountLookup& outputUseCounts;
     std::unordered_map<std::string, unsigned int> imageCache;
     std::unordered_map<std::string, unsigned int> maskCache;
     std::unordered_map<std::string, std::size_t> imageFingerprintCache;
     std::unordered_map<std::string, std::size_t> maskFingerprintCache;
-    std::set<std::string> visitingImages;
-    std::set<std::string> visitingMasks;
-    std::set<std::string> fingerprintingImages;
-    std::set<std::string> fingerprintingMasks;
+    mutable std::unordered_map<std::string, bool> scalarSocketCache;
+    std::unordered_set<std::string> visitingImages;
+    std::unordered_set<std::string> visitingMasks;
+    std::unordered_set<std::string> fingerprintingImages;
+    std::unordered_set<std::string> fingerprintingMasks;
 };
 
 std::vector<DataMathInputLinkInfo> CollectDataMathAverageInputs(const GraphExecutionContext& executionContext, int nodeId);

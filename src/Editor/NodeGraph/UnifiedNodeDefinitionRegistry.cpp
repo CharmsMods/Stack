@@ -50,6 +50,7 @@ int VariantForNode(const Node& node) {
         case NodeKind::DataMath: return static_cast<int>(node.dataMathMode);
         case NodeKind::Value: return static_cast<int>(node.value.value.logicalType);
         case NodeKind::TechnicalImage: return static_cast<int>(node.technicalImageSettings.operation);
+        case NodeKind::FrequencyFilter: return 0;
         case NodeKind::FrequencyMask: return static_cast<int>(node.frequencyMaskShape);
         case NodeKind::SpectrumMath: return static_cast<int>(node.spectrumMathMode);
         case NodeKind::MagnitudePhase: return static_cast<int>(node.magnitudePhaseMode);
@@ -75,6 +76,10 @@ Node Prototype(NodeKind kind, int variant) {
             break;
         case NodeKind::TechnicalImage:
             node.technicalImageSettings.operation = static_cast<Stack::NodeMath::TechnicalImageOperation>(variant);
+            break;
+        case NodeKind::FrequencyFilter:
+            node.frequencyFilterSettings.localResponse.mode =
+                static_cast<EditorNodeGraph::FrequencyFilterMode>(variant);
             break;
         case NodeKind::FrequencyMask:
             node.frequencyMaskShape = static_cast<EditorNodeGraph::FrequencyMaskShape>(variant);
@@ -260,10 +265,58 @@ std::vector<LiveParameterDefinition> BuildParameters(const Node& node) {
         case NodeKind::ImageGenerator:
             parameters.push_back(OpaqueSettingsParameter("generator-settings", "Generator Settings", "imageGeneratorSettings"));
             break;
+        case NodeKind::FrequencyFilter: {
+            LiveParameterDefinition strength = NumericParameter(
+                EditorNodeGraph::kStrengthParameterId, "Strength", 1.0, 0.0, 1.0,
+                "normalized", LiveAnimationPolicy::Linear, "frequencyFilterSettings.strength");
+            strength.graphInputCapable = true;
+            parameters.push_back(std::move(strength));
+            parameters.push_back(OpaqueSettingsParameter(
+                "local-response", "Local Response", "frequencyFilterSettings.localResponse"));
+            parameters.push_back(OpaqueSettingsParameter(
+                "edge-policy", "Edge Policy", "frequencyFilterSettings.edgePolicy"));
+            break;
+        }
+        case NodeKind::FrequencyResponse: {
+            auto addFrequencyParameter = [&](const char* id, const char* label, double defaultValue,
+                                             double minimum, double maximum, const char* storageKey) {
+                LiveParameterDefinition parameter = NumericParameter(
+                    id, label, defaultValue, minimum, maximum, "cycles-per-pixel",
+                    LiveAnimationPolicy::Linear, storageKey);
+                parameter.graphInputCapable = true;
+                parameters.push_back(std::move(parameter));
+            };
+            addFrequencyParameter(EditorNodeGraph::kLowCutoffParameterId, "Low Cutoff", 0.08, 0.0, 0.5,
+                "frequencyResponseSettings.lowCutoff");
+            addFrequencyParameter(EditorNodeGraph::kHighCutoffParameterId, "High Cutoff", 0.25, 0.0, 0.5,
+                "frequencyResponseSettings.highCutoff");
+            addFrequencyParameter(EditorNodeGraph::kTransitionWidthParameterId, "Transition", 0.025, 0.0, 0.5,
+                "frequencyResponseSettings.transitionWidth");
+            LiveParameterDefinition order = NumericParameter(
+                EditorNodeGraph::kButterworthOrderParameterId, "Order", 2.0, 1.0, 16.0,
+                "unitless", LiveAnimationPolicy::Linear, "frequencyResponseSettings.butterworthOrder");
+            order.graphInputCapable = true;
+            parameters.push_back(std::move(order));
+            parameters.push_back(OpaqueSettingsParameter(
+                "response-shape", "Response Shape", "frequencyResponseSettings"));
+            break;
+        }
+        case NodeKind::ApplyFrequencyResponse: {
+            LiveParameterDefinition strength = NumericParameter(
+                EditorNodeGraph::kStrengthParameterId, "Strength", 1.0, 0.0, 1.0,
+                "normalized", LiveAnimationPolicy::Linear, "applyFrequencyResponseSettings.strength");
+            strength.graphInputCapable = true;
+            parameters.push_back(std::move(strength));
+            break;
+        }
+        case NodeKind::CombineSpectra:
+            parameters.push_back(OpaqueSettingsParameter(
+                "operation", "Operation", "combineSpectraSettings.mode"));
+            break;
         case NodeKind::FrequencyFft:
         case NodeKind::FrequencyIfft:
-            parameters.push_back(BooleanParameter("luminance-only", "Luminance Only", false,
-                node.kind == NodeKind::FrequencyFft ? "frequencyFftSettings.luminanceOnly" : "frequencyIfftSettings.luminanceOnly"));
+            parameters.push_back(OpaqueSettingsParameter("edge-policy", "Edge Policy",
+                node.kind == NodeKind::FrequencyFft ? "frequencyFftSettings.edgePolicy" : "frequencyIfftSettings.edgePolicy"));
             break;
         case NodeKind::FrequencyMask:
             parameters.push_back(NumericParameter("cutoff", "Cutoff", 0.25, 0.0, 1.0, "normalized-frequency", LiveAnimationPolicy::Linear, "frequencyMaskSettings.cutoff"));
@@ -287,8 +340,35 @@ std::vector<LiveParameterDefinition> BuildParameters(const Node& node) {
             parameters.push_back(NumericParameter("gamma", "Gamma", 1.0, 0.1, 4.0, "unitless", LiveAnimationPolicy::Linear, "magnitudePhaseSettings.gamma"));
             break;
         case NodeKind::SpectrumAnalyzer:
-            parameters.push_back(NumericParameter("inner-radius", "Inner Radius", 0.0, 0.0, 1.0, "normalized-frequency", LiveAnimationPolicy::Linear, "spectrumAnalyzerSettings.innerRadius"));
-            parameters.push_back(NumericParameter("outer-radius", "Outer Radius", 1.0, 0.0, 1.0, "normalized-frequency", LiveAnimationPolicy::Linear, "spectrumAnalyzerSettings.outerRadius"));
+            parameters.push_back(NumericParameter(EditorNodeGraph::kAnalyzerLowParameterId, "Band Low", 0.0, 0.0, 0.5, "cycles-per-pixel", LiveAnimationPolicy::Linear, "spectrumAnalyzerSettings.innerRadius"));
+            parameters.back().graphInputCapable = true;
+            parameters.push_back(NumericParameter(EditorNodeGraph::kAnalyzerHighParameterId, "Band High", 0.5, 0.0, 0.5, "cycles-per-pixel", LiveAnimationPolicy::Linear, "spectrumAnalyzerSettings.outerRadius"));
+            parameters.back().graphInputCapable = true;
+            break;
+        case NodeKind::Output:
+            parameters.push_back(OpaqueSettingsParameter(
+                "inspection", "Channel Inspection", "outputSettings"));
+            break;
+        case NodeKind::ConstantChannel:
+            parameters.push_back(NumericParameter(
+                "value",
+                "Value",
+                1.0,
+                -65504.0,
+                65504.0,
+                "unitless",
+                LiveAnimationPolicy::Linear,
+                "constantChannelSettings.value"));
+            parameters.push_back(OpaqueSettingsParameter(
+                "purpose",
+                "Generated Purpose",
+                "constantChannelSettings.generatedOpaqueAlpha"));
+            break;
+        case NodeKind::ChannelCombine:
+            parameters.push_back(OpaqueSettingsParameter(
+                "auto-alpha",
+                "Automatic Alpha",
+                "imageCombineSettings"));
             break;
         default:
             break;
@@ -297,12 +377,10 @@ std::vector<LiveParameterDefinition> BuildParameters(const Node& node) {
         switch (node.kind) {
             case NodeKind::Image:
             case NodeKind::RawSource:
-            case NodeKind::Output:
             case NodeKind::Composite:
             case NodeKind::Scope:
             case NodeKind::Preview:
             case NodeKind::ChannelSplit:
-            case NodeKind::ChannelCombine:
             case NodeKind::FieldMean:
                 break;
             default:
@@ -346,6 +424,14 @@ std::vector<NodeCatalogEntry> AllEntries() {
     const NodeCatalogEntry synthetic[] = {
         Synthetic(NodeKind::Image, "Image Source", "source:image"),
         Synthetic(NodeKind::RawSource, "RAW Source", "source:raw"),
+        Synthetic(NodeKind::RawProjectFrame,
+            "RAW Project Frame", "managed:raw-project-frame"),
+        Synthetic(NodeKind::MultiFrameDenoise,
+            "Multi-Frame Denoise", "managed:multi-frame-denoise"),
+        Synthetic(NodeKind::RawProjectSourceSet,
+            "RAW Project Source Set", "managed:raw-project-source-set"),
+        Synthetic(NodeKind::RawNeuralDenoise,
+            "Legacy RAW Neural Denoise (Bypass)", "raw-neural-denoise"),
         Synthetic(NodeKind::RawDetailAutoMask, "RAW Detail Auto Mask", "raw-detail:auto-mask"),
         Synthetic(NodeKind::RawDetailFusion, "Pre-Local Exposure", "raw-detail:fusion"),
         Synthetic(NodeKind::Composite, "Composite", "composite"),
@@ -377,6 +463,9 @@ std::string VersionString(const Stack::NodeMath::SemanticVersion& version) {
 Stack::NodeMath::Inspectability InspectabilityFor(NodeKind kind) {
     switch (kind) {
         case NodeKind::RawSource:
+        case NodeKind::RawProjectFrame:
+        case NodeKind::MultiFrameDenoise:
+        case NodeKind::RawProjectSourceSet:
         case NodeKind::RawDevelopment:
         case NodeKind::RawNeuralDenoise:
         case NodeKind::RawDecode:
@@ -401,6 +490,7 @@ std::string ComputeLiveNodeDefinitionHash(const LiveNodeDefinition& definition) 
         { "variant", definition.variant },
         { "label", definition.label },
         { "category", definition.category },
+        { "searchAliases", definition.searchAliases },
         { "previewKey", definition.previewKey },
         { "previewRecipeVersion", definition.previewRecipeVersion },
         { "previewStrategy", static_cast<int>(definition.previewStrategy) },
@@ -425,6 +515,7 @@ std::string ComputeLiveNodeDefinitionHash(const LiveNodeDefinition& definition) 
             { "default", parameter.defaultValue }, { "hasDomain", parameter.hasNumericDomain },
             { "minimum", parameter.minimum }, { "maximum", parameter.maximum },
             { "uiHint", parameter.uiHint }, { "serialized", parameter.serialized },
+            { "graphInputCapable", parameter.graphInputCapable },
             { "animation", static_cast<int>(parameter.animation) }, { "storageKey", parameter.storageKey }
         });
     }
@@ -436,15 +527,36 @@ const std::vector<LiveNodeDefinition>& GetUnifiedNodeDefinitionRegistry() {
         std::vector<LiveNodeDefinition> definitions;
         const std::vector<NodeCatalogEntry> browserEntries = BuildNodeCatalogEntries();
         for (const NodeCatalogEntry& entry : AllEntries()) {
+            if (entry.kind == NodeKind::FrequencyFilter &&
+                entry.value != static_cast<int>(EditorNodeGraph::FrequencyFilterMode::AllPass)) {
+                continue;
+            }
             Node prototype = Prototype(entry.kind, entry.value);
             LiveNodeDefinition definition;
             definition.kind = entry.kind;
             definition.variant = entry.value;
             definition.identity.id = DefinitionId(entry);
-            definition.identity.version = { 1, 0, 0 };
+            const bool frequencyV2 =
+                entry.kind == NodeKind::FrequencyFilter ||
+                entry.kind == NodeKind::FrequencyResponse ||
+                entry.kind == NodeKind::FrequencyFft ||
+                entry.kind == NodeKind::FrequencyIfft ||
+                entry.kind == NodeKind::SpectrumView ||
+                entry.kind == NodeKind::ApplyFrequencyResponse ||
+                entry.kind == NodeKind::CombineSpectra ||
+                entry.kind == NodeKind::SpectrumSeparate ||
+                entry.kind == NodeKind::SpectrumRecombine ||
+                entry.kind == NodeKind::SpectrumAnalyzer;
+            const bool contractV2 =
+                entry.kind == NodeKind::Output ||
+                entry.kind == NodeKind::ChannelCombine;
+            definition.identity.version = (frequencyV2 || contractV2)
+                ? Stack::NodeMath::SemanticVersion{ 2, 0, 0 }
+                : Stack::NodeMath::SemanticVersion{ 1, 0, 0 };
             definition.inspectability = InspectabilityFor(entry.kind);
             definition.label = entry.label;
             definition.category = entry.category;
+            definition.searchAliases = entry.searchAliases;
             definition.previewKey = entry.previewKey;
             definition.previewRecipeVersion = entry.previewRecipeVersion;
             definition.previewStrategy = entry.previewStrategy;
@@ -468,10 +580,17 @@ std::vector<NodeCatalogEntry> BuildRegisteredNodeCatalogEntries() {
         entry.value = definition.variant;
         entry.label = definition.label;
         entry.category = definition.category;
+        entry.searchAliases = definition.searchAliases;
         entry.previewKey = definition.previewKey;
         entry.previewRecipeVersion = definition.previewRecipeVersion;
         entry.previewStrategy = definition.previewStrategy;
         entries.push_back(std::move(entry));
+    }
+    for (const NodeCatalogEntry& preset : BuildNodeCatalogEntries()) {
+        if (preset.kind == NodeKind::FrequencyFilter &&
+            preset.value != static_cast<int>(EditorNodeGraph::FrequencyFilterMode::AllPass)) {
+            entries.push_back(preset);
+        }
     }
     const auto& compounds = GetShippedCompoundTemplates();
     for (std::size_t index = 0; index < compounds.size(); ++index) {
@@ -491,6 +610,12 @@ std::vector<NodeCatalogEntry> BuildRegisteredNodeCatalogEntries() {
 std::vector<EditorNodeGraph::SocketDefinition> BuildRegisteredSockets(
     const Node& node,
     bool visibleOnly) {
+    // MFD input sockets are stable per-frame bindings generated from the
+    // project manifest. The live definition establishes the node identity,
+    // while the instance remains authoritative for its dynamic RAW inputs.
+    if (node.kind == NodeKind::MultiFrameDenoise) {
+        return BuildSockets(node, visibleOnly);
+    }
     const LiveNodeDefinition* definition = FindLiveNodeDefinition(node);
     if (!definition) return BuildSockets(node, visibleOnly);
     std::vector<EditorNodeGraph::SocketDefinition> sockets;

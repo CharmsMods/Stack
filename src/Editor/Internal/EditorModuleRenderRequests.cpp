@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,10 +13,7 @@ constexpr int kScalableGeneratorMaxRaster = 4096;
 constexpr double kPreviewLikeRefreshQuietSeconds = 0.18;
 
 std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return {};
-    }
-    return std::vector<unsigned char>(static_cast<size_t>(width * height * 4), 0);
+    return Stack::PixelBuffer::BuildTransparentRgbaPixels(width, height);
 }
 
 } // namespace
@@ -64,7 +62,12 @@ bool EditorModule::HasPendingPreviewRefreshes() const {
 
     for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::Preview &&
-            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
+            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter) {
+            continue;
+        }
+        if (node.kind == EditorNodeGraph::NodeKind::FrequencyFilter &&
+            !node.expanded) {
             continue;
         }
         if (GetPreviewNodeRevision(node.id) == 0) {
@@ -81,7 +84,9 @@ bool EditorModule::HasPendingPreviewRefreshes() const {
 }
 
 std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompositeOutputRequests() {
-    RefreshCompositeMetadataCacheIfNeeded();
+    if (!RefreshCompositeMetadataCacheIfNeeded()) {
+        return {};
+    }
 
     std::vector<EditorRenderWorker::CompositeOutputRequest> requests;
     requests.reserve(m_CachedCompletedChains.size());
@@ -204,14 +209,25 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
     int fallbackImageChannels = 4;
     for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::Preview &&
-            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask) {
+            node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
+            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter) {
+            continue;
+        }
+        if (node.kind == EditorNodeGraph::NodeKind::FrequencyFilter &&
+            !node.expanded) {
             continue;
         }
 
         const bool generatedAutoMaskPreview = node.kind == EditorNodeGraph::NodeKind::RawDetailAutoMask;
+        const bool frequencySpectrumPreview =
+            node.kind == EditorNodeGraph::NodeKind::FrequencyFilter;
         const EditorNodeGraph::Link* input = generatedAutoMaskPreview
             ? m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId)
-            : m_NodeGraph.FindAnyInputLink(node.id, EditorNodeGraph::kPreviewInputSocketId);
+            : m_NodeGraph.FindAnyInputLink(
+                node.id,
+                frequencySpectrumPreview
+                    ? EditorNodeGraph::kChannelInputSocketId
+                    : EditorNodeGraph::kPreviewInputSocketId);
         if (!input) {
             m_PreviewRequestedGenerations.erase(node.id);
             m_PreviewCompletedGenerations.erase(node.id);
@@ -228,7 +244,8 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             continue;
         }
         if (sourceSocket.type != EditorNodeGraph::SocketType::Image &&
-            sourceSocket.type != EditorNodeGraph::SocketType::Mask) {
+            sourceSocket.type != EditorNodeGraph::SocketType::Mask &&
+            sourceSocket.type != EditorNodeGraph::SocketType::Channel) {
             continue;
         }
 
@@ -249,7 +266,10 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         request.sourceNodeId = sourceNodeId;
         request.sourceSocketId = sourceSocketId;
         request.maskInput = sourceSocket.type == EditorNodeGraph::SocketType::Mask;
-        request.directSourceOutput = true;
+        request.frequencySpectrumInput = frequencySpectrumPreview;
+        request.frequencyEdgePolicy = static_cast<RenderFrequencyEdgePolicy>(
+            node.frequencyFilterSettings.edgePolicy);
+        request.directSourceOutput = !frequencySpectrumPreview;
         request.dirtyGeneration = dirtyGeneration;
 
         if (TryResolveReferenceSourceBuffer(

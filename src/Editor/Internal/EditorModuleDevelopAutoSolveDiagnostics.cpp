@@ -196,6 +196,10 @@ DevelopAutoStageFingerprints BuildDevelopAutoStageFingerprints(
 
     DevelopAutoStageHashBuilder rawBaseHash;
     rawBaseHash.AddValue(fingerprints.metadata);
+    rawBaseHash.AddInt(static_cast<int>(settings.processingVersion));
+    rawBaseHash.AddInt(static_cast<int>(settings.workingSpace));
+    rawBaseHash.AddBool(settings.applyBaselineExposure);
+    rawBaseHash.AddBool(settings.encodeSrgbOutput);
     rawBaseHash.AddFloat(settings.exposureStops, 1000.0f);
     rawBaseHash.AddInt(static_cast<int>(settings.whiteBalanceMode));
     for (float value : settings.manualWhiteBalance) rawBaseHash.AddFloat(value, 1000.0f);
@@ -224,6 +228,7 @@ DevelopAutoStageFingerprints BuildDevelopAutoStageFingerprints(
     rawBaseHash.AddFloat(settings.lateralRedCyan, 1000.0f);
     rawBaseHash.AddFloat(settings.lateralBlueYellow, 1000.0f);
     rawBaseHash.AddBool(settings.mosaicDenoise.enabled);
+    rawBaseHash.AddInt(static_cast<int>(settings.mosaicDenoise.mode));
     rawBaseHash.AddBool(settings.mosaicDenoise.hotPixelSuppression);
     rawBaseHash.AddFloat(settings.mosaicDenoise.hotPixelThreshold, 1000.0f);
     rawBaseHash.AddFloat(settings.mosaicDenoise.lumaStrength, 1000.0f);

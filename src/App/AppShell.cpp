@@ -116,16 +116,29 @@ void ApplyBaseOpenGlWindowHints() {
 enum RootTabId {
     RootTabLibrary = 0,
     RootTabEditor = 1,
-    RootTabTools = 2,
     RootTabRaw = 3,
-    RootTabComposite = 4
+    RootTabComposite = 4,
+    RootTabRawLab = 5
 };
+
+enum AppChromeCommandId {
+    AppChromeCommandNone = 0,
+    AppChromeCommandFile = 1,
+    AppChromeCommandSettings = 2
+};
+
+bool IsRawWorkspaceRootTab(int tabId) {
+    return tabId == RootTabRaw || tabId == RootTabRawLab;
+}
+
+bool CrossesRawWorkspaceLifecycleBoundary(int oldTab, int newTab) {
+    return IsRawWorkspaceRootTab(oldTab) != IsRawWorkspaceRootTab(newTab);
+}
 
 bool IsFadeableRootTab(int tabId) {
     return tabId == RootTabLibrary ||
         tabId == RootTabEditor ||
-        tabId == RootTabTools ||
-        tabId == RootTabRaw;
+        IsRawWorkspaceRootTab(tabId);
 }
 
 struct RootTabDescriptor {
@@ -149,7 +162,15 @@ constexpr double kClosingSurfaceMinVisibleSeconds = 0.95;
 constexpr double kClosingSurfaceMaxDrainSeconds = 2.25;
 constexpr int kClosingSurfaceMinPresentedFrames = 12;
 constexpr double kClosingTextIntroSeconds = 0.24;
-constexpr bool kLibraryLoadTransitionDiagnostics = true;
+constexpr bool kLibraryLoadTransitionDiagnostics = false;
+constexpr float kFloatingChromeRevealEdgeHeight = 7.0f;
+constexpr float kFloatingChromeHiddenSliver = 3.0f;
+constexpr double kFloatingChromeHoldSeconds = 0.62;
+constexpr double kFloatingChromeStartupDiscoverySeconds = 1.8;
+constexpr float kFloatingChromeShowSpeed = 13.0f;
+constexpr float kFloatingChromeHideSpeed = 7.0f;
+constexpr float kFloatingChromePillPaddingX = 10.0f;
+constexpr float kFloatingChromePillPaddingY = 5.0f;
 
 float Saturate(float value) {
     return std::clamp(value, 0.0f, 1.0f);
@@ -453,10 +474,10 @@ struct AppWindowTitlebarNativeInputState {
     HWND hwnd = nullptr;
     WNDPROC originalWndProc = nullptr;
     std::vector<std::pair<RECT, int>> tabRects;
-    RECT settingsRect = { 0, 0, 0, 0 };
-    bool settingsRectValid = false;
+    std::vector<std::pair<RECT, int>> commandRects;
     int pendingTab = -1;
-    bool pendingSettings = false;
+    int pendingSecondaryTab = -1;
+    int pendingCommand = 0;
 };
 
 AppWindowTitlebarNativeInputState g_AppWindowTitlebarNativeInputState;
@@ -589,8 +610,7 @@ RECT ImRectToScreenRect(const ImRect& rect);
 
 void BeginAppWindowTitlebarNativeInputFrame() {
     g_AppWindowTitlebarNativeInputState.tabRects.clear();
-    g_AppWindowTitlebarNativeInputState.settingsRect = { 0, 0, 0, 0 };
-    g_AppWindowTitlebarNativeInputState.settingsRectValid = false;
+    g_AppWindowTitlebarNativeInputState.commandRects.clear();
 }
 
 void AddAppWindowTitlebarNativeTabRect(const ImRect& rect, int tabId) {
@@ -600,12 +620,13 @@ void AddAppWindowTitlebarNativeTabRect(const ImRect& rect, int tabId) {
     g_AppWindowTitlebarNativeInputState.tabRects.emplace_back(ImRectToScreenRect(rect), tabId);
 }
 
-void SetAppWindowTitlebarNativeSettingsRect(const ImRect& rect) {
+void AddAppWindowTitlebarNativeCommandRect(const ImRect& rect, int commandId) {
     if (!g_AppWindowTitlebarNativeInputState.hwnd) {
         return;
     }
-    g_AppWindowTitlebarNativeInputState.settingsRect = ImRectToScreenRect(rect);
-    g_AppWindowTitlebarNativeInputState.settingsRectValid = true;
+    g_AppWindowTitlebarNativeInputState.commandRects.emplace_back(
+        ImRectToScreenRect(rect),
+        commandId);
 }
 
 int ConsumeAppWindowTitlebarNativeTabRequest() {
@@ -614,20 +635,28 @@ int ConsumeAppWindowTitlebarNativeTabRequest() {
     return tabId;
 }
 
-bool ConsumeAppWindowTitlebarNativeSettingsRequest() {
-    const bool requested = g_AppWindowTitlebarNativeInputState.pendingSettings;
-    g_AppWindowTitlebarNativeInputState.pendingSettings = false;
-    return requested;
+int ConsumeAppWindowTitlebarNativeSecondaryTabRequest() {
+    const int tabId = g_AppWindowTitlebarNativeInputState.pendingSecondaryTab;
+    g_AppWindowTitlebarNativeInputState.pendingSecondaryTab = -1;
+    return tabId;
+}
+
+int ConsumeAppWindowTitlebarNativeCommandRequest() {
+    const int command = g_AppWindowTitlebarNativeInputState.pendingCommand;
+    g_AppWindowTitlebarNativeInputState.pendingCommand = 0;
+    return command;
 }
 
 bool HandleAppWindowTitlebarNativeClick(POINT cursor) {
-    if (g_AppWindowTitlebarNativeInputState.settingsRectValid &&
-        PtInRect(&g_AppWindowTitlebarNativeInputState.settingsRect, cursor)) {
-        g_AppWindowTitlebarNativeInputState.pendingSettings = true;
-        TraceMainWindowNativeState(
-            g_AppWindowTitlebarNativeInputState.hwnd,
-            "appwindow-titlebar-native-settings-click");
-        return true;
+    for (const auto& [rect, commandId] :
+         g_AppWindowTitlebarNativeInputState.commandRects) {
+        if (PtInRect(&rect, cursor)) {
+            g_AppWindowTitlebarNativeInputState.pendingCommand = commandId;
+            TraceMainWindowNativeState(
+                g_AppWindowTitlebarNativeInputState.hwnd,
+                "appwindow-titlebar-native-command-click");
+            return true;
+        }
     }
 
     for (const auto& [rect, tabId] : g_AppWindowTitlebarNativeInputState.tabRects) {
@@ -643,6 +672,22 @@ bool HandleAppWindowTitlebarNativeClick(POINT cursor) {
     return false;
 }
 
+bool HandleAppWindowTitlebarNativeSecondaryClick(POINT cursor, bool doubleClick) {
+    for (const auto& [rect, tabId] : g_AppWindowTitlebarNativeInputState.tabRects) {
+        if (!PtInRect(&rect, cursor)) {
+            continue;
+        }
+        if (doubleClick) {
+            g_AppWindowTitlebarNativeInputState.pendingSecondaryTab = tabId;
+            TraceMainWindowNativeState(
+                g_AppWindowTitlebarNativeInputState.hwnd,
+                "appwindow-titlebar-native-tab-secondary-double-click");
+        }
+        return true;
+    }
+    return false;
+}
+
 LRESULT CALLBACK AppWindowTitlebarNativeInputWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_NCLBUTTONDOWN:
@@ -652,6 +697,20 @@ LRESULT CALLBACK AppWindowTitlebarNativeInputWndProc(HWND hwnd, UINT message, WP
                 static_cast<LONG>(static_cast<SHORT>(HIWORD(lParam)))
             };
             if (HandleAppWindowTitlebarNativeClick(cursor)) {
+                return 0;
+            }
+            break;
+        }
+        case WM_NCRBUTTONDOWN:
+        case WM_NCRBUTTONUP:
+        case WM_NCRBUTTONDBLCLK: {
+            POINT cursor {
+                static_cast<LONG>(static_cast<SHORT>(LOWORD(lParam))),
+                static_cast<LONG>(static_cast<SHORT>(HIWORD(lParam)))
+            };
+            if (HandleAppWindowTitlebarNativeSecondaryClick(
+                    cursor,
+                    message == WM_NCRBUTTONDBLCLK)) {
                 return 0;
             }
             break;
@@ -1152,9 +1211,12 @@ AppShell::AppShell()
     , m_SplashTexture(0)
     , m_EditorTabTexture(0)
     , m_LibraryTabTexture(0)
-    , m_ToolsTabTexture(0)
     , m_RawTabTexture(0)
-    , m_HeaderSettingsTexture(0)
+    , m_RawLabTabTexture(0)
+    , m_FileNewTexture(0)
+    , m_FileOpenProjectTexture(0)
+    , m_FileSaveTexture(0)
+    , m_FileExitProgramTexture(0)
     , m_BackgroundImageTexture(0)
     , m_BackgroundImageWidth(0)
     , m_BackgroundImageHeight(0)
@@ -1279,18 +1341,30 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
         EmbeddedTabIcons::Library_png_data,
         EmbeddedTabIcons::Library_png_size,
         "Library");
-    m_ToolsTabTexture = LoadEmbeddedPngTexture(
-        EmbeddedTabIcons::Tools_png_data,
-        EmbeddedTabIcons::Tools_png_size,
-        "Tools");
     m_RawTabTexture = LoadEmbeddedPngTexture(
         EmbeddedTabIcons::ToneCurve_png_data,
         EmbeddedTabIcons::ToneCurve_png_size,
         "RAW");
-    m_HeaderSettingsTexture = LoadEmbeddedPngTexture(
-        EmbeddedTabIcons::Settings_png_data,
-        EmbeddedTabIcons::Settings_png_size,
-        "HeaderSettings");
+    m_RawLabTabTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::RawLab_png_data,
+        EmbeddedTabIcons::RawLab_png_size,
+        "RAW Lab");
+    m_FileNewTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::FileNew_png_data,
+        EmbeddedTabIcons::FileNew_png_size,
+        "File New");
+    m_FileOpenProjectTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::FileOpenProject_png_data,
+        EmbeddedTabIcons::FileOpenProject_png_size,
+        "File Open Project");
+    m_FileSaveTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::FileSave_png_data,
+        EmbeddedTabIcons::FileSave_png_size,
+        "File Save");
+    m_FileExitProgramTexture = LoadEmbeddedPngTexture(
+        EmbeddedTabIcons::FileExitProgram_png_data,
+        EmbeddedTabIcons::FileExitProgram_png_size,
+        "File Exit Program");
 
     glfwSetWindowUserPointer(m_Window, this);
     glfwSetWindowCloseCallback(m_Window, OnWindowClose);
@@ -1333,11 +1407,9 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
 
     Async::TaskSystem::Get().Initialize();
     m_Editor.Initialize(m_Window, m_Appearance.get());
-    m_Tools.Initialize();
+    m_Library.Initialize();
     m_Composite.Initialize();
     // The Library tab populates asynchronously so the main window can appear quickly.
-
-    LibraryManager::Get().RequestRefreshLibraryAsync();
     PresetManager::Get();
 
     if (!loadedAppearance) {
@@ -1359,6 +1431,39 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
 }
 
 void AppShell::RequestMainWindowClose(const char* source) {
+    if (m_CloseRequested || m_MainWindowCloseSavePending) {
+        return;
+    }
+
+    const std::string closeSource =
+        (source && source[0] != '\0') ? source : "unknown";
+    const EditorModule::ProjectFileCommandContext context =
+        m_Editor.GetProjectFileCommandContext();
+    if (context.busy) {
+        PushToast(
+            UiNotificationSeverity::Info,
+            context.busyReason.empty()
+                ? "Finish the current project operation before closing Stack."
+                : context.busyReason,
+            "close-project-operation-busy");
+        if (m_Window) {
+            glfwSetWindowShouldClose(m_Window, GLFW_FALSE);
+        }
+        return;
+    }
+    if (context.dirty) {
+        m_PendingMainWindowCloseSource = closeSource;
+        m_ShowUnnamedEditorClosePrompt = true;
+        if (m_Window) {
+            glfwSetWindowShouldClose(m_Window, GLFW_FALSE);
+        }
+        return;
+    }
+
+    BeginMainWindowClose(closeSource);
+}
+
+void AppShell::BeginMainWindowClose(const std::string& source) {
     if (m_CloseRequested) {
         return;
     }
@@ -1366,13 +1471,185 @@ void AppShell::RequestMainWindowClose(const char* source) {
     m_CloseRequested = true;
     m_ClosingPresentedFrames = 0;
     m_CloseRequestedAt = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
-    m_CloseSource = (source && source[0] != '\0') ? source : "unknown";
+    m_CloseSource = source.empty() ? "unknown" : source;
     if (m_Window) {
         glfwSetWindowShouldClose(m_Window, GLFW_FALSE);
     }
     TraceMainWindowState("close-request", m_CloseSource.c_str());
     TraceShutdownPhase("close-request");
     CancelWorkForMainWindowClose();
+}
+
+void AppShell::RequestFileMenuSave() {
+    const EditorModule::ProjectFileCommandContext context =
+        m_Editor.GetProjectFileCommandContext();
+    if (!context.canSave) {
+        PushToast(
+            UiNotificationSeverity::Info,
+            context.busyReason.empty()
+                ? "There is no project available to save in the current state."
+                : context.busyReason,
+            "file-menu-save-unavailable");
+        return;
+    }
+
+    if (context.sessionKind == EditorModule::ProjectSessionKind::EditorProject &&
+        m_Editor.GetCurrentProjectName().empty() &&
+        m_Editor.GetCurrentProjectFileName().empty()) {
+        m_ShowEditorNamePrompt = true;
+        return;
+    }
+
+    const std::string projectName = m_Editor.GetCurrentProjectName().empty()
+        ? "Untitled Project"
+        : m_Editor.GetCurrentProjectName();
+    m_Editor.RequestSaveCurrentProject(projectName);
+}
+
+void AppShell::RequestFileMenuSaveAs() {
+    const EditorModule::ProjectFileCommandContext context =
+        m_Editor.GetProjectFileCommandContext();
+    if (!context.canSaveAs) {
+        PushToast(
+            UiNotificationSeverity::Info,
+            context.busyReason.empty()
+                ? "There is no project available for Save As."
+                : context.busyReason,
+            "file-menu-save-as-unavailable");
+        return;
+    }
+
+    std::filesystem::path destination;
+    if (context.storageKind ==
+        Stack::Project::ProjectStorageKind::DirectoryBundle) {
+        const std::string projectName = m_Editor.GetCurrentProjectName().empty()
+            ? "RAW Project"
+            : m_Editor.GetCurrentProjectName();
+        const std::string selected = FileDialogs::SaveProjectBundleDialog(
+            "Save Project Bundle As",
+            (projectName + ".stackbundle").c_str());
+        if (selected.empty()) {
+            return;
+        }
+        destination = selected;
+    } else {
+        std::string defaultName;
+        if (!context.projectPath.empty() &&
+            context.projectPath.extension() == ".stack") {
+            defaultName = context.projectPath.filename().string();
+        }
+        if (defaultName.empty()) {
+            defaultName = (m_Editor.GetCurrentProjectName().empty()
+                ? std::string("Untitled Project")
+                : m_Editor.GetCurrentProjectName()) + ".stack";
+        }
+        const std::string selected = FileDialogs::SaveProjectFileDialog(
+            "Save Project As",
+            defaultName.c_str());
+        if (selected.empty()) {
+            return;
+        }
+        destination = selected;
+    }
+
+    m_Editor.RequestSaveProjectAs(destination);
+}
+
+void AppShell::ClearPendingFileAction() {
+    m_PendingFileAction = PendingFileAction::None;
+    m_PendingFileProjectPath.clear();
+    m_FileActionSavePending = false;
+}
+
+void AppShell::QueueFileAction(
+    PendingFileAction action,
+    std::filesystem::path projectPath) {
+    if (action == PendingFileAction::None) {
+        return;
+    }
+
+    const EditorModule::ProjectFileCommandContext context =
+        m_Editor.GetProjectFileCommandContext();
+    if ((action == PendingFileAction::OpenProject && !context.canOpen) ||
+        (action == PendingFileAction::NewEditorProject &&
+         !context.canCreateEditorProject) ||
+        (action == PendingFileAction::CloseCurrent && !context.canClose)) {
+        PushToast(
+            UiNotificationSeverity::Info,
+            context.busyReason.empty()
+                ? "That project action is unavailable right now."
+                : context.busyReason,
+            "file-menu-project-action-unavailable");
+        return;
+    }
+
+    if (action == PendingFileAction::OpenProject) {
+        std::error_code pathError;
+        const bool isDirectory = std::filesystem::is_directory(
+            projectPath,
+            pathError);
+        std::string extension = projectPath.extension().string();
+        std::transform(
+            extension.begin(),
+            extension.end(),
+            extension.begin(),
+            [](unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+        const bool supported = !pathError &&
+            std::filesystem::exists(projectPath, pathError) &&
+            !pathError &&
+            ((isDirectory && extension == ".stackbundle") ||
+             (!isDirectory && extension == ".stack"));
+        if (!supported) {
+            PushToast(
+                UiNotificationSeverity::Error,
+                "Choose a .stack project file or a .stackbundle directory.",
+                "file-menu-open-invalid-project");
+            return;
+        }
+    }
+
+    m_PendingFileAction = action;
+    m_PendingFileProjectPath = std::move(projectPath);
+    if (context.dirty) {
+        m_ShowFileDispositionPrompt = true;
+        return;
+    }
+    ExecutePendingFileAction(false);
+}
+
+bool AppShell::ExecutePendingFileAction(bool discardCurrent) {
+    const PendingFileAction action = m_PendingFileAction;
+    bool success = false;
+    switch (action) {
+        case PendingFileAction::NewEditorProject:
+            if (m_Editor.GetProjectSessionKind() ==
+                EditorModule::ProjectSessionKind::Empty) {
+                success = true;
+            } else {
+                success = m_Editor.CloseCurrentProject(discardCurrent);
+            }
+            if (success) {
+                RequestTabSwitch(RootTabEditor);
+            }
+            break;
+        case PendingFileAction::OpenProject:
+            success = m_Editor.RequestOpenProjectFromPath(
+                m_PendingFileProjectPath,
+                true);
+            break;
+        case PendingFileAction::CloseCurrent:
+            success = m_Editor.CloseCurrentProject(discardCurrent);
+            break;
+        case PendingFileAction::None:
+            break;
+    }
+
+    if (success) {
+        ClearPendingFileAction();
+    }
+    return success;
 }
 
 void AppShell::CancelWorkForMainWindowClose() {
@@ -1669,29 +1946,38 @@ void AppShell::DetachedPreviewPlatformShowWindowHook(ImGuiViewport* viewport) {
     app->HandleDetachedPreviewPlatformShowWindow(viewport);
 }
 
-bool AppShell::IsDetachedPreviewViewport(
+bool AppShell::IsDetachedSurfaceViewport(
     const ImGuiViewport* viewport,
-    EditorModule::DetachedPreviewNativeWindowRequest* request) const {
-    EditorModule::DetachedPreviewNativeWindowRequest localRequest;
-    if (!m_Editor.QueryDetachedPreviewNativeWindow(localRequest)) {
-        return false;
+    EditorModule::DetachedNativeWindowRequest* request) const {
+    const EditorModule::DetachedSurfaceKind kinds[] = {
+        EditorModule::DetachedSurfaceKind::EditorPreview,
+        EditorModule::DetachedSurfaceKind::RawGallery
+    };
+    for (const EditorModule::DetachedSurfaceKind kind : kinds) {
+        EditorModule::DetachedNativeWindowRequest localRequest;
+        if (!m_Editor.QueryDetachedNativeWindow(kind, localRequest)) {
+            continue;
+        }
+        if (viewport != nullptr &&
+            localRequest.viewportId != 0 &&
+            viewport->ID == localRequest.viewportId) {
+            if (request) {
+                *request = localRequest;
+            }
+            return true;
+        }
     }
-    if (request) {
-        *request = localRequest;
-    }
-    return viewport != nullptr &&
-        localRequest.viewportId != 0 &&
-        viewport->ID == localRequest.viewportId;
+    return false;
 }
 
 void AppShell::HandleDetachedPreviewPlatformCreateWindow(ImGuiViewport* viewport) {
-    EditorModule::DetachedPreviewNativeWindowRequest request;
-    const bool detachedPreviewViewport = IsDetachedPreviewViewport(viewport, &request);
+    EditorModule::DetachedNativeWindowRequest request;
+    const bool detachedSurfaceViewport = IsDetachedSurfaceViewport(viewport, &request);
     if (m_OriginalPlatformCreateWindow) {
         m_OriginalPlatformCreateWindow(viewport);
     }
 
-    if (!detachedPreviewViewport || !viewport) {
+    if (!detachedSurfaceViewport || !viewport) {
         return;
     }
 
@@ -1704,19 +1990,19 @@ void AppShell::HandleDetachedPreviewPlatformCreateWindow(ImGuiViewport* viewport
         NativeWindowTheme::Apply(request.window, request.surfaceColor, true);
         themeApplied = true;
         request.requestFocus = false;
-        m_Editor.CompleteDetachedPreviewNativeWindowRequest(request, true, false);
+        m_Editor.CompleteDetachedNativeWindowRequest(request, true, false);
     }
     TraceDetachedPreviewNativeWindow("platform-create", &request, themeApplied, false, false);
 }
 
 void AppShell::HandleDetachedPreviewPlatformShowWindow(ImGuiViewport* viewport) {
-    EditorModule::DetachedPreviewNativeWindowRequest request;
-    const bool detachedPreviewViewport = IsDetachedPreviewViewport(viewport, &request);
+    EditorModule::DetachedNativeWindowRequest request;
+    const bool detachedSurfaceViewport = IsDetachedSurfaceViewport(viewport, &request);
     if (m_OriginalPlatformShowWindow) {
         m_OriginalPlatformShowWindow(viewport);
     }
 
-    if (!detachedPreviewViewport || !viewport) {
+    if (!detachedSurfaceViewport || !viewport) {
         return;
     }
 
@@ -1730,83 +2016,95 @@ void AppShell::HandleDetachedPreviewPlatformShowWindow(ImGuiViewport* viewport) 
         m_DetachedPreviewOpeningTopMostHeld = false;
         m_DetachedPreviewOpeningWindow = request.window;
         m_DetachedPreviewOpeningReleaseAttempts = 0;
-        m_Editor.MarkDetachedPreviewNativeWindowShown(request, focused);
+        m_Editor.MarkDetachedNativeWindowShown(request, focused);
     }
     TraceDetachedPreviewNativeWindow("platform-show", &request, false, request.hasPlatformWindow, focused);
 }
 
 void AppShell::ProcessDetachedPreviewNativeWindow() {
-    EditorModule::DetachedPreviewNativeWindowRequest request;
-    if (!m_Editor.QueryDetachedPreviewNativeWindow(request)) {
-        return;
-    }
-
-    bool themeApplied = false;
-    bool focusAttempted = false;
-    bool focused = false;
-    if (request.hasPlatformWindow && request.window != nullptr) {
-        NativeWindowTheme::SetOwner(request.window, m_Window);
-        NativeWindowTheme::EnsureNotTopMost(request.window);
-        if (request.applyTheme) {
-            NativeWindowTheme::Apply(request.window, request.surfaceColor, true);
-            themeApplied = true;
+    const EditorModule::DetachedSurfaceKind kinds[] = {
+        EditorModule::DetachedSurfaceKind::EditorPreview,
+        EditorModule::DetachedSurfaceKind::RawGallery
+    };
+    for (const EditorModule::DetachedSurfaceKind kind : kinds) {
+        EditorModule::DetachedNativeWindowRequest request;
+        if (!m_Editor.QueryDetachedNativeWindow(kind, request)) {
+            continue;
         }
-        if (request.requestFocus) {
-            focusAttempted = true;
-            focused = NativeWindowTheme::ShowAndFocus(request.window, false);
-        } else {
-            focused = glfwGetWindowAttrib(request.window, GLFW_FOCUSED) == GLFW_TRUE;
-        }
-        m_Editor.CompleteDetachedPreviewNativeWindowRequest(request, themeApplied, focused);
-    }
 
-    TraceDetachedPreviewNativeWindow(
-        "post-platform-update",
-        &request,
-        themeApplied,
-        focusAttempted,
-        focused);
+        bool themeApplied = false;
+        bool focusAttempted = false;
+        bool focused = false;
+        if (request.hasPlatformWindow && request.window != nullptr) {
+            NativeWindowTheme::SetOwner(request.window, m_Window);
+            NativeWindowTheme::EnsureNotTopMost(request.window);
+            if (request.applyTheme) {
+                NativeWindowTheme::Apply(request.window, request.surfaceColor, true);
+                themeApplied = true;
+            }
+            if (request.requestFocus) {
+                focusAttempted = true;
+                focused = NativeWindowTheme::ShowAndFocus(request.window, false);
+            } else {
+                focused = glfwGetWindowAttrib(request.window, GLFW_FOCUSED) == GLFW_TRUE;
+            }
+            m_Editor.CompleteDetachedNativeWindowRequest(request, themeApplied, focused);
+        }
+
+        TraceDetachedPreviewNativeWindow(
+            "post-platform-update",
+            &request,
+            themeApplied,
+            focusAttempted,
+            focused);
+    }
 }
 
 void AppShell::CompleteDetachedPreviewPlatformPresent() {
-    EditorModule::DetachedPreviewNativeWindowRequest request;
-    if (!m_Editor.QueryDetachedPreviewNativeWindow(request) ||
-        !request.hasPlatformWindow ||
-        request.window == nullptr) {
-        return;
-    }
+    const EditorModule::DetachedSurfaceKind kinds[] = {
+        EditorModule::DetachedSurfaceKind::EditorPreview,
+        EditorModule::DetachedSurfaceKind::RawGallery
+    };
+    for (const EditorModule::DetachedSurfaceKind kind : kinds) {
+        EditorModule::DetachedNativeWindowRequest request;
+        if (!m_Editor.QueryDetachedNativeWindow(kind, request) ||
+            !request.hasPlatformWindow ||
+            request.window == nullptr) {
+            continue;
+        }
 
-    const bool wasFirstPresented = request.firstPresented;
-    if (!request.firstPresented) {
-        m_Editor.MarkDetachedPreviewPlatformPresented(request.window);
-    }
+        const bool wasFirstPresented = request.firstPresented;
+        if (!request.firstPresented) {
+            m_Editor.MarkDetachedPlatformPresented(kind, request.window);
+        }
 
-    bool focused = NativeWindowTheme::IsFocusedOrForeground(request.window);
-    bool releasedTopMost = false;
-    if (m_DetachedPreviewOpeningTopMostHeld && request.window == m_DetachedPreviewOpeningWindow) {
-        NativeWindowTheme::ReleaseOpeningTopMost(request.window);
-        m_DetachedPreviewOpeningTopMostHeld = false;
-        m_DetachedPreviewOpeningWindow = nullptr;
-        m_DetachedPreviewOpeningReleaseAttempts = 0;
-        releasedTopMost = true;
-    }
+        const bool focused = NativeWindowTheme::IsFocusedOrForeground(request.window);
+        bool releasedTopMost = false;
+        if (m_DetachedPreviewOpeningTopMostHeld && request.window == m_DetachedPreviewOpeningWindow) {
+            NativeWindowTheme::ReleaseOpeningTopMost(request.window);
+            m_DetachedPreviewOpeningTopMostHeld = false;
+            m_DetachedPreviewOpeningWindow = nullptr;
+            m_DetachedPreviewOpeningReleaseAttempts = 0;
+            releasedTopMost = true;
+        }
 
-    if (!wasFirstPresented || releasedTopMost || m_DetachedPreviewOpeningTopMostHeld) {
-        EditorModule::DetachedPreviewNativeWindowRequest updatedRequest;
-        if (m_Editor.QueryDetachedPreviewNativeWindow(updatedRequest)) {
-            TraceDetachedPreviewNativeWindow(
-                releasedTopMost ? "opening-topmost-release" : "post-platform-present",
-                &updatedRequest,
-                false,
-                m_DetachedPreviewOpeningTopMostHeld,
-                focused);
+        if (!wasFirstPresented || releasedTopMost || m_DetachedPreviewOpeningTopMostHeld) {
+            EditorModule::DetachedNativeWindowRequest updatedRequest;
+            if (m_Editor.QueryDetachedNativeWindow(kind, updatedRequest)) {
+                TraceDetachedPreviewNativeWindow(
+                    releasedTopMost ? "opening-topmost-release" : "post-platform-present",
+                    &updatedRequest,
+                    false,
+                    m_DetachedPreviewOpeningTopMostHeld,
+                    focused);
+            }
         }
     }
 }
 
 void AppShell::TraceDetachedPreviewNativeWindow(
     const char* event,
-    const EditorModule::DetachedPreviewNativeWindowRequest* request,
+    const EditorModule::DetachedNativeWindowRequest* request,
     bool themeApplied,
     bool focusAttempted,
     bool focused) {
@@ -2307,7 +2605,6 @@ void AppShell::RenderUI() {
 
     ImGuiIO& io = ImGui::GetIO();
     const double now = ImGui::GetTime();
-    m_ChromeRevealTime = now;
     double startupElapsed = kAppStartupMotionSeconds;
     if (m_AppStartupMotionActive) {
         if (m_AppStartupMotionStartedAt <= 0.0) {
@@ -2336,21 +2633,18 @@ void AppShell::RenderUI() {
                 &m_Composite,
                 m_Appearance.get(),
                 &m_RequestedTab,
-                RootTabRaw,
+                RootTabRawLab,
                 [this](const std::string& projectFileName) {
                     BeginLibraryToEditorProjectLoad(projectFileName);
                 });
         } },
         { RootTabRaw, "RAW", m_RawTabTexture, [this]() { m_Editor.RenderRawWorkspaceUI(); } },
-        { RootTabEditor, "Editor", m_EditorTabTexture, [this]() { m_Editor.RenderUI(); } },
-        { RootTabTools, "Tools", m_ToolsTabTexture, [this]() {
-            m_Tools.RenderUI([this](ColorLut::LutPayload payload) {
-                if (m_Editor.AddGeneratedLutNodeFromPayload(std::move(payload))) {
-                    RequestTabSwitch(RootTabEditor);
-                }
-            });
-        } }
+        { RootTabRawLab, "RAW Lab", m_RawLabTabTexture != 0 ? m_RawLabTabTexture : m_RawTabTexture,
+            [this]() { m_Editor.RenderRawWorkspaceLabUI(); } },
+        { RootTabEditor, "Editor", m_EditorTabTexture, [this]() { m_Editor.RenderUI(); } }
     };
+    const bool floatingIslandEnabled =
+        m_Appearance && m_Appearance->GetExperimentalIslandEnabled();
 
     TickLibraryToEditorProjectLoadTransition();
     const bool loadTransitionActive = m_LoadTransitionPhase != LibraryToEditorProjectLoadPhase::None;
@@ -2360,9 +2654,21 @@ void AppShell::RenderUI() {
     if (appWindowNativeTabRequest != -1) {
         RequestTabSwitch(appWindowNativeTabRequest);
     }
+    const int appWindowNativeSecondaryTabRequest =
+        ConsumeAppWindowTitlebarNativeSecondaryTabRequest();
+    if (appWindowNativeSecondaryTabRequest == RootTabRawLab) {
+        RequestTabSwitch(RootTabRaw);
+    }
+    const int appWindowNativeCommandRequest =
+        ConsumeAppWindowTitlebarNativeCommandRequest();
+#else
+    const int appWindowNativeCommandRequest = AppChromeCommandNone;
 #endif
     if (m_Editor.ConsumeOpenRawWorkspaceTabRequest()) {
-        RequestTabSwitch(RootTabRaw);
+        RequestTabSwitch(RootTabRawLab);
+    }
+    if (m_Editor.ConsumeOpenRawLabTabRequest()) {
+        RequestTabSwitch(RootTabRawLab);
     }
     if (m_Editor.ConsumeOpenEditorTabRequest()) {
         RequestTabSwitch(RootTabEditor);
@@ -2385,13 +2691,6 @@ void AppShell::RenderUI() {
             from.z + (to.z - from.z) * clamped,
             from.w + (to.w - from.w) * clamped);
     };
-    auto withAlpha = [](ImVec4 color, float alpha) {
-        color.w = std::clamp(alpha, 0.0f, 1.0f);
-        return color;
-    };
-
-    m_ChromeHiddenT = std::max(0.0f, m_ChromeHiddenT - io.DeltaTime * 4.0f);
-
     const bool customChrome = UseFramelessMainWindowChrome();
     const bool customChromeDrag = customChrome && CustomChromeStageHandlesHitTest();
     const bool customChromeWindowControls = customChrome && CustomChromeStageRendersWindowControls();
@@ -2413,6 +2712,7 @@ void AppShell::RenderUI() {
     }
 #endif
     std::vector<ImRect> chromeHitExclusionRects;
+    bool legacyRawTabRequested = false;
     auto addChromeHitExclusion = [&](const ImVec2& min, const ImVec2& max) {
         chromeHitExclusionRects.emplace_back(min, max);
     };
@@ -2441,25 +2741,24 @@ void AppShell::RenderUI() {
             ImGui::InvisibleButton("##TabIcon", ImVec2(hitSize, hitSize));
             addChromeHitExclusion(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
 #if defined(_WIN32)
-            if (appWindowTitlebarActive) {
+            if (appWindowTitlebarActive && m_ChromeHiddenT < 0.95f) {
                 AddAppWindowTitlebarNativeTabRect(hitRect, tab.id);
             }
 #endif
             const bool iconHovered = ImGui::IsItemHovered();
             const bool iconHeld = ImGui::IsItemActive();
             clicked = ImGui::IsItemClicked() || (appWindowTitlebarLeftPressedThisFrame && iconHovered);
-            if (experimentalClientChrome && (selected || iconHovered || iconHeld)) {
-                const ImVec4 fill = selected || iconHeld
-                    ? withAlpha(surfacePalette.controlSurfaceActive, std::max(surfacePalette.controlSurfaceActive.w, 0.70f))
-                    : withAlpha(surfacePalette.controlSurfaceHovered, std::max(surfacePalette.controlSurfaceHovered.w, 0.48f));
-                ImGui::GetWindowDrawList()->AddRectFilled(hitRect.Min, hitRect.Max, ImGui::GetColorU32(fill), 8.0f);
-                if (selected) {
-                    ImGui::GetWindowDrawList()->AddRectFilled(
-                        ImVec2(hitRect.Min.x + 7.0f, hitRect.Max.y - 2.0f),
-                        ImVec2(hitRect.Max.x - 7.0f, hitRect.Max.y),
-                        selectedAccentColor,
-                        1.0f);
-                }
+            if (tab.id == RootTabRawLab &&
+                iconHovered &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Right)) {
+                legacyRawTabRequested = true;
+            }
+            if (experimentalClientChrome && selected) {
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(hitRect.Min.x + 7.0f, hitRect.Max.y - 2.0f),
+                    ImVec2(hitRect.Max.x - 7.0f, hitRect.Max.y),
+                    selectedAccentColor,
+                    1.0f);
             }
             const float iconOffset = (hitSize - iconSize) * 0.5f;
             const ImVec2 iconMin(cursor.x + iconOffset, cursor.y + iconOffset);
@@ -2476,7 +2775,12 @@ void AppShell::RenderUI() {
                 ImVec2(1, 1),
                 iconTint);
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", tab.label);
+                if (tab.id == RootTabRawLab) {
+                    ImGui::SetTooltip(
+                        "RAW Lab\nDouble right-click for legacy RAW");
+                } else {
+                    ImGui::SetTooltip("%s", tab.label);
+                }
             }
         } else {
             ImGui::PushStyleColor(ImGuiCol_Button, baseButton);
@@ -2485,11 +2789,16 @@ void AppShell::RenderUI() {
             const float textWidth = ImGui::CalcTextSize(tab.label).x + 18.0f;
             clicked = ImGui::Button(tab.label, ImVec2(textWidth, tabHeight));
             addChromeHitExclusion(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+            if (tab.id == RootTabRawLab &&
+                ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Right)) {
+                legacyRawTabRequested = true;
+            }
 
             const ImVec2 min = ImGui::GetItemRectMin();
             const ImVec2 max = ImGui::GetItemRectMax();
 #if defined(_WIN32)
-            if (appWindowTitlebarActive) {
+            if (appWindowTitlebarActive && m_ChromeHiddenT < 0.95f) {
                 AddAppWindowTitlebarNativeTabRect(ImRect(min, max), tab.id);
             }
 #endif
@@ -2525,46 +2834,8 @@ void AppShell::RenderUI() {
     const float chromeHeight = appWindowTitlebarActive
         ? std::max(50.0f, appWindowTitlebarHeight + 10.0f)
         : 50.0f;
-    const float chromeOffset = -chromeHeight * (1.0f - std::pow(1.0f - m_ChromeHiddenT, 3.0f));
-    const float chromeAlpha = 1.0f - m_ChromeHiddenT;
 
-    ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, chromeAlpha);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 10.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-    ImVec4 chromeChildBg = seamlessSurfaces ? ImVec4(0.0f, 0.0f, 0.0f, 0.0f) : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
-    if (experimentalClientChrome && !seamlessSurfaces) {
-        chromeChildBg = blendColor(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg), ImGui::GetStyleColorVec4(ImGuiCol_Header), 0.28f);
-    }
-    ImGui::PushStyleColor(
-        ImGuiCol_ChildBg,
-        chromeChildBg);
-    ImGui::SetCursorPosY(chromeOffset);
-    ImGui::BeginChild("GlobalProgramBar", ImVec2(0.0f, chromeHeight), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
-    if (experimentalClientChrome && !seamlessSurfaces) {
-        const ImVec2 chromeMin = ImGui::GetWindowPos();
-        const ImVec2 chromeMax = ImVec2(chromeMin.x + ImGui::GetWindowSize().x, chromeMin.y + ImGui::GetWindowSize().y);
-        const ImU32 separatorColor = ImGui::GetColorU32(withAlpha(
-            ImGui::GetStyleColorVec4(ImGuiCol_Separator),
-            0.55f));
-        ImGui::GetWindowDrawList()->AddLine(
-            ImVec2(chromeMin.x, chromeMax.y - 0.5f),
-            ImVec2(chromeMax.x, chromeMax.y - 0.5f),
-            separatorColor,
-            1.0f);
-    }
-
-    constexpr float chromeButtonHitSize = 28.0f;
-    constexpr float chromeButtonGap = 8.0f;
-    constexpr float windowControlHitWidth = 36.0f;
-    constexpr float nativeCaptionFallbackReserveWidth = 150.0f;
-    const float chromeControlTopY = ImGui::GetCursorPosY();
-
-    ImVec2 settingsGearMin(0.0f, 0.0f);
-    ImVec2 settingsGearMax(0.0f, 0.0f);
-    bool settingsGearHovered = false;
+    bool settingsButtonHovered = false;
 
     auto openSettingsPopup = [&]() {
         if (!m_SettingsPopupOpen) {
@@ -2572,7 +2843,6 @@ void AppShell::RenderUI() {
             m_SettingsPopupOpenedAt = ImGui::GetTime();
         }
     };
-
     auto toggleSettingsPopup = [&]() {
         if (m_SettingsPopupOpen) {
             m_SettingsPopupOpen = false;
@@ -2582,122 +2852,577 @@ void AppShell::RenderUI() {
         }
     };
 
-    auto renderSettingsGear = [&](const char* id) {
-        if (m_HeaderSettingsTexture == 0) {
-            return;
-        }
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->Pos.x + 18.0f, viewport->Pos.y + 10.0f),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 0.0f));
+    ImGui::Begin(
+        "PersistentApplicationMenu",
+        nullptr,
+        ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoFocusOnAppearing |
+            ImGuiWindowFlags_NoBackground);
 
-        constexpr float iconSize = 18.0f;
-        ImGui::SetCursorPosY(chromeControlTopY);
-
+    auto renderChromeTextButton = [&] (
+        const char* id,
+        const char* label,
+        bool selected,
+        int nativeCommandId,
+        ImVec2* outMin,
+        ImVec2* outMax,
+        bool* outHovered) {
+        constexpr float hitHeight = 28.0f;
+        const ImVec2 textSize = ImGui::CalcTextSize(label);
+        const float hitWidth = textSize.x + 12.0f;
         const ImVec2 cursor = ImGui::GetCursorScreenPos();
-        settingsGearMin = cursor;
-        settingsGearMax = ImVec2(cursor.x + chromeButtonHitSize, cursor.y + chromeButtonHitSize);
-        ImGui::InvisibleButton(id, ImVec2(chromeButtonHitSize, chromeButtonHitSize));
-        addChromeHitExclusion(settingsGearMin, settingsGearMax);
+        const ImRect rect(cursor, ImVec2(cursor.x + hitWidth, cursor.y + hitHeight));
+        ImGui::InvisibleButton(id, ImVec2(hitWidth, hitHeight));
+        addChromeHitExclusion(rect.Min, rect.Max);
 #if defined(_WIN32)
-        if (appWindowTitlebarActive) {
-            SetAppWindowTitlebarNativeSettingsRect(ImRect(settingsGearMin, settingsGearMax));
+        if (appWindowTitlebarActive && nativeCommandId != AppChromeCommandNone) {
+            AddAppWindowTitlebarNativeCommandRect(rect, nativeCommandId);
         }
 #endif
-        settingsGearHovered = ImGui::IsItemHovered();
-        const bool gearHeld = ImGui::IsItemActive();
-        const bool gearClicked = ImGui::IsItemClicked() || (appWindowTitlebarLeftPressedThisFrame && settingsGearHovered);
+        const bool hovered = ImGui::IsItemHovered();
+        const bool held = ImGui::IsItemActive();
+        if (outMin) *outMin = rect.Min;
+        if (outMax) *outMax = rect.Max;
+        if (outHovered) *outHovered = hovered;
 
-        const ImRect gearRect(settingsGearMin, settingsGearMax);
-        const bool gearSelected = m_SettingsPopupOpen;
-        ImVec4 bgColor(0.0f, 0.0f, 0.0f, 0.0f);
-        if (seamlessSurfaces) {
-            bgColor = gearSelected || gearHeld
-                ? surfacePalette.controlSurfaceActive
-                : (settingsGearHovered ? surfacePalette.controlSurfaceHovered : bgColor);
-        } else if (gearSelected || settingsGearHovered || gearHeld) {
-            bgColor = gearSelected || gearHeld
-                ? blendColor(ImGui::GetStyleColorVec4(ImGuiCol_Button), ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive), 0.55f)
-                : blendColor(ImGui::GetStyleColorVec4(ImGuiCol_Button), ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered), 0.35f);
+        ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        const ImVec4 accentColor = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+        if (selected || held) {
+            textColor = accentColor;
+        } else if (hovered) {
+            textColor = blendColor(textColor, accentColor, 0.72f);
         }
-        if (bgColor.w > 0.001f) {
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                gearRect.Min,
-                gearRect.Max,
-                ImGui::GetColorU32(bgColor),
-                8.0f);
+        const ImVec2 textPos(
+            cursor.x + (hitWidth - textSize.x) * 0.5f,
+            cursor.y + (hitHeight - textSize.y) * 0.5f);
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        if (selected || hovered || held) {
+            ImVec4 glow = accentColor;
+            glow.w *= selected || held ? 0.22f : 0.14f;
+            const ImU32 glowColor = ImGui::GetColorU32(glow);
+            drawList->AddText(ImVec2(textPos.x - 1.0f, textPos.y), glowColor, label);
+            drawList->AddText(ImVec2(textPos.x + 1.0f, textPos.y), glowColor, label);
+            drawList->AddText(ImVec2(textPos.x, textPos.y - 1.0f), glowColor, label);
+            drawList->AddText(ImVec2(textPos.x, textPos.y + 1.0f), glowColor, label);
         }
+        drawList->AddText(textPos, ImGui::GetColorU32(textColor), label);
+        return ImGui::IsItemClicked();
+    };
 
-        const float iconOffset = (chromeButtonHitSize - iconSize) * 0.5f;
-        const ImVec2 iconMin(cursor.x + iconOffset, cursor.y + iconOffset);
-        const ImVec2 iconMax(iconMin.x + iconSize, iconMin.y + iconSize);
-        const ImU32 iconTint = StackAppearance::ResolveThemedMonochromeIconTint(
-            m_Appearance.get(),
-            gearSelected || gearHeld,
-            settingsGearHovered);
-        ImGui::GetWindowDrawList()->AddImage(
-            (ImTextureID)(intptr_t)m_HeaderSettingsTexture,
-            iconMin,
-            iconMax,
-            ImVec2(0, 0),
-            ImVec2(1, 1),
-            iconTint);
-        if (settingsGearHovered) {
-            ImGui::SetTooltip("Settings");
-        }
-        if (gearClicked) {
-            toggleSettingsPopup();
+    auto activateRootTab = [&](int tabId) {
+        if (!loadTransitionActive &&
+            tabId != m_CurrentTabId &&
+            CanChangeRootTab(m_CurrentTabId, tabId)) {
+            BeginRootTabBodyFade(m_CurrentTabId, tabId);
+            OnTabChanged(m_CurrentTabId, tabId);
+            m_CurrentTabId = tabId;
         }
     };
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
-    for (size_t i = 0; i < tabs.size(); ++i) {
-        const RootTabDescriptor& tab = tabs[i];
-        if (i > 0) {
+    const bool filePopupWasOpen = ImGui::IsPopupOpen("GlobalFileMenu");
+    const bool fileClicked = renderChromeTextButton(
+        "##PersistentFileButton",
+        "File",
+        filePopupWasOpen,
+        AppChromeCommandFile,
+        nullptr,
+        nullptr,
+        nullptr);
+    ImGui::SameLine();
+    ImVec2 persistentMenuLastMax;
+    const bool settingsClicked = renderChromeTextButton(
+        "##PersistentSettingsButton",
+        "Settings",
+        m_SettingsPopupOpen,
+        AppChromeCommandSettings,
+        nullptr,
+        &persistentMenuLastMax,
+        &settingsButtonHovered);
+
+    if (!floatingIslandEnabled) {
+        const auto renderTextNavigation = [&] (
+            const char* id,
+            const char* label,
+            int tabId,
+            bool selected,
+            bool legacyRawGesture) {
             ImGui::SameLine();
-        }
-        if (renderTabButton(tab, m_CurrentTabId == tab.id) &&
-            !loadTransitionActive &&
-            tab.id != m_CurrentTabId &&
-            CanChangeRootTab(m_CurrentTabId, tab.id)) {
-            BeginRootTabBodyFade(m_CurrentTabId, tab.id);
-            OnTabChanged(m_CurrentTabId, tab.id);
-            m_CurrentTabId = tab.id;
-        }
+            ImVec2 itemMin;
+            ImVec2 itemMax;
+            bool hovered = false;
+            const bool clicked = renderChromeTextButton(
+                id,
+                label,
+                selected,
+                AppChromeCommandNone,
+                &itemMin,
+                &itemMax,
+                &hovered);
+            persistentMenuLastMax = itemMax;
+#if defined(_WIN32)
+            if (appWindowTitlebarActive) {
+                AddAppWindowTitlebarNativeTabRect(ImRect(itemMin, itemMax), tabId);
+            }
+#endif
+            if (legacyRawGesture &&
+                hovered &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Right)) {
+                legacyRawTabRequested = true;
+            }
+            if (clicked) {
+                activateRootTab(tabId);
+            }
+        };
+
+        renderTextNavigation(
+            "##PersistentLibraryButton",
+            "Library",
+            RootTabLibrary,
+            m_CurrentTabId == RootTabLibrary,
+            false);
+        renderTextNavigation(
+            "##PersistentRawButton",
+            "Raw",
+            RootTabRawLab,
+            IsRawWorkspaceRootTab(m_CurrentTabId),
+            true);
+        renderTextNavigation(
+            "##PersistentGraphButton",
+            "Graph",
+            RootTabEditor,
+            m_CurrentTabId == RootTabEditor,
+            false);
     }
-    if (appWindowTitlebarActive && m_HeaderSettingsTexture != 0) {
-        ImGui::SameLine();
-        renderSettingsGear("##HeaderSettingsGearLeft");
+    const float persistentMenuRightScreen = persistentMenuLastMax.x;
+
+    if (fileClicked ||
+        appWindowNativeCommandRequest == AppChromeCommandFile) {
+        ImGui::OpenPopup("GlobalFileMenu");
+    }
+    if (settingsClicked ||
+        appWindowNativeCommandRequest == AppChromeCommandSettings) {
+        toggleSettingsPopup();
     }
 
-    if (m_CurrentTabId == RootTabRaw) {
-        std::string rawProgramStatus = m_Editor.GetRawWorkspaceProgramBarStatus();
-        if (!rawProgramStatus.empty()) {
-            auto clippedText = [](const std::string& text, float maxWidth) {
-                if (maxWidth <= 0.0f || ImGui::CalcTextSize(text.c_str()).x <= maxWidth) {
-                    return text;
+    ImGui::SetNextWindowSizeConstraints(
+        ImVec2(300.0f, 0.0f),
+        ImVec2(440.0f, viewport->Size.y * 0.85f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 9.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    if (ImGui::BeginPopup("GlobalFileMenu")) {
+        const EditorModule::ProjectFileCommandContext context =
+            m_Editor.GetProjectFileCommandContext();
+        const auto drawMenuIcon = [](unsigned int texture, bool enabled = true) {
+            if (texture == 0) {
+                return;
+            }
+            const ImVec2 itemMin = ImGui::GetItemRectMin();
+            const ImVec2 itemMax = ImGui::GetItemRectMax();
+            const float iconSize = std::min(15.0f, itemMax.y - itemMin.y - 5.0f);
+            const ImVec2 iconMin(
+                itemMin.x + 6.0f,
+                itemMin.y + (itemMax.y - itemMin.y - iconSize) * 0.5f);
+            const ImVec2 iconMax(iconMin.x + iconSize, iconMin.y + iconSize);
+            ImVec4 tint = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            if (!enabled) {
+                tint = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            }
+            ImGui::GetWindowDrawList()->AddImage(
+                (ImTextureID)(intptr_t)texture,
+                iconMin,
+                iconMax,
+                ImVec2(0.0f, 0.0f),
+                ImVec2(1.0f, 1.0f),
+                ImGui::ColorConvertFloat4ToU32(tint));
+        };
+        const auto fileMenuItem = [&drawMenuIcon](
+                                      const char* label,
+                                      const char* shortcut,
+                                      unsigned int texture,
+                                      bool enabled = true) {
+            // Dear ImGui menu items own the text/shortcut/arrow columns, while
+            // the icon is drawn over the row. Reserve a full, scale-friendly
+            // icon column so the label never crosses the glyph.
+            const std::string paddedLabel = std::string("        ") + label;
+            const bool activated = ImGui::MenuItem(
+                paddedLabel.c_str(), shortcut, false, enabled);
+            drawMenuIcon(texture, enabled);
+            return activated;
+        };
+        const auto menuSeparator = []() {
+            ImGui::Dummy(ImVec2(0.0f, 2.0f));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        };
+        if (fileMenuItem(
+                "New Editor Project",
+                "Ctrl+N",
+                m_FileNewTexture,
+                context.canCreateEditorProject)) {
+            QueueFileAction(PendingFileAction::NewEditorProject);
+        }
+        if (fileMenuItem(
+                "Open Project...",
+                "Ctrl+O",
+                m_FileOpenProjectTexture,
+                context.canOpen)) {
+            m_ShowOpenProjectPrompt = true;
+        }
+
+        menuSeparator();
+        if (fileMenuItem(
+                "Save Project",
+                "Ctrl+S",
+                m_FileSaveTexture,
+                context.canSave)) {
+            RequestFileMenuSave();
+        }
+        if (fileMenuItem(
+                "Save As...",
+                "Ctrl+Shift+S",
+                m_FileSaveTexture,
+                context.canSaveAs)) {
+            RequestFileMenuSaveAs();
+        }
+
+        const bool showStorageConversion = context.storageKind.has_value();
+        const bool storageConversionOpen = showStorageConversion &&
+            ImGui::BeginMenu("        Convert Project Storage", context.canSaveAs);
+        if (showStorageConversion) {
+            drawMenuIcon(m_FileSaveTexture, context.canSaveAs);
+        }
+        if (storageConversionOpen) {
+            const Stack::Project::ProjectStorageKind targetKind =
+                *context.storageKind ==
+                    Stack::Project::ProjectStorageKind::DirectoryBundle
+                ? Stack::Project::ProjectStorageKind::PortableFile
+                : Stack::Project::ProjectStorageKind::DirectoryBundle;
+            const char* convertLabel = targetKind ==
+                Stack::Project::ProjectStorageKind::PortableFile
+                ? "To Portable File..."
+                : "To Directory Bundle...";
+            if (fileMenuItem(
+                    convertLabel,
+                    nullptr,
+                    m_FileSaveTexture)) {
+                std::filesystem::path destination;
+                if (targetKind == Stack::Project::ProjectStorageKind::PortableFile) {
+                    const std::string defaultName =
+                        (m_Editor.GetCurrentProjectName().empty()
+                            ? std::string("RAW Project")
+                            : m_Editor.GetCurrentProjectName()) + ".stack";
+                    destination = FileDialogs::SaveProjectFileDialog(
+                        "Convert Project to Portable Storage",
+                        defaultName.c_str());
+                } else {
+                    const std::string projectName =
+                        m_Editor.GetCurrentProjectName().empty()
+                            ? std::string("RAW Project")
+                            : m_Editor.GetCurrentProjectName();
+                    destination = FileDialogs::SaveProjectBundleDialog(
+                        "Convert Project to Bundle Storage",
+                        (projectName + ".stackbundle").c_str());
                 }
-
-                std::string clipped = text;
-                constexpr const char* suffix = "...";
-                const float suffixWidth = ImGui::CalcTextSize(suffix).x;
-                while (!clipped.empty() &&
-                    ImGui::CalcTextSize(clipped.c_str()).x + suffixWidth > maxWidth) {
-                    clipped.pop_back();
+                if (!destination.empty()) {
+                    std::string error;
+                    if (!m_Editor.SaveActiveMultiFrameRawProjectAs(
+                            destination,
+                            targetKind,
+                            &error)) {
+                        m_Editor.ShowUiNotification(
+                            UiNotificationSeverity::Error,
+                            error.empty()
+                                ? "Project storage conversion failed."
+                                : error,
+                            "file-menu-convert-project-storage");
+                    }
                 }
-                return clipped.empty() ? std::string(suffix) : clipped + suffix;
-            };
+            }
+            ImGui::EndMenu();
+        }
 
-            ImGui::SameLine(0.0f, 18.0f);
-            const float statusMaxWidth = std::max(
-                80.0f,
-                ImGui::GetWindowContentRegionMax().x -
-                    ImGui::GetCursorPosX() -
-                    (customChromeWindowControls ? 170.0f : 70.0f));
-            rawProgramStatus = clippedText(rawProgramStatus, statusMaxWidth);
-            const ImVec2 statusSize = ImGui::CalcTextSize(rawProgramStatus.c_str());
-            ImGui::SetCursorPosY(chromeControlTopY + std::max(0.0f, (chromeButtonHitSize - statusSize.y) * 0.5f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextUnformatted(rawProgramStatus.c_str());
-            ImGui::PopStyleColor();
+        menuSeparator();
+        const char* closeLabel = context.sessionKind ==
+            EditorModule::ProjectSessionKind::RawPreview
+            ? "Close Preview"
+            : "Close Project";
+        if (fileMenuItem(
+                closeLabel,
+                "Ctrl+W",
+                m_FileExitProgramTexture,
+                context.canClose)) {
+            QueueFileAction(PendingFileAction::CloseCurrent);
+        }
+        menuSeparator();
+        if (fileMenuItem(
+                "Exit Stack",
+                nullptr,
+                m_FileExitProgramTexture)) {
+            RequestMainWindowClose("file-menu-exit");
+        }
+        if (context.busy && !context.busyReason.empty()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", context.busyReason.c_str());
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(5);
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+
+    const bool globalShortcutAllowed =
+        !io.WantTextInput &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+    if (globalShortcutAllowed && io.KeyCtrl) {
+        if (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            RequestFileMenuSaveAs();
+        } else if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            RequestFileMenuSave();
+        } else if (ImGui::IsKeyPressed(ImGuiKey_O, false)) {
+            if (m_Editor.GetProjectFileCommandContext().canOpen) {
+                m_ShowOpenProjectPrompt = true;
+            }
+        } else if (ImGui::IsKeyPressed(ImGuiKey_N, false)) {
+            QueueFileAction(PendingFileAction::NewEditorProject);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+            QueueFileAction(PendingFileAction::CloseCurrent);
         }
     }
+
+    const float previousChromeOffset =
+        -(chromeHeight - kFloatingChromeHiddenSliver) *
+        (1.0f - std::pow(1.0f - m_ChromeHiddenT, 3.0f));
+    const bool pointerInsideMainViewportX =
+        io.MousePos.x >= viewport->Pos.x &&
+        io.MousePos.x <= viewport->Pos.x + viewport->Size.x;
+    const bool pointerAtTopEdge =
+        pointerInsideMainViewportX &&
+        io.MousePos.y >= viewport->Pos.y - 1.0f &&
+        io.MousePos.y <= viewport->Pos.y + kFloatingChromeRevealEdgeHeight;
+    const float previousChromeTop = viewport->Pos.y + previousChromeOffset;
+    const float previousChromeBottom = previousChromeTop + chromeHeight;
+    const bool pointerOverVisibleChrome =
+        pointerInsideMainViewportX &&
+        m_ChromeHiddenT < 0.995f &&
+        io.MousePos.y >= previousChromeTop &&
+        io.MousePos.y <= previousChromeBottom;
+    const bool startupDiscovery =
+        m_MainWindowShownTime > 0.0 &&
+        now - m_MainWindowShownTime < kFloatingChromeStartupDiscoverySeconds;
+    const bool keepChromeRevealed =
+        m_CurrentTabId == RootTabLibrary ||
+        pointerAtTopEdge ||
+        pointerOverVisibleChrome ||
+        loadTransitionActive ||
+        startupDiscovery;
+    if (keepChromeRevealed) {
+        m_ChromeRevealTime = now;
+    }
+    const bool revealChrome =
+        keepChromeRevealed ||
+        (m_ChromeRevealTime > 0.0 &&
+         now - m_ChromeRevealTime < kFloatingChromeHoldSeconds);
+    m_ChromeHiddenT = ImGuiExtras::AnimateTowards(
+        m_ChromeHiddenT,
+        revealChrome ? 0.0f : 1.0f,
+        io.DeltaTime,
+        revealChrome ? kFloatingChromeShowSpeed : kFloatingChromeHideSpeed);
+    const float chromeOffset =
+        -(chromeHeight - kFloatingChromeHiddenSliver) *
+        (1.0f - std::pow(1.0f - m_ChromeHiddenT, 3.0f));
+    const float chromeAlpha = 1.0f - m_ChromeHiddenT;
+
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->Pos.x, viewport->Pos.y + chromeOffset),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, chromeHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, chromeAlpha);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGuiWindowFlags floatingChromeFlags =
+        ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBackground;
+    if (m_ChromeHiddenT > 0.995f) {
+        floatingChromeFlags |= ImGuiWindowFlags_NoInputs;
+    }
+    ImGui::Begin("FloatingRootNavigation", nullptr, floatingChromeFlags);
+    ImGui::PopStyleVar(2);
+
+    constexpr float chromeButtonHitSize = 28.0f;
+    constexpr float chromeButtonGap = 8.0f;
+    constexpr float windowControlHitWidth = 36.0f;
+    constexpr float nativeCaptionFallbackReserveWidth = 150.0f;
+    const float chromeControlTopY = ImGui::GetCursorPosY();
+
+    auto rootNavigationButtonWidth = [&](const RootTabDescriptor& tab) {
+        return tab.iconTexture != 0
+            ? chromeButtonHitSize
+            : ImGui::CalcTextSize(tab.label).x + 18.0f;
+    };
+    float rootNavigationWidth = 0.0f;
+    for (const RootTabDescriptor& tab : tabs) {
+        if (!floatingIslandEnabled || tab.id == RootTabRaw) {
+            continue;
+        }
+        if (rootNavigationWidth > 0.0f) {
+            rootNavigationWidth += chromeButtonGap;
+        }
+        rootNavigationWidth += rootNavigationButtonWidth(tab);
+    }
+    const float rootNavigationStartX = floatingIslandEnabled
+        ? std::max(
+            ImGui::GetWindowContentRegionMin().x,
+            (ImGui::GetWindowSize().x - rootNavigationWidth) * 0.5f)
+        : std::max(
+            ImGui::GetWindowContentRegionMin().x,
+            persistentMenuRightScreen - viewport->Pos.x + 8.0f);
+    const float rootNavigationEndX = rootNavigationStartX + rootNavigationWidth;
+
+    if (floatingIslandEnabled) {
+    ImVec4 navigationSurface = surfacePalette.chromeSurface;
+    if (navigationSurface.w <= 0.001f) {
+        navigationSurface = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    }
+    navigationSurface.w = std::max(navigationSurface.w, 0.92f);
+    ImVec4 navigationBorder = surfacePalette.border;
+    if (navigationBorder.w <= 0.001f) {
+        navigationBorder = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+    }
+    navigationBorder.w = std::max(navigationBorder.w, 0.55f);
+    const ImVec2 floatingWindowPos = ImGui::GetWindowPos();
+    const ImVec2 navigationPillMin(
+        floatingWindowPos.x + rootNavigationStartX - kFloatingChromePillPaddingX,
+        floatingWindowPos.y + chromeControlTopY - kFloatingChromePillPaddingY);
+    const ImVec2 navigationPillMax(
+        floatingWindowPos.x + rootNavigationEndX + kFloatingChromePillPaddingX,
+        floatingWindowPos.y + chromeControlTopY + chromeButtonHitSize +
+            kFloatingChromePillPaddingY);
+    ImDrawList* floatingChromeDrawList = ImGui::GetWindowDrawList();
+    floatingChromeDrawList->PushClipRectFullScreen();
+    constexpr int navigationShadowPasses = 28;
+    constexpr float navigationShadowSigma = 28.0f;
+    for (int pass = navigationShadowPasses; pass >= 1; --pass) {
+        const float spread = static_cast<float>(pass) * 2.0f;
+        const float gaussian = std::exp(
+            -(spread * spread) /
+            (2.0f * navigationShadowSigma * navigationShadowSigma));
+        const ImVec4 shadowColor(0.0f, 0.0f, 0.0f, 0.0045f * gaussian);
+        floatingChromeDrawList->AddRectFilled(
+            ImVec2(
+                navigationPillMin.x - spread,
+                navigationPillMin.y - spread + 6.0f),
+            ImVec2(
+                navigationPillMax.x + spread,
+                navigationPillMax.y + spread + 6.0f),
+            ImGui::GetColorU32(shadowColor),
+            12.0f + spread);
+    }
+    floatingChromeDrawList->PopClipRect();
+    floatingChromeDrawList->AddRectFilled(
+        navigationPillMin,
+        navigationPillMax,
+        ImGui::GetColorU32(navigationSurface),
+        12.0f);
+    floatingChromeDrawList->AddRect(
+        navigationPillMin,
+        navigationPillMax,
+        ImGui::GetColorU32(navigationBorder),
+        12.0f,
+        0,
+        1.0f);
+    }
+
+    ImGui::SetCursorPosX(rootNavigationStartX);
+    ImGui::SetCursorPosY(chromeControlTopY);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
+    if (floatingIslandEnabled) {
+        int visibleNavigationTabCount = 0;
+        for (const RootTabDescriptor& tab : tabs) {
+            if (tab.id == RootTabRaw) {
+                continue;
+            }
+            if (visibleNavigationTabCount > 0) {
+                ImGui::SameLine();
+            }
+            const bool selected = tab.id == RootTabRawLab
+                ? IsRawWorkspaceRootTab(m_CurrentTabId)
+                : m_CurrentTabId == tab.id;
+            if (renderTabButton(tab, selected)) {
+                activateRootTab(tab.id);
+            }
+            ++visibleNavigationTabCount;
+        }
+    }
+    if (legacyRawTabRequested &&
+        !loadTransitionActive &&
+        m_CurrentTabId != RootTabRaw &&
+        CanChangeRootTab(m_CurrentTabId, RootTabRaw)) {
+        BeginRootTabBodyFade(m_CurrentTabId, RootTabRaw);
+        OnTabChanged(m_CurrentTabId, RootTabRaw);
+        m_CurrentTabId = RootTabRaw;
+    }
+    const bool rawWorkspaceLocked =
+        IsRawWorkspaceRootTab(m_CurrentTabId) &&
+        m_Editor.IsRawWorkspaceLockedByEditorProject();
+    const float leftStatusStartX = ImGui::GetWindowContentRegionMin().x;
+    const float leftStatusMaximumWidth = std::max(
+        0.0f,
+        rootNavigationStartX - leftStatusStartX - 18.0f);
+    if (rawWorkspaceLocked) {
+        constexpr const char* switchLabel = "Switch to RAW Workspace";
+        const float requestedButtonWidth = ImGui::CalcTextSize(switchLabel).x + 28.0f;
+        if (leftStatusMaximumWidth >= 96.0f) {
+            const float buttonWidth = std::min(requestedButtonWidth, leftStatusMaximumWidth);
+            ImGui::SetCursorPosX(leftStatusStartX);
+            ImGui::SetCursorPosY(chromeControlTopY);
+            ImGui::BeginDisabled(m_RawWorkspaceSwitchSavePending);
+            if (ImGui::Button(switchLabel, ImVec2(buttonWidth, chromeButtonHitSize))) {
+                if (m_Editor.IsDirty()) {
+                    m_ShowRawWorkspaceSwitchPrompt = true;
+                } else {
+                    m_Editor.CloseEditorProjectAndActivateRawWorkspace();
+                }
+            }
+            ImGui::EndDisabled();
+            addChromeHitExclusion(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        }
+    }
+    ImGui::SetCursorPosX(rootNavigationEndX);
+    ImGui::SetCursorPosY(chromeControlTopY);
+    // Text-navigation mode intentionally leaves the centered navigation
+    // surface empty. Commit the reserved cursor extent with a zero-width
+    // layout item so Dear ImGui does not treat SetCursorPos as an attempt to
+    // grow this transparent chrome window without submitting content.
+    ImGui::Dummy(ImVec2(0.0f, chromeButtonHitSize));
     ImGui::PopStyleVar();
 
     const float windowControlsWidth = customChromeWindowControls ? (windowControlHitWidth * 3.0f) : 0.0f;
@@ -2707,11 +3432,8 @@ void AppShell::RenderUI() {
     const float nativeCaptionReservedWidth = appWindowTitlebarActive
         ? std::max(nativeCaptionFallbackReserveWidth, reportedNativeCaptionReservedWidth)
         : reportedNativeCaptionReservedWidth;
-    const float settingsBlockWidth = (m_HeaderSettingsTexture != 0 && !appWindowTitlebarActive) ? chromeButtonHitSize : 0.0f;
-    const bool hasRightClusterContent = settingsBlockWidth > 0.0f || customChromeWindowControls;
-    float rightClusterWidth = settingsBlockWidth +
-        (settingsBlockWidth > 0.0f && windowControlsWidth > 0.0f ? chromeButtonGap : 0.0f) +
-        windowControlsWidth;
+    const bool hasRightClusterContent = customChromeWindowControls;
+    float rightClusterWidth = windowControlsWidth;
     if (nativeCaptionReservedWidth > 0.0f) {
         rightClusterWidth += nativeCaptionReservedWidth + (rightClusterWidth > 0.0f ? chromeButtonGap : 0.0f);
     }
@@ -2753,15 +3475,8 @@ void AppShell::RenderUI() {
                 : ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     };
 
-    if (m_HeaderSettingsTexture != 0 && !appWindowTitlebarActive) {
-        renderSettingsGear("##HeaderSettingsGear");
-    }
-
     if (customChromeWindowControls) {
         const bool maximized = m_Window && glfwGetWindowAttrib(m_Window, GLFW_MAXIMIZED) == GLFW_TRUE;
-        if (m_HeaderSettingsTexture != 0) {
-            ImGui::SameLine(0.0f, chromeButtonGap);
-        }
 
         auto renderWindowControl = [&](const char* id, WindowControlKind kind, const char* tooltip) {
             ImGui::SetCursorPosY((chromeHeight - chromeButtonHitSize) * 0.5f);
@@ -2814,19 +3529,14 @@ void AppShell::RenderUI() {
     } else {
         AppWindowTitleBarBridge::ClearPassthroughRegions();
     }
-    ImGui::EndChild();
+    ImGui::End();
     ImGui::PopStyleVar();
 
-#if defined(_WIN32)
-    if (ConsumeAppWindowTitlebarNativeSettingsRequest()) {
-        openSettingsPopup();
-    }
-#endif
-
-    RenderHeaderSettingsPopup(settingsGearMin, settingsGearMax, settingsGearHovered);
+    RenderHeaderSettingsPopup(settingsButtonHovered);
 
     if (!loadTransitionActive) {
         m_Library.RenderGlobalPopups();
+        RenderFileCommandPrompts();
         RenderEditorSavePrompts();
     }
 
@@ -2857,7 +3567,7 @@ void AppShell::RenderUI() {
                 &m_Composite,
                 m_Appearance.get(),
                 &m_RequestedTab,
-                RootTabRaw,
+                RootTabRawLab,
                 [this](const std::string& projectFileName) {
                     BeginLibraryToEditorProjectLoad(projectFileName);
                 });
@@ -2905,7 +3615,16 @@ void AppShell::RenderUI() {
                     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + startupBodyOffsetY);
                 }
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, rootTabBodyAlpha * startupContentAlpha);
+                const bool lockRawBody =
+                    IsRawWorkspaceRootTab(tab.id) &&
+                    m_Editor.IsRawWorkspaceLockedByEditorProject();
+                if (lockRawBody) {
+                    ImGui::BeginDisabled();
+                }
                 tab.renderBody();
+                if (lockRawBody) {
+                    ImGui::EndDisabled();
+                }
                 ImGui::PopStyleVar();
                 break;
             }
@@ -2928,9 +3647,10 @@ void AppShell::RenderUI() {
     if (m_Editor.IsDetachedPreviewActive()) {
         m_Editor.RenderDetachedPreviewWindow();
     }
+    m_Editor.RenderRawWorkspaceDetachedWindows();
 }
 
-void AppShell::RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVec2& gearButtonMax, bool gearButtonHovered) {
+void AppShell::RenderHeaderSettingsPopup(bool buttonHovered) {
     if (!m_SettingsPopupOpen || !m_Appearance) {
         return;
     }
@@ -2947,7 +3667,10 @@ void AppShell::RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVe
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float popupWidth = std::clamp(viewport->Size.x * 0.66f, 820.0f, 1080.0f);
-    const float popupHeight = std::clamp(viewport->Size.y * 0.82f, 620.0f, 940.0f);
+    // Graph is the tallest fixed settings page. Background libraries can grow
+    // without bound and scroll independently, so they should not force the
+    // shared window to occupy most of the display.
+    const float popupHeight = std::clamp(viewport->Size.y * 0.70f, 620.0f, 780.0f);
 
     ImVec2 popupPos(
         viewport->Pos.x + (viewport->Size.x - popupWidth) * 0.5f,
@@ -3012,15 +3735,14 @@ void AppShell::RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVe
     ImGui::TextUnformatted("Settings");
     ImGui::SameLine();
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 74.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     if (ImGui::Button("Close", ImVec2(74.0f, 0.0f))) {
         popupOpen = false;
     }
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextWrapped("Tune appearance, graph behavior, viewport rendering, and app updates without leaving the workspace.");
-    ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::PopStyleColor(3);
+    ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
     AppSettingsPopup::RenderContents(m_Appearance.get(), &m_Editor, m_UpdateManager.get(), m_SettingsPopupState);
 
@@ -3033,7 +3755,7 @@ void AppShell::RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVe
         (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) &&
         !openedThisFrame &&
         !popupHovered &&
-        !gearButtonHovered;
+        !buttonHovered;
     m_SettingsPopupOpen = popupOpen && !outsideClick;
     if (!m_SettingsPopupOpen) {
         m_SettingsPopupOpenedAt = 0.0;
@@ -3044,6 +3766,27 @@ void AppShell::BeginLibraryToEditorProjectLoad(const std::string& projectFileNam
     if (projectFileName.empty() ||
         m_LoadTransitionPhase != LibraryToEditorProjectLoadPhase::None ||
         Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState())) {
+        return;
+    }
+
+    if (!m_ProjectLoadCurrentProjectDispositionApproved &&
+        m_Editor.IsDirty() &&
+        m_Editor.GetProjectSessionKind() ==
+            EditorModule::ProjectSessionKind::EditorProject) {
+        m_PendingProjectLoadFileName = projectFileName;
+        m_ShowEditorSavePrompt = true;
+        return;
+    }
+    m_ProjectLoadCurrentProjectDispositionApproved = false;
+    if ((m_Editor.GetProjectSessionKind() ==
+             EditorModule::ProjectSessionKind::RawPreview ||
+         m_Editor.GetProjectSessionKind() ==
+             EditorModule::ProjectSessionKind::RawProject) &&
+        !m_Editor.FlushActiveRawWorkspaceProjectIfDirty()) {
+        PushToast(
+            UiNotificationSeverity::Error,
+            "The selected project was not opened because the current RAW project could not be saved.",
+            "project-load-raw-save-failed");
         return;
     }
 
@@ -3509,6 +4252,106 @@ void AppShell::RenderToasts() {
     }
 }
 
+void AppShell::RenderFileCommandPrompts() {
+    if (m_ShowOpenProjectPrompt) {
+        m_ShowOpenProjectPrompt = false;
+        std::filesystem::path selected =
+            FileDialogs::OpenStackProjectFileDialog("Open Project");
+        if (!selected.empty()) {
+            std::string fileName = selected.filename().string();
+            std::transform(
+                fileName.begin(),
+                fileName.end(),
+                fileName.begin(),
+                [](unsigned char value) {
+                    return static_cast<char>(std::tolower(value));
+                });
+            if (fileName == "project.stackmanifest") {
+                selected = selected.parent_path();
+            }
+            QueueFileAction(PendingFileAction::OpenProject, std::move(selected));
+        }
+    }
+    if (m_ShowFileDispositionPrompt) {
+        ImGui::OpenPopup("Unsaved Project##FileMenu");
+        m_ShowFileDispositionPrompt = false;
+    }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        viewport->GetCenter(),
+        ImGuiCond_Appearing,
+        ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal(
+            "Unsaved Project##FileMenu",
+            nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize)) {
+        const char* actionText = "continue";
+        if (m_PendingFileAction == PendingFileAction::NewEditorProject) {
+            actionText = "start a new Editor project";
+        } else if (m_PendingFileAction == PendingFileAction::OpenProject) {
+            actionText = "open the selected project";
+        } else if (m_PendingFileAction == PendingFileAction::CloseCurrent) {
+            actionText = "close the current project";
+        }
+        ImGui::TextWrapped(
+            "The current project has unsaved changes. Save it before you %s, "
+            "discard those changes, or cancel?",
+            actionText);
+        if (m_PendingFileAction == PendingFileAction::OpenProject &&
+            !m_PendingFileProjectPath.empty()) {
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "Next: %s",
+                m_PendingFileProjectPath.filename().string().c_str());
+        }
+        ImGui::Spacing();
+
+        const EditorModule::ProjectFileCommandContext context =
+            m_Editor.GetProjectFileCommandContext();
+        const bool busy = m_FileActionSavePending || context.busy;
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Save & Continue", ImVec2(140.0f, 0.0f))) {
+            m_FileActionSavePending = true;
+            const std::string projectName =
+                m_Editor.GetCurrentProjectName().empty()
+                ? "Untitled Project"
+                : m_Editor.GetCurrentProjectName();
+            if (!m_Editor.RequestSaveCurrentProject(
+                    projectName,
+                    [this](bool success) {
+                        m_FileActionSavePending = false;
+                        if (success) {
+                            ExecutePendingFileAction(false);
+                        }
+                    })) {
+                m_FileActionSavePending = false;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard & Continue", ImVec2(150.0f, 0.0f))) {
+            ExecutePendingFileAction(true);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f)) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            ClearPendingFileAction();
+            ImGui::CloseCurrentPopup();
+        }
+        if (busy) {
+            ImGui::TextDisabled(
+                "%s",
+                m_FileActionSavePending
+                    ? "Saving the current project..."
+                    : context.busyReason.c_str());
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void AppShell::RenderEditorSavePrompts() {
     if (m_ShowEditorSavePrompt) {
         ImGui::OpenPopup("Editor Project Already Open##AppShell");
@@ -3519,33 +4362,59 @@ void AppShell::RenderEditorSavePrompts() {
         ImGui::OpenPopup("Save New Editor Project##AppShell");
         m_ShowEditorNamePrompt = false;
     }
+    if (m_ShowRawWorkspaceSwitchPrompt) {
+        ImGui::OpenPopup("Switch to RAW Workspace##AppShell");
+        m_ShowRawWorkspaceSwitchPrompt = false;
+    }
+    if (m_ShowUnnamedEditorClosePrompt) {
+        ImGui::OpenPopup("Save Before Closing Stack##AppShell");
+        m_ShowUnnamedEditorClosePrompt = false;
+    }
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("Editor Project Already Open##AppShell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("There is already a project open in the Editor tab. Would you like to save it before loading the new project?");
+        ImGui::TextWrapped("There is already an edited project open. Save it before loading the selected project, discard it, or cancel.");
         ImGui::Spacing();
 
+        ImGui::BeginDisabled(m_ProjectLoadSavePending);
         if (ImGui::Button("Save & Continue", ImVec2(140.0f, 0.0f))) {
-            if (m_Editor.GetCurrentProjectFileName().empty()) {
-                m_ShowEditorNamePrompt = true;
-            } else {
-                m_Editor.RequestSaveCurrentProject(m_Editor.GetCurrentProjectName());
-                RequestTabSwitch(RootTabEditor);
+            m_ProjectLoadSavePending = true;
+            const std::string targetProject = m_PendingProjectLoadFileName;
+            const std::string projectName = m_Editor.GetCurrentProjectName().empty()
+                ? "Untitled Project"
+                : m_Editor.GetCurrentProjectName();
+            if (!m_Editor.RequestSaveCurrentProject(
+                    projectName,
+                    [this, targetProject](bool success) {
+                        m_ProjectLoadSavePending = false;
+                        if (success) {
+                            m_PendingProjectLoadFileName.clear();
+                            m_ProjectLoadCurrentProjectDispositionApproved = true;
+                            BeginLibraryToEditorProjectLoad(targetProject);
+                        }
+                    })) {
+                m_ProjectLoadSavePending = false;
             }
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::SameLine();
         if (ImGui::Button("Discard & Continue", ImVec2(140.0f, 0.0f))) {
-            RequestTabSwitch(RootTabEditor);
+            const std::string targetProject = m_PendingProjectLoadFileName;
+            m_PendingProjectLoadFileName.clear();
+            m_ProjectLoadCurrentProjectDispositionApproved = true;
+            BeginLibraryToEditorProjectLoad(targetProject);
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+            m_PendingProjectLoadFileName.clear();
             ImGui::CloseCurrentPopup();
         }
+
+        ImGui::EndDisabled();
 
         ImGui::EndPopup();
     }
@@ -3575,15 +4444,85 @@ void AppShell::RenderEditorSavePrompts() {
 
         ImGui::EndPopup();
     }
+
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Switch to RAW Workspace##AppShell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped(
+            "The RAW workspace can only use one active project. Save the current Editor project before switching, discard it, or cancel.");
+        ImGui::Spacing();
+
+        ImGui::BeginDisabled(m_RawWorkspaceSwitchSavePending);
+        if (ImGui::Button("Save & Switch", ImVec2(140.0f, 0.0f))) {
+            m_RawWorkspaceSwitchSavePending = true;
+            const std::string projectName = m_Editor.GetCurrentProjectName().empty()
+                ? "Untitled Project"
+                : m_Editor.GetCurrentProjectName();
+            m_Editor.RequestSaveCurrentProject(projectName, [this](bool success) {
+                m_RawWorkspaceSwitchSavePending = false;
+                if (success) {
+                    m_Editor.CloseEditorProjectAndActivateRawWorkspace();
+                }
+            });
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Discard & Switch", ImVec2(140.0f, 0.0f))) {
+            m_Editor.CloseEditorProjectAndActivateRawWorkspace();
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Save Before Closing Stack##AppShell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("The current project has unsaved changes. Save them before closing Stack?");
+        ImGui::Spacing();
+        ImGui::BeginDisabled(m_MainWindowCloseSavePending);
+        if (ImGui::Button("Save & Close", ImVec2(130.0f, 0.0f))) {
+            m_MainWindowCloseSavePending = true;
+            const std::string closeSource = m_PendingMainWindowCloseSource;
+            const std::string projectName = m_Editor.GetCurrentProjectName().empty()
+                ? "Untitled Project"
+                : m_Editor.GetCurrentProjectName();
+            if (!m_Editor.RequestSaveCurrentProject(
+                    projectName,
+                    [this, closeSource](bool success) {
+                        m_MainWindowCloseSavePending = false;
+                        if (success) {
+                            m_PendingMainWindowCloseSource.clear();
+                            BeginMainWindowClose(closeSource);
+                        }
+                    })) {
+                m_MainWindowCloseSavePending = false;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard & Close", ImVec2(130.0f, 0.0f))) {
+            const std::string closeSource = m_PendingMainWindowCloseSource;
+            m_PendingMainWindowCloseSource.clear();
+            ImGui::CloseCurrentPopup();
+            BeginMainWindowClose(closeSource);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+            m_PendingMainWindowCloseSource.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
 }
 
 void AppShell::OnTabChanged(int oldTab, int newTab) {
-    if (oldTab == RootTabRaw && newTab != RootTabRaw) {
-        m_Editor.LeaveRawWorkspaceRootTab(newTab == RootTabEditor);
-    }
-    if (newTab == RootTabRaw && oldTab != RootTabRaw) {
-        m_Editor.EnterRawWorkspaceRootTab();
-    }
+    (void)oldTab;
+    (void)newTab;
     m_ActiveSyncLayerId.clear();
 }
 
@@ -3591,7 +4530,8 @@ void AppShell::BeginRootTabBodyFade(int oldTab, int newTab) {
     const bool supportedPair =
         oldTab != newTab &&
         IsFadeableRootTab(oldTab) &&
-        IsFadeableRootTab(newTab);
+        IsFadeableRootTab(newTab) &&
+        !CrossesRawWorkspaceLifecycleBoundary(oldTab, newTab);
     m_RootTabBodyFadeActive = supportedPair;
     m_RootTabBodyFadeStartedAt = supportedPair ? ImGui::GetTime() : 0.0;
     m_RootTabBodyFadeFromTab = supportedPair ? oldTab : -1;
@@ -3666,6 +4606,13 @@ void AppShell::Shutdown() {
 #if defined(_WIN32)
     SetFramelessMainWindowCursorReleaseCallback({});
 #endif
+    // Shared-pool work captures module-owned cancellation state while it
+    // finishes. Join those tasks before any module begins clearing the state
+    // they can still observe. Main-thread completions are discarded by the
+    // task-system shutdown and therefore cannot run against torn-down modules.
+    runPhase("task-system-shutdown", [&]() {
+        Async::TaskSystem::Get().Shutdown();
+    });
     runPhase("editor-shutdown", [&]() {
         m_Editor.Shutdown();
     });
@@ -3683,25 +4630,34 @@ void AppShell::Shutdown() {
             glDeleteTextures(1, &m_LibraryTabTexture);
             m_LibraryTabTexture = 0;
         }
-        if (m_ToolsTabTexture) {
-            glDeleteTextures(1, &m_ToolsTabTexture);
-            m_ToolsTabTexture = 0;
-        }
         if (m_RawTabTexture) {
             glDeleteTextures(1, &m_RawTabTexture);
             m_RawTabTexture = 0;
         }
-        if (m_HeaderSettingsTexture) {
-            glDeleteTextures(1, &m_HeaderSettingsTexture);
-            m_HeaderSettingsTexture = 0;
+        if (m_RawLabTabTexture) {
+            glDeleteTextures(1, &m_RawLabTabTexture);
+            m_RawLabTabTexture = 0;
+        }
+        if (m_FileNewTexture) {
+            glDeleteTextures(1, &m_FileNewTexture);
+            m_FileNewTexture = 0;
+        }
+        if (m_FileOpenProjectTexture) {
+            glDeleteTextures(1, &m_FileOpenProjectTexture);
+            m_FileOpenProjectTexture = 0;
+        }
+        if (m_FileSaveTexture) {
+            glDeleteTextures(1, &m_FileSaveTexture);
+            m_FileSaveTexture = 0;
+        }
+        if (m_FileExitProgramTexture) {
+            glDeleteTextures(1, &m_FileExitProgramTexture);
+            m_FileExitProgramTexture = 0;
         }
         ReleaseBackgroundImageTexture();
     });
     runPhase("composite-shutdown", [&]() {
         m_Composite.Shutdown();
-    });
-    runPhase("task-system-shutdown", [&]() {
-        Async::TaskSystem::Get().Shutdown();
     });
     runPhase("cursor-release", [&]() {
         ReleaseLockedScrubCursor(false);
@@ -3744,10 +4700,13 @@ void AppShell::RequestTabSwitch(int tabId) {
 }
 
 bool AppShell::CanChangeRootTab(int oldTab, int newTab) {
-    if (oldTab == RootTabRaw && newTab != RootTabRaw) {
-        return m_Editor.FlushActiveRawWorkspaceProjectIfDirty();
+    if (!CrossesRawWorkspaceLifecycleBoundary(oldTab, newTab)) {
+        return true;
     }
-    return true;
+    if (IsRawWorkspaceRootTab(oldTab)) {
+        return m_Editor.LeaveRawWorkspaceRootTab(newTab == RootTabEditor);
+    }
+    return m_Editor.EnterRawWorkspaceRootTab();
 }
 
 void AppShell::OnFileDrop(GLFWwindow* window, int count, const char** paths) {
@@ -3766,7 +4725,16 @@ void AppShell::HandleDrop(int count, const char** paths) {
         glfwGetCursorPos(m_Window, &cursorX, &cursorY);
     }
 
-    if (m_CurrentTabId == RootTabEditor || m_CurrentTabId == RootTabRaw) {
+    if (IsRawWorkspaceRootTab(m_CurrentTabId) &&
+        m_Editor.IsRawWorkspaceLockedByEditorProject()) {
+        m_Editor.ShowUiNotification(
+            UiNotificationSeverity::Info,
+            "Switch to the RAW workspace before importing files here.",
+            "raw-workspace-locked-file-drop");
+        return;
+    }
+
+    if (m_CurrentTabId == RootTabEditor || IsRawWorkspaceRootTab(m_CurrentTabId)) {
         std::vector<std::string> graphImagePaths;
         graphImagePaths.reserve(count);
         for (int i = 0; i < count; ++i) {

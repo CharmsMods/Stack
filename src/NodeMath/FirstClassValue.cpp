@@ -83,9 +83,14 @@ bool ParseLogicalType(const std::string& text, LogicalValueType& type) {
         { "vector3", LogicalValueType::Vector3 }, { "vector4", LogicalValueType::Vector4 },
         { "matrix3", LogicalValueType::Matrix3 }, { "matrix4", LogicalValueType::Matrix4 },
         { "coordinate2", LogicalValueType::Coordinate2 }, { "curve1d", LogicalValueType::Curve1D },
-        { "lut", LogicalValueType::Lut }, { "scalar-field", LogicalValueType::ScalarField },
+        { "lut", LogicalValueType::Lut }, { "channel", LogicalValueType::Channel },
+        { "scalar-field", LogicalValueType::ScalarField },
         { "vector2-field", LogicalValueType::Vector2Field }, { "vector3-field", LogicalValueType::Vector3Field },
         { "vector4-field", LogicalValueType::Vector4Field }, { "color-image", LogicalValueType::ColorImage },
+        { "complex-spectrum", LogicalValueType::ComplexSpectrum },
+        { "frequency-response", LogicalValueType::FrequencyResponse },
+        { "spectrum-magnitude", LogicalValueType::SpectrumMagnitude },
+        { "spectrum-phase", LogicalValueType::SpectrumPhase },
         { "histogram", LogicalValueType::Histogram }, { "statistics", LogicalValueType::Statistics },
         { "metadata", LogicalValueType::Metadata }, { "specialized-handle", LogicalValueType::SpecializedHandle }
     };
@@ -112,6 +117,41 @@ bool ParseArray(const nlohmann::json& json, std::array<double, N>& value) {
     return true;
 }
 
+template <std::size_t N>
+bool AllFinite(const std::array<double, N>& values) {
+    return std::all_of(
+        values.begin(),
+        values.end(),
+        [](double value) { return std::isfinite(value); });
+}
+
+bool UniformNumericPayloadIsFinite(const FirstClassPayload& payload) {
+    if (const double* scalar = std::get_if<double>(&payload)) {
+        return std::isfinite(*scalar);
+    }
+    if (const auto* values =
+            std::get_if<std::array<double, 2>>(&payload)) {
+        return AllFinite(*values);
+    }
+    if (const auto* values =
+            std::get_if<std::array<double, 3>>(&payload)) {
+        return AllFinite(*values);
+    }
+    if (const auto* values =
+            std::get_if<std::array<double, 4>>(&payload)) {
+        return AllFinite(*values);
+    }
+    if (const auto* values =
+            std::get_if<std::array<double, 9>>(&payload)) {
+        return AllFinite(*values);
+    }
+    if (const auto* values =
+            std::get_if<std::array<double, 16>>(&payload)) {
+        return AllFinite(*values);
+    }
+    return true;
+}
+
 bool PayloadMatches(const FirstClassValue& value) {
     if (value.availability != ValueAvailability::Known) return std::holds_alternative<std::monostate>(value.payload);
     switch (value.logicalType) {
@@ -130,11 +170,17 @@ bool PayloadMatches(const FirstClassValue& value) {
     case LogicalValueType::Lut:
     case LogicalValueType::Metadata:
     case LogicalValueType::SpecializedHandle:
+    case LogicalValueType::Channel:
     case LogicalValueType::ScalarField:
     case LogicalValueType::Vector2Field:
     case LogicalValueType::Vector3Field:
     case LogicalValueType::Vector4Field:
-    case LogicalValueType::ColorImage: return std::holds_alternative<ResourceValue>(value.payload);
+    case LogicalValueType::ColorImage:
+    case LogicalValueType::ComplexSpectrum:
+    case LogicalValueType::FrequencyResponse:
+    case LogicalValueType::SpectrumMagnitude:
+    case LogicalValueType::SpectrumPhase:
+        return std::holds_alternative<ResourceValue>(value.payload);
     default: return false;
     }
 }
@@ -147,9 +193,11 @@ std::vector<double> VectorComponents(const FirstClassValue& source) {
 }
 
 bool IsFieldType(LogicalValueType type) {
-    return type == LogicalValueType::ScalarField || type == LogicalValueType::Vector2Field ||
+    return type == LogicalValueType::Channel ||
+        type == LogicalValueType::ScalarField || type == LogicalValueType::Vector2Field ||
         type == LogicalValueType::Vector3Field || type == LogicalValueType::Vector4Field ||
-        type == LogicalValueType::ColorImage;
+        type == LogicalValueType::ColorImage || type == LogicalValueType::ComplexSpectrum ||
+        type == LogicalValueType::SpectrumMagnitude || type == LogicalValueType::SpectrumPhase;
 }
 
 } // namespace
@@ -194,20 +242,59 @@ std::vector<ContractIssue> ValidateFirstClassValue(const FirstClassValue& value)
     std::vector<ContractIssue> issues;
     if (value.schemaVersion != kFirstClassValueSchemaVersion) issues.push_back({ "schemaVersion", "unsupported first-class value schema" });
     if (value.logicalType == LogicalValueType::Invalid || value.logicalType == LogicalValueType::Failure) issues.push_back({ "logicalType", "a concrete logical type is required" });
-    if (!PayloadMatches(value)) issues.push_back({ "payload", "payload does not match logical type or availability" });
+    const bool payloadMatches = PayloadMatches(value);
+    if (!payloadMatches) issues.push_back({ "payload", "payload does not match logical type or availability" });
     if ((value.availability == ValueAvailability::Missing || value.availability == ValueAvailability::Failure) && value.message.empty()) issues.push_back({ "message", "missing and failed values require a message" });
     if (value.storage == ValueStorageClass::Uniform && IsFieldType(value.logicalType)) issues.push_back({ "storage", "per-pixel field types cannot use uniform storage" });
-    if (value.logicalType == LogicalValueType::Curve1D && value.availability == ValueAvailability::Known) {
-        const CurveValue& curve = std::get<CurveValue>(value.payload);
-        if (curve.points.size() < 2) issues.push_back({ "payload.points", "a known curve requires at least two points" });
-        for (std::size_t i = 0; i < curve.points.size(); ++i) {
-            if (!std::isfinite(curve.points[i].x) || !std::isfinite(curve.points[i].y)) issues.push_back({ "payload.points", "curve points must be finite" });
-            if (i > 0 && curve.points[i].x <= curve.points[i - 1].x) issues.push_back({ "payload.points", "curve x values must be strictly increasing" });
+    if (value.availability == ValueAvailability::Known &&
+        payloadMatches &&
+        value.storage == ValueStorageClass::Uniform &&
+        !UniformNumericPayloadIsFinite(value.payload)) {
+        issues.push_back({ "payload", "uniform numeric values must be finite" });
+    }
+    if (value.logicalType == LogicalValueType::Curve1D &&
+        value.availability == ValueAvailability::Known) {
+        if (const CurveValue* curve = std::get_if<CurveValue>(&value.payload)) {
+            if (curve->points.size() < 2) issues.push_back({ "payload.points", "a known curve requires at least two points" });
+            for (std::size_t i = 0; i < curve->points.size(); ++i) {
+                if (!std::isfinite(curve->points[i].x) || !std::isfinite(curve->points[i].y)) issues.push_back({ "payload.points", "curve points must be finite" });
+                if (i > 0 && curve->points[i].x <= curve->points[i - 1].x) issues.push_back({ "payload.points", "curve x values must be strictly increasing" });
+            }
         }
     }
-    if (value.logicalType == LogicalValueType::Histogram && value.availability == ValueAvailability::Known) {
-        const HistogramValue& histogram = std::get<HistogramValue>(value.payload);
-        if (!(histogram.domainMaximum > histogram.domainMinimum) || histogram.bins.empty()) issues.push_back({ "payload", "a histogram requires an ordered domain and bins" });
+    if (value.logicalType == LogicalValueType::Histogram &&
+        value.availability == ValueAvailability::Known) {
+        if (const HistogramValue* histogram =
+                std::get_if<HistogramValue>(&value.payload)) {
+            const bool finite =
+                std::isfinite(histogram->domainMinimum) &&
+                std::isfinite(histogram->domainMaximum) &&
+                std::all_of(
+                    histogram->bins.begin(),
+                    histogram->bins.end(),
+                    [](double bin) { return std::isfinite(bin); });
+            if (!finite) {
+                issues.push_back({ "payload", "histogram domain and bins must be finite" });
+            }
+            if (!(histogram->domainMaximum > histogram->domainMinimum) ||
+                histogram->bins.empty()) {
+                issues.push_back({ "payload", "a histogram requires an ordered domain and bins" });
+            }
+        }
+    }
+    if (value.logicalType == LogicalValueType::Statistics &&
+        value.availability == ValueAvailability::Known) {
+        if (const StatisticsValue* statistics =
+                std::get_if<StatisticsValue>(&value.payload);
+            statistics &&
+            !std::all_of(
+                statistics->entries.begin(),
+                statistics->entries.end(),
+                [](const auto& entry) {
+                    return std::isfinite(entry.second);
+                })) {
+            issues.push_back({ "payload", "statistics values must be finite" });
+        }
     }
     return issues;
 }
@@ -217,7 +304,9 @@ bool AreUnitsCompatible(const UnitDescriptor& source, const UnitDescriptor& dest
 }
 
 bool CanExplicitlyBroadcast(const FirstClassValue& source, LogicalValueType destinationType, ValueStorageClass destinationStorage) {
-    if (source.availability != ValueAvailability::Known || source.storage != ValueStorageClass::Uniform) return false;
+    if (source.availability != ValueAvailability::Known ||
+        source.storage != ValueStorageClass::Uniform ||
+        !ValidateFirstClassValue(source).empty()) return false;
     if (source.logicalType == destinationType && source.storage == destinationStorage) return true;
     if (source.logicalType != LogicalValueType::Scalar) return false;
     if (destinationStorage == ValueStorageClass::Uniform) return destinationType == LogicalValueType::Vector2 || destinationType == LogicalValueType::Vector3 || destinationType == LogicalValueType::Vector4;
@@ -239,13 +328,19 @@ FirstClassValue BroadcastUniformScalar(const FirstClassValue& source, LogicalVal
 
 FirstClassValue ExtractUniformComponent(const FirstClassValue& source, std::size_t component) {
     const std::vector<double> values = VectorComponents(source);
-    if (source.storage != ValueStorageClass::Uniform || source.availability != ValueAvailability::Known || component >= values.size()) return MakeFailureValue(LogicalValueType::Scalar, ValueStorageClass::Uniform, "component extraction requires an in-range uniform vector component");
+    if (source.storage != ValueStorageClass::Uniform ||
+        source.availability != ValueAvailability::Known ||
+        !ValidateFirstClassValue(source).empty() ||
+        component >= values.size()) return MakeFailureValue(LogicalValueType::Scalar, ValueStorageClass::Uniform, "component extraction requires a finite in-range uniform vector component");
     return MakeUniformScalar(values[component], source.units);
 }
 
 FirstClassValue ReduceUniformVector(const FirstClassValue& source, VectorReduction reduction) {
     const std::vector<double> values = VectorComponents(source);
-    if (source.storage != ValueStorageClass::Uniform || source.availability != ValueAvailability::Known || values.empty()) return MakeFailureValue(LogicalValueType::Scalar, ValueStorageClass::Uniform, "reduction requires a known uniform vector");
+    if (source.storage != ValueStorageClass::Uniform ||
+        source.availability != ValueAvailability::Known ||
+        !ValidateFirstClassValue(source).empty() ||
+        values.empty()) return MakeFailureValue(LogicalValueType::Scalar, ValueStorageClass::Uniform, "reduction requires a known finite uniform vector");
     double result = 0.0;
     if (reduction == VectorReduction::Minimum) result = *std::min_element(values.begin(), values.end());
     else if (reduction == VectorReduction::Maximum) result = *std::max_element(values.begin(), values.end());
@@ -309,11 +404,16 @@ bool DeserializeFirstClassValue(const nlohmann::json& json, FirstClassValue& val
         case LogicalValueType::Lut:
         case LogicalValueType::Metadata:
         case LogicalValueType::SpecializedHandle:
+        case LogicalValueType::Channel:
         case LogicalValueType::ScalarField:
         case LogicalValueType::Vector2Field:
         case LogicalValueType::Vector3Field:
         case LogicalValueType::Vector4Field:
-        case LogicalValueType::ColorImage: { ResourceValue resource; resource.resourceType = payload.value("resourceType", std::string()); resource.identity = payload.value("identity", std::string()); resource.contentHash = payload.value("contentHash", std::string()); parsed.payload = std::move(resource); break; }
+        case LogicalValueType::ColorImage:
+        case LogicalValueType::ComplexSpectrum:
+        case LogicalValueType::FrequencyResponse:
+        case LogicalValueType::SpectrumMagnitude:
+        case LogicalValueType::SpectrumPhase: { ResourceValue resource; resource.resourceType = payload.value("resourceType", std::string()); resource.identity = payload.value("identity", std::string()); resource.contentHash = payload.value("contentHash", std::string()); parsed.payload = std::move(resource); break; }
         default: return fail("known payload is unsupported for this logical type");
         }
     }

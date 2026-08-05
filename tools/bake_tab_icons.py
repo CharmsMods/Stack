@@ -3,11 +3,15 @@ import tempfile
 from io import BytesIO
 
 
-def write_bytes(out_file, data):
+def write_bytes(out_file, data, trim_line_ends=False):
     for index, byte in enumerate(data):
         if index % 12 == 0:
             out_file.write("\n    ")
-        out_file.write(f"0x{byte:02x}, ")
+        out_file.write(f"0x{byte:02x},")
+        if not trim_line_ends or (
+            (index + 1) % 12 != 0 and index + 1 != len(data)
+        ):
+            out_file.write(" ")
 
 
 def invert_png_rgb(data):
@@ -64,7 +68,7 @@ def bake_icons(input_specs, output_path):
 
             out_file.write(f"inline const unsigned char {symbol_name}_png_data[] = {{")
             if data:
-                write_bytes(out_file, data)
+                write_bytes(out_file, data, symbol_name.startswith("File"))
             else:
                 out_file.write("\n    0x00")
             out_file.write("\n};\n\n")
@@ -89,7 +93,6 @@ if __name__ == "__main__":
     input_specs = [
         ("Editor", os.path.join(root_dir, "Icons", "Editor.png")),
         ("Library", os.path.join(root_dir, "Icons", "Library.png")),
-        ("Tools", os.path.join(root_dir, "Icons", "tools tab.png")),
         ("Render", os.path.join(root_dir, "Icons", "Render, Cube with points.png")),
         ("CharmLogo", os.path.join(root_dir, "Icons", "Charm logo icon.png")),
         ("NodeGraph", os.path.join(root_dir, "Icons", "node graph.png")),
@@ -105,7 +108,32 @@ if __name__ == "__main__":
         ("CustomMask", os.path.join(root_dir, "Icons", "custom mask.png")),
         ("Lut", os.path.join(root_dir, "Icons", "LUT.png")),
         ("Denoise", os.path.join(root_dir, "Icons", "denoise.png")),
+        ("RawFolder", os.path.join(root_dir, "Icons", "Raw Tab", "folder.png")),
+        ("RawRefresh", os.path.join(root_dir, "Icons", "Raw Tab", "refresh.png")),
+        ("RawClear", os.path.join(root_dir, "Icons", "Raw Tab", "x.png")),
+        ("RawGrid", os.path.join(root_dir, "Icons", "Raw Tab", "grid.png")),
+        ("RawList", os.path.join(root_dir, "Icons", "Raw Tab", "list.png")),
+        ("RawGallery", os.path.join(root_dir, "Icons", "Raw Tab", "gallery.png")),
+        ("RawLab", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "raw-lab.png")),
+        ("RawLabLight", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "light.png")),
+        ("RawLabZones", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "zones.png")),
+        ("RawLabSave", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "save.png")),
+        ("RawLabReset", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "reset.png")),
+        ("RawLabTarget", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "target.png")),
+        ("RawLabFilmstrip", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "filmstrip.png")),
+        ("RawLabWorkspaceGallery", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "workspace-gallery.png")),
+        ("RawLabFinalView", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "final-view.png")),
+        ("RawLabCompare", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "compare.png")),
+        ("RawLabAffected", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "affected.png")),
+        ("RawLabDelta", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "delta.png")),
+        ("RawLabHighlightRisk", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "highlight-risk.png")),
+        ("RawLabInspect", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "inspect.png")),
+        ("RawLabFitView", os.path.join(root_dir, "Icons", "Raw Tab", "Lab", "fit-view.png")),
         ("PopoutCanvasWindow", os.path.join(root_dir, "Icons", "popout canvas window.png"), "invert"),
+        ("FileNew", os.path.join(root_dir, "Icons", "File Dialog", "new.png")),
+        ("FileOpenProject", os.path.join(root_dir, "Icons", "File Dialog", "open project.png")),
+        ("FileSave", os.path.join(root_dir, "Icons", "File Dialog", "save.png")),
+        ("FileExitProgram", os.path.join(root_dir, "Icons", "File Dialog", "exit program.png")),
         ("ProgramIcon", os.path.join(root_dir, "website", "program icon.png")),
     ]
     output_file = os.path.join(root_dir, "src", "App", "Resources", "EmbeddedTabIcons.h")

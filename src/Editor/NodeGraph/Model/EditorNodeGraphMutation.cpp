@@ -1,14 +1,30 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
 
 #include <algorithm>
-#include <functional>
+#include <new>
+#include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace EditorNodeGraph {
 namespace {
 
 bool IsChannelSocketId(const std::string& socketId) {
     return socketId == "r" || socketId == "g" || socketId == "b" || socketId == "a";
+}
+
+void SetConnectionErrorNoThrow(
+    std::string* errorMessage,
+    const char* message) noexcept {
+    if (!errorMessage) return;
+    try {
+        *errorMessage = message;
+    } catch (...) {
+        errorMessage->clear();
+    }
 }
 
 bool IsUniformOrResourceSocketType(SocketType type) {
@@ -32,6 +48,27 @@ bool IsUniformOrResourceSocketType(SocketType type) {
         default:
             return false;
     }
+}
+
+bool IsSpecializedFrequencySocketType(SocketType type) {
+    return type == SocketType::Spectrum ||
+        type == SocketType::FrequencyResponse ||
+        type == SocketType::SpectrumMagnitude ||
+        type == SocketType::SpectrumPhase;
+}
+
+bool IsImplementedTypedParameterInput(
+    const Node& node,
+    const std::string& socketId,
+    SocketType type) {
+    if (type != SocketType::Scalar) return false;
+    if (node.kind == NodeKind::TechnicalImage) {
+        return socketId == kExposureValueInputSocketId;
+    }
+    if (socketId.rfind("param:", 0) != 0) return false;
+    const std::string parameterId = socketId.substr(6);
+    return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), parameterId) !=
+        node.exposedParameterIds.end();
 }
 
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
@@ -109,115 +146,187 @@ MfsrGraphInputFamily ResolveMfsrGraphInputFamily(
     const Graph& graph,
     int nodeId,
     const std::string& socketId) {
-    std::unordered_set<std::string> visiting;
-    std::function<MfsrGraphInputFamily(int, const std::string&)> resolve =
-        [&](int currentNodeId, const std::string& currentSocketId) -> MfsrGraphInputFamily {
-            const std::string key = std::to_string(currentNodeId) + ":" + currentSocketId;
-            if (!visiting.insert(key).second) {
-                return MfsrGraphInputFamily::Unknown;
+    MfsrGraphInputFamily family = MfsrGraphInputFamily::Unknown;
+    std::unordered_set<std::string> visited;
+    visited.reserve(graph.GetNodes().size());
+    std::vector<std::pair<int, std::string>> pending{
+        { nodeId, socketId }
+    };
+
+    while (!pending.empty()) {
+        const auto [currentNodeId, currentSocketId] =
+            std::move(pending.back());
+        pending.pop_back();
+        const std::string key =
+            std::to_string(currentNodeId) + "\x1f" + currentSocketId;
+        if (!visited.insert(key).second) {
+            continue;
+        }
+
+        const Node* node = graph.FindNode(currentNodeId);
+        if (!node) {
+            continue;
+        }
+
+        const auto addInput = [&](const std::string& inputSocketId) {
+            if (const Link* upstream =
+                    graph.FindInputLink(currentNodeId, inputSocketId)) {
+                pending.emplace_back(
+                    upstream->fromNodeId,
+                    upstream->fromSocketId);
+                return true;
             }
-
-            auto finish = [&](MfsrGraphInputFamily family) {
-                visiting.erase(key);
-                return family;
-            };
-
-            const Node* node = graph.FindNode(currentNodeId);
-            if (!node) {
-                return finish(MfsrGraphInputFamily::Unknown);
-            }
-
-            auto inputFamily = [&](const std::string& inputSocketId) {
-                const Link* upstream = graph.FindInputLink(currentNodeId, inputSocketId);
-                return upstream
-                    ? resolve(upstream->fromNodeId, upstream->fromSocketId)
-                    : MfsrGraphInputFamily::Unknown;
-            };
-
-            auto mergeInputs = [&](const std::vector<std::string>& inputSocketIds) {
-                MfsrGraphInputFamily family = MfsrGraphInputFamily::Unknown;
-                for (const std::string& inputSocketId : inputSocketIds) {
-                    family = MergeMfsrGraphInputFamily(family, inputFamily(inputSocketId));
-                    if (family == MfsrGraphInputFamily::Mixed) {
-                        break;
-                    }
-                }
-                return family;
-            };
-
-            switch (node->kind) {
-                case NodeKind::RawSource:
-                case NodeKind::RawDevelopment:
-                case NodeKind::RawNeuralDenoise:
-                case NodeKind::RawDecode:
-                case NodeKind::RawDevelop:
-                    return finish(MfsrGraphInputFamily::RawDerived);
-                case NodeKind::Image:
-                case NodeKind::ImageGenerator:
-                    return finish(MfsrGraphInputFamily::RasterDerived);
-                case NodeKind::Layer:
-                case NodeKind::Lut:
-                case NodeKind::TechnicalImage:
-                case NodeKind::Reformat:
-                case NodeKind::RawDetailAutoMask:
-                case NodeKind::RawDetailFusion:
-                case NodeKind::ChannelSplit:
-                case NodeKind::ImageToMask:
-                case NodeKind::FrequencyFft:
-                case NodeKind::FrequencyIfft:
-                case NodeKind::SpectrumView:
-                case NodeKind::MagnitudePhase:
-                case NodeKind::SpectrumAnalyzer:
-                    return finish(inputFamily(kImageInputSocketId));
-                case NodeKind::HdrMerge:
-                    if (currentSocketId == kHdrMergeInput1SocketId ||
-                        currentSocketId == kHdrMergeInput2SocketId ||
-                        currentSocketId == kHdrMergeInput3SocketId) {
-                        return finish(inputFamily(currentSocketId));
-                    }
-                    return finish(mergeInputs({ kHdrMergeInput1SocketId, kHdrMergeInput2SocketId, kHdrMergeInput3SocketId }));
-                case NodeKind::Mfsr: {
-                    if (IsMfsrInputSocketId(currentSocketId)) {
-                        return finish(inputFamily(currentSocketId));
-                    }
-                    std::vector<std::string> inputSocketIds;
-                    inputSocketIds.reserve(kMaxMfsrInputCount);
-                    for (int inputIndex = 0; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
-                        inputSocketIds.push_back(MfsrInputSocketId(inputIndex));
-                    }
-                    return finish(mergeInputs(inputSocketIds));
-                }
-                case NodeKind::Mix:
-                    return finish(mergeInputs({ kMixInputASocketId, kMixInputBSocketId }));
-                case NodeKind::SpectrumMath:
-                    return finish(mergeInputs({ kMixInputASocketId, kMixInputBSocketId }));
-                case NodeKind::DataMath: {
-                    std::vector<std::string> inputSocketIds;
-                    inputSocketIds.reserve(kMaxDataMathInputCount + 1);
-                    for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                        inputSocketIds.push_back(DataMathInputSocketId(inputIndex));
-                    }
-                    inputSocketIds.push_back(kDataMathBaseInputSocketId);
-                    return finish(mergeInputs(inputSocketIds));
-                }
-                case NodeKind::ChannelCombine:
-                case NodeKind::Output:
-                    return finish(mergeInputs({ "r", "g", "b", "a", kImageInputSocketId }));
-                case NodeKind::MaskGenerator:
-                case NodeKind::Value:
-                case NodeKind::FrequencyMask:
-                case NodeKind::MaskCombine:
-                case NodeKind::MaskUtility:
-                case NodeKind::CustomMask:
-                case NodeKind::Composite:
-                case NodeKind::Scope:
-                case NodeKind::Preview:
-                    return finish(MfsrGraphInputFamily::Unknown);
-            }
-            return finish(MfsrGraphInputFamily::Unknown);
+            return false;
+        };
+        const auto addChannels = [&]() {
+            addInput("r");
+            addInput("g");
+            addInput("b");
+            addInput("a");
         };
 
-    return resolve(nodeId, socketId);
+        switch (node->kind) {
+            case NodeKind::RawSource:
+            case NodeKind::RawDevelopment:
+            case NodeKind::RawNeuralDenoise:
+            case NodeKind::RawDecode:
+            case NodeKind::RawDevelop:
+                family = MergeMfsrGraphInputFamily(
+                    family,
+                    MfsrGraphInputFamily::RawDerived);
+                break;
+            case NodeKind::Image:
+            case NodeKind::ImageGenerator:
+                family = MergeMfsrGraphInputFamily(
+                    family,
+                    MfsrGraphInputFamily::RasterDerived);
+                break;
+            case NodeKind::Layer:
+            case NodeKind::TechnicalImage:
+            case NodeKind::Reformat:
+            case NodeKind::RawDetailAutoMask:
+            case NodeKind::RawDetailFusion:
+            case NodeKind::ChannelSplit:
+            case NodeKind::ImageToMask:
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::Compound: {
+                std::vector<std::string> dependencies;
+                std::string error;
+                if (graph.ResolveCompoundOutputInputDependencies(
+                        currentNodeId,
+                        currentSocketId,
+                        dependencies,
+                        &error)) {
+                    for (const std::string& dependency : dependencies) {
+                        addInput(dependency);
+                    }
+                }
+                break;
+            }
+            case NodeKind::Lut:
+                if (!addInput(kImageInputSocketId)) {
+                    addChannels();
+                }
+                break;
+            case NodeKind::HdrMerge:
+                if (currentSocketId == kHdrMergeInput1SocketId ||
+                    currentSocketId == kHdrMergeInput2SocketId ||
+                    currentSocketId == kHdrMergeInput3SocketId) {
+                    addInput(currentSocketId);
+                } else {
+                    addInput(kHdrMergeInput1SocketId);
+                    addInput(kHdrMergeInput2SocketId);
+                    addInput(kHdrMergeInput3SocketId);
+                }
+                break;
+            case NodeKind::Mfsr:
+                if (IsMfsrInputSocketId(currentSocketId)) {
+                    addInput(currentSocketId);
+                } else {
+                    for (int inputIndex = 0;
+                         inputIndex < kMaxMfsrInputCount;
+                         ++inputIndex) {
+                        addInput(MfsrInputSocketId(inputIndex));
+                    }
+                }
+                break;
+            case NodeKind::Mix:
+                addInput(kMixInputASocketId);
+                addInput(kMixInputBSocketId);
+                break;
+            case NodeKind::DataMath:
+                for (int inputIndex = 0;
+                     inputIndex < kMaxDataMathInputCount;
+                     ++inputIndex) {
+                    addInput(DataMathInputSocketId(inputIndex));
+                }
+                addInput(kDataMathBaseInputSocketId);
+                break;
+            case NodeKind::ChannelCombine:
+                if (!addInput(kImageInputSocketId)) {
+                    addChannels();
+                }
+                break;
+            case NodeKind::ConstantChannel:
+                addInput(kMatchExtentInputSocketId);
+                break;
+            case NodeKind::Output:
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::FrequencyFilter:
+            case NodeKind::FrequencyFft:
+                addInput(kChannelInputSocketId);
+                break;
+            case NodeKind::FrequencyIfft:
+            case NodeKind::SpectrumView:
+            case NodeKind::SpectrumSeparate:
+            case NodeKind::SpectrumAnalyzer:
+                addInput(kSpectrumInputSocketId);
+                break;
+            case NodeKind::ApplyFrequencyResponse:
+                addInput(kSpectrumInputSocketId);
+                break;
+            case NodeKind::CombineSpectra:
+                addInput(kSpectrumInputASocketId);
+                addInput(kSpectrumInputBSocketId);
+                break;
+            case NodeKind::SpectrumRecombine:
+                addInput(kSpectrumMagnitudeInputSocketId);
+                addInput(kSpectrumPhaseInputSocketId);
+                break;
+            case NodeKind::SpectrumMath:
+                addInput(kMixInputASocketId);
+                addInput(kMixInputBSocketId);
+                break;
+            case NodeKind::MagnitudePhase:
+                if (node->magnitudePhaseMode ==
+                    MagnitudePhaseMode::Recombine) {
+                    addInput("magnitude");
+                    addInput("phase");
+                } else {
+                    addInput(kImageInputSocketId);
+                }
+                break;
+            case NodeKind::MaskGenerator:
+            case NodeKind::Value:
+            case NodeKind::FieldMean:
+            case NodeKind::FrequencyResponse:
+            case NodeKind::FrequencyMask:
+            case NodeKind::MaskCombine:
+            case NodeKind::MaskUtility:
+            case NodeKind::CustomMask:
+            case NodeKind::Composite:
+            case NodeKind::Scope:
+            case NodeKind::Preview:
+                break;
+        }
+
+        if (family == MfsrGraphInputFamily::Mixed) {
+            return family;
+        }
+    }
+    return family;
 }
 
 bool MfsrGraphInputFamiliesConflict(MfsrGraphInputFamily a, MfsrGraphInputFamily b) {
@@ -270,6 +379,19 @@ bool Graph::IsOutputConnected() const {
     return !GetCompletedChains().empty();
 }
 
+bool Graph::IsOutputChannelInspection(int outputNodeId) const {
+    const Node* output = FindNode(outputNodeId);
+    if (!output || output->kind != NodeKind::Output) {
+        return false;
+    }
+    const Link* input =
+        FindInputLink(outputNodeId, kImageInputSocketId);
+    return input &&
+        IsScalarSocketStream(
+            input->fromNodeId,
+            input->fromSocketId);
+}
+
 bool Graph::TryConnect(int fromNodeId, int toNodeId, std::string* errorMessage) {
     const Node* from = FindNode(fromNodeId);
     const Node* to = FindNode(toNodeId);
@@ -312,13 +434,23 @@ bool Graph::CanConnectSockets(
         return false;
     }
 
-    const bool fromIsScalarStream = IsScalarSocketStream(fromNodeId, fromSocketId);
+    bool fromScalarStreamResolved = false;
+    bool fromIsScalarStream = false;
+    const auto isFromScalarStream = [&]() {
+        if (!fromScalarStreamResolved) {
+            fromIsScalarStream =
+                IsScalarSocketStream(fromNodeId, fromSocketId);
+            fromScalarStreamResolved = true;
+        }
+        return fromIsScalarStream;
+    };
 
     const bool toScope = to->kind == NodeKind::Scope && toSocketId == kScopeInputSocketId;
     if (toScope) {
         if (fromSocket.type != SocketType::Image &&
+            fromSocket.type != SocketType::Channel &&
             fromSocket.type != SocketType::ScalarField &&
-            !(fromSocket.type == SocketType::Mask && fromIsScalarStream)) {
+            !(fromSocket.type == SocketType::Mask && isFromScalarStream())) {
             if (errorMessage) *errorMessage = "Scopes can analyze image or scalar outputs.";
             return false;
         }
@@ -328,37 +460,112 @@ bool Graph::CanConnectSockets(
     const bool toPreview = to->kind == NodeKind::Preview && toSocketId == kPreviewInputSocketId;
     if (toPreview) {
         if (fromSocket.type != SocketType::Image &&
+            fromSocket.type != SocketType::Channel &&
             fromSocket.type != SocketType::ScalarField &&
-            !(fromSocket.type == SocketType::Mask && fromIsScalarStream)) {
+            !(fromSocket.type == SocketType::Mask && isFromScalarStream())) {
             if (errorMessage) *errorMessage = "Preview nodes can inspect image or scalar outputs.";
             return false;
         }
         return true;
     }
 
-    const std::string upstreamChannel = ResolveSocketChannel(fromNodeId, fromSocketId);
-    if ((to->kind == NodeKind::Output || to->kind == NodeKind::Lut) &&
-        toSocketId == kImageInputSocketId &&
-        !upstreamChannel.empty()) {
-        std::string ignored;
-        const bool ok = CanConnectSockets(fromNodeId, fromSocketId, toNodeId, upstreamChannel, nullptr, errorMessage);
-        if (ok && normalizedToSocketId) {
-            *normalizedToSocketId = upstreamChannel;
+    if (to->kind == NodeKind::Lut &&
+        toSocketId == kImageInputSocketId) {
+        const std::string upstreamChannel =
+            ResolveSocketChannel(fromNodeId, fromSocketId);
+        if (!upstreamChannel.empty()) {
+            const bool ok =
+                CanConnectSockets(
+                    fromNodeId,
+                    fromSocketId,
+                    toNodeId,
+                    upstreamChannel,
+                    nullptr,
+                    errorMessage);
+            if (ok && normalizedToSocketId) {
+                *normalizedToSocketId = upstreamChannel;
+            }
+            return ok;
         }
-        (void)ignored;
-        return ok;
+    }
+
+    if (ConnectionRules::IsChannelProcessingBridge(
+            *this,
+            fromNodeId,
+            fromSocketId,
+            fromSocket,
+            *to,
+            toSocketId,
+            toSocket)) {
+        if (WouldCreateCycle(
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                toSocketId)) {
+            if (errorMessage) {
+                *errorMessage =
+                    "That connection would create a cycle.";
+            }
+            return false;
+        }
+        return true;
     }
 
     if (fromSocket.type == SocketType::Raw || toSocket.type == SocketType::Raw) {
-        const bool validRawLink =
+        const bool validMfdBinding =
+            fromSocket.type == SocketType::Raw &&
+            toSocket.type == SocketType::Raw &&
+            from->kind == NodeKind::RawProjectFrame &&
+            to->kind == NodeKind::MultiFrameDenoise &&
+            fromSocketId == kRawOutputSocketId &&
+            toSocketId == MfdFrameInputSocketId(from->rawProjectFrame.frameId) &&
+            from->rawProjectFrame.sourceSetId ==
+                to->multiFrameDenoise.sourceSetId;
+        const bool validRawPipelineLink =
             fromSocket.type == SocketType::Raw &&
             toSocket.type == SocketType::Raw &&
             (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
             fromSocketId == kRawOutputSocketId &&
             (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop) &&
             toSocketId == kRawInputSocketId;
-        if (!validRawLink) {
-            if (errorMessage) *errorMessage = "RAW sockets connect from RAW Source or RAW neural nodes into RAW neural, RAW Decode, or RAW Develop nodes.";
+        if (!validMfdBinding && !validRawPipelineLink) {
+            if (errorMessage) *errorMessage =
+                "RAW sockets connect through the RAW pipeline or from a managed RAW Project Frame into its MFD input.";
+            return false;
+        }
+        if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
+            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            return false;
+        }
+        return true;
+    }
+
+    if (IsSpecializedFrequencySocketType(fromSocket.type) ||
+        IsSpecializedFrequencySocketType(toSocket.type)) {
+        if (fromSocket.type != toSocket.type) {
+            if (errorMessage) {
+                *errorMessage =
+                    "Frequency sockets require an exact type match. Use Channel Split/Combine for images, "
+                    "Fourier Transform/Inverse Fourier Transform for Channel and Spectrum, or "
+                    "Separate/Recombine Spectrum for Magnitude and Phase.";
+            }
+            return false;
+        }
+        if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
+            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            return false;
+        }
+        return true;
+    }
+
+    if (fromSocket.type == SocketType::Channel ||
+        toSocket.type == SocketType::Channel) {
+        if (fromSocket.type != toSocket.type) {
+            if (errorMessage) {
+                *errorMessage =
+                    "A Channel connects only to a declared Channel-capable input, including single-channel roles such as Mask. "
+                    "Use Channel Split/Combine when converting between Image and Channel.";
+            }
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
@@ -373,10 +580,25 @@ bool Graph::CanConnectSockets(
             if (errorMessage) *errorMessage = "Typed value sockets require an exact type match; use an explicit conversion or broadcast node.";
             return false;
         }
+        if (from->kind == NodeKind::Value) {
+            const auto valueIssues =
+                Stack::NodeMath::ValidateFirstClassValue(from->value.value);
+            if (from->value.value.availability !=
+                    Stack::NodeMath::ValueAvailability::Known ||
+                !valueIssues.empty()) {
+                if (errorMessage) {
+                    *errorMessage = !valueIssues.empty()
+                        ? "The connected typed value is invalid: " +
+                            valueIssues.front().message
+                        : (from->value.value.message.empty()
+                            ? "The connected typed value is not known."
+                            : from->value.value.message);
+                }
+                return false;
+            }
+        }
         if (to->kind != NodeKind::Compound &&
-            (to->kind != NodeKind::TechnicalImage ||
-             toSocketId != kExposureValueInputSocketId ||
-             toSocket.type != SocketType::Scalar)) {
+            !IsImplementedTypedParameterInput(*to, toSocketId, toSocket.type)) {
             if (errorMessage) *errorMessage = "This typed value input is not implemented by the selected node definition.";
             return false;
         }
@@ -401,12 +623,15 @@ bool Graph::CanConnectSockets(
               from->kind == NodeKind::MagnitudePhase) && fromSocketId == kMaskOutputSocketId) ||
             from->kind == NodeKind::Compound ||
             (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(fromSocketId)) ||
-            fromIsScalarStream;
+            isFromScalarStream();
 
         const bool fromScalarField = fromSocket.type == SocketType::Mask || fromSocket.type == SocketType::ScalarField;
         const bool toScalarField = toSocket.type == SocketType::Mask || toSocket.type == SocketType::ScalarField;
         const bool isScalarToScalar = fromScalarField && toScalarField;
-        const bool isScalarImageToScalar = fromSocket.type == SocketType::Image && toScalarField && fromIsScalarStream;
+        const bool isScalarImageToScalar =
+            fromSocket.type == SocketType::Image &&
+            toScalarField &&
+            isFromScalarStream();
         const bool isScalarToImage = fromScalarField && toSocket.type == SocketType::Image;
 
         if (isScalarToScalar || isScalarImageToScalar) {
@@ -421,10 +646,10 @@ bool Graph::CanConnectSockets(
                 (to->kind == NodeKind::Layer && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::Lut && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::TechnicalImage && toSocketId == kImageInputSocketId) ||
+                (to->kind == NodeKind::Reformat && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::RawDetailAutoMask && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::RawDetailFusion && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
-                (to->kind == NodeKind::Output && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::ImageToMask && toSocketId == kImageToMaskInputSocketId) ||
                 (to->kind == NodeKind::ChannelSplit && toSocketId == kImageInputSocketId) ||
                 (to->kind == NodeKind::FrequencyFft && toSocketId == kImageInputSocketId) ||
@@ -436,7 +661,7 @@ bool Graph::CanConnectSockets(
                 (to->kind == NodeKind::SpectrumMath && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
                 DataMathAllowsScalarToImageTarget(*to, toSocketId);
             if (!validScalarSource || !validImageTarget) {
-                if (errorMessage) *errorMessage = "Scalar outputs can connect to image inputs, Blend Images, Data Math, scalar converters, split nodes, or the output node.";
+                if (errorMessage) *errorMessage = "Scalar outputs can connect to image inputs, Reformat, Blend Images, Data Math, scalar converters, split nodes, or the output node.";
                 return false;
             }
         } else {
@@ -458,7 +683,7 @@ bool Graph::CanConnectSockets(
         return false;
     }
     if (to->kind == NodeKind::Mfsr && IsMfsrInputSocketId(toSocketId)) {
-        if (fromIsScalarStream) {
+        if (isFromScalarStream()) {
             if (errorMessage) *errorMessage = "MFSR inputs require full image frames, not scalar streams.";
             return false;
         }
@@ -536,7 +761,9 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Image links must target Spectrum Math input A or B.";
         return false;
     }
-    if (to->kind == NodeKind::DataMath && IsImageAverageNode(*to) && fromIsScalarStream) {
+    if (to->kind == NodeKind::DataMath &&
+        IsImageAverageNode(*to) &&
+        isFromScalarStream()) {
         if (errorMessage) *errorMessage = "Average Images inputs require full image streams.";
         return false;
     }
@@ -582,8 +809,7 @@ bool Graph::IsScalarTargetSocket(int nodeId, const std::string& socketId) const 
             (socketId == kMaskCombineInputASocketId || socketId == kMaskCombineInputBSocketId)) ||
         (to->kind == NodeKind::MaskUtility && socketId == kMaskUtilityInputSocketId) ||
         (to->kind == NodeKind::Lut && IsChannelSocketId(socketId)) ||
-        (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(socketId)) ||
-        (to->kind == NodeKind::Output && IsChannelSocketId(socketId));
+        (to->kind == NodeKind::ChannelCombine && IsChannelSocketId(socketId));
 }
 
 bool Graph::CanInsertImageToScalarExtractor(
@@ -648,10 +874,37 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
         return false;
     }
 
+    Link preparedLink;
+    try {
+        preparedLink =
+            MakeSocketLink(
+                fromNodeId,
+                fromSocketId,
+                toNodeId,
+                resolvedToSocketId);
+        if (m_Links.size() == m_Links.max_size()) {
+            throw std::length_error("node graph link capacity exhausted");
+        }
+        // Every branch below removes an existing input before publishing this
+        // replacement. Secure both the Link strings and vector capacity first
+        // so allocation failure cannot leave the graph partially disconnected.
+        m_Links.reserve(m_Links.size() + 1u);
+    } catch (const std::bad_alloc&) {
+        SetConnectionErrorNoThrow(
+            errorMessage,
+            "The connection could not be created because memory is exhausted.");
+        return false;
+    } catch (const std::length_error&) {
+        SetConnectionErrorNoThrow(
+            errorMessage,
+            "The connection could not be created because the graph link limit was reached.");
+        return false;
+    }
+
     const bool toScope = to->kind == NodeKind::Scope && resolvedToSocketId == kScopeInputSocketId;
     if (toScope) {
         RemoveScopeLinksForNodeInput(toNodeId, resolvedToSocketId);
-        m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, resolvedToSocketId));
+        m_Links.push_back(std::move(preparedLink));
         TouchStructure();
         return true;
     }
@@ -659,14 +912,14 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
     const bool toPreview = to->kind == NodeKind::Preview && resolvedToSocketId == kPreviewInputSocketId;
     if (toPreview) {
         RemoveScopeLinksForNodeInput(toNodeId, resolvedToSocketId);
-        m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, resolvedToSocketId));
+        m_Links.push_back(std::move(preparedLink));
         TouchStructure();
         return true;
     }
 
     if (fromSocket.type == SocketType::Raw || toSocket.type == SocketType::Raw) {
         RemoveRenderLinksForNodeInput(toNodeId, resolvedToSocketId);
-        m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, resolvedToSocketId));
+        m_Links.push_back(std::move(preparedLink));
         TouchStructure();
         return true;
     }
@@ -674,16 +927,26 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
     if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask ||
         fromSocket.type == SocketType::ScalarField || toSocket.type == SocketType::ScalarField ||
         IsUniformOrResourceSocketType(fromSocket.type) || IsUniformOrResourceSocketType(toSocket.type)) {
-        if ((to->kind == NodeKind::Output || to->kind == NodeKind::Lut) && IsChannelSocketId(resolvedToSocketId)) {
+        if (to->kind == NodeKind::Lut && IsChannelSocketId(resolvedToSocketId)) {
             RemoveLinksForNodeInput(toNodeId, kImageInputSocketId);
+        } else if (to->kind == NodeKind::Lut &&
+                   resolvedToSocketId == kImageInputSocketId) {
+            RemoveLinksForNodeInput(toNodeId, "r");
+            RemoveLinksForNodeInput(toNodeId, "g");
+            RemoveLinksForNodeInput(toNodeId, "b");
+            RemoveLinksForNodeInput(toNodeId, "a");
         }
         RemoveLinksForNodeInput(toNodeId, resolvedToSocketId);
-        m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, resolvedToSocketId));
+        m_Links.push_back(std::move(preparedLink));
         TouchStructure();
         return true;
     }
 
-    if ((to->kind == NodeKind::Output || to->kind == NodeKind::Lut) && resolvedToSocketId == kImageInputSocketId) {
+    if (to->kind == NodeKind::Lut &&
+        IsChannelSocketId(resolvedToSocketId)) {
+        RemoveLinksForNodeInput(toNodeId, kImageInputSocketId);
+    }
+    if (to->kind == NodeKind::Lut && resolvedToSocketId == kImageInputSocketId) {
         RemoveLinksForNodeInput(toNodeId, "r");
         RemoveLinksForNodeInput(toNodeId, "g");
         RemoveLinksForNodeInput(toNodeId, "b");
@@ -693,7 +956,7 @@ bool Graph::TryConnectSockets(int fromNodeId, const std::string& fromSocketId, i
     if (from->kind == NodeKind::Image) {
         ActivateImageNode(fromNodeId);
     }
-    m_Links.push_back(MakeSocketLink(fromNodeId, fromSocketId, toNodeId, resolvedToSocketId));
+    m_Links.push_back(std::move(preparedLink));
     TouchStructure();
     return true;
 }
@@ -801,41 +1064,49 @@ bool Graph::HasLink(int fromNodeId, int toNodeId) const {
 }
 
 bool Graph::HasLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) const {
-    return std::any_of(m_Links.begin(), m_Links.end(), [&](const Link& link) {
-        return link.fromNodeId == fromNodeId &&
+    bool found = false;
+    ForEachOutgoingLink(fromNodeId, [&](const Link& link) {
+        if (!found &&
             link.fromSocketId == fromSocketId &&
             link.toNodeId == toNodeId &&
-            link.toSocketId == toSocketId;
+            link.toSocketId == toSocketId) {
+            found = true;
+        }
     });
+    return found;
 }
 
 bool Graph::WouldCreateCycle(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) const {
     (void)fromSocketId;
     (void)toSocketId;
+
     std::unordered_set<int> visited;
-    std::function<bool(int)> reachesFrom = [&](int current) {
+    visited.reserve(m_Nodes.size());
+    std::vector<int> pending { toNodeId };
+    while (!pending.empty()) {
+        const int current = pending.back();
+        pending.pop_back();
         if (current == fromNodeId) {
             return true;
         }
         if (!visited.insert(current).second) {
-            return false;
+            continue;
         }
-        for (const Link& link : m_Links) {
-            if (link.fromNodeId != current || GetLinkRole(link) != LinkRole::Render) {
-                continue;
+        ForEachOutgoingLink(current, [&](const Link& link) {
+            const Node* target = FindNode(link.toNodeId);
+            const bool analysisTarget =
+                target &&
+                ((target->kind == NodeKind::Scope &&
+                  link.toSocketId == kScopeInputSocketId) ||
+                 (target->kind == NodeKind::Preview &&
+                  link.toSocketId == kPreviewInputSocketId));
+            if (!analysisTarget &&
+                link.fromSocketId != kPreFinishImageOutputSocketId) {
+                pending.push_back(link.toNodeId);
             }
-            // Raw Develop's hidden pre-finish output is computed before the integrated finish mask
-            // is applied, so image-to-mask links sourced from it do not form a true feedback cycle.
-            if (link.fromSocketId == kPreFinishImageOutputSocketId) {
-                continue;
-            }
-            if (reachesFrom(link.toNodeId)) {
-                return true;
-            }
-        }
-        return false;
-    };
-    return reachesFrom(toNodeId);
+        });
+    }
+    return false;
 }
 
 void Graph::RemoveRenderLinksForNodeInput(int nodeId, const std::string& socketId) {

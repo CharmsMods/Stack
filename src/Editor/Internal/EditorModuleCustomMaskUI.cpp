@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <unordered_set>
 
 namespace {
 
@@ -49,42 +53,78 @@ float SmoothStepFloat(float edge0, float edge1, float value) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-void EnsureCustomMaskRaster(EditorNodeGraph::CustomMaskPayload& payload) {
+bool EnsureCustomMaskRaster(EditorNodeGraph::CustomMaskPayload& payload) {
     payload.width = std::clamp(payload.width, 1, 8192);
     payload.height = std::clamp(payload.height, 1, 8192);
     const std::size_t expected =
         static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height);
     if (payload.rasterLayer.size() != expected) {
-        payload.rasterLayer.assign(expected, 0.0f);
+        try {
+            payload.rasterLayer.assign(expected, 0.0f);
+        } catch (const std::bad_alloc&) {
+            return false;
+        } catch (const std::length_error&) {
+            return false;
+        }
     }
+    return true;
 }
 
-void ResizeCustomMaskRaster(EditorNodeGraph::CustomMaskPayload& payload, int newWidth, int newHeight) {
+bool ResizeCustomMaskRaster(EditorNodeGraph::CustomMaskPayload& payload, int newWidth, int newHeight) {
     newWidth = std::clamp(newWidth, 1, 8192);
     newHeight = std::clamp(newHeight, 1, 8192);
-    EnsureCustomMaskRaster(payload);
     if (newWidth == payload.width && newHeight == payload.height) {
-        return;
+        return true;
     }
 
-    std::vector<float> resized(static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(newHeight), 0.0f);
-    for (int y = 0; y < newHeight; ++y) {
-        const float v = newHeight > 1 ? static_cast<float>(y) / static_cast<float>(newHeight - 1) : 0.0f;
-        const int srcY = std::clamp(static_cast<int>(std::round(v * static_cast<float>(payload.height - 1))), 0, payload.height - 1);
-        for (int x = 0; x < newWidth; ++x) {
-            const float u = newWidth > 1 ? static_cast<float>(x) / static_cast<float>(newWidth - 1) : 0.0f;
-            const int srcX = std::clamp(static_cast<int>(std::round(u * static_cast<float>(payload.width - 1))), 0, payload.width - 1);
-            resized[static_cast<std::size_t>(y) * static_cast<std::size_t>(newWidth) + static_cast<std::size_t>(x)] =
-                payload.rasterLayer[static_cast<std::size_t>(srcY) * static_cast<std::size_t>(payload.width) + static_cast<std::size_t>(srcX)];
+    const std::size_t sourceExpected =
+        static_cast<std::size_t>(payload.width) *
+        static_cast<std::size_t>(payload.height);
+    if (payload.rasterLayer.size() != sourceExpected) {
+        payload.width = newWidth;
+        payload.height = newHeight;
+        std::vector<float>().swap(payload.rasterLayer);
+        return true;
+    }
+
+    std::vector<float> resized;
+    try {
+        resized.assign(
+            static_cast<std::size_t>(newWidth) *
+                static_cast<std::size_t>(newHeight),
+            0.0f);
+        for (int y = 0; y < newHeight; ++y) {
+            const float v = newHeight > 1 ? static_cast<float>(y) / static_cast<float>(newHeight - 1) : 0.0f;
+            const int srcY = std::clamp(static_cast<int>(std::round(v * static_cast<float>(payload.height - 1))), 0, payload.height - 1);
+            for (int x = 0; x < newWidth; ++x) {
+                const float u = newWidth > 1 ? static_cast<float>(x) / static_cast<float>(newWidth - 1) : 0.0f;
+                const int srcX = std::clamp(static_cast<int>(std::round(u * static_cast<float>(payload.width - 1))), 0, payload.width - 1);
+                resized[static_cast<std::size_t>(y) * static_cast<std::size_t>(newWidth) + static_cast<std::size_t>(x)] =
+                    payload.rasterLayer[static_cast<std::size_t>(srcY) * static_cast<std::size_t>(payload.width) + static_cast<std::size_t>(srcX)];
+            }
         }
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
     }
     payload.width = newWidth;
     payload.height = newHeight;
-    payload.rasterLayer = std::move(resized);
+    if (std::all_of(
+            resized.begin(),
+            resized.end(),
+            [](float value) { return value == 0.0f; })) {
+        payload.rasterLayer.clear();
+    } else {
+        payload.rasterLayer = std::move(resized);
+    }
+    return true;
 }
 
-void ApplyBrush(EditorNodeGraph::CustomMaskPayload& payload, float u, float v, bool erase) {
-    EnsureCustomMaskRaster(payload);
+bool ApplyBrush(EditorNodeGraph::CustomMaskPayload& payload, float u, float v, bool erase) {
+    if (!EnsureCustomMaskRaster(payload)) {
+        return false;
+    }
     const float radius = std::max(1.0f, payload.brushSize) * 0.5f;
     const float centerX = u * static_cast<float>(payload.width - 1);
     const float centerY = v * static_cast<float>(payload.height - 1);
@@ -111,6 +151,7 @@ void ApplyBrush(EditorNodeGraph::CustomMaskPayload& payload, float u, float v, b
             value = Clamp01(value + (target - value) * opacity * falloff);
         }
     }
+    return true;
 }
 
 void DrawCustomMaskBrushPreview(
@@ -183,7 +224,8 @@ bool PointInPreviewPolygon(const std::vector<EditorNodeGraph::Vec2>& points, flo
     bool inside = false;
     for (std::size_t i = 0, j = points.size() - 1; i < points.size(); j = i++) {
         const bool intersects = ((points[i].y > v) != (points[j].y > v)) &&
-            (u < (points[j].x - points[i].x) * (v - points[i].y) / std::max(0.000001f, points[j].y - points[i].y) + points[i].x);
+            (u < (points[j].x - points[i].x) * (v - points[i].y) /
+                (points[j].y - points[i].y) + points[i].x);
         if (intersects) {
             inside = !inside;
         }
@@ -327,6 +369,23 @@ float EditorModule::SampleCustomMaskForPreview(const EditorNodeGraph::CustomMask
         value = payload.rasterLayer[index];
     }
     for (const EditorNodeGraph::CustomMaskObject& object : payload.objects) {
+        const bool usableGeometry =
+            object.enabled &&
+            ((object.type ==
+                  EditorNodeGraph::CustomMaskObjectType::Rectangle &&
+              object.points.size() >= 2) ||
+             (object.type ==
+                  EditorNodeGraph::CustomMaskObjectType::Ellipse &&
+              object.points.size() >= 2) ||
+             (object.type ==
+                  EditorNodeGraph::CustomMaskObjectType::Polygon &&
+              object.points.size() >= 3) ||
+             (object.type ==
+                  EditorNodeGraph::CustomMaskObjectType::FreeformPath &&
+              object.points.size() >= 2));
+        if (!usableGeometry) {
+            continue;
+        }
         value = CombinePreviewMaskValue(
             value,
             EvaluatePreviewObject(object, std::clamp(u, 0.0f, 1.0f), std::clamp(v, 0.0f, 1.0f), width, height),
@@ -346,59 +405,112 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     }
 
     EditorNodeGraph::CustomMaskPayload& payload = node.customMask;
-    EnsureCustomMaskRaster(payload);
 
+    constexpr std::size_t customMaskHistoryByteBudget =
+        256ull * 1024ull * 1024ull;
+    const auto trimHistory = [&](auto& history) {
+        std::size_t rasterBytes = 0;
+        for (const EditorNodeGraph::CustomMaskPayload& snapshot : history) {
+            const std::size_t bytes =
+                snapshot.rasterLayer.size() >
+                        std::numeric_limits<std::size_t>::max() /
+                            sizeof(float)
+                    ? std::numeric_limits<std::size_t>::max()
+                    : snapshot.rasterLayer.size() * sizeof(float);
+            rasterBytes =
+                rasterBytes > std::numeric_limits<std::size_t>::max() - bytes
+                    ? std::numeric_limits<std::size_t>::max()
+                    : rasterBytes + bytes;
+        }
+        while (history.size() > 1 &&
+               (history.size() > 64 ||
+                rasterBytes > customMaskHistoryByteBudget)) {
+            const std::size_t removedBytes =
+                history.front().rasterLayer.size() * sizeof(float);
+            history.pop_front();
+            rasterBytes =
+                rasterBytes > removedBytes
+                    ? rasterBytes - removedBytes
+                    : 0;
+        }
+    };
+    const auto pushHistoryCopy = [&](auto& history, const auto& snapshot) {
+        try {
+            history.push_back(snapshot);
+        } catch (const std::bad_alloc&) {
+            return false;
+        } catch (const std::length_error&) {
+            return false;
+        }
+        trimHistory(history);
+        return true;
+    };
     auto pushUndoSnapshot = [&](const EditorNodeGraph::CustomMaskPayload& snapshot) {
         auto& undo = m_CustomMaskUndoStacks[node.id];
-        undo.push_back(snapshot);
-        while (undo.size() > 64) {
-            undo.pop_front();
+        if (!pushHistoryCopy(undo, snapshot)) {
+            return false;
         }
         m_CustomMaskRedoStacks[node.id].clear();
+        return true;
     };
     auto pushUndo = [&]() {
-        pushUndoSnapshot(payload);
+        return pushUndoSnapshot(payload);
     };
 
     auto commitChange = [&]() {
-        EnsureCustomMaskRaster(payload);
         MarkRenderDirty(node.id);
         MarkDirty();
     };
 
-    auto findImageSizeBackwards = [&](auto&& self, int currentNodeId, int& outW, int& outH, std::vector<int>& visited) -> bool {
-        if (std::find(visited.begin(), visited.end(), currentNodeId) != visited.end()) {
-            return false;
-        }
-        visited.push_back(currentNodeId);
-        const EditorNodeGraph::Node* current = m_NodeGraph.FindNode(currentNodeId);
-        if (!current) {
-            return false;
-        }
-        if (current->kind == EditorNodeGraph::NodeKind::Image &&
-            current->image.width > 0 &&
-            current->image.height > 0) {
-            outW = current->image.width;
-            outH = current->image.height;
-            return true;
-        }
-        for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
-            if (link.toNodeId != currentNodeId || !m_NodeGraph.IsRenderLink(link)) {
+    auto findImageSizeBackwards =
+        [&](int startNodeId, int& outW, int& outH) -> bool {
+        std::vector<int> pending{ startNodeId };
+        std::unordered_set<int> visited;
+        visited.reserve(m_NodeGraph.GetNodes().size());
+        while (!pending.empty()) {
+            const int currentNodeId = pending.back();
+            pending.pop_back();
+            if (!visited.insert(currentNodeId).second) {
                 continue;
             }
-            const bool imageInput =
-                link.toSocketId == EditorNodeGraph::kImageInputSocketId ||
-                link.toSocketId == EditorNodeGraph::kMixInputASocketId ||
-                link.toSocketId == EditorNodeGraph::kMixInputBSocketId ||
-                EditorNodeGraph::IsDataMathInputSocketId(link.toSocketId) ||
-                link.toSocketId == EditorNodeGraph::kDataMathBaseInputSocketId ||
-                link.toSocketId == EditorNodeGraph::kHdrMergeInput1SocketId ||
-                link.toSocketId == EditorNodeGraph::kHdrMergeInput2SocketId ||
-                link.toSocketId == EditorNodeGraph::kHdrMergeInput3SocketId ||
-                link.toSocketId == EditorNodeGraph::kImageToMaskInputSocketId;
-            if (imageInput && self(self, link.fromNodeId, outW, outH, visited)) {
+            const EditorNodeGraph::Node* current =
+                m_NodeGraph.FindNode(currentNodeId);
+            if (!current) {
+                continue;
+            }
+            if (current->kind == EditorNodeGraph::NodeKind::Image &&
+                current->image.width > 0 &&
+                current->image.height > 0) {
+                outW = current->image.width;
+                outH = current->image.height;
                 return true;
             }
+            m_NodeGraph.ForEachIncomingRenderLink(
+                currentNodeId,
+                [&](const EditorNodeGraph::Link& link) {
+                    const bool imageInput =
+                        link.toSocketId ==
+                            EditorNodeGraph::kImageInputSocketId ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kMixInputASocketId ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kMixInputBSocketId ||
+                        EditorNodeGraph::IsDataMathInputSocketId(
+                            link.toSocketId) ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kDataMathBaseInputSocketId ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kHdrMergeInput1SocketId ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kHdrMergeInput2SocketId ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kHdrMergeInput3SocketId ||
+                        link.toSocketId ==
+                            EditorNodeGraph::kImageToMaskInputSocketId;
+                    if (imageInput) {
+                        pending.push_back(link.fromNodeId);
+                    }
+                });
         }
         return false;
     };
@@ -415,15 +527,11 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
             }
         }
 
-        std::vector<int> queue;
-        std::vector<int> visited;
-        queue.push_back(node.id);
+        std::vector<int> queue{ node.id };
+        std::unordered_set<int> discovered{ node.id };
+        discovered.reserve(m_NodeGraph.GetNodes().size());
         for (std::size_t i = 0; i < queue.size(); ++i) {
             const int currentId = queue[i];
-            if (std::find(visited.begin(), visited.end(), currentId) != visited.end()) {
-                continue;
-            }
-            visited.push_back(currentId);
             const EditorNodeGraph::Node* current = m_NodeGraph.FindNode(currentId);
             if (!current) {
                 continue;
@@ -436,17 +544,25 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                 return true;
             }
 
-            for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
-                if (link.fromNodeId != currentId || !m_NodeGraph.IsRenderLink(link)) {
-                    continue;
-                }
-                std::vector<int> upstreamVisited;
-                if (findImageSizeBackwards(findImageSizeBackwards, link.toNodeId, outW, outH, upstreamVisited)) {
-                    return true;
-                }
-                if (std::find(queue.begin(), queue.end(), link.toNodeId) == queue.end()) {
+            bool resolved = false;
+            m_NodeGraph.ForEachOutgoingRenderLink(
+                currentId,
+                [&](const EditorNodeGraph::Link& link) {
+                    if (resolved ||
+                        !discovered.insert(link.toNodeId).second) {
+                        return;
+                    }
+                    if (findImageSizeBackwards(
+                            link.toNodeId,
+                            outW,
+                            outH)) {
+                        resolved = true;
+                        return;
+                    }
                     queue.push_back(link.toNodeId);
-                }
+                });
+            if (resolved) {
+                return true;
             }
         }
 
@@ -481,52 +597,88 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
         }
 
         std::vector<int> queue { node.id };
-        std::vector<int> visited;
+        std::unordered_set<int> discovered{ node.id };
+        discovered.reserve(m_NodeGraph.GetNodes().size());
         for (std::size_t index = 0; index < queue.size(); ++index) {
             const int currentId = queue[index];
-            if (std::find(visited.begin(), visited.end(), currentId) != visited.end()) {
-                continue;
-            }
-            visited.push_back(currentId);
-            for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
-                if (link.fromNodeId != currentId || !m_NodeGraph.IsRenderLink(link)) {
-                    continue;
-                }
-                const EditorNodeGraph::Node* downstream = m_NodeGraph.FindNode(link.toNodeId);
-                if (!downstream) {
-                    continue;
-                }
+            bool resolved = false;
+            m_NodeGraph.ForEachOutgoingRenderLink(
+                currentId,
+                [&](const EditorNodeGraph::Link& link) {
+                    if (resolved ||
+                        !discovered.insert(link.toNodeId).second) {
+                        return;
+                    }
+                    const EditorNodeGraph::Node* downstream =
+                        m_NodeGraph.FindNode(link.toNodeId);
+                    if (!downstream) {
+                        return;
+                    }
+                    const auto tryUseReferenceInput =
+                        [&](const std::string& socketId) {
+                            return tryUseImageNode(
+                                m_NodeGraph.ResolveReferenceSourceNodeId(
+                                    downstream->id,
+                                    socketId));
+                        };
 
-                if (downstream->kind == EditorNodeGraph::NodeKind::Layer &&
-                    link.toSocketId == EditorNodeGraph::kMaskInputSocketId) {
-                    if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kImageInputSocketId))) {
-                        return result;
-                    }
-                } else if (downstream->kind == EditorNodeGraph::NodeKind::Mix &&
-                    link.toSocketId == EditorNodeGraph::kMixFactorSocketId) {
-                    if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kMixInputASocketId)) ||
-                        tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kMixInputBSocketId))) {
-                        return result;
-                    }
-                } else if (downstream->kind == EditorNodeGraph::NodeKind::DataMath &&
-                    link.toSocketId == EditorNodeGraph::kMaskInputSocketId) {
-                    if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::kDataMathBaseInputSocketId))) {
-                        return result;
-                    }
-                    for (int inputIndex = 0; inputIndex < EditorNodeGraph::kMaxDataMathInputCount; ++inputIndex) {
-                        if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeId(downstream->id, EditorNodeGraph::DataMathInputSocketId(inputIndex)))) {
-                            return result;
+                    if (downstream->kind ==
+                            EditorNodeGraph::NodeKind::Layer &&
+                        link.toSocketId ==
+                            EditorNodeGraph::kMaskInputSocketId) {
+                        if (tryUseReferenceInput(
+                                EditorNodeGraph::kImageInputSocketId)) {
+                            resolved = true;
+                        }
+                    } else if (downstream->kind ==
+                                   EditorNodeGraph::NodeKind::Mix &&
+                               link.toSocketId ==
+                                   EditorNodeGraph::kMixFactorSocketId) {
+                        if (tryUseReferenceInput(
+                                EditorNodeGraph::kMixInputASocketId) ||
+                            tryUseReferenceInput(
+                                EditorNodeGraph::kMixInputBSocketId)) {
+                            resolved = true;
+                        }
+                    } else if (
+                        downstream->kind ==
+                            EditorNodeGraph::NodeKind::DataMath &&
+                        link.toSocketId ==
+                            EditorNodeGraph::kMaskInputSocketId) {
+                        if (tryUseReferenceInput(
+                                EditorNodeGraph::
+                                    kDataMathBaseInputSocketId)) {
+                            resolved = true;
+                            return;
+                        }
+                        for (int inputIndex = 0;
+                             inputIndex <
+                                 EditorNodeGraph::kMaxDataMathInputCount;
+                             ++inputIndex) {
+                            if (tryUseReferenceInput(
+                                    EditorNodeGraph::DataMathInputSocketId(
+                                        inputIndex))) {
+                                resolved = true;
+                                return;
+                            }
+                        }
+                    } else if (
+                        downstream->kind ==
+                        EditorNodeGraph::NodeKind::Output) {
+                        if (tryUseImageNode(
+                                m_NodeGraph
+                                    .ResolveReferenceSourceNodeIdForOutput(
+                                        downstream->id))) {
+                            resolved = true;
                         }
                     }
-                } else if (downstream->kind == EditorNodeGraph::NodeKind::Output) {
-                    if (tryUseImageNode(m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(downstream->id))) {
-                        return result;
-                    }
-                }
 
-                if (std::find(queue.begin(), queue.end(), link.toNodeId) == queue.end()) {
-                    queue.push_back(link.toNodeId);
-                }
+                    if (!resolved) {
+                        queue.push_back(link.toNodeId);
+                    }
+                });
+            if (resolved) {
+                return result;
             }
         }
 
@@ -542,8 +694,12 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
         int referenceH = 0;
         if (resolveReferenceSize(referenceW, referenceH) && referenceW > 0 && referenceH > 0 &&
             (payload.width != referenceW || payload.height != referenceH)) {
-            ResizeCustomMaskRaster(payload, std::clamp(referenceW, 1, 8192), std::clamp(referenceH, 1, 8192));
-            commitChange();
+            if (ResizeCustomMaskRaster(
+                    payload,
+                    std::clamp(referenceW, 1, 8192),
+                    std::clamp(referenceH, 1, 8192))) {
+                commitChange();
+            }
         }
     }
 
@@ -577,8 +733,9 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     if (ImGui::Button("Undo", ImVec2(undoButtonW, 0.0f))) {
         auto& undo = m_CustomMaskUndoStacks[node.id];
         if (!undo.empty()) {
-            m_CustomMaskRedoStacks[node.id].push_back(payload);
-            payload = undo.back();
+            auto& redo = m_CustomMaskRedoStacks[node.id];
+            (void)pushHistoryCopy(redo, payload);
+            payload = std::move(undo.back());
             undo.pop_back();
             commitChange();
         }
@@ -587,8 +744,9 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     if (ImGui::Button("Redo", ImVec2(undoButtonW, 0.0f))) {
         auto& redo = m_CustomMaskRedoStacks[node.id];
         if (!redo.empty()) {
-            m_CustomMaskUndoStacks[node.id].push_back(payload);
-            payload = redo.back();
+            auto& undo = m_CustomMaskUndoStacks[node.id];
+            (void)pushHistoryCopy(undo, payload);
+            payload = std::move(redo.back());
             redo.pop_back();
             commitChange();
         }
@@ -596,14 +754,21 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     ImGui::SameLine();
     if (ImGui::Button("Clear", ImVec2(undoButtonW, 0.0f))) {
         pushUndo();
-        std::fill(payload.rasterLayer.begin(), payload.rasterLayer.end(), 0.0f);
+        std::vector<float>().swap(payload.rasterLayer);
         commitChange();
     }
     ImGui::SameLine();
     if (ImGui::Button("Fill", ImVec2(undoButtonW, 0.0f))) {
         pushUndo();
-        std::fill(payload.rasterLayer.begin(), payload.rasterLayer.end(), 1.0f);
-        commitChange();
+        if (EnsureCustomMaskRaster(payload)) {
+            std::fill(payload.rasterLayer.begin(), payload.rasterLayer.end(), 1.0f);
+            commitChange();
+        } else {
+            auto& undo = m_CustomMaskUndoStacks[node.id];
+            if (!undo.empty()) {
+                undo.pop_back();
+            }
+        }
     }
 
     ImGui::SameLine();
@@ -761,8 +926,13 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
         float u = 0.0f;
         float v = 0.0f;
         mouseToCanvasUv(mouse, u, v);
-        ApplyBrush(payload, u, v, payload.activeTool == EditorNodeGraph::CustomMaskTool::Erase);
-        commitChange();
+        if (ApplyBrush(
+                payload,
+                u,
+                v,
+                payload.activeTool == EditorNodeGraph::CustomMaskTool::Erase)) {
+            commitChange();
+        }
     }
     if (m_CustomMaskPaintingNodes.count(node.id) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         m_CustomMaskPaintingNodes.erase(node.id);
@@ -790,6 +960,10 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     }
 
     auto addObject = [&](EditorNodeGraph::CustomMaskObjectType type) {
+        if (payload.objects.size() >=
+            EditorNodeGraph::kMaximumCustomMaskObjectCount) {
+            return;
+        }
         pushUndo();
         EditorNodeGraph::CustomMaskObject object;
         object.id = payload.nextObjectId++;
@@ -824,17 +998,33 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
         }
 
         if (ImGui::BeginTabItem("Mask")) {
-            const EditorNodeGraph::CustomMaskPayload beforeGlobalEdit = payload;
+            bool editedInvert = payload.invert;
+            float editedBlurRadius = payload.blurRadius;
+            float editedExpandContract = payload.expandContract;
             bool globalChanged = false;
-            globalChanged |= ImGui::Checkbox("Invert", &payload.invert);
+            bool globalEditStarted = false;
+            globalChanged |= ImGui::Checkbox("Invert", &editedInvert);
+            globalEditStarted |= ImGui::IsItemActivated();
             ImGui::SameLine();
             ImGui::SetNextItemWidth(fullWidth * 0.34f);
-            globalChanged |= ImGui::SliderFloat("Blur", &payload.blurRadius, 0.0f, 64.0f, "%.1f px");
+            globalChanged |= ImGui::SliderFloat("Blur", &editedBlurRadius, 0.0f, 64.0f, "%.1f px");
+            globalEditStarted |= ImGui::IsItemActivated();
             ImGui::SameLine();
             ImGui::SetNextItemWidth(fullWidth * 0.34f);
-            globalChanged |= ImGui::SliderFloat("Expand / Contract", &payload.expandContract, -64.0f, 64.0f, "%.1f px");
+            globalChanged |= ImGui::SliderFloat(
+                "Expand / Contract",
+                &editedExpandContract,
+                -64.0f,
+                64.0f,
+                "%.1f px");
+            globalEditStarted |= ImGui::IsItemActivated();
             if (globalChanged) {
-                pushUndoSnapshot(beforeGlobalEdit);
+                if (globalEditStarted || !ImGui::IsAnyItemActive()) {
+                    pushUndo();
+                }
+                payload.invert = editedInvert;
+                payload.blurRadius = editedBlurRadius;
+                payload.expandContract = editedExpandContract;
                 commitChange();
             }
             ImGui::EndTabItem();
@@ -864,52 +1054,66 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
             EditorNodeGraph::CustomMaskObject* selected = FindCustomMaskObject(payload, payload.selectedObjectId);
             ImGui::BeginChild("##CustomMaskObjectEditor", ImVec2(0.0f, 130.0f), false);
             if (selected) {
-                const EditorNodeGraph::CustomMaskPayload beforeObjectEdit = payload;
+                EditorNodeGraph::CustomMaskObject editedObject = *selected;
                 bool objectChanged = false;
-                int type = static_cast<int>(selected->type);
+                bool objectEditStarted = false;
+                int type = static_cast<int>(editedObject.type);
                 const char* objectTypes[] = { "Rectangle", "Ellipse", "Polygon", "Freeform Path" };
                 ImGui::SetNextItemWidth(150.0f);
                 if (ImGui::Combo("Type", &type, objectTypes, IM_ARRAYSIZE(objectTypes))) {
-                    selected->type = static_cast<EditorNodeGraph::CustomMaskObjectType>(std::clamp(type, 0, 3));
+                    editedObject.type = static_cast<EditorNodeGraph::CustomMaskObjectType>(std::clamp(type, 0, 3));
                     objectChanged = true;
                 }
+                objectEditStarted |= ImGui::IsItemActivated();
                 ImGui::SameLine();
-                int operation = static_cast<int>(selected->operation);
+                int operation = static_cast<int>(editedObject.operation);
                 const char* operations[] = { "Add", "Subtract", "Intersect", "Exclude" };
                 ImGui::SetNextItemWidth(140.0f);
                 if (ImGui::Combo("Operation", &operation, operations, IM_ARRAYSIZE(operations))) {
-                    selected->operation = static_cast<EditorNodeGraph::CustomMaskOperation>(std::clamp(operation, 0, 3));
+                    editedObject.operation = static_cast<EditorNodeGraph::CustomMaskOperation>(std::clamp(operation, 0, 3));
                     objectChanged = true;
                 }
+                objectEditStarted |= ImGui::IsItemActivated();
                 ImGui::SameLine();
-                objectChanged |= ImGui::Checkbox("On", &selected->enabled);
+                objectChanged |= ImGui::Checkbox("On", &editedObject.enabled);
+                objectEditStarted |= ImGui::IsItemActivated();
                 ImGui::SameLine();
-                objectChanged |= ImGui::Checkbox("Invert", &selected->invert);
+                objectChanged |= ImGui::Checkbox("Invert", &editedObject.invert);
+                objectEditStarted |= ImGui::IsItemActivated();
                 ImGui::SetNextItemWidth(fullWidth * 0.23f);
-                objectChanged |= ImGui::SliderFloat("Strength", &selected->strength, 0.0f, 1.0f);
+                objectChanged |= ImGui::SliderFloat("Strength", &editedObject.strength, 0.0f, 1.0f);
+                objectEditStarted |= ImGui::IsItemActivated();
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(fullWidth * 0.23f);
-                objectChanged |= ImGui::SliderFloat("Feather", &selected->feather, 0.0f, 0.5f);
+                objectChanged |= ImGui::SliderFloat("Feather", &editedObject.feather, 0.0f, 0.5f);
+                objectEditStarted |= ImGui::IsItemActivated();
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(fullWidth * 0.23f);
-                objectChanged |= ImGui::SliderFloat("Radius", &selected->blur, 0.0f, 128.0f);
+                objectChanged |= ImGui::SliderFloat("Radius", &editedObject.blur, 0.0f, 128.0f);
+                objectEditStarted |= ImGui::IsItemActivated();
 
-                if (selected->type == EditorNodeGraph::CustomMaskObjectType::Polygon ||
-                    selected->type == EditorNodeGraph::CustomMaskObjectType::FreeformPath) {
-                    if (ImGui::Button("Add Point", ImVec2(92.0f, 0.0f))) {
-                        selected->points.push_back({ 0.5f, 0.5f });
+                if (editedObject.type == EditorNodeGraph::CustomMaskObjectType::Polygon ||
+                    editedObject.type == EditorNodeGraph::CustomMaskObjectType::FreeformPath) {
+                    if (ImGui::Button("Add Point", ImVec2(92.0f, 0.0f)) &&
+                        editedObject.points.size() <
+                            EditorNodeGraph::kMaximumCustomMaskPointsPerObject) {
+                        editedObject.points.push_back({ 0.5f, 0.5f });
                         objectChanged = true;
                     }
+                    objectEditStarted |= ImGui::IsItemActivated();
                     ImGui::SameLine();
-                    if (ImGui::Button("Remove Point", ImVec2(108.0f, 0.0f)) && !selected->points.empty()) {
-                        selected->points.pop_back();
+                    if (ImGui::Button("Remove Point", ImVec2(108.0f, 0.0f)) && !editedObject.points.empty()) {
+                        editedObject.points.pop_back();
                         objectChanged = true;
                     }
+                    objectEditStarted |= ImGui::IsItemActivated();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Duplicate", ImVec2(86.0f, 0.0f))) {
+                if (ImGui::Button("Duplicate", ImVec2(86.0f, 0.0f)) &&
+                    payload.objects.size() <
+                        EditorNodeGraph::kMaximumCustomMaskObjectCount) {
                     pushUndo();
-                    EditorNodeGraph::CustomMaskObject copy = *selected;
+                    EditorNodeGraph::CustomMaskObject copy = editedObject;
                     copy.id = payload.nextObjectId++;
                     payload.selectedObjectId = copy.id;
                     payload.objects.push_back(std::move(copy));
@@ -937,23 +1141,27 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                     return;
                 }
 
-                for (std::size_t i = 0; i < selected->points.size(); ++i) {
-                    float point[2] = { selected->points[i].x, selected->points[i].y };
+                for (std::size_t i = 0; i < editedObject.points.size(); ++i) {
+                    float point[2] = { editedObject.points[i].x, editedObject.points[i].y };
                     char label[64];
                     std::snprintf(label, sizeof(label), "P%zu", i + 1);
                     ImGui::SetNextItemWidth(170.0f);
                     if (ImGui::DragFloat2(label, point, 0.003f, 0.0f, 1.0f, "%.3f")) {
-                        selected->points[i].x = std::clamp(point[0], 0.0f, 1.0f);
-                        selected->points[i].y = std::clamp(point[1], 0.0f, 1.0f);
+                        editedObject.points[i].x = std::clamp(point[0], 0.0f, 1.0f);
+                        editedObject.points[i].y = std::clamp(point[1], 0.0f, 1.0f);
                         objectChanged = true;
                     }
-                    if ((i % 3) != 2 && i + 1 < selected->points.size()) {
+                    objectEditStarted |= ImGui::IsItemActivated();
+                    if ((i % 3) != 2 && i + 1 < editedObject.points.size()) {
                         ImGui::SameLine();
                     }
                 }
 
                 if (objectChanged) {
-                    pushUndoSnapshot(beforeObjectEdit);
+                    if (objectEditStarted || !ImGui::IsAnyItemActive()) {
+                        pushUndo();
+                    }
+                    *selected = std::move(editedObject);
                     commitChange();
                 }
             } else {
@@ -973,8 +1181,9 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
             const bool heightChanged = ImGui::InputInt("H", &height, 16, 128);
             if ((widthChanged || heightChanged) && width > 0 && height > 0) {
                 pushUndo();
-                ResizeCustomMaskRaster(payload, width, height);
-                commitChange();
+                if (ResizeCustomMaskRaster(payload, width, height)) {
+                    commitChange();
+                }
             }
             ImGui::SameLine();
             if (ImGui::Button("Match Graph", ImVec2(110.0f, lineHeight))) {
@@ -982,8 +1191,9 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                 int referenceH = 0;
                 if (resolveReferenceSize(referenceW, referenceH) && referenceW > 0 && referenceH > 0) {
                     pushUndo();
-                    ResizeCustomMaskRaster(payload, referenceW, referenceH);
-                    commitChange();
+                    if (ResizeCustomMaskRaster(payload, referenceW, referenceH)) {
+                        commitChange();
+                    }
                 }
             }
 

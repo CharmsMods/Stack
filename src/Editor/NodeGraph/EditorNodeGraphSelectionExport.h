@@ -25,6 +25,16 @@ struct ExportResult {
     std::uint32_t nodeCount = 0;
 };
 
-ExportResult BuildExport(EditorModule* editor, const std::vector<int>& nodeIds, bool includeState, bool wholeGraph);
+enum class LayoutMode {
+    Preserve,
+    Omit
+};
+
+ExportResult BuildExport(
+    EditorModule* editor,
+    const std::vector<int>& nodeIds,
+    bool includeState,
+    bool wholeGraph,
+    LayoutMode layoutMode = LayoutMode::Preserve);
 
 } // namespace EditorNodeGraphSelectionExport

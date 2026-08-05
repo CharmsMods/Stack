@@ -74,6 +74,10 @@ RawMetadataSummary BuildRawMetadataSummary(const Raw::RawMetadata& metadata) {
 
     summary.hasBaselineExposure = metadata.hasDngBaselineExposure;
     summary.baselineExposureEv = metadata.dngBaselineExposure;
+    summary.appliedOpcodeList2Count = metadata.dngAppliedOpcodeCountByList[1];
+    summary.unsupportedOpcodeList1Count = metadata.dngUnsupportedOpcodeCountByList[0];
+    summary.unsupportedOpcodeList2Count = metadata.dngUnsupportedOpcodeCountByList[1];
+    summary.unsupportedOpcodeList3Count = metadata.dngUnsupportedOpcodeCountByList[2];
     summary.iso = metadata.isoSpeed;
     summary.shutterSeconds = metadata.exposureTimeSeconds;
     summary.aperture = metadata.apertureFNumber;

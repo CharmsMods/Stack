@@ -231,7 +231,7 @@ bool PrototypeHasCompatibleInput(
     const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
     EditorNodeGraph::Node testNode = prototype;
     testNode.id = nextPrototypeNodeId++;
-    compatibilityGraph.GetNodes().push_back(testNode);
+    compatibilityGraph.EditNodes().push_back(testNode);
 
     bool compatible = false;
     for (const EditorNodeGraph::SocketDefinition& socket : compatibilityGraph.GetSockets(testNode, true)) {
@@ -260,7 +260,7 @@ bool PrototypeHasCompatibleOutput(
     const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
     EditorNodeGraph::Node testNode = prototype;
     testNode.id = nextPrototypeNodeId++;
-    compatibilityGraph.GetNodes().push_back(testNode);
+    compatibilityGraph.EditNodes().push_back(testNode);
 
     bool compatible = false;
     for (const EditorNodeGraph::SocketDefinition& socket : compatibilityGraph.GetSockets(testNode, true)) {
@@ -335,6 +335,13 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Compound:
             editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
             break;
+        case EditorNodeGraph::NodeKind::FrequencyFilter:
+            editor->AddFrequencyFilterNodeAt(
+                static_cast<EditorNodeGraph::FrequencyFilterMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyResponse:
+            editor->AddFrequencyResponseNodeAt(graphPos);
+            break;
         case EditorNodeGraph::NodeKind::FrequencyFft:
             editor->AddFrequencyFftNodeAt(graphPos);
             break;
@@ -343,6 +350,18 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::SpectrumView:
             editor->AddSpectrumViewNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
+            editor->AddApplyFrequencyResponseNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::CombineSpectra:
+            editor->AddCombineSpectraNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumSeparate:
+            editor->AddSpectrumSeparateNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumRecombine:
+            editor->AddSpectrumRecombineNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::FrequencyMask:
             editor->AddFrequencyMaskNodeAt(static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value), graphPos);
@@ -361,6 +380,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::ChannelCombine:
             editor->AddChannelCombineNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::ConstantChannel:
+            editor->AddConstantChannelNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::RawDevelopment:
             editor->AddRawDevelopmentNodeAt(graphPos);
@@ -391,6 +413,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Composite:
             break;
     }
@@ -524,7 +549,8 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                 const NodeBrowserEntry& entry = entries[index];
                 const bool matchesSearch =
                     ContainsCaseInsensitive(entry.label, search) ||
-                    ContainsCaseInsensitive(entry.category, search);
+                    ContainsCaseInsensitive(entry.category, search) ||
+                    ContainsCaseInsensitive(entry.searchAliases, search);
                 if (!matchesSearch) {
                     continue;
                 }

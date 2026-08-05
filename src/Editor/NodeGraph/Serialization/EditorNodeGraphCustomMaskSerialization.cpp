@@ -3,21 +3,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace EditorNodeGraph {
 namespace {
-
-std::vector<unsigned char> ReadBinaryJson(const nlohmann::json& value) {
-    if (!value.is_binary()) {
-        return {};
-    }
-
-    const auto& binaryValue = value.get_binary();
-    return std::vector<unsigned char>(binaryValue.begin(), binaryValue.end());
-}
 
 std::string CustomMaskReferenceModeToString(CustomMaskReferenceMode mode) {
     return mode == CustomMaskReferenceMode::GraphNode ? "GraphNode" : "CustomSize";
@@ -96,12 +91,33 @@ std::vector<unsigned char> EncodeCustomMaskRasterU16(const std::vector<float>& r
     return bytes;
 }
 
-std::vector<float> DecodeCustomMaskRasterU16(const std::vector<unsigned char>& bytes, int width, int height) {
+std::vector<float> DecodeCustomMaskRasterU16(
+    const nlohmann::json& encoded,
+    int width,
+    int height) {
+    if (!encoded.is_binary()) {
+        return {};
+    }
     const std::size_t expected =
         static_cast<std::size_t>(std::max(0, width)) * static_cast<std::size_t>(std::max(0, height));
-    std::vector<float> raster(expected, 0.0f);
-    const std::size_t count = std::min(expected, bytes.size() / 2);
-    for (std::size_t i = 0; i < count; ++i) {
+    const auto& bytes = encoded.get_binary();
+    if (expected == 0 || bytes.empty()) {
+        return {};
+    }
+    if (expected > std::numeric_limits<std::size_t>::max() / 2u ||
+        bytes.size() != expected * 2u) {
+        return {};
+    }
+
+    std::vector<float> raster;
+    try {
+        raster.resize(expected);
+    } catch (const std::bad_alloc&) {
+        return {};
+    } catch (const std::length_error&) {
+        return {};
+    }
+    for (std::size_t i = 0; i < expected; ++i) {
         const std::uint16_t value =
             static_cast<std::uint16_t>(bytes[i * 2 + 0]) |
             static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[i * 2 + 1]) << 8);
@@ -139,9 +155,21 @@ CustomMaskObject DeserializeCustomMaskObject(const nlohmann::json& value) {
     object.operation = CustomMaskOperationFromString(value.value("operation", std::string("Add")));
     object.enabled = value.value("enabled", object.enabled);
     object.invert = value.value("invert", object.invert);
-    object.strength = value.value("strength", object.strength);
-    object.feather = value.value("feather", object.feather);
-    object.blur = value.value("blur", object.blur);
+    const auto finiteOr = [](float candidate, float fallback) {
+        return std::isfinite(candidate) ? candidate : fallback;
+    };
+    object.strength = std::clamp(
+        finiteOr(value.value("strength", object.strength), 1.0f),
+        0.0f,
+        1.0f);
+    object.feather = std::clamp(
+        finiteOr(value.value("feather", object.feather), 0.0f),
+        0.0f,
+        1.0f);
+    object.blur = std::clamp(
+        finiteOr(value.value("blur", object.blur), 0.0f),
+        0.0f,
+        static_cast<float>(kMaximumCustomMaskDimension));
     const bool legacyDefaultShapeFeather =
         value.contains("feather") &&
         std::abs(object.feather - 0.02f) <= 0.00001f &&
@@ -155,10 +183,20 @@ CustomMaskObject DeserializeCustomMaskObject(const nlohmann::json& value) {
     const nlohmann::json points = value.value("points", nlohmann::json::array());
     if (points.is_array()) {
         for (const nlohmann::json& pointJson : points) {
+            if (object.points.size() >=
+                kMaximumCustomMaskPointsPerObject) {
+                break;
+            }
             if (!pointJson.is_object()) continue;
             Vec2 point;
-            point.x = pointJson.value("x", 0.0f);
-            point.y = pointJson.value("y", 0.0f);
+            point.x = std::clamp(
+                finiteOr(pointJson.value("x", 0.0f), 0.0f),
+                0.0f,
+                1.0f);
+            point.y = std::clamp(
+                finiteOr(pointJson.value("y", 0.0f), 0.0f),
+                0.0f,
+                1.0f);
             object.points.push_back(point);
         }
     }
@@ -216,21 +254,57 @@ CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
     payload.referenceMode = CustomMaskReferenceModeFromString(value.value("referenceMode", std::string("CustomSize")));
     payload.referenceNodeId = value.value("referenceNodeId", payload.referenceNodeId);
     payload.referenceSocketId = value.value("referenceSocketId", payload.referenceSocketId);
-    payload.width = std::clamp(value.value("width", payload.width), 1, 8192);
-    payload.height = std::clamp(value.value("height", payload.height), 1, 8192);
+    payload.width = std::clamp(
+        value.value("width", payload.width),
+        1,
+        kMaximumCustomMaskDimension);
+    payload.height = std::clamp(
+        value.value("height", payload.height),
+        1,
+        kMaximumCustomMaskDimension);
     payload.aspectLocked = value.value("aspectLocked", payload.aspectLocked);
-    payload.rasterLayer = DecodeCustomMaskRasterU16(ReadBinaryJson(value.value("rasterLayer", nlohmann::json())), payload.width, payload.height);
+    const auto rasterIt = value.find("rasterLayer");
+    payload.rasterLayer = rasterIt != value.end()
+        ? DecodeCustomMaskRasterU16(*rasterIt, payload.width, payload.height)
+        : std::vector<float>{};
 
     const nlohmann::json objects = value.value("objects", nlohmann::json::array());
     if (objects.is_array()) {
         for (const nlohmann::json& objectJson : objects) {
+            if (payload.objects.size() >=
+                kMaximumCustomMaskObjectCount) {
+                break;
+            }
             payload.objects.push_back(DeserializeCustomMaskObject(objectJson));
         }
     }
-    payload.nextObjectId = value.value("nextObjectId", payload.nextObjectId);
-    for (const CustomMaskObject& object : payload.objects) {
-        payload.nextObjectId = std::max(payload.nextObjectId, object.id + 1);
+    constexpr int maximumSafeObjectId =
+        std::numeric_limits<int>::max() - 65536;
+    std::unordered_set<int> usedObjectIds;
+    usedObjectIds.reserve(payload.objects.size());
+    int nextAvailableObjectId = 1;
+    for (CustomMaskObject& object : payload.objects) {
+        if (object.id <= 0 ||
+            object.id > maximumSafeObjectId ||
+            usedObjectIds.count(object.id) != 0) {
+            while (usedObjectIds.count(nextAvailableObjectId) != 0 &&
+                   nextAvailableObjectId < maximumSafeObjectId) {
+                ++nextAvailableObjectId;
+            }
+            object.id = nextAvailableObjectId;
+        }
+        usedObjectIds.insert(object.id);
+        if (object.id >= nextAvailableObjectId &&
+            object.id < maximumSafeObjectId) {
+            nextAvailableObjectId = object.id + 1;
+        }
     }
+    payload.nextObjectId = std::clamp(
+        value.value("nextObjectId", payload.nextObjectId),
+        1,
+        maximumSafeObjectId);
+    payload.nextObjectId =
+        std::max(payload.nextObjectId, nextAvailableObjectId);
 
     const nlohmann::json globalOps = value.value("globalOps", nlohmann::json::object());
     if (globalOps.is_object()) {
@@ -253,8 +327,9 @@ CustomMaskPayload DeserializeCustomMaskPayload(const nlohmann::json& value) {
 
     const std::size_t expected =
         static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height);
-    if (payload.rasterLayer.size() != expected) {
-        payload.rasterLayer.assign(expected, 0.0f);
+    if (!payload.rasterLayer.empty() &&
+        payload.rasterLayer.size() != expected) {
+        std::vector<float>().swap(payload.rasterLayer);
     }
     return payload;
 }

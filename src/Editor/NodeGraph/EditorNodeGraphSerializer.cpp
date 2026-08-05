@@ -9,6 +9,8 @@
 #include "Serialization/EditorNodeGraphRawSerialization.h"
 #include "Serialization/EditorNodeGraphUtilitySerialization.h"
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
 
 namespace EditorNodeGraph {
 namespace {
@@ -25,6 +27,9 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::RawDetailFusion: return "RawDetailFusion";
         case NodeKind::HdrMerge: return "HdrMerge";
         case NodeKind::Mfsr: return "MFSR";
+        case NodeKind::RawProjectFrame: return "RawProjectFrame";
+        case NodeKind::MultiFrameDenoise: return "MultiFrameDenoise";
+        case NodeKind::RawProjectSourceSet: return "RawProjectSourceSet";
         case NodeKind::Lut: return "Lut";
         case NodeKind::Layer: return "Layer";
         case NodeKind::Output: return "Output";
@@ -39,6 +44,7 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::ImageGenerator: return "ImageGenerator";
         case NodeKind::ChannelSplit: return "ChannelSplit";
         case NodeKind::ChannelCombine: return "ChannelCombine";
+        case NodeKind::ConstantChannel: return "ConstantChannel";
         case NodeKind::CustomMask: return "CustomMask";
         case NodeKind::DataMath: return "DataMath";
         case NodeKind::Value: return "Value";
@@ -46,9 +52,15 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Reformat: return "Reformat";
         case NodeKind::TechnicalImage: return "TechnicalImage";
         case NodeKind::Compound: return "Compound";
+        case NodeKind::FrequencyFilter: return "FrequencyFilter";
+        case NodeKind::FrequencyResponse: return "FrequencyResponse";
         case NodeKind::FrequencyFft: return "FrequencyFft";
         case NodeKind::FrequencyIfft: return "FrequencyIfft";
         case NodeKind::SpectrumView: return "SpectrumView";
+        case NodeKind::ApplyFrequencyResponse: return "ApplyFrequencyResponse";
+        case NodeKind::CombineSpectra: return "CombineSpectra";
+        case NodeKind::SpectrumSeparate: return "SpectrumSeparate";
+        case NodeKind::SpectrumRecombine: return "SpectrumRecombine";
         case NodeKind::FrequencyMask: return "FrequencyMask";
         case NodeKind::SpectrumMath: return "SpectrumMath";
         case NodeKind::MagnitudePhase: return "MagnitudePhase";
@@ -119,6 +131,81 @@ bool NodeUsuallyProducesFullImageForAverageMigration(const Node& node, const std
     }
 }
 
+bool IsLegacyOutputComponentSocket(const std::string& socketId) {
+    return socketId == "r" ||
+        socketId == "g" ||
+        socketId == "b" ||
+        socketId == "a";
+}
+
+nlohmann::json SerializeOutputSettings(const OutputSettings& settings) {
+    return {
+        { "schemaVersion", OutputSettings::kSchemaVersion },
+        { "channelViewMode",
+          Stack::NodeMath::OutputChannelViewModeToken(
+              settings.channelViewMode) }
+    };
+}
+
+OutputSettings DeserializeOutputSettings(const nlohmann::json& value) {
+    OutputSettings settings;
+    if (!value.is_object()) {
+        return settings;
+    }
+    Stack::NodeMath::OutputChannelViewMode parsed =
+        Stack::NodeMath::OutputChannelViewMode::Neutral;
+    if (Stack::NodeMath::ParseOutputChannelViewMode(
+            value.value("channelViewMode", std::string("neutral")),
+            parsed)) {
+        settings.channelViewMode = parsed;
+    }
+    return settings;
+}
+
+nlohmann::json SerializeConstantChannelSettings(
+    const ConstantChannelSettings& settings) {
+    return {
+        { "schemaVersion", ConstantChannelSettings::kSchemaVersion },
+        { "value", std::isfinite(settings.value) ? settings.value : 1.0f },
+        { "generatedOpaqueAlpha", settings.generatedOpaqueAlpha }
+    };
+}
+
+ConstantChannelSettings DeserializeConstantChannelSettings(
+    const nlohmann::json& value) {
+    ConstantChannelSettings settings;
+    if (!value.is_object()) {
+        return settings;
+    }
+    const float parsed =
+        value.contains("value") &&
+        value["value"].is_number()
+            ? value["value"].get<float>()
+            : settings.value;
+    settings.value = std::isfinite(parsed) ? parsed : 1.0f;
+    settings.generatedOpaqueAlpha =
+        value.value("generatedOpaqueAlpha", false);
+    return settings;
+}
+
+nlohmann::json SerializeImageCombineSettings(
+    const ImageCombineSettings& settings) {
+    return {
+        { "schemaVersion", ImageCombineSettings::kSchemaVersion },
+        { "autoAlphaSuppressed", settings.autoAlphaSuppressed }
+    };
+}
+
+ImageCombineSettings DeserializeImageCombineSettings(
+    const nlohmann::json& value) {
+    ImageCombineSettings settings;
+    if (value.is_object()) {
+        settings.autoAlphaSuppressed =
+            value.value("autoAlphaSuppressed", false);
+    }
+    return settings;
+}
+
 std::vector<unsigned char> BuildImagePayloadStoragePngBytes(const ImagePayload& image) {
     if (!image.pngBytes.empty()) {
         return image.pngBytes;
@@ -144,7 +231,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
     root["layers"] = layerArray.is_array() ? layerArray : nlohmann::json::array();
 
     nlohmann::json graphJson = nlohmann::json::object();
-    graphJson["version"] = 6;
+    graphJson["version"] = 8;
     graphJson["allowNoOutput"] = graph.AllowsNoOutput();
     graphJson["nextNodeId"] = graph.GetNextNodeId();
     graphJson["nextGroupId"] = graph.GetNextGroupId();
@@ -181,9 +268,15 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["dataMathSettings"] = SerializeDataMathSettings(node.dataMathSettings);
         item["technicalImageSettings"] = SerializeTechnicalImageSettings(node.technicalImageSettings);
         item["reformatSettings"] = SerializeReformatSettings(node.reformatSettings);
+        item["frequencyFilterSettings"] = SerializeFrequencyFilterSettings(node.frequencyFilterSettings);
+        item["frequencyResponseSettings"] = SerializeFrequencyResponseSettings(node.frequencyResponseSettings);
         item["frequencyFftSettings"] = SerializeFrequencyFftSettings(node.frequencyFftSettings);
         item["frequencyIfftSettings"] = SerializeFrequencyFftSettings(node.frequencyIfftSettings);
         item["spectrumViewSettings"] = SerializeSpectrumViewSettings(node.spectrumViewSettings);
+        item["applyFrequencyResponseSettings"] =
+            SerializeApplyFrequencyResponseSettings(node.applyFrequencyResponseSettings);
+        item["combineSpectraSettings"] =
+            SerializeCombineSpectraSettings(node.combineSpectraSettings);
         item["frequencyMaskShape"] = FrequencyMaskShapeToString(node.frequencyMaskShape);
         item["frequencyMaskSettings"] = SerializeFrequencyMaskSettings(node.frequencyMaskSettings);
         item["spectrumMathMode"] = SpectrumMathModeToString(node.spectrumMathMode);
@@ -192,7 +285,20 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["magnitudePhaseSettings"] = SerializeMagnitudePhaseSettings(node.magnitudePhaseSettings);
         item["spectrumAnalyzerMode"] = SpectrumAnalyzerModeToString(node.spectrumAnalyzerMode);
         item["spectrumAnalyzerSettings"] = SerializeSpectrumAnalyzerSettings(node.spectrumAnalyzerSettings);
+        item["exposedParameterIds"] = node.exposedParameterIds;
         item["outputEnabled"] = node.outputEnabled;
+        if (node.kind == NodeKind::Output) {
+            item["outputSettings"] =
+                SerializeOutputSettings(node.outputSettings);
+        } else if (node.kind == NodeKind::ConstantChannel) {
+            item["constantChannelSettings"] =
+                SerializeConstantChannelSettings(
+                    node.constantChannelSettings);
+        } else if (node.kind == NodeKind::ChannelCombine) {
+            item["imageCombineSettings"] =
+                SerializeImageCombineSettings(
+                    node.imageCombineSettings);
+        }
         item["definition"] = {
             { "id", node.definitionId },
             { "version", node.definitionVersion },
@@ -260,6 +366,41 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["mfsrHasPlaceholderCachedOutput"] = node.mfsr.hasPlaceholderCachedOutput;
             item["mfsrPlaceholderStatus"] = node.mfsr.placeholderStatus;
             item["mfsrError"] = node.mfsr.errorMessage;
+        } else if (node.kind == NodeKind::RawProjectFrame) {
+            item["sourceSetId"] = node.rawProjectFrame.sourceSetId;
+            item["frameId"] = node.rawProjectFrame.frameId;
+            item["assetId"] = node.rawProjectFrame.assetId;
+            item["frameLabel"] = node.rawProjectFrame.displayLabel;
+            item["frameCompatibilityStatus"] =
+                node.rawProjectFrame.compatibilityStatus;
+            item["frameEnabled"] = node.rawProjectFrame.enabled;
+            item["frameReference"] = node.rawProjectFrame.reference;
+            item["frameManaged"] = node.rawProjectFrame.managed;
+            item["frameQuarantined"] = node.rawProjectFrame.quarantined;
+        } else if (node.kind == NodeKind::MultiFrameDenoise) {
+            item["sourceSetId"] = node.multiFrameDenoise.sourceSetId;
+            item["mfdStatus"] = node.multiFrameDenoise.presentationStatus;
+            item["mfdResultState"] = node.multiFrameDenoise.resultState;
+            item["mfdInternalViewTransformEnabled"] =
+                node.multiFrameDenoise.internalViewTransformEnabled;
+            item["mfdManaged"] = node.multiFrameDenoise.managed;
+            item["mfdQuarantined"] = node.multiFrameDenoise.quarantined;
+            item["mfdFrameBindings"] = nlohmann::json::array();
+            for (const MfdFrameBinding& binding :
+                 node.multiFrameDenoise.frameBindings) {
+                item["mfdFrameBindings"].push_back({
+                    { "frameId", binding.frameId },
+                    { "socketId", binding.socketId },
+                    { "label", binding.label },
+                    { "enabled", binding.enabled },
+                    { "reference", binding.reference }
+                });
+            }
+        } else if (node.kind == NodeKind::RawProjectSourceSet) {
+            item["sourceSetId"] = node.rawProjectSourceSet.sourceSetId;
+            item["sourceSetStatus"] = node.rawProjectSourceSet.presentationStatus;
+            item["sourceSetManaged"] = node.rawProjectSourceSet.managed;
+            item["sourceSetQuarantined"] = node.rawProjectSourceSet.quarantined;
         } else if (node.kind == NodeKind::Lut) {
             item["lut"] = SerializeLutPayload(node.lut);
         } else if (node.kind == NodeKind::CustomMask) {
@@ -276,7 +417,11 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             { "fromNodeId", link.fromNodeId },
             { "fromSocket", link.fromSocketId },
             { "toNodeId", link.toNodeId },
-            { "toSocket", link.toSocketId }
+            { "toSocket", link.toSocketId },
+            { "ownership", link.ownership == Link::Ownership::ManagedSourceBinding
+                ? "managed-source-binding"
+                : "user" },
+            { "bindingId", link.bindingId }
         });
     }
     graphJson["links"] = std::move(linksJson);
@@ -302,6 +447,35 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
 
     root["nodeGraph"] = std::move(graphJson);
     return root;
+}
+
+void RemoveGraphLayoutFromPayload(nlohmann::json& pipelineData) {
+    if (!pipelineData.is_object()) {
+        return;
+    }
+
+    auto graphIt = pipelineData.find("nodeGraph");
+    if (graphIt == pipelineData.end() || !graphIt->is_object()) {
+        return;
+    }
+
+    nlohmann::json& graphJson = *graphIt;
+    auto nodesIt = graphJson.find("nodes");
+    if (nodesIt != graphJson.end() && nodesIt->is_array()) {
+        for (nlohmann::json& nodeJson : *nodesIt) {
+            if (!nodeJson.is_object()) {
+                continue;
+            }
+            nodeJson.erase("x");
+            nodeJson.erase("y");
+        }
+    }
+
+    // Groups are canvas-only organization and cannot be represented without
+    // their position and bounds.
+    graphJson.erase("groups");
+    graphJson.erase("nextGroupId");
+    graphJson.erase("selectedNodeId");
 }
 
 void DeserializeGraphPayload(
@@ -352,6 +526,19 @@ void DeserializeGraphPayload(
         }
     }
     const nlohmann::json nodesJson = graphJson.value("nodes", nlohmann::json::array());
+    const nlohmann::json linksJson = graphJson.value("links", nlohmann::json::array());
+    std::unordered_map<int, int> legacyOutputComponentCounts;
+    if (linksJson.is_array()) {
+        for (const nlohmann::json& item : linksJson) {
+            if (!item.is_object()) continue;
+            const std::string toSocket =
+                item.value("toSocket", std::string());
+            if (IsLegacyOutputComponentSocket(toSocket)) {
+                ++legacyOutputComponentCounts[
+                    item.value("toNodeId", item.value("to", 0))];
+            }
+        }
+    }
 
     int maxNodeId = 0;
     for (const nlohmann::json& item : nodesJson) {
@@ -445,11 +632,9 @@ void DeserializeGraphPayload(
             node.rawDevelop.autoGuidance.contrastBias = autoGuidance.value("contrastBias", node.rawDevelop.autoGuidance.contrastBias);
             node.rawDevelop.autoGuidance.subjectSceneBias = autoGuidance.value("subjectSceneBias", node.rawDevelop.autoGuidance.subjectSceneBias);
             node.rawDevelop.autoGuidance.moodReadabilityBias = autoGuidance.value("moodReadabilityBias", node.rawDevelop.autoGuidance.moodReadabilityBias);
-            const std::string uiMode = item.value("uiMode", std::string("Auto"));
-            node.rawDevelop.uiMode =
-                (uiMode == "Manual" || uiMode == "Advanced")
-                    ? EditorNodeGraph::RawDevelopUiMode::Manual
-                    : EditorNodeGraph::RawDevelopUiMode::Auto;
+            // Auto mode is archived. Preserve its authored settings and open
+            // every Develop node in the manual editor.
+            node.rawDevelop.uiMode = EditorNodeGraph::RawDevelopUiMode::Manual;
             if (node.title.empty() || node.title == "RAW Develop") node.title = "Develop";
         } else if (kind == "RawDetailAutoMask") {
             node.kind = NodeKind::RawDetailAutoMask;
@@ -470,12 +655,67 @@ void DeserializeGraphPayload(
             node.mfsr.placeholderStatus = item.value("mfsrPlaceholderStatus", std::string(kMfsrPhase2PlaceholderStatus));
             node.mfsr.errorMessage = item.value("mfsrError", std::string());
             if (node.title.empty() || node.title == "Multi-Frame Super Resolution") node.title = "MFSR";
+        } else if (kind == "RawProjectFrame") {
+            node.kind = NodeKind::RawProjectFrame;
+            node.rawProjectFrame.sourceSetId = item.value("sourceSetId", std::string());
+            node.rawProjectFrame.frameId = item.value("frameId", std::string());
+            node.rawProjectFrame.assetId = item.value("assetId", std::string());
+            node.rawProjectFrame.displayLabel = item.value("frameLabel", std::string());
+            node.rawProjectFrame.compatibilityStatus =
+                item.value("frameCompatibilityStatus", std::string());
+            node.rawProjectFrame.enabled = item.value("frameEnabled", true);
+            node.rawProjectFrame.reference = item.value("frameReference", false);
+            node.rawProjectFrame.managed = item.value("frameManaged", true);
+            node.rawProjectFrame.quarantined = item.value("frameQuarantined", false);
+            if (node.title.empty()) node.title = node.rawProjectFrame.displayLabel.empty()
+                ? "RAW Frame"
+                : node.rawProjectFrame.displayLabel;
+        } else if (kind == "MultiFrameDenoise") {
+            node.kind = NodeKind::MultiFrameDenoise;
+            node.multiFrameDenoise.sourceSetId = item.value("sourceSetId", std::string());
+            node.multiFrameDenoise.presentationStatus = item.value(
+                "mfdStatus", std::string(kMfdAwaitingProcessingStatus));
+            node.multiFrameDenoise.resultState =
+                item.value("mfdResultState", std::string("unavailable"));
+            node.multiFrameDenoise.internalViewTransformEnabled =
+                item.value("mfdInternalViewTransformEnabled", true);
+            node.multiFrameDenoise.managed = item.value("mfdManaged", true);
+            node.multiFrameDenoise.quarantined = item.value("mfdQuarantined", false);
+            const nlohmann::json bindings = item.value(
+                "mfdFrameBindings", nlohmann::json::array());
+            if (bindings.is_array()) {
+                for (const nlohmann::json& bindingValue : bindings) {
+                    if (!bindingValue.is_object()) continue;
+                    MfdFrameBinding binding;
+                    binding.frameId = bindingValue.value("frameId", std::string());
+                    binding.socketId = bindingValue.value(
+                        "socketId", MfdFrameInputSocketId(binding.frameId));
+                    binding.label = bindingValue.value("label", std::string());
+                    binding.enabled = bindingValue.value("enabled", true);
+                    binding.reference = bindingValue.value("reference", false);
+                    node.multiFrameDenoise.frameBindings.push_back(std::move(binding));
+                }
+            }
+            if (node.title.empty()) node.title = "MFD";
+        } else if (kind == "RawProjectSourceSet") {
+            node.kind = NodeKind::RawProjectSourceSet;
+            node.rawProjectSourceSet.sourceSetId =
+                item.value("sourceSetId", std::string());
+            node.rawProjectSourceSet.presentationStatus = item.value(
+                "sourceSetStatus",
+                std::string(kRawProjectSourceSetUnavailableStatus));
+            node.rawProjectSourceSet.managed = item.value("sourceSetManaged", true);
+            node.rawProjectSourceSet.quarantined =
+                item.value("sourceSetQuarantined", false);
+            if (node.title.empty()) node.title = "RAW Project Source Set";
         } else if (kind == "Lut" || kind == "LUT") {
             node.kind = NodeKind::Lut;
             node.lut = DeserializeLutPayload(item.value("lut", nlohmann::json::object()));
             if (node.title.empty()) node.title = "LUT";
         } else if (kind == "Output") {
             node.kind = NodeKind::Output;
+            node.outputSettings = DeserializeOutputSettings(
+                item.value("outputSettings", nlohmann::json::object()));
             if (node.title.empty()) node.title = "Output";
         } else if (kind == "Composite") {
             node.kind = NodeKind::Composite;
@@ -592,6 +832,16 @@ void DeserializeGraphPayload(
             }
             node.compound.instance.instanceUuid = node.instanceUuid;
             if (node.title.empty()) node.title = "Compound";
+        } else if (kind == "FrequencyFilter") {
+            node.kind = NodeKind::FrequencyFilter;
+            node.frequencyFilterSettings = DeserializeFrequencyFilterSettings(
+                item.value("frequencyFilterSettings", nlohmann::json::object()));
+            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+        } else if (kind == "FrequencyResponse") {
+            node.kind = NodeKind::FrequencyResponse;
+            node.frequencyResponseSettings = DeserializeFrequencyResponseSettings(
+                item.value("frequencyResponseSettings", nlohmann::json::object()));
+            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
         } else if (kind == "FrequencyFft") {
             node.kind = NodeKind::FrequencyFft;
             node.frequencyFftSettings =
@@ -613,6 +863,22 @@ void DeserializeGraphPayload(
             if (node.title.empty()) {
                 EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
             }
+        } else if (kind == "ApplyFrequencyResponse") {
+            node.kind = NodeKind::ApplyFrequencyResponse;
+            node.applyFrequencyResponseSettings = DeserializeApplyFrequencyResponseSettings(
+                item.value("applyFrequencyResponseSettings", nlohmann::json::object()));
+            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+        } else if (kind == "CombineSpectra") {
+            node.kind = NodeKind::CombineSpectra;
+            node.combineSpectraSettings = DeserializeCombineSpectraSettings(
+                item.value("combineSpectraSettings", nlohmann::json::object()));
+            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+        } else if (kind == "SpectrumSeparate") {
+            node.kind = NodeKind::SpectrumSeparate;
+            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+        } else if (kind == "SpectrumRecombine") {
+            node.kind = NodeKind::SpectrumRecombine;
+            if (node.title.empty()) EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
         } else if (kind == "FrequencyMask") {
             node.kind = NodeKind::FrequencyMask;
             node.frequencyMaskSettings =
@@ -701,8 +967,24 @@ void DeserializeGraphPayload(
             }
         } else if (kind == "ChannelCombine") {
             node.kind = NodeKind::ChannelCombine;
+            node.imageCombineSettings =
+                DeserializeImageCombineSettings(
+                    item.value(
+                        "imageCombineSettings",
+                        nlohmann::json::object()));
+            if (node.title.empty() ||
+                node.title == "Channel Combine") {
+                node.title = "Image Combine";
+            }
+        } else if (kind == "ConstantChannel") {
+            node.kind = NodeKind::ConstantChannel;
+            node.constantChannelSettings =
+                DeserializeConstantChannelSettings(
+                    item.value(
+                        "constantChannelSettings",
+                        nlohmann::json::object()));
             if (node.title.empty()) {
-                node.title = "Channel Combine";
+                node.title = "Constant Channel";
             }
         } else {
             node.kind = NodeKind::Layer;
@@ -714,6 +996,9 @@ void DeserializeGraphPayload(
                 node.title = "Layer";
             }
         }
+
+        node.exposedParameterIds =
+            item.value("exposedParameterIds", std::vector<std::string>{});
 
         if (node.kind == NodeKind::Compound) {
             node.definitionId = node.compound.instance.definition.id;
@@ -730,6 +1015,38 @@ void DeserializeGraphPayload(
                     graph.FindCompoundDefinition(node.compound.instance.definition)) {
                 node.title = definition->label;
             }
+        } else if (graphVersion >= 5 &&
+                   graphVersion < 8 &&
+                   node.kind == NodeKind::Output &&
+                   legacyOutputComponentCounts[node.id] <= 1) {
+            // Output v2 is an intentional schema migration. A single legacy
+            // component link has an unambiguous Channel meaning and is moved
+            // to Result. Multi-component constructions are preserved below
+            // with their old exact identity and remain unresolved.
+            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
+        } else if (
+            graphVersion >= 5 &&
+            node.kind == NodeKind::ChannelCombine &&
+            savedDefinitionId == "stack:graph/channel-combine" &&
+            savedDefinitionVersion == "1.0.0") {
+            // Image Combine v2 adds only the persisted automatic-alpha
+            // suppression state. A v1 node has the exact v2 default
+            // (not suppressed), so this upgrade is unambiguous.
+            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
+        } else if (
+            graphVersion >= 5 &&
+            (node.kind == NodeKind::RawProjectFrame ||
+             node.kind == NodeKind::MultiFrameDenoise ||
+             node.kind == NodeKind::RawProjectSourceSet) &&
+            savedDefinitionId.empty() &&
+            savedDefinitionVersion.empty() &&
+            savedDefinitionHash.empty()) {
+            // Source-set graph nodes were introduced before their protected
+            // internal definitions were registered. Their kind and bindings
+            // are owned by the project manifest, so the previously empty
+            // identity has one unambiguous migration. A partial or mismatched
+            // identity still remains unresolved below.
+            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
         } else if (graphVersion >= 5) {
             EditorNodeGraphDefinitions::ResolveSavedLiveDefinition(
                 node,
@@ -743,9 +1060,22 @@ void DeserializeGraphPayload(
             // identity only in memory; this is not a compatibility guarantee.
             EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
         }
+        if (graphVersion < 7 &&
+            (node.kind == NodeKind::FrequencyFft ||
+             node.kind == NodeKind::FrequencyIfft ||
+             node.kind == NodeKind::SpectrumView ||
+             node.kind == NodeKind::FrequencyMask ||
+             node.kind == NodeKind::SpectrumMath ||
+             node.kind == NodeKind::MagnitudePhase ||
+             node.kind == NodeKind::SpectrumAnalyzer)) {
+            node.definitionResolved = false;
+            node.definitionResolutionError =
+                "Legacy frequency nodes are intentionally not reinterpreted. "
+                "Replace this node with a Channel-First Frequency node.";
+        }
 
         maxNodeId = std::max(maxNodeId, node.id);
-        graph.GetNodes().push_back(std::move(node));
+        graph.EditNodes().push_back(std::move(node));
     }
 
     for (const Node& node : graph.GetNodes()) {
@@ -779,7 +1109,6 @@ void DeserializeGraphPayload(
     graph.SelectNode(graphJson.value("selectedNodeId", -1));
     graph.SetActiveImageNodeId(graphJson.value("activeImageNodeId", -1));
 
-    const nlohmann::json linksJson = graphJson.value("links", nlohmann::json::array());
     if (linksJson.is_array()) {
         for (const nlohmann::json& item : linksJson) {
             if (!item.is_object()) continue;
@@ -798,8 +1127,9 @@ void DeserializeGraphPayload(
                 NodeUsuallyProducesFullImageForAverageMigration(
                     *fromNode,
                     item.value("fromSocket", graph.DefaultOutputSocket(*fromNode)))) {
-                toNode->dataMathMode = DataMathMode::ImageAverage;
-                EditorNodeGraphDefinitions::ApplyNodeMetadata(*toNode);
+                graph.SetDataMathMode(
+                    toNode->id,
+                    DataMathMode::ImageAverage);
             }
         }
     }
@@ -818,9 +1148,37 @@ void DeserializeGraphPayload(
         }
 
         const std::string fromSocket = item.value("fromSocket", graph.DefaultOutputSocket(*fromNode));
-        const std::string toSocket = item.value("toSocket", graph.DefaultInputSocket(*toNode));
+        std::string toSocket = item.value("toSocket", graph.DefaultInputSocket(*toNode));
+        const bool legacyOutputComponent =
+            toNode->kind == NodeKind::Output &&
+            IsLegacyOutputComponentSocket(toSocket);
+        if (legacyOutputComponent && !toNode->definitionResolved) {
+            // Preserve authored multi-component legacy state losslessly. It
+            // intentionally does not become an executable render link until
+            // the user replaces it with an explicit Image Combine.
+            graph.EditLinks().push_back(
+                Link{ from, fromSocket, to, toSocket });
+            continue;
+        }
+        if (legacyOutputComponent &&
+            graphVersion < 8 &&
+            legacyOutputComponentCounts[to] == 1) {
+            toSocket = kImageInputSocketId;
+        }
         if (!fromSocket.empty() && !toSocket.empty() && !graph.HasLink(from, fromSocket, to, toSocket)) {
-            graph.TryConnectSockets(from, fromSocket, to, toSocket);
+            if (graph.TryConnectSockets(from, fromSocket, to, toSocket)) {
+                for (Link& link : graph.EditLinks()) {
+                    if (link.fromNodeId == from && link.fromSocketId == fromSocket &&
+                        link.toNodeId == to && link.toSocketId == toSocket) {
+                        link.ownership = item.value("ownership", std::string()) ==
+                                "managed-source-binding"
+                            ? Link::Ownership::ManagedSourceBinding
+                            : Link::Ownership::User;
+                        link.bindingId = item.value("bindingId", std::string());
+                        break;
+                    }
+                }
+            }
         }
     }
 

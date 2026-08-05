@@ -41,6 +41,7 @@ else()
     option(STACK_ENABLE_APPWINDOW_TITLEBAR "Enable Windows App SDK AppWindowTitleBar bridge" OFF)
 endif()
 set(STACK_WINDOWS_APP_SDK_ROOT "" CACHE PATH "Optional root of a Microsoft.WindowsAppSDK NuGet package")
+set(STACK_WINDOWS_ML_ROOT "" CACHE PATH "Optional root of the Microsoft.Windows.AI.MachineLearning NuGet package")
 
 set(STACK_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps")
 if (EXISTS "${STACK_DEPS_DIR}/glfw-src/CMakeLists.txt")
@@ -67,7 +68,7 @@ message(STATUS "Fetching Dear ImGui...")
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG docking
+    GIT_TAG 5a76f2adf1b0403b86a45010121fb32a6bff8680
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -354,6 +355,92 @@ elseif (UNIX)
 endif()
 
 if (WIN32)
+    option(STACK_BUILD_MODEL_SERVICE "Build the optional external Windows ML model service" ON)
+else()
+    option(STACK_BUILD_MODEL_SERVICE "Build the optional external Windows ML model service" OFF)
+endif()
+
+if (WIN32 AND STACK_BUILD_MODEL_SERVICE)
+    set(STACK_WINDOWS_ML_CANDIDATE_ROOTS)
+    if (STACK_WINDOWS_ML_ROOT)
+        list(APPEND STACK_WINDOWS_ML_CANDIDATE_ROOTS "${STACK_WINDOWS_ML_ROOT}")
+    endif()
+    if (DEFINED ENV{STACK_WINDOWS_ML_ROOT} AND NOT "$ENV{STACK_WINDOWS_ML_ROOT}" STREQUAL "")
+        list(APPEND STACK_WINDOWS_ML_CANDIDATE_ROOTS "$ENV{STACK_WINDOWS_ML_ROOT}")
+    endif()
+    file(GLOB STACK_WINDOWS_ML_LOCAL_ROOTS
+        LIST_DIRECTORIES true
+        "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/deps/nuget/Microsoft.Windows.AI.MachineLearning/*"
+    )
+    if (STACK_WINDOWS_ML_LOCAL_ROOTS)
+        list(SORT STACK_WINDOWS_ML_LOCAL_ROOTS COMPARE NATURAL ORDER DESCENDING)
+        list(APPEND STACK_WINDOWS_ML_CANDIDATE_ROOTS ${STACK_WINDOWS_ML_LOCAL_ROOTS})
+    endif()
+
+    set(STACK_WINDOWS_ML_FOUND OFF)
+    foreach(STACK_WINDOWS_ML_CANDIDATE IN LISTS STACK_WINDOWS_ML_CANDIDATE_ROOTS)
+        if (EXISTS "${STACK_WINDOWS_ML_CANDIDATE}/build/cmake/microsoft.windows.ai.machinelearning-config.cmake")
+            find_package(
+                microsoft.windows.ai.machinelearning CONFIG QUIET
+                PATHS "${STACK_WINDOWS_ML_CANDIDATE}/build/cmake"
+                NO_DEFAULT_PATH
+            )
+            if (TARGET WindowsML::WindowsML)
+                set(STACK_WINDOWS_ML_FOUND ON)
+                set(STACK_WINDOWS_ML_ROOT_RESOLVED "${STACK_WINDOWS_ML_CANDIDATE}")
+                break()
+            endif()
+        endif()
+    endforeach()
+
+    if (STACK_WINDOWS_ML_FOUND)
+        message(STATUS "External StackModelService enabled from: ${STACK_WINDOWS_ML_ROOT_RESOLVED}")
+        add_executable(StackModelService
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/restormer/StackModelService.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/Restormer/RestormerProtocol.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/Restormer/RestormerTiling.cpp"
+        )
+        add_executable(StackModelServiceProtocolTests
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/restormer/StackModelServiceProtocolTests.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/Restormer/RestormerProtocol.cpp"
+        )
+        set_target_properties(StackModelService PROPERTIES
+            CXX_STANDARD 20
+            CXX_STANDARD_REQUIRED ON
+            CXX_EXTENSIONS OFF
+        )
+        set_target_properties(StackModelServiceProtocolTests PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+            CXX_EXTENSIONS OFF
+        )
+        target_include_directories(StackModelService PRIVATE
+            src
+            src/ThirdParty
+        )
+        target_include_directories(StackModelServiceProtocolTests PRIVATE
+            src
+            src/ThirdParty
+        )
+        target_link_libraries(StackModelService PRIVATE
+            WindowsML::WindowsML
+        )
+        add_custom_command(TARGET StackModelService POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:StackModelService>
+                $<TARGET_FILE_DIR:StackModelService>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${WINML_DIRECTML_DLL}"
+                "$<TARGET_FILE_DIR:StackModelService>"
+            COMMAND_EXPAND_LISTS
+            VERBATIM
+        )
+    else()
+        message(WARNING "Microsoft.Windows.AI.MachineLearning was not found; StackModelService will not be built.")
+    endif()
+endif()
+
+if (WIN32)
     set(STACK_BUILDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/stack_builder")
     if (EXISTS "${STACK_BUILDER_DIR}/CMakeLists.txt")
         add_subdirectory("${STACK_BUILDER_DIR}" "${CMAKE_BINARY_DIR}/stack_builder")
@@ -361,6 +448,111 @@ if (WIN32)
 endif()
 
 include(CTest)
+
+if (BUILD_TESTING)
+    add_test(
+        NAME StackRaw.MfdPhase0
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase0
+    )
+    set_tests_properties(StackRaw.MfdPhase0 PROPERTIES
+        LABELS "raw;mfd;contract;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase1
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase1
+    )
+    set_tests_properties(StackRaw.MfdPhase1 PROPERTIES
+        LABELS "raw;mfd;preparation;cache;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase2
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase2
+    )
+    set_tests_properties(StackRaw.MfdPhase2 PROPERTIES
+        LABELS "raw;mfd;noise;variance;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase3
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase3
+    )
+    set_tests_properties(StackRaw.MfdPhase3 PROPERTIES
+        LABELS "raw;mfd;sampler;cfa;variance;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase4
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase4
+    )
+    set_tests_properties(StackRaw.MfdPhase4 PROPERTIES
+        LABELS "raw;mfd;registration;exposure;affine;fft;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase5
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase5
+    )
+    set_tests_properties(StackRaw.MfdPhase5 PROPERTIES
+        LABELS "raw;mfd;registration;motion;covariance;pyramid;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase6
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase6
+    )
+    set_tests_properties(StackRaw.MfdPhase6 PROPERTIES
+        LABELS "raw;mfd;reliability;motion;noise;gating;cache;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase7
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase7
+    )
+    set_tests_properties(StackRaw.MfdPhase7 PROPERTIES
+        LABELS "raw;mfd;fusion;variance;reliability;gating;diagnostics;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase8
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase8
+    )
+    set_tests_properties(StackRaw.MfdPhase8 PROPERTIES
+        LABELS "raw;mfd;streaming;cache;cancellation;determinism;memory;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdPhase9
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-phase9
+    )
+    set_tests_properties(StackRaw.MfdPhase9 PROPERTIES
+        LABELS "raw;mfd;corpus;metrics;ablation;calibration;release-gate;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdCorpusIntake
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-corpus-intake
+    )
+    set_tests_properties(StackRaw.MfdCorpusIntake PROPERTIES
+        LABELS "raw;mfd;corpus;intake;manifest;compatibility;cpu"
+    )
+
+    add_test(
+        NAME StackRaw.MfdEndToEnd
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-mfd-end-to-end
+    )
+    set_tests_properties(StackRaw.MfdEndToEnd PROPERTIES
+        LABELS "raw;mfd;processor;registration;fusion;atomicity;memory;cpu"
+    )
+endif()
+
+if (BUILD_TESTING AND TARGET StackModelServiceProtocolTests)
+    add_test(
+        NAME StackRestormer.ModelServiceProtocol
+        COMMAND StackModelServiceProtocolTests $<TARGET_FILE:StackModelService>
+    )
+endif()
 
 option(STACK_BUILD_NODE_MATH_TESTS "Build deterministic CPU/GPU node-math reference tests" ON)
 if (BUILD_TESTING AND STACK_BUILD_NODE_MATH_TESTS)
@@ -381,6 +573,9 @@ if (BUILD_TESTING AND STACK_BUILD_NODE_MATH_TESTS)
 
     add_executable(StackNodeMathPhase6Tests ${STACK_NODE_MATH_PHASE6_TEST_SOURCE_FILES})
     target_include_directories(StackNodeMathPhase6Tests PRIVATE src)
+
+    add_executable(StackNodeMathChannelImageTests ${STACK_NODE_MATH_CHANNEL_IMAGE_TEST_SOURCE_FILES})
+    target_include_directories(StackNodeMathChannelImageTests PRIVATE src)
 
     add_executable(StackNodeMathReferenceTests ${STACK_NODE_MATH_REFERENCE_TEST_SOURCE_FILES})
     target_include_directories(StackNodeMathReferenceTests PRIVATE
@@ -441,6 +636,11 @@ if (BUILD_TESTING AND STACK_BUILD_NODE_MATH_TESTS)
         COMMAND StackNodeMathPhase6Tests)
     set_tests_properties(StackNodeMathReductions.Phase6B PROPERTIES
         LABELS "node-math;reduction;scalar;planning;cpu")
+
+    add_test(NAME StackNodeMathChannels.Phase7B1
+        COMMAND StackNodeMathChannelImageTests)
+    set_tests_properties(StackNodeMathChannels.Phase7B1 PROPERTIES
+        LABELS "node-math;channels;partial-image;semantic;cpu")
 
     add_test(NAME StackNodeMathPointwise.LiveGpu
         COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-node-math-phase4)
@@ -519,4 +719,41 @@ if (STACK_BUILD_GRAPH_TESTS)
         src
         src/ThirdParty
     )
+
+    if (BUILD_TESTING)
+        add_test(NAME StackEditor.GraphBehavior
+            COMMAND StackGraphBehaviorTests)
+        set_tests_properties(StackEditor.GraphBehavior PROPERTIES
+            LABELS "editor;node-graph;cpu")
+
+        add_test(NAME StackRaw.Evidence
+            COMMAND StackRawEvidenceTests)
+        set_tests_properties(StackRaw.Evidence PROPERTIES
+            LABELS "raw;analysis;cpu")
+
+        add_test(NAME StackRaw.RenderedFeatures
+            COMMAND StackRenderedFeatureTests)
+        set_tests_properties(StackRaw.RenderedFeatures PROPERTIES
+            LABELS "raw;features;cpu")
+
+        add_test(NAME StackRaw.PreciseCandidates
+            COMMAND StackPreciseCandidateTests)
+        set_tests_properties(StackRaw.PreciseCandidates PROPERTIES
+            LABELS "raw;optimizer;cpu")
+
+        add_test(NAME StackRaw.OptimizerSelection
+            COMMAND StackOptimizerSelectionTests)
+        set_tests_properties(StackRaw.OptimizerSelection PROPERTIES
+            LABELS "raw;optimizer;cpu")
+
+        add_test(NAME StackRaw.PreciseDryRun
+            COMMAND StackPreciseDryRunTests)
+        set_tests_properties(StackRaw.PreciseDryRun PROPERTIES
+            LABELS "raw;optimizer;cpu")
+
+        add_test(NAME StackRaw.PreciseIntegration
+            COMMAND StackPreciseIntegrationTests)
+        set_tests_properties(StackRaw.PreciseIntegration PROPERTIES
+            LABELS "raw;integration;cpu")
+    endif()
 endif()

@@ -11,7 +11,7 @@ inline float NodeUiScaleFromZoom(float zoom) {
 }
 
 inline float PinRadiusForZoom(float zoom) {
-    return std::max(0.35f, 5.3f * NodeUiScaleFromZoom(zoom));
+    return 5.5f * NodeUiScaleFromZoom(zoom);
 }
 
 inline float LinkThicknessScaleFromZoom(float zoom) {

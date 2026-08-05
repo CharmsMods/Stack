@@ -2,12 +2,12 @@
 
 #include "Editor/GraphCapture.h"
 #include "EditorNodeGraph.h"
+#include "Editor/NodeGraph/UI/EditorNodeGraphUILayout.h"
 #include "ThirdParty/json.hpp"
 #include <imgui.h>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,6 +20,7 @@ class EditorNodeGraphUI {
 public:
     ~EditorNodeGraphUI();
     void Initialize();
+    void Shutdown();
     void Render(EditorModule* editor);
     Stack::EditorGraphCapture::GraphViewportSnapshot GetGraphCaptureViewportSnapshot() const;
     void RenderGraphCapture(
@@ -101,14 +102,22 @@ private:
     struct SocketAnchor {
         std::string socketId;
         EditorNodeGraph::SocketDirection direction = EditorNodeGraph::SocketDirection::Input;
+        EditorNodeGraph::Vec2 logicalPos;
         ImVec2 screenPos;
     };
 
     struct NodeLayoutCache {
+        Stack::Editor::NodeGraphUILayout::NodeLogicalLayout logicalLayout;
+        std::uint64_t logicalContentRevision = 0;
+        std::uint64_t logicalRevision = 0;
+        bool hasLogicalLayout = false;
         CachedRect frameRect;
         CachedRect headerRect;
         CachedRect contentRect;
         CachedRect contentUsedRect;
+        CachedRect persistentVisualRect;
+        CachedRect overlayRect;
+        CachedRect interactionRect;
         std::vector<SocketAnchor> socketAnchors;
     };
 
@@ -138,13 +147,12 @@ private:
     EditorNodeGraph::Vec2 NodeSize(const EditorNodeGraph::Node& node) const;
     EditorNodeGraph::Vec2 NodeScreenSize(const EditorNodeGraph::Node& node) const;
     EditorNodeGraph::Vec2 NodeViewportSizePx(const EditorNodeGraph::Node& node) const;
-    EditorNodeGraph::Vec2 NodeGraphFootprintSize(const EditorNodeGraph::Node& node) const;
+    Stack::Editor::NodeGraphUILayout::LogicalRect NodeGraphBounds(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
     bool UsesFixedNodeViewport() const;
     float NodeContentScale() const;
     float NodePinRadius() const;
-    float NodeWidthScale() const;
-    float NodeUiScalePreference() const;
-    float NodeGrabAreaHeight() const;
     void ZoomAtMouse(float wheel);
     void ClampPanToContent(const EditorNodeGraph::Graph& graph);
     void StopMiddlePanCapture();
@@ -214,6 +222,10 @@ private:
     SocketHit FindOutputPinAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos);
     int FindNodeAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos);
     EditorNodeGraph::Link FindLinkAt(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Vec2& screenPos);
+    void CacheLinkHitTest(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Vec2& screenPos,
+        const EditorNodeGraph::Link& link);
     bool IsPointNearLink(const EditorNodeGraph::Vec2& point, const EditorNodeGraph::Vec2& a, const EditorNodeGraph::Vec2& b) const;
     unsigned int GetImagePreviewTexture(const EditorNodeGraph::Node& node);
     unsigned int GetGraphPreviewTexture(EditorModule* editor, const EditorNodeGraph::Node& node);
@@ -226,10 +238,21 @@ private:
     unsigned int UploadPreviewTexture(int nodeId, const std::vector<unsigned char>& pixels, int width, int height);
     void ResetPerGraphVisualCaches();
     void SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& graph);
-    NodeLayoutCache BuildNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) const;
+    void BuildNodeLayoutCache(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node,
+        NodeLayoutCache& cache) const;
+    Stack::Editor::NodeGraphUILayout::NodeLogicalLayout BuildLogicalNodeLayout(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
+    std::uint64_t LogicalNodeLayoutRevision(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
+    std::uint64_t LogicalNodeContentRevision(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node) const;
     void RefreshNodeLayoutCache(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node);
     const NodeLayoutCache* FindNodeLayoutCache(int nodeId) const;
-    void RefreshNodeLookupCache(const EditorNodeGraph::Graph& graph, bool force = false);
     EditorNodeGraph::Node* FindCachedNode(EditorNodeGraph::Graph& graph, int nodeId);
     const EditorNodeGraph::Node* FindCachedNode(const EditorNodeGraph::Graph& graph, int nodeId);
     void RefreshNodeOrderCache(const EditorNodeGraph::Graph& graph);
@@ -262,6 +285,20 @@ private:
         ImDrawList* drawList,
         ImU32 textColor,
         float uiScale);
+    bool ShouldShowSocketContextLabel(
+        const EditorNodeGraph::Graph& graph,
+        const EditorNodeGraph::Node& node,
+        const EditorNodeGraph::SocketDefinition& socket,
+        bool nodeHovered,
+        bool socketHovered) const;
+    CachedRect DrawSocketContextLabel(
+        ImDrawList* drawList,
+        const EditorNodeGraph::SocketDefinition& socket,
+        const SocketAnchor& anchor,
+        ImU32 textColor,
+        ImU32 backgroundColor,
+        float uiScale) const;
+    void ExtendNodeOverlayBounds(int nodeId, const CachedRect& rect);
     bool IsPointInNodeHeader(int nodeId, const ImVec2& point) const;
     bool IsPointInNodeDraggableRegion(int nodeId, const ImVec2& point) const;
     void DrawClippedText(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const char* text, ImU32 color) const;
@@ -345,7 +382,13 @@ private:
     std::unordered_map<int, float> m_NodeSelectionAnim;
     std::unordered_map<int, float> m_NodeHoverAnim;
     std::unordered_map<std::string, float> m_LinkEmphasisAnim;
+    float m_LinkLabelRevealAlpha = 0.0f;
     std::unordered_map<std::string, CachedRect> m_LinkLabelHitRects;
+    int m_LinkHitTestFrame = -1;
+    const EditorNodeGraph::Graph* m_LinkHitTestGraph = nullptr;
+    std::uint64_t m_LinkHitTestGraphRevision = 0;
+    EditorNodeGraph::Vec2 m_LinkHitTestScreenPos {};
+    EditorNodeGraph::Link m_LinkHitTestResult;
     std::unordered_set<int> m_RevealedAdvancedInputNodes;
     std::unordered_set<int> m_RevealedAdvancedOutputNodes;
     std::string m_DetailCardHoverKey;
@@ -353,10 +396,13 @@ private:
     bool m_DetailCardHoverSeenThisFrame = false;
     bool m_DetailCardInteractionAllowed = false;
     std::unordered_map<int, float> m_GroupEmphasisAnim;
-    std::map<int, std::uint64_t> m_NodeFrontOrder;
-    std::map<int, NodeLayoutCache> m_NodeLayoutCache;
-    mutable std::map<int, float> m_NodeMeasuredBaseHeights;
-    mutable std::map<int, bool> m_NodeContentOverflow;
+    std::unordered_map<int, std::uint64_t> m_NodeFrontOrder;
+    std::unordered_map<int, NodeLayoutCache> m_NodeLayoutCache;
+    std::vector<CachedRect> m_VisibleNodeFrameRects;
+    mutable std::unordered_map<int, float> m_NodeMeasuredBaseHeights;
+    mutable std::unordered_map<int, std::uint64_t>
+        m_NodeMeasuredContentRevisions;
+    mutable std::unordered_map<int, bool> m_NodeContentOverflow;
     std::uint64_t m_NodeFrontOrderCounter = 1;
     int m_NodeOrderCacheFrame = -1;
     const EditorNodeGraph::Graph* m_NodeOrderCacheGraph = nullptr;
@@ -365,10 +411,6 @@ private:
     std::uint64_t m_NodeOrderCacheFrontCounter = 0;
     std::vector<int> m_NodeRenderOrderCache;
     std::vector<int> m_NodeHitTestOrderCache;
-    const EditorNodeGraph::Graph* m_NodeLookupCacheGraph = nullptr;
-    std::uint64_t m_NodeLookupCacheGraphRevision = 0;
-    std::size_t m_NodeLookupCacheNodeCount = 0;
-    std::unordered_map<int, std::size_t> m_NodeLookupCache;
     EditorNodeGraph::Graph* m_RenderGraphOverride = nullptr;
     std::vector<std::shared_ptr<LayerBase>>* m_RenderLayersOverride = nullptr;
     bool m_RenderPreviewOnly = false;
@@ -400,7 +442,11 @@ private:
 
     void CopySelectedNodes(EditorModule* editor, bool writeSystemClipboard = false);
     void PasteNodes(EditorModule* editor, bool preferSystemClipboard = false);
-    void CopyGraphInfo(EditorModule* editor, bool wholeGraph, bool includeState);
+    void CopyGraphInfo(
+        EditorModule* editor,
+        bool wholeGraph,
+        bool includeState,
+        bool includeLayout = true);
     void PasteGraphInfo(EditorModule* editor);
     bool PasteClipboardPayload(EditorModule* editor, const nlohmann::json& clipboardPayload, std::string* outSummary);
     void DuplicateSelectedNodes(EditorModule* editor);

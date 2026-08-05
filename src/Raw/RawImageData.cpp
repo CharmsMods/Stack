@@ -42,11 +42,28 @@ const char* WhiteBalanceModeName(WhiteBalanceMode mode) {
     return "As Shot";
 }
 
+const char* RawProcessingVersionName(RawProcessingVersion version) {
+    switch (version) {
+        case RawProcessingVersion::LegacyV1: return "Legacy V1";
+        case RawProcessingVersion::TruthfulV1: return "Truthful V1";
+    }
+    return "Legacy V1";
+}
+
 const char* DemosaicMethodName(DemosaicMethod method) {
     switch (method) {
         case DemosaicMethod::Bilinear: return "Fast / Bilinear (preview-safe)";
+        case DemosaicMethod::MalvarHeCutler: return "Malvar-He-Cutler 5x5";
     }
     return "Fast / Bilinear (preview-safe)";
+}
+
+const char* RawWorkingSpaceName(RawWorkingSpace workingSpace) {
+    switch (workingSpace) {
+        case RawWorkingSpace::LinearSrgbD65: return "Linear sRGB / D65";
+        case RawWorkingSpace::LinearRec2020D65: return "Linear Rec. 2020 / D65";
+    }
+    return "Linear sRGB / D65";
 }
 
 const char* RawPixelLayoutName(RawPixelLayout layout) {

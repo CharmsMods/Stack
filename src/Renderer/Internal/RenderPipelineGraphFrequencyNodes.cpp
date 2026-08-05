@@ -1,10 +1,14 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
-#include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <functional>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <vector>
 
 using namespace Stack::Renderer::GraphExecution;
 
@@ -17,70 +21,72 @@ namespace {
 #define GL_RG 0x8227
 #endif
 
-unsigned int CreateComplexTexture(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return 0;
-    }
+constexpr int kMaximumNotches = 16;
+constexpr float kPi = 3.14159265358979323846f;
 
-    unsigned int texture = 0;
-    glGenTextures(1, &texture);
-    if (texture == 0) {
-        return 0;
-    }
+unsigned int CreateComplexTexture(int width, int height) {
+    const unsigned int texture =
+        GLHelpers::CreateStorageTexture(width, height, GL_RG32F);
+    if (texture == 0) return 0;
+    const Stack::Renderer::GLState::TextureBinding savedTexture(
+        GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
-    if (glGetError() != GL_NO_ERROR) {
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glDeleteTextures(1, &texture);
-        return 0;
-    }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    savedTexture.Restore();
     return texture;
 }
 
+template <typename RenderFn>
 bool RenderIntoSizedTexture(
     unsigned int texture,
     int width,
     int height,
-    const std::function<void(unsigned int)>& renderFn) {
-    if (texture == 0 || width <= 0 || height <= 0) {
-        return false;
-    }
-
-    unsigned int fbo = GLHelpers::CreateFBO(texture);
-    if (fbo == 0) {
-        return false;
-    }
-
-    GLint prevFBO = 0;
-    GLint prevViewport[4] = { 0, 0, 0, 0 };
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-    glGetIntegerv(GL_VIEWPORT, prevViewport);
+    RenderFn&& renderFn) {
+    if (texture == 0 || width <= 0 || height <= 0) return false;
+    const ScopedFramebufferState savedState(true);
+    const unsigned int fbo = GLHelpers::CreateFBO(texture);
+    if (fbo == 0) return false;
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, width, height);
     glClear(GL_COLOR_BUFFER_BIT);
+    while (glGetError() != GL_NO_ERROR) {}
     renderFn(fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    const bool ok = glGetError() == GL_NO_ERROR;
+    savedState.Restore(true);
     glDeleteFramebuffers(1, &fbo);
-    return true;
+    return ok;
 }
 
-int FrequencyMaskShapeToShader(RenderFrequencyMaskShape shape) {
-    switch (shape) {
-        case RenderFrequencyMaskShape::LowPass: return 0;
-        case RenderFrequencyMaskShape::HighPass: return 1;
-        case RenderFrequencyMaskShape::BandPass: return 2;
-        case RenderFrequencyMaskShape::BandStop: return 3;
-        case RenderFrequencyMaskShape::Notch: return 4;
-        case RenderFrequencyMaskShape::Gaussian: return 5;
-        case RenderFrequencyMaskShape::Butterworth: return 6;
+Stack::Renderer::Frequency::FftEdgePolicy ToFftEdgePolicy(RenderFrequencyEdgePolicy policy) {
+    switch (policy) {
+        case RenderFrequencyEdgePolicy::Mirror:
+            return Stack::Renderer::Frequency::FftEdgePolicy::Mirror;
+        case RenderFrequencyEdgePolicy::Wrap:
+            return Stack::Renderer::Frequency::FftEdgePolicy::Wrap;
+        case RenderFrequencyEdgePolicy::ZeroPad:
+            return Stack::Renderer::Frequency::FftEdgePolicy::ZeroPad;
     }
-    return 0;
+    return Stack::Renderer::Frequency::FftEdgePolicy::Mirror;
+}
+
+bool CompatibleFrequencyResources(
+    const RenderFrequencyResource& a,
+    const RenderFrequencyResource& b) {
+    return a.valid && b.valid &&
+        a.sourceWidth == b.sourceWidth &&
+        a.sourceHeight == b.sourceHeight &&
+        a.paddedWidth == b.paddedWidth &&
+        a.paddedHeight == b.paddedHeight &&
+        a.paddingOriginX == b.paddingOriginX &&
+        a.paddingOriginY == b.paddingOriginY &&
+        a.edgePolicy == b.edgePolicy &&
+        a.sourceRole == b.sourceRole &&
+        a.normalization == b.normalization &&
+        a.precision == b.precision &&
+        a.coordinateConvention == b.coordinateConvention;
 }
 
 } // namespace
@@ -102,34 +108,29 @@ void RenderPipeline::EnsureFrequencyPrograms() {
         in vec2 vTexCoord;
         out vec4 FragColor;
         uniform sampler2D uSpectrum;
+        uniform int uMode;
         uniform int uLut;
         uniform float uExposure;
         uniform float uGamma;
         uniform int uCenterDc;
+        const float PI = 3.14159265358979323846;
 
         vec3 turbo(float x) {
             x = clamp(x, 0.0, 1.0);
-            vec4 kRed = vec4(0.13572138, 4.61539260, -42.66032258, 132.13108234);
-            vec4 kGreen = vec4(0.09140261, 2.19418839, 4.84296658, -14.18503333);
-            vec4 kBlue = vec4(0.10667330, 12.64194608, -60.58204836, 110.36276771);
-            vec2 v = vec2(1.0, x);
-            vec4 vx = vec4(1.0, x, x * x, x * x * x);
-            float r = dot(vx, kRed) + 59.28637943 * v.y * v.y * v.y * v.y;
-            float g = dot(vx, kGreen) + 4.27729857 * v.y * v.y * v.y * v.y;
-            float b = dot(vx, kBlue) - 26.10412138 * v.y * v.y * v.y * v.y;
-            return clamp(vec3(r, g, b), 0.0, 1.0);
+            vec4 v = vec4(1.0, x, x * x, x * x * x);
+            return clamp(vec3(
+                dot(v, vec4(0.13572138, 4.61539260, -42.66032258, 132.13108234)) + 59.28637943 * pow(x, 4.0),
+                dot(v, vec4(0.09140261, 2.19418839, 4.84296658, -14.18503333)) + 4.27729857 * pow(x, 4.0),
+                dot(v, vec4(0.10667330, 12.64194608, -60.58204836, 110.36276771)) - 26.10412138 * pow(x, 4.0)),
+                0.0, 1.0);
         }
-
         vec3 viridis(float x) {
-            x = clamp(x, 0.0, 1.0);
             vec3 a = vec3(0.267, 0.005, 0.329);
             vec3 b = vec3(0.128, 0.567, 0.551);
             vec3 c = vec3(0.993, 0.906, 0.144);
             return mix(mix(a, b, smoothstep(0.0, 0.72, x)), c, smoothstep(0.55, 1.0, x));
         }
-
         vec3 inferno(float x) {
-            x = clamp(x, 0.0, 1.0);
             vec3 a = vec3(0.002, 0.001, 0.014);
             vec3 b = vec3(0.520, 0.046, 0.510);
             vec3 c = vec3(0.988, 0.998, 0.645);
@@ -138,71 +139,92 @@ void RenderPipeline::EnsureFrequencyPrograms() {
 
         void main() {
             vec2 uv = uCenterDc != 0 ? fract(vTexCoord + vec2(0.5)) : vTexCoord;
-            vec2 complexValue = texture(uSpectrum, uv).rg;
-            float magnitude = length(complexValue);
-            float value = log(1.0 + magnitude) * max(uExposure, 0.001) * 0.18;
-            value = pow(clamp(value, 0.0, 1.0), 1.0 / max(uGamma, 0.001));
-
-            vec3 color = vec3(value);
-            if (uLut == 0) {
-                color = turbo(value);
-            } else if (uLut == 1) {
-                color = viridis(value);
-            } else if (uLut == 2) {
-                color = inferno(value);
+            vec2 c = texture(uSpectrum, uv).rg;
+            float value;
+            if (uMode == 0) {
+                value = log(1.0 + length(c)) * max(uExposure, 0.001) * 0.18;
+            } else if (uMode == 1) {
+                value = (atan(c.y, c.x) + PI) / (2.0 * PI);
+            } else {
+                float signedValue = uMode == 2 ? c.x : c.y;
+                value = 0.5 + 0.5 * tanh(signedValue * max(uExposure, 0.001));
             }
+            value = pow(clamp(value, 0.0, 1.0), 1.0 / max(uGamma, 0.001));
+            vec3 color = vec3(value);
+            if (uLut == 0) color = turbo(value);
+            else if (uLut == 1) color = viridis(value);
+            else if (uLut == 2) color = inferno(value);
             FragColor = vec4(color, 1.0);
         }
     )";
 
-    static const char* frequencyMaskFragSrc = R"(
+    static const char* frequencyResponseFragSrc = R"(
         #version 330 core
         in vec2 vTexCoord;
         out vec4 FragColor;
-        uniform int uShape;
-        uniform float uCutoff;
-        uniform float uWidth;
-        uniform float uFeather;
+        uniform vec2 uSize;
+        uniform int uMode;
+        uniform int uProfile;
+        uniform float uLowCutoff;
+        uniform float uHighCutoff;
+        uniform float uTransitionWidth;
         uniform float uOrder;
-        uniform vec2 uCenter;
-        uniform int uInvert;
+        uniform int uNotchCount;
+        uniform vec3 uNotches[16];
+        const float PI = 3.14159265358979323846;
+
+        float lowPass(float radius, float cutoff) {
+            cutoff = clamp(cutoff, 0.000001, 0.70710678);
+            float transition = max(uTransitionWidth, 0.000001);
+            if (uProfile == 0) {
+                return 1.0 - smoothstep(cutoff - transition * 0.5, cutoff + transition * 0.5, radius);
+            }
+            if (uProfile == 1) {
+                float sigma = cutoff / sqrt(2.0 * log(2.0));
+                return exp(-0.5 * radius * radius / max(sigma * sigma, 0.0000001));
+            }
+            if (uProfile == 2) {
+                return 1.0 / (1.0 + pow(radius / cutoff, 2.0 * clamp(uOrder, 1.0, 12.0)));
+            }
+            return radius <= cutoff ? 1.0 : 0.0;
+        }
 
         void main() {
-            vec2 centered = vTexCoord - vec2(0.5);
-            float radial = clamp(length(centered) / 0.70710678, 0.0, 1.0);
-            float cutoff = clamp(uCutoff, 0.0, 1.0);
-            float width = max(uWidth, 0.0001);
-            float feather = max(uFeather, 0.0001);
+            vec2 index = gl_FragCoord.xy - vec2(0.5);
+            vec2 frequency = vec2(
+                index.x <= uSize.x * 0.5 ? index.x / uSize.x : (index.x - uSize.x) / uSize.x,
+                index.y <= uSize.y * 0.5 ? index.y / uSize.y : (index.y - uSize.y) / uSize.y);
+            float radius = length(frequency);
+            float low = lowPass(radius, uLowCutoff);
+            float high = 1.0 - lowPass(radius, uHighCutoff);
             float value = 1.0;
+            if (uMode == 1) value = low;
+            else if (uMode == 2) value = 1.0 - lowPass(radius, uLowCutoff);
+            else if (uMode == 3) value = (1.0 - lowPass(radius, uLowCutoff)) * lowPass(radius, uHighCutoff);
+            else if (uMode == 4) value = 1.0 - ((1.0 - lowPass(radius, uLowCutoff)) * lowPass(radius, uHighCutoff));
 
-            if (uShape == 0) {
-                value = 1.0 - smoothstep(max(0.0, cutoff - feather), min(1.0, cutoff + feather), radial);
-            } else if (uShape == 1) {
-                value = smoothstep(max(0.0, cutoff - feather), min(1.0, cutoff + feather), radial);
-            } else if (uShape == 2 || uShape == 3) {
-                float halfWidth = width * 0.5;
-                float lo = smoothstep(cutoff - halfWidth - feather, cutoff - halfWidth + feather, radial);
-                float hi = 1.0 - smoothstep(cutoff + halfWidth - feather, cutoff + halfWidth + feather, radial);
-                value = clamp(lo * hi, 0.0, 1.0);
-                if (uShape == 3) {
-                    value = 1.0 - value;
+            if (uMode == 5) {
+                value = 1.0;
+                for (int i = 0; i < 16; ++i) {
+                    if (i >= uNotchCount) break;
+                    float angle = radians(uNotches[i].y);
+                    vec2 center = uNotches[i].x * vec2(cos(angle), sin(angle));
+                    float distanceToPair = min(distance(frequency, center), distance(frequency, -center));
+                    float width = max(uNotches[i].z, 0.000001);
+                    float rejection;
+                    if (uProfile == 1) {
+                        rejection = 1.0 - exp(-0.5 * distanceToPair * distanceToPair / (width * width));
+                    } else if (uProfile == 2) {
+                        rejection = 1.0 / (1.0 + pow(width / max(distanceToPair, 0.000001), 2.0 * clamp(uOrder, 1.0, 12.0)));
+                    } else if (uProfile == 3) {
+                        rejection = distanceToPair >= width ? 1.0 : 0.0;
+                    } else {
+                        rejection = smoothstep(width, width + max(uTransitionWidth, 0.000001), distanceToPair);
+                    }
+                    value *= rejection;
                 }
-            } else if (uShape == 4) {
-                float d = distance(vTexCoord, uCenter);
-                value = smoothstep(width, width + feather, d);
-            } else if (uShape == 5) {
-                float sigma = max(cutoff, 0.001);
-                value = exp(-(radial * radial) / (2.0 * sigma * sigma));
-            } else if (uShape == 6) {
-                float order = clamp(uOrder, 1.0, 12.0);
-                float ratio = radial / max(cutoff, 0.001);
-                value = 1.0 / (1.0 + pow(ratio, 2.0 * order));
             }
-
-            if (uInvert != 0) {
-                value = 1.0 - value;
-            }
-            FragColor = vec4(value, value, value, 1.0);
+            FragColor = vec4(clamp(value, 0.0, 1.0));
         }
     )";
 
@@ -212,33 +234,20 @@ void RenderPipeline::EnsureFrequencyPrograms() {
         out vec4 FragColor;
         uniform sampler2D uSpectrumA;
         uniform sampler2D uSpectrumB;
-        uniform sampler2D uFilter;
-        uniform int uHasB;
-        uniform int uHasFilter;
+        uniform sampler2D uResponse;
         uniform int uMode;
-        uniform float uAmount;
-
-        vec2 cmul(vec2 a, vec2 b) {
-            return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
-        }
-
+        uniform float uStrength;
         void main() {
             vec2 a = texture(uSpectrumA, vTexCoord).rg;
-            vec2 b = uHasB != 0 ? texture(uSpectrumB, vTexCoord).rg : vec2(0.0);
-            float amount = clamp(uAmount, 0.0, 4.0);
-            vec2 outValue = a;
+            vec2 outputValue = a;
             if (uMode == 0) {
-                vec2 filterUv = fract(vTexCoord + vec2(0.5));
-                float filterValue = uHasFilter != 0 ? clamp(texture(uFilter, filterUv).r, 0.0, 1.0) : 1.0;
-                outValue = a * mix(1.0, filterValue, clamp(amount, 0.0, 1.0));
-            } else if (uMode == 1) {
-                outValue = a + b * amount;
-            } else if (uMode == 2) {
-                outValue = a - b * amount;
-            } else if (uMode == 3) {
-                outValue = abs(a - b) * amount;
+                float response = clamp(texture(uResponse, vTexCoord).r, 0.0, 1.0);
+                outputValue = a * mix(1.0, response, clamp(uStrength, 0.0, 1.0));
+            } else {
+                vec2 b = texture(uSpectrumB, vTexCoord).rg;
+                outputValue = uMode == 1 ? a + b : a - b;
             }
-            FragColor = vec4(outValue, 0.0, 1.0);
+            FragColor = vec4(outputValue, 0.0, 1.0);
         }
     )";
 
@@ -250,28 +259,16 @@ void RenderPipeline::EnsureFrequencyPrograms() {
         uniform sampler2D uMagnitude;
         uniform sampler2D uPhase;
         uniform int uMode;
-        uniform float uExposure;
-        uniform float uGamma;
-
-        const float PI = 3.14159265358979323846;
-
         void main() {
             if (uMode == 2) {
                 float magnitude = max(texture(uMagnitude, vTexCoord).r, 0.0);
-                float phase = texture(uPhase, vTexCoord).r * 2.0 * PI - PI;
+                float phase = texture(uPhase, vTexCoord).r;
                 FragColor = vec4(vec2(cos(phase), sin(phase)) * magnitude, 0.0, 1.0);
                 return;
             }
-
             vec2 c = texture(uSpectrum, vTexCoord).rg;
-            float value = 0.0;
-            if (uMode == 0) {
-                value = log(1.0 + length(c)) * max(uExposure, 0.001) * 0.18;
-            } else {
-                value = (atan(c.y, c.x) + PI) / (2.0 * PI);
-            }
-            value = pow(clamp(value, 0.0, 1.0), 1.0 / max(uGamma, 0.001));
-            FragColor = vec4(value, value, value, 1.0);
+            float rawValue = uMode == 0 ? length(c) : atan(c.y, c.x);
+            FragColor = vec4(rawValue, 0.0, 0.0, 1.0);
         }
     )";
 
@@ -280,268 +277,456 @@ void RenderPipeline::EnsureFrequencyPrograms() {
         in vec2 vTexCoord;
         out vec4 FragColor;
         uniform sampler2D uSpatial;
-        uniform vec2 uSourceSize;
-        uniform vec2 uPaddedSize;
-
+        uniform ivec2 uPaddingOrigin;
         void main() {
-            vec2 cropUv = vTexCoord * (uSourceSize / max(uPaddedSize, vec2(1.0)));
-            float value = texture(uSpatial, cropUv).r;
+            ivec2 sourcePixel = ivec2(gl_FragCoord.xy);
+            float value = texelFetch(uSpatial, sourcePixel + uPaddingOrigin, 0).r;
             FragColor = vec4(value, value, value, 1.0);
         }
     )";
 
-    if (!m_SpectrumViewProgram) {
+    if (!m_SpectrumViewProgram)
         m_SpectrumViewProgram = GLHelpers::CreateShaderProgram(vertexSrc, spectrumViewFragSrc);
-    }
-    if (!m_FrequencyMaskProgram) {
-        m_FrequencyMaskProgram = GLHelpers::CreateShaderProgram(vertexSrc, frequencyMaskFragSrc);
-    }
-    if (!m_SpectrumMathProgram) {
+    if (!m_FrequencyMaskProgram)
+        m_FrequencyMaskProgram = GLHelpers::CreateShaderProgram(vertexSrc, frequencyResponseFragSrc);
+    if (!m_SpectrumMathProgram)
         m_SpectrumMathProgram = GLHelpers::CreateShaderProgram(vertexSrc, spectrumMathFragSrc);
-    }
-    if (!m_MagnitudePhaseProgram) {
+    if (!m_MagnitudePhaseProgram)
         m_MagnitudePhaseProgram = GLHelpers::CreateShaderProgram(vertexSrc, magnitudePhaseFragSrc);
-    }
-    if (!m_FrequencyIfftProjectProgram) {
+    if (!m_FrequencyIfftProjectProgram)
         m_FrequencyIfftProjectProgram = GLHelpers::CreateShaderProgram(vertexSrc, ifftProjectFragSrc);
+}
+
+RenderFrequencyResource RenderPipeline::RenderFourierTransform(
+    unsigned int channelTexture,
+    int sourceWidth,
+    int sourceHeight,
+    RenderFrequencyEdgePolicy edgePolicy,
+    std::string sourceRole) {
+    RenderFrequencyResource result;
+    if (channelTexture == 0 || sourceWidth <= 0 || sourceHeight <= 0) return result;
+    result.sourceWidth = sourceWidth;
+    result.sourceHeight = sourceHeight;
+    result.paddedWidth = Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(sourceWidth);
+    result.paddedHeight = Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(sourceHeight);
+    result.paddingOriginX = (result.paddedWidth - sourceWidth) / 2;
+    result.paddingOriginY = (result.paddedHeight - sourceHeight) / 2;
+    result.edgePolicy = edgePolicy;
+    result.sourceRole = std::move(sourceRole);
+    result.kind = RenderFrequencyResourceKind::Spectrum;
+    result.hermitian = true;
+    result.texture = m_GpuFft.Forward(
+        channelTexture,
+        sourceWidth,
+        sourceHeight,
+        result.paddedWidth,
+        result.paddedHeight,
+        result.paddingOriginX,
+        result.paddingOriginY,
+        ToFftEdgePolicy(edgePolicy));
+    result.valid = result.texture != 0;
+    return result;
+}
+
+RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderInverseFourierTransform(
+    const RenderFrequencyResource& spectrum) {
+    GraphNodeRenderResult result;
+    if (!spectrum.valid || spectrum.texture == 0 ||
+        spectrum.kind != RenderFrequencyResourceKind::Spectrum ||
+        !spectrum.hermitian ||
+        spectrum.sourceWidth <= 0 || spectrum.sourceHeight <= 0) {
+        return result;
     }
+    EnsureFrequencyPrograms();
+    const unsigned int spatial = m_GpuFft.Inverse(
+        spectrum.texture, spectrum.paddedWidth, spectrum.paddedHeight);
+    if (spatial == 0) return result;
+    if (m_FrequencyIfftProjectProgram == 0) {
+        glDeleteTextures(1, &spatial);
+        return result;
+    }
+    result.texture = GLHelpers::CreateEmptyTexture(spectrum.sourceWidth, spectrum.sourceHeight);
+    const bool rendered = RenderIntoSizedTexture(
+        result.texture, spectrum.sourceWidth, spectrum.sourceHeight, [&](unsigned int) {
+            glUseProgram(m_FrequencyIfftProjectProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, spatial);
+            glUniform1i(glGetUniformLocation(m_FrequencyIfftProjectProgram, "uSpatial"), 0);
+            glUniform2i(
+                glGetUniformLocation(m_FrequencyIfftProjectProgram, "uPaddingOrigin"),
+                spectrum.paddingOriginX,
+                spectrum.paddingOriginY);
+            m_Quad.Draw();
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    glDeleteTextures(1, &spatial);
+    if (!rendered && result.texture != 0) {
+        glDeleteTextures(1, &result.texture);
+        result.texture = 0;
+    }
+    result.owned = result.texture != 0;
+    return result;
+}
+
+unsigned int RenderPipeline::RenderFrequencyResponseTexture(
+    const RenderFrequencyResponseSettings& settings,
+    int paddedWidth,
+    int paddedHeight) {
+    EnsureFrequencyPrograms();
+    if (m_FrequencyMaskProgram == 0 || paddedWidth <= 0 || paddedHeight <= 0) return 0;
+    unsigned int result = CreateComplexTexture(paddedWidth, paddedHeight);
+    std::array<float, static_cast<std::size_t>(kMaximumNotches) * 3u>
+        notchData {};
+    const int notchCount = std::min<int>(
+        static_cast<int>(settings.notches.size()), kMaximumNotches);
+    for (int i = 0; i < notchCount; ++i) {
+        notchData[static_cast<std::size_t>(i) * 3u] =
+            std::clamp(settings.notches[static_cast<std::size_t>(i)].frequency, 0.0f, 0.70710678f);
+        notchData[static_cast<std::size_t>(i) * 3u + 1u] =
+            settings.notches[static_cast<std::size_t>(i)].directionDegrees;
+        notchData[static_cast<std::size_t>(i) * 3u + 2u] =
+            std::max(settings.notches[static_cast<std::size_t>(i)].width, 0.000001f);
+    }
+    const bool rendered = RenderIntoSizedTexture(result, paddedWidth, paddedHeight, [&](unsigned int) {
+        glUseProgram(m_FrequencyMaskProgram);
+        glUniform2f(glGetUniformLocation(m_FrequencyMaskProgram, "uSize"),
+            static_cast<float>(paddedWidth), static_cast<float>(paddedHeight));
+        glUniform1i(glGetUniformLocation(m_FrequencyMaskProgram, "uMode"),
+            static_cast<int>(settings.mode));
+        glUniform1i(glGetUniformLocation(m_FrequencyMaskProgram, "uProfile"),
+            static_cast<int>(settings.profile));
+        glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uLowCutoff"), settings.lowCutoff);
+        glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uHighCutoff"), settings.highCutoff);
+        glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uTransitionWidth"), settings.transitionWidth);
+        glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uOrder"), settings.butterworthOrder);
+        glUniform1i(glGetUniformLocation(m_FrequencyMaskProgram, "uNotchCount"), notchCount);
+        glUniform3fv(glGetUniformLocation(m_FrequencyMaskProgram, "uNotches"),
+            kMaximumNotches, notchData.data());
+        m_Quad.Draw();
+        glUseProgram(0);
+    });
+    if (!rendered && result != 0) {
+        glDeleteTextures(1, &result);
+        result = 0;
+    }
+    return result;
+}
+
+RenderFrequencyResource RenderPipeline::RenderApplyFrequencyResponse(
+    const RenderFrequencyResource& spectrum,
+    const RenderFrequencyResponseSettings& response,
+    float strength) {
+    RenderFrequencyResource result = spectrum;
+    result.texture = 0;
+    result.valid = false;
+    if (!spectrum.valid || spectrum.texture == 0 ||
+        spectrum.kind != RenderFrequencyResourceKind::Spectrum) return result;
+    EnsureFrequencyPrograms();
+    if (m_SpectrumMathProgram == 0) return result;
+    const unsigned int responseTexture = RenderFrequencyResponseTexture(
+        response, spectrum.paddedWidth, spectrum.paddedHeight);
+    if (responseTexture == 0) return result;
+    const float canonicalStrength = std::isfinite(strength)
+        ? std::clamp(strength, 0.0f, 1.0f)
+        : 1.0f;
+    result.texture = CreateComplexTexture(spectrum.paddedWidth, spectrum.paddedHeight);
+    const bool rendered = RenderIntoSizedTexture(
+        result.texture, spectrum.paddedWidth, spectrum.paddedHeight, [&](unsigned int) {
+            glUseProgram(m_SpectrumMathProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, spectrum.texture);
+            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uSpectrumA"), 0);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, responseTexture);
+            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uResponse"), 2);
+            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uMode"), 0);
+            glUniform1f(glGetUniformLocation(m_SpectrumMathProgram, "uStrength"),
+                canonicalStrength);
+            m_Quad.Draw();
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    glDeleteTextures(1, &responseTexture);
+    if (!rendered && result.texture != 0) {
+        glDeleteTextures(1, &result.texture);
+        result.texture = 0;
+    }
+    result.valid = result.texture != 0;
+    result.hermitian = spectrum.hermitian;
+    return result;
+}
+
+RenderFrequencyResource RenderPipeline::RenderCombineSpectra(
+    const RenderFrequencyResource& a,
+    const RenderFrequencyResource& b,
+    RenderSpectrumCombineMode mode) {
+    RenderFrequencyResource result = a;
+    result.texture = 0;
+    result.valid = false;
+    if (a.kind != RenderFrequencyResourceKind::Spectrum ||
+        b.kind != RenderFrequencyResourceKind::Spectrum ||
+        !CompatibleFrequencyResources(a, b)) return result;
+    EnsureFrequencyPrograms();
+    if (m_SpectrumMathProgram == 0) return result;
+    result.texture = CreateComplexTexture(a.paddedWidth, a.paddedHeight);
+    const bool rendered = RenderIntoSizedTexture(
+        result.texture, a.paddedWidth, a.paddedHeight, [&](unsigned int) {
+            glUseProgram(m_SpectrumMathProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, a.texture);
+            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uSpectrumA"), 0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, b.texture);
+            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uSpectrumB"), 1);
+            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uMode"),
+                mode == RenderSpectrumCombineMode::Add ? 1 : 2);
+            m_Quad.Draw();
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    if (!rendered && result.texture != 0) {
+        glDeleteTextures(1, &result.texture);
+        result.texture = 0;
+    }
+    result.valid = result.texture != 0;
+    result.hermitian = a.hermitian && b.hermitian;
+    return result;
+}
+
+RenderFrequencyResource RenderPipeline::RenderSpectrumComponent(
+    const RenderFrequencyResource& spectrum,
+    RenderFrequencyResourceKind componentKind) {
+    RenderFrequencyResource result = spectrum;
+    result.texture = 0;
+    result.valid = false;
+    result.kind = componentKind;
+    if (!spectrum.valid || spectrum.kind != RenderFrequencyResourceKind::Spectrum ||
+        (componentKind != RenderFrequencyResourceKind::Magnitude &&
+         componentKind != RenderFrequencyResourceKind::Phase)) return result;
+    EnsureFrequencyPrograms();
+    if (m_MagnitudePhaseProgram == 0) return result;
+    result.texture = CreateComplexTexture(spectrum.paddedWidth, spectrum.paddedHeight);
+    const bool rendered = RenderIntoSizedTexture(
+        result.texture, spectrum.paddedWidth, spectrum.paddedHeight, [&](unsigned int) {
+            glUseProgram(m_MagnitudePhaseProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, spectrum.texture);
+            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uSpectrum"), 0);
+            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uMode"),
+                componentKind == RenderFrequencyResourceKind::Magnitude ? 0 : 1);
+            m_Quad.Draw();
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    if (!rendered && result.texture != 0) {
+        glDeleteTextures(1, &result.texture);
+        result.texture = 0;
+    }
+    result.valid = result.texture != 0;
+    return result;
+}
+
+RenderFrequencyResource RenderPipeline::RenderRecombineSpectrum(
+    const RenderFrequencyResource& magnitude,
+    const RenderFrequencyResource& phase) {
+    RenderFrequencyResource result = magnitude;
+    result.texture = 0;
+    result.kind = RenderFrequencyResourceKind::Spectrum;
+    result.valid = false;
+    if (magnitude.kind != RenderFrequencyResourceKind::Magnitude ||
+        phase.kind != RenderFrequencyResourceKind::Phase ||
+        !CompatibleFrequencyResources(magnitude, phase)) return result;
+    EnsureFrequencyPrograms();
+    if (m_MagnitudePhaseProgram == 0) return result;
+    result.texture = CreateComplexTexture(magnitude.paddedWidth, magnitude.paddedHeight);
+    const bool rendered = RenderIntoSizedTexture(
+        result.texture, magnitude.paddedWidth, magnitude.paddedHeight, [&](unsigned int) {
+            glUseProgram(m_MagnitudePhaseProgram);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, magnitude.texture);
+            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uMagnitude"), 1);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, phase.texture);
+            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uPhase"), 2);
+            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uMode"), 2);
+            m_Quad.Draw();
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    if (!rendered && result.texture != 0) {
+        glDeleteTextures(1, &result.texture);
+        result.texture = 0;
+    }
+    result.valid = result.texture != 0;
+    result.hermitian = magnitude.hermitian && phase.hermitian;
+    return result;
+}
+
+RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderSpectrumVisualization(
+    const RenderFrequencyResource& spectrum,
+    const RenderSpectrumViewSettings& settings) {
+    GraphNodeRenderResult result;
+    if (!spectrum.valid || spectrum.texture == 0 ||
+        spectrum.kind != RenderFrequencyResourceKind::Spectrum) return result;
+    EnsureFrequencyPrograms();
+    if (m_SpectrumViewProgram == 0) return result;
+    result.texture = GLHelpers::CreateEmptyTexture(spectrum.sourceWidth, spectrum.sourceHeight);
+    const bool rendered = RenderIntoSizedTexture(
+        result.texture, spectrum.sourceWidth, spectrum.sourceHeight, [&](unsigned int) {
+            glUseProgram(m_SpectrumViewProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, spectrum.texture);
+            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uSpectrum"), 0);
+            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uMode"), static_cast<int>(settings.mode));
+            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uLut"), static_cast<int>(settings.lut));
+            glUniform1f(glGetUniformLocation(m_SpectrumViewProgram, "uExposure"), settings.exposure);
+            glUniform1f(glGetUniformLocation(m_SpectrumViewProgram, "uGamma"), settings.gamma);
+            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uCenterDc"), settings.centerDc ? 1 : 0);
+            m_Quad.Draw();
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    if (!rendered && result.texture != 0) {
+        glDeleteTextures(1, &result.texture);
+        result.texture = 0;
+    }
+    result.owned = result.texture != 0;
+    return result;
+}
+
+RenderSpectrumAnalysis RenderPipeline::AnalyzeSpectrum(
+    const RenderFrequencyResource& spectrum,
+    const RenderSpectrumAnalyzerSettings& settings,
+    std::size_t fingerprint) {
+    RenderSpectrumAnalysis result;
+    result.fingerprint = fingerprint;
+    if (!spectrum.valid || spectrum.texture == 0 ||
+        spectrum.kind != RenderFrequencyResourceKind::Spectrum ||
+        spectrum.paddedWidth <= 0 ||
+        spectrum.paddedHeight <= 0) {
+        result.error = "Spectrum Analyzer requires a valid complex spectrum.";
+        return result;
+    }
+
+    std::size_t elementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            spectrum.paddedWidth,
+            spectrum.paddedHeight,
+            2,
+            elementCount)) {
+        result.error =
+            "Spectrum Analyzer dimensions exceed CPU readback limits.";
+        return result;
+    }
+    std::vector<float> complexSamples;
+    try {
+        complexSamples.resize(elementCount);
+    } catch (const std::bad_alloc&) {
+        result.error =
+            "Spectrum Analyzer could not allocate its CPU readback.";
+        return result;
+    } catch (const std::length_error&) {
+        result.error =
+            "Spectrum Analyzer dimensions exceed CPU readback limits.";
+        return result;
+    }
+    const ScopedFramebufferState savedState(true);
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
+    const unsigned int fbo = GLHelpers::CreateFBO(spectrum.texture);
+    if (fbo == 0) {
+        savedPackState.Restore();
+        savedState.Restore(true);
+        result.error = "Spectrum Analyzer could not create a readback target.";
+        return result;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(
+        0, 0, spectrum.paddedWidth, spectrum.paddedHeight,
+        GL_RG, GL_FLOAT, complexSamples.data());
+    const bool readbackOk = glGetError() == GL_NO_ERROR;
+    savedPackState.Restore();
+    savedState.Restore(true);
+    glDeleteFramebuffers(1, &fbo);
+    if (!readbackOk) {
+        result.error = "Spectrum Analyzer texture readback failed.";
+        return result;
+    }
+
+    std::array<double, 256> radialSums {};
+    std::array<std::uint64_t, 256> radialCounts {};
+    double nonDcPower = 0.0;
+    double selectedPower = 0.0;
+    double peakPower = -1.0;
+    const double inner = std::clamp<double>(settings.innerRadius, 0.0, 0.70710678);
+    const double outer = std::clamp<double>(
+        std::max(settings.innerRadius, settings.outerRadius), 0.0, 0.70710678);
+
+    for (int y = 0; y < spectrum.paddedHeight; ++y) {
+        const double fy = y <= spectrum.paddedHeight / 2
+            ? static_cast<double>(y) / spectrum.paddedHeight
+            : static_cast<double>(y - spectrum.paddedHeight) / spectrum.paddedHeight;
+        for (int x = 0; x < spectrum.paddedWidth; ++x) {
+            const double fx = x <= spectrum.paddedWidth / 2
+                ? static_cast<double>(x) / spectrum.paddedWidth
+                : static_cast<double>(x - spectrum.paddedWidth) / spectrum.paddedWidth;
+            const bool dc = x == 0 && y == 0;
+            if (dc && settings.excludeDc) continue;
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) * spectrum.paddedWidth + x) * 2u;
+            const double real = complexSamples[offset];
+            const double imaginary = complexSamples[offset + 1u];
+            const double power = real * real + imaginary * imaginary;
+            if (!std::isfinite(power)) continue;
+            const double frequency = std::sqrt(fx * fx + fy * fy);
+            const std::size_t bin = std::min<std::size_t>(
+                255u, static_cast<std::size_t>(
+                    std::floor(std::clamp(frequency / 0.70710678, 0.0, 1.0) * 255.0)));
+            radialSums[bin] += power;
+            ++radialCounts[bin];
+            if (!dc) nonDcPower += power;
+            if (frequency >= inner && frequency <= outer) {
+                if (!dc) selectedPower += power;
+                if (power > peakPower) {
+                    peakPower = power;
+                    result.peakFrequency = static_cast<float>(frequency);
+                    result.peakDirectionDegrees = static_cast<float>(
+                        std::atan2(fy, fx) * 180.0 / kPi);
+                }
+            }
+        }
+    }
+    for (std::size_t i = 0; i < result.radialPower.size(); ++i) {
+        result.radialPower[i] = radialCounts[i] == 0
+            ? 0.0f
+            : static_cast<float>(radialSums[i] / static_cast<double>(radialCounts[i]));
+    }
+    result.bandPower = nonDcPower > std::numeric_limits<double>::epsilon()
+        ? static_cast<float>(selectedPower / nonDcPower)
+        : 0.0f;
+    result.valid = true;
+    return result;
 }
 
 RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderFrequencyGraphNode(
-    const GraphExecutionContext& executionContext,
-    const RenderGraphNode& node,
-    const std::string& socketId,
-    const std::function<unsigned int(int, const std::string&)>& evalImage,
-    const std::function<unsigned int(int, const std::string&)>& evalMask) {
-    GraphNodeRenderResult result;
-    if (m_Width <= 0 || m_Height <= 0) {
-        return result;
-    }
-
-    EnsureFrequencyPrograms();
-    const int paddedW = Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(m_Width);
-    const int paddedH = Stack::Renderer::Frequency::GpuFft::NextPowerOfTwo(m_Height);
-
-    if (node.kind == RenderGraphNodeKind::FrequencyFft) {
-        const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
-        const unsigned int inputTexture = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-        if (inputTexture != 0) {
-            result.texture = m_GpuFft.Forward(
-                inputTexture,
-                m_Width,
-                m_Height,
-                paddedW,
-                paddedH,
-                node.frequencyFftSettings.luminanceOnly);
-            result.owned = result.texture != 0;
-        }
-        return result;
-    }
-
-    if (node.kind == RenderGraphNodeKind::FrequencyIfft) {
-        const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
-        const unsigned int spectrumTexture = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-        if (spectrumTexture == 0) {
-            return result;
-        }
-
-        const unsigned int spatialTexture = m_GpuFft.Inverse(spectrumTexture, paddedW, paddedH);
-        if (spatialTexture == 0 || !m_FrequencyIfftProjectProgram) {
-            if (spatialTexture != 0) glDeleteTextures(1, &spatialTexture);
-            return result;
-        }
-
-        result.texture = CreateGraphRenderTargetTexture();
-        const bool rendered = RenderIntoGraphTargetTexture(result.texture, [&](unsigned int) {
-            glUseProgram(m_FrequencyIfftProjectProgram);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, spatialTexture);
-            glUniform1i(glGetUniformLocation(m_FrequencyIfftProjectProgram, "uSpatial"), 0);
-            glUniform2f(glGetUniformLocation(m_FrequencyIfftProjectProgram, "uSourceSize"), static_cast<float>(m_Width), static_cast<float>(m_Height));
-            glUniform2f(glGetUniformLocation(m_FrequencyIfftProjectProgram, "uPaddedSize"), static_cast<float>(paddedW), static_cast<float>(paddedH));
-            m_Quad.Draw();
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glUseProgram(0);
-        });
-        glDeleteTextures(1, &spatialTexture);
-        if (!rendered && result.texture != 0) {
-            glDeleteTextures(1, &result.texture);
-            result.texture = 0;
-        }
-        result.owned = result.texture != 0;
-        return result;
-    }
-
-    if (node.kind == RenderGraphNodeKind::SpectrumView) {
-        const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
-        const unsigned int spectrumTexture = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-        if (spectrumTexture == 0 || !m_SpectrumViewProgram) {
-            return result;
-        }
-
-        result.texture = CreateGraphRenderTargetTexture();
-        const bool rendered = RenderIntoGraphTargetTexture(result.texture, [&](unsigned int) {
-            glUseProgram(m_SpectrumViewProgram);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, spectrumTexture);
-            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uSpectrum"), 0);
-            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uLut"), static_cast<int>(node.spectrumViewSettings.lut));
-            glUniform1f(glGetUniformLocation(m_SpectrumViewProgram, "uExposure"), node.spectrumViewSettings.exposure);
-            glUniform1f(glGetUniformLocation(m_SpectrumViewProgram, "uGamma"), node.spectrumViewSettings.gamma);
-            glUniform1i(glGetUniformLocation(m_SpectrumViewProgram, "uCenterDc"), node.spectrumViewSettings.centerDc ? 1 : 0);
-            m_Quad.Draw();
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glUseProgram(0);
-        });
-        if (!rendered && result.texture != 0) {
-            glDeleteTextures(1, &result.texture);
-            result.texture = 0;
-        }
-        result.owned = result.texture != 0;
-        return result;
-    }
-
-    if (node.kind == RenderGraphNodeKind::FrequencyMask) {
-        if (!m_FrequencyMaskProgram) {
-            return result;
-        }
-        result.texture = CreateGraphRenderTargetTexture();
-        const RenderFrequencyMaskSettings& settings = node.frequencyMaskSettings;
-        const bool rendered = RenderIntoGraphTargetTexture(result.texture, [&](unsigned int) {
-            glUseProgram(m_FrequencyMaskProgram);
-            glUniform1i(glGetUniformLocation(m_FrequencyMaskProgram, "uShape"), FrequencyMaskShapeToShader(settings.shape));
-            glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uCutoff"), settings.cutoff);
-            glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uWidth"), settings.width);
-            glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uFeather"), settings.feather);
-            glUniform1f(glGetUniformLocation(m_FrequencyMaskProgram, "uOrder"), settings.order);
-            glUniform2f(glGetUniformLocation(m_FrequencyMaskProgram, "uCenter"), settings.centerX, settings.centerY);
-            glUniform1i(glGetUniformLocation(m_FrequencyMaskProgram, "uInvert"), settings.invert ? 1 : 0);
-            m_Quad.Draw();
-            glUseProgram(0);
-        });
-        if (!rendered && result.texture != 0) {
-            glDeleteTextures(1, &result.texture);
-            result.texture = 0;
-        }
-        result.owned = result.texture != 0;
-        return result;
-    }
-
-    if (node.kind == RenderGraphNodeKind::SpectrumMath) {
-        const RenderGraphLink* inputA = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kMixInputASocketId);
-        const RenderGraphLink* inputB = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kMixInputBSocketId);
-        const RenderGraphLink* filterInput = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId);
-        const unsigned int textureA = inputA ? evalImage(inputA->fromNodeId, inputA->fromSocketId) : 0;
-        const unsigned int textureB = inputB ? evalImage(inputB->fromNodeId, inputB->fromSocketId) : 0;
-        const unsigned int filterTexture = filterInput ? evalMask(filterInput->fromNodeId, filterInput->fromSocketId) : 0;
-        if (textureA == 0 || !m_SpectrumMathProgram) {
-            return result;
-        }
-
-        result.texture = CreateComplexTexture(paddedW, paddedH);
-        const bool rendered = RenderIntoSizedTexture(result.texture, paddedW, paddedH, [&](unsigned int) {
-            glUseProgram(m_SpectrumMathProgram);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, textureA);
-            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uSpectrumA"), 0);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, textureB);
-            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uSpectrumB"), 1);
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, filterTexture);
-            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uFilter"), 2);
-            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uHasB"), textureB != 0 ? 1 : 0);
-            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uHasFilter"), filterTexture != 0 ? 1 : 0);
-            glUniform1i(glGetUniformLocation(m_SpectrumMathProgram, "uMode"), static_cast<int>(node.spectrumMathMode));
-            glUniform1f(glGetUniformLocation(m_SpectrumMathProgram, "uAmount"), node.spectrumMathSettings.amount);
-            m_Quad.Draw();
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glUseProgram(0);
-        });
-        if (!rendered && result.texture != 0) {
-            glDeleteTextures(1, &result.texture);
-            result.texture = 0;
-        }
-        result.owned = result.texture != 0;
-        return result;
-    }
-
-    if (node.kind == RenderGraphNodeKind::MagnitudePhase) {
-        if (!m_MagnitudePhaseProgram) {
-            return result;
-        }
-        const bool recombine =
-            node.magnitudePhaseMode == RenderMagnitudePhaseMode::Recombine &&
-            socketId == EditorNodeGraph::kImageOutputSocketId;
-
-        if (recombine) {
-            const RenderGraphLink* magInput = executionContext.FindInputLink(node.nodeId, "magnitude");
-            const RenderGraphLink* phaseInput = executionContext.FindInputLink(node.nodeId, "phase");
-            const unsigned int magTexture = magInput ? evalMask(magInput->fromNodeId, magInput->fromSocketId) : 0;
-            const unsigned int phaseTexture = phaseInput ? evalMask(phaseInput->fromNodeId, phaseInput->fromSocketId) : 0;
-            if (magTexture == 0 || phaseTexture == 0) {
-                return result;
-            }
-
-            result.texture = CreateComplexTexture(paddedW, paddedH);
-            const bool rendered = RenderIntoSizedTexture(result.texture, paddedW, paddedH, [&](unsigned int) {
-                glUseProgram(m_MagnitudePhaseProgram);
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, magTexture);
-                glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uMagnitude"), 1);
-                glActiveTexture(GL_TEXTURE2);
-                glBindTexture(GL_TEXTURE_2D, phaseTexture);
-                glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uPhase"), 2);
-                glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uMode"), 2);
-                glUniform1f(glGetUniformLocation(m_MagnitudePhaseProgram, "uExposure"), node.magnitudePhaseSettings.exposure);
-                glUniform1f(glGetUniformLocation(m_MagnitudePhaseProgram, "uGamma"), node.magnitudePhaseSettings.gamma);
-                m_Quad.Draw();
-                glActiveTexture(GL_TEXTURE2);
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glActiveTexture(GL_TEXTURE0);
-                glUseProgram(0);
-            });
-            if (!rendered && result.texture != 0) {
-                glDeleteTextures(1, &result.texture);
-                result.texture = 0;
-            }
-            result.owned = result.texture != 0;
-            return result;
-        }
-
-        const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kImageInputSocketId);
-        const unsigned int spectrumTexture = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
-        if (spectrumTexture == 0) {
-            return result;
-        }
-
-        result.texture = CreateGraphRenderTargetTexture();
-        const bool rendered = RenderIntoGraphTargetTexture(result.texture, [&](unsigned int) {
-            glUseProgram(m_MagnitudePhaseProgram);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, spectrumTexture);
-            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uSpectrum"), 0);
-            glUniform1i(glGetUniformLocation(m_MagnitudePhaseProgram, "uMode"), static_cast<int>(node.magnitudePhaseMode));
-            glUniform1f(glGetUniformLocation(m_MagnitudePhaseProgram, "uExposure"), node.magnitudePhaseSettings.exposure);
-            glUniform1f(glGetUniformLocation(m_MagnitudePhaseProgram, "uGamma"), node.magnitudePhaseSettings.gamma);
-            m_Quad.Draw();
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glUseProgram(0);
-        });
-        if (!rendered && result.texture != 0) {
-            glDeleteTextures(1, &result.texture);
-            result.texture = 0;
-        }
-        result.owned = result.texture != 0;
-        return result;
-    }
-
-    return result;
+    const GraphExecutionContext&,
+    const RenderGraphNode&,
+    const std::string&,
+    const std::function<unsigned int(int, const std::string&)>&,
+    const std::function<unsigned int(int, const std::string&)>&) {
+    // Schema-v6 frequency shells intentionally have no execution path.
+    // Schema-v7 uses the typed evaluators in ExecuteGraphImpl.
+    return {};
 }

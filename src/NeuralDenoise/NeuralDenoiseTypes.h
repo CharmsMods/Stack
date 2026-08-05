@@ -3,16 +3,12 @@
 #include "ThirdParty/json.hpp"
 
 #include <string>
-#include <vector>
 
 namespace NeuralDenoise {
 
-enum class ModelType {
-    Unknown,
-    LinearRgb,
-    GenericRgb,
-    RawBayerPacked4Ch
-};
+// Compatibility-only schema for projects saved with Stack's retired neural
+// denoise experiments. This file deliberately contains no runtime/model-pack
+// contract. New denoise work must define a new versioned interface.
 
 enum class RuntimePreference {
     Auto,
@@ -72,38 +68,6 @@ struct TilePlan {
     bool featherMerge = true;
 };
 
-struct NeuralDenoiseModelInfo {
-    std::string id;
-    std::string displayName;
-    std::string relativeFile;
-    std::string resolvedPath;
-    ModelType type = ModelType::Unknown;
-    std::string architecture;
-    std::string preferredBackend;
-    std::string inputFormat = "nchw";
-    std::string inputRange = "0_1";
-    std::string inputName;
-    std::string outputName;
-    std::vector<std::string> precision;
-    int inputChannels = 0;
-    int outputChannels = 0;
-    bool supportsTiling = false;
-    int requiredInputMultiple = 1;
-    std::string license;
-    std::string licenseFile;
-    TilePlan tileHints;
-};
-
-struct ModelAvailability {
-    bool manifestLoaded = false;
-    bool runtimeAvailable = false;
-    bool modelFileAvailable = false;
-    bool licenseNoticeAvailable = true;
-    bool supported = false;
-    std::string status;
-    std::vector<std::string> warnings;
-};
-
 struct NeuralDenoiseSettings {
     bool enabled = false;
     std::string selectedModelId;
@@ -143,36 +107,6 @@ struct NeuralDenoiseSettings {
     RawWhiteBalanceStage rawWhiteBalanceStage = RawWhiteBalanceStage::BeforeWhiteBalance;
     RawOutputMode rawOutputMode = RawOutputMode::ContinueToDemosaic;
 };
-
-struct NeuralDenoiseImage {
-    int width = 0;
-    int height = 0;
-    int channels = 4;
-    std::vector<float> rgba;
-
-    bool IsValid() const {
-        return width > 0 && height > 0 && channels == 4 &&
-            rgba.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
-    }
-};
-
-struct NeuralDenoiseInferenceRequest {
-    NeuralDenoiseModelInfo model;
-    NeuralDenoiseSettings settings;
-    NeuralDenoiseImage input;
-};
-
-struct NeuralDenoiseInferenceResult {
-    bool success = false;
-    bool usedCuda = false;
-    bool usedCpu = false;
-    std::string status;
-    NeuralDenoiseImage output;
-};
-
-const char* ModelTypeToToken(ModelType value);
-ModelType ModelTypeFromToken(const std::string& value);
-const char* ModelTypeLabel(ModelType value);
 
 const char* RuntimePreferenceToToken(RuntimePreference value);
 RuntimePreference RuntimePreferenceFromToken(const std::string& value);

@@ -62,6 +62,9 @@ struct PortDefinition {
     std::string id;
     PortDirection direction = PortDirection::Input;
     LogicalValueType logicalType = LogicalValueType::Invalid;
+    // Empty means the primary logicalType is the only accepted type. A
+    // populated list declares an exact union and must include logicalType.
+    std::vector<LogicalValueType> acceptedLogicalTypes;
     PortArity arity = PortArity::Single;
     std::size_t minimumConnections = 0;
     std::size_t maximumConnections = 1; // Zero means unbounded for variadic ports.
@@ -167,6 +170,7 @@ struct SemanticPolicies {
 
 enum class DescriptorField {
     Channels,
+    PresentImageComponents,
     Color,
     Transfer,
     Reference,

@@ -6,14 +6,65 @@
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <limits>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace ColorLut {
 namespace {
+
+bool TryComputeLut1DValueCount(int size, std::size_t& outCount) {
+    outCount = 0;
+    if (size <= 0) {
+        return false;
+    }
+    const std::size_t edge = static_cast<std::size_t>(size);
+    if (edge > std::numeric_limits<std::size_t>::max() / 3u) {
+        return false;
+    }
+    outCount = edge * 3u;
+    return true;
+}
+
+bool TryComputeLut3DValueCount(int size, std::size_t& outCount) {
+    outCount = 0;
+    if (size <= 0) {
+        return false;
+    }
+    const std::size_t edge = static_cast<std::size_t>(size);
+    if (edge > std::numeric_limits<std::size_t>::max() / edge) {
+        return false;
+    }
+    const std::size_t square = edge * edge;
+    if (square > std::numeric_limits<std::size_t>::max() / edge) {
+        return false;
+    }
+    const std::size_t cube = square * edge;
+    if (cube > std::numeric_limits<std::size_t>::max() / 3u) {
+        return false;
+    }
+    outCount = cube * 3u;
+    return true;
+}
+
+bool TryParseGridIndex(float value, int& outIndex) {
+    if (!std::isfinite(value)) {
+        return false;
+    }
+    const double rounded = std::round(static_cast<double>(value));
+    if (rounded < 0.0 ||
+        rounded > static_cast<double>(std::numeric_limits<int>::max()) ||
+        std::abs(static_cast<double>(value) - rounded) > 0.0001) {
+        return false;
+    }
+    outIndex = static_cast<int>(rounded);
+    return true;
+}
 
 std::string Trim(const std::string& value) {
     std::size_t start = 0;
@@ -129,11 +180,19 @@ void SetUniformDomain(
 }
 
 bool ValidateStage(const Lut1DStage& stage) {
-    if (stage.size <= 0) {
+    std::size_t expected = 0;
+    if (!TryComputeLut1DValueCount(stage.size, expected)) {
         return false;
     }
-    if (stage.values.size() != static_cast<std::size_t>(stage.size) * 3u) {
+    if (stage.values.size() != expected) {
         return false;
+    }
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        if (!IsFiniteFloat(stage.domainMin[channel]) ||
+            !IsFiniteFloat(stage.domainMax[channel]) ||
+            stage.domainMax[channel] <= stage.domainMin[channel]) {
+            return false;
+        }
     }
     for (float value : stage.values) {
         if (!IsFiniteFloat(value)) {
@@ -144,12 +203,19 @@ bool ValidateStage(const Lut1DStage& stage) {
 }
 
 bool ValidateStage(const Lut3DStage& stage) {
-    if (stage.size <= 0) {
+    std::size_t expected = 0;
+    if (!TryComputeLut3DValueCount(stage.size, expected)) {
         return false;
     }
-    const std::size_t edge = static_cast<std::size_t>(stage.size);
-    if (stage.values.size() != edge * edge * edge * 3u) {
+    if (stage.values.size() != expected) {
         return false;
+    }
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        if (!IsFiniteFloat(stage.domainMin[channel]) ||
+            !IsFiniteFloat(stage.domainMax[channel]) ||
+            stage.domainMax[channel] <= stage.domainMin[channel]) {
+            return false;
+        }
     }
     for (float value : stage.values) {
         if (!IsFiniteFloat(value)) {
@@ -227,7 +293,10 @@ bool ParseCube(std::istream& input, LutImportResult& result) {
         }
         if (line.rfind("LUT_1D_SIZE", 0) == 0) {
             const std::string tail = Trim(line.substr(11));
-            if (!ParseIntStrict(tail, size1D) || size1D <= 1) {
+            std::size_t ignored = 0;
+            if (!ParseIntStrict(tail, size1D) ||
+                size1D <= 1 ||
+                !TryComputeLut1DValueCount(size1D, ignored)) {
                 result.message = "Invalid LUT_1D_SIZE in .cube file.";
                 return false;
             }
@@ -235,7 +304,10 @@ bool ParseCube(std::istream& input, LutImportResult& result) {
         }
         if (line.rfind("LUT_3D_SIZE", 0) == 0) {
             const std::string tail = Trim(line.substr(11));
-            if (!ParseIntStrict(tail, size3D) || size3D <= 1) {
+            std::size_t ignored = 0;
+            if (!ParseIntStrict(tail, size3D) ||
+                size3D <= 1 ||
+                !TryComputeLut3DValueCount(size3D, ignored)) {
                 result.message = "Invalid LUT_3D_SIZE in .cube file.";
                 return false;
             }
@@ -247,9 +319,20 @@ bool ParseCube(std::istream& input, LutImportResult& result) {
             result.message = "Invalid LUT sample row in .cube file.";
             return false;
         }
-        if (size1D > 0 && oneDValues.size() < static_cast<std::size_t>(size1D) * 3u) {
+        std::size_t expected1DValues = 0;
+        std::size_t expected3DValues = 0;
+        const bool has1D =
+            TryComputeLut1DValueCount(size1D, expected1DValues);
+        const bool has3D =
+            TryComputeLut3DValueCount(size3D, expected3DValues);
+        if (has1D && oneDValues.size() < expected1DValues) {
             oneDValues.insert(oneDValues.end(), sample.begin(), sample.end());
-        } else if (size3D > 0) {
+        } else if (has3D) {
+            if (threeDValues.size() > expected3DValues - sample.size()) {
+                result.message =
+                    "The .cube file contained more samples than its declared LUT sizes.";
+                return false;
+            }
             threeDValues.insert(threeDValues.end(), sample.begin(), sample.end());
         } else {
             result.message = "Encountered LUT samples before a declared LUT size in .cube file.";
@@ -336,7 +419,10 @@ bool ParseSpi1d(std::istream& input, LutImportResult& result) {
                 continue;
             }
             if (line.rfind("Length", 0) == 0) {
-                if (!ParseIntStrict(Trim(line.substr(6)), length) || length <= 1) {
+                std::size_t ignored = 0;
+                if (!ParseIntStrict(Trim(line.substr(6)), length) ||
+                    length <= 1 ||
+                    !TryComputeLut1DValueCount(length, ignored)) {
                     result.message = "Invalid Length in .spi1d file.";
                     return false;
                 }
@@ -359,6 +445,14 @@ bool ParseSpi1d(std::istream& input, LutImportResult& result) {
         }
         if (components == 0) {
             components = static_cast<int>(values.size());
+        }
+        std::size_t expectedValues = 0;
+        if (length > 0 &&
+            TryComputeLut1DValueCount(length, expectedValues) &&
+            stage.values.size() >= expectedValues) {
+            result.message =
+                "The .spi1d file contained more rows than its declared length.";
+            return false;
         }
         if (components == 1) {
             if (values.size() != 1) {
@@ -429,12 +523,12 @@ bool ParseSpi3d(std::istream& input, LutImportResult& result) {
             continue;
         }
         if (floatValues.size() == 3 && declaredSize <= 0) {
-            const int sx = static_cast<int>(std::round(floatValues[0]));
-            const int sy = static_cast<int>(std::round(floatValues[1]));
-            const int sz = static_cast<int>(std::round(floatValues[2]));
-            if (std::abs(floatValues[0] - static_cast<float>(sx)) < 0.0001f &&
-                std::abs(floatValues[1] - static_cast<float>(sy)) < 0.0001f &&
-                std::abs(floatValues[2] - static_cast<float>(sz)) < 0.0001f &&
+            int sx = 0;
+            int sy = 0;
+            int sz = 0;
+            if (TryParseGridIndex(floatValues[0], sx) &&
+                TryParseGridIndex(floatValues[1], sy) &&
+                TryParseGridIndex(floatValues[2], sz) &&
                 sx > 1 && sx == sy && sx == sz) {
                 declaredSize = sx;
                 continue;
@@ -450,17 +544,32 @@ bool ParseSpi3d(std::istream& input, LutImportResult& result) {
     int maxIndex = -1;
     for (const auto& row : rows) {
         for (int axis = 0; axis < 3; ++axis) {
-            const int index = static_cast<int>(std::round(row[axis]));
-            if (std::abs(row[axis] - static_cast<float>(index)) > 0.0001f || index < 0) {
+            int index = 0;
+            if (!TryParseGridIndex(row[axis], index)) {
                 result.message = "The .spi3d file used non-integer grid coordinates.";
                 return false;
             }
             maxIndex = std::max(maxIndex, index);
         }
     }
-    const int size = declaredSize > 0 ? declaredSize : (maxIndex + 1);
+    const int size = declaredSize > 0
+        ? declaredSize
+        : (maxIndex < std::numeric_limits<int>::max() ? maxIndex + 1 : 0);
     if (size <= 1) {
         result.message = "The .spi3d file did not declare a usable grid size.";
+        return false;
+    }
+
+    std::size_t valueCount = 0;
+    if (!TryComputeLut3DValueCount(size, valueCount)) {
+        result.message =
+            "The .spi3d grid dimensions exceed supported memory limits.";
+        return false;
+    }
+    const std::size_t sampleCount = valueCount / 3u;
+    if (rows.size() != sampleCount) {
+        result.message =
+            "The .spi3d sample count did not match its declared grid.";
         return false;
     }
 
@@ -468,11 +577,19 @@ bool ParseSpi3d(std::istream& input, LutImportResult& result) {
     stage.size = size;
     stage.domainMin = domainMin;
     stage.domainMax = domainMax;
-    stage.values.assign(static_cast<std::size_t>(size) * static_cast<std::size_t>(size) * static_cast<std::size_t>(size) * 3u, 0.0f);
+    stage.values.assign(valueCount, 0.0f);
+    std::vector<unsigned char> populated(sampleCount, 0u);
     for (const auto& row : rows) {
-        const int r = static_cast<int>(std::round(row[0]));
-        const int g = static_cast<int>(std::round(row[1]));
-        const int b = static_cast<int>(std::round(row[2]));
+        int r = 0;
+        int g = 0;
+        int b = 0;
+        if (!TryParseGridIndex(row[0], r) ||
+            !TryParseGridIndex(row[1], g) ||
+            !TryParseGridIndex(row[2], b)) {
+            result.message =
+                "The .spi3d file used non-integer grid coordinates.";
+            return false;
+        }
         if (r >= size || g >= size || b >= size) {
             result.message = "The .spi3d file referenced a sample outside its declared grid.";
             return false;
@@ -480,6 +597,13 @@ bool ParseSpi3d(std::istream& input, LutImportResult& result) {
         const std::size_t offset =
             ((static_cast<std::size_t>(r) * static_cast<std::size_t>(size) + static_cast<std::size_t>(g)) * static_cast<std::size_t>(size) +
                 static_cast<std::size_t>(b)) * 3u;
+        const std::size_t sampleIndex = offset / 3u;
+        if (populated[sampleIndex] != 0u) {
+            result.message =
+                "The .spi3d file contained duplicate grid coordinates.";
+            return false;
+        }
+        populated[sampleIndex] = 1u;
         stage.values[offset + 0] = row[3];
         stage.values[offset + 1] = row[4];
         stage.values[offset + 2] = row[5];
@@ -524,11 +648,17 @@ bool Parse3dl(std::istream& input, LutImportResult& result) {
         samples.push_back({ values[0], values[1], values[2] });
     }
 
-    int size = static_cast<int>(gridLine.size());
+    int size = gridLine.size() <=
+            static_cast<std::size_t>(std::numeric_limits<int>::max())
+        ? static_cast<int>(gridLine.size())
+        : 0;
     if (size <= 1 && !samples.empty()) {
         const double cubeRoot = std::cbrt(static_cast<double>(samples.size()));
         const int rounded = static_cast<int>(std::round(cubeRoot));
-        if (rounded > 1 && static_cast<std::size_t>(rounded * rounded * rounded) == samples.size()) {
+        std::size_t inferredValueCount = 0;
+        if (rounded > 1 &&
+            TryComputeLut3DValueCount(rounded, inferredValueCount) &&
+            inferredValueCount / 3u == samples.size()) {
             size = rounded;
         }
     }
@@ -536,7 +666,9 @@ bool Parse3dl(std::istream& input, LutImportResult& result) {
         result.message = "The .3dl file did not declare a usable LUT grid.";
         return false;
     }
-    if (samples.size() != static_cast<std::size_t>(size) * static_cast<std::size_t>(size) * static_cast<std::size_t>(size)) {
+    std::size_t valueCount = 0;
+    if (!TryComputeLut3DValueCount(size, valueCount) ||
+        samples.size() != valueCount / 3u) {
         result.message = "The .3dl sample count did not match the inferred LUT size.";
         return false;
     }
@@ -581,17 +713,31 @@ LutImportResult ImportLutFile(const std::string& path) {
         return result;
     }
 
-    const std::string extension = FileExtension(path);
-    if (extension == ".cube") {
-        result.success = ParseCube(input, result);
-    } else if (extension == ".spi1d") {
-        result.success = ParseSpi1d(input, result);
-    } else if (extension == ".spi3d") {
-        result.success = ParseSpi3d(input, result);
-    } else if (extension == ".3dl") {
-        result.success = Parse3dl(input, result);
-    } else {
-        result.message = "Unsupported LUT format.";
+    try {
+        const std::string extension = FileExtension(path);
+        if (extension == ".cube") {
+            result.success = ParseCube(input, result);
+        } else if (extension == ".spi1d") {
+            result.success = ParseSpi1d(input, result);
+        } else if (extension == ".spi3d") {
+            result.success = ParseSpi3d(input, result);
+        } else if (extension == ".3dl") {
+            result.success = Parse3dl(input, result);
+        } else {
+            result.message = "Unsupported LUT format.";
+        }
+    } catch (const std::bad_alloc&) {
+        result.success = false;
+        result.message =
+            "The LUT requires more memory than is safely available.";
+    } catch (const std::length_error&) {
+        result.success = false;
+        result.message =
+            "The LUT dimensions exceed supported memory limits.";
+    } catch (const std::exception& error) {
+        result.success = false;
+        result.message =
+            std::string("The LUT could not be parsed safely: ") + error.what();
     }
 
     FinalizeResult(result, path);

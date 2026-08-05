@@ -1,5 +1,12 @@
 # Stack MFSR Implementation Plan
 
+> Superseded UI note (August 2, 2026): the planned top-level MFSR tab in Phase
+> 3 is replaced by RAW Lab's `Multi-Frame` tool and source-set project model.
+> Existing serialized MFSR placeholder nodes remain compatible. All decode,
+> analysis, alignment, fusion, cache, and final-output decisions in later
+> phases remain deferred and must be reconciled with the source-set manifest
+> before implementation.
+
 ## Purpose
 Implement MFSR in small testable phases. Do not attempt the full algorithm in one pass.
 
@@ -41,17 +48,20 @@ Acceptance:
 - Node can be created, saved, loaded, and connected.
 - Invalid input combinations show clear UI errors.
 
-## Phase 3: MFSR tab shell
-Goal: create the dedicated tab as a controller for the active MFSR node.
+## Phase 3: RAW Lab Multi-Frame surface (foundation implemented)
+Goal: use RAW Lab as the controller for the active project source set and its
+managed compact graph binding; do not add a top-level MFSR tab.
 
 Tasks:
-- Add header icon/tab.
-- Empty state creates/selects an MFSR node.
-- When a node is selected, show input list, reference frame, settings panel, preview placeholder, diagnostics placeholder.
+- Use the RAW Lab `Multi-Frame` tool.
+- Empty state creates a source-set project or explicitly upgrades a legacy RAW
+  project copy.
+- Show manual set/frame organization, reference and operation intent, plus an
+  explicit `Processing is not implemented yet` state.
 
 Acceptance:
-- Tab and graph node remain linked.
-- Changing selected node updates the tab state.
+- RAW Lab set and managed graph node remain linked.
+- Changing either selection updates the other without changing project identity.
 
 ## Phase 4: Decode + analysis preview
 Goal: use Stack RAW/raster code to create analysis frame packets and proxies.

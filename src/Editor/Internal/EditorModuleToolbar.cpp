@@ -157,6 +157,36 @@ void EditorModule::LoadResourceTextures() {
         EmbeddedTabIcons::ColorGrade_png_size,
         "ColorGrade"
     );
+    m_RawFolderIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawFolder_png_data,
+        EmbeddedTabIcons::RawFolder_png_size,
+        "RawFolder"
+    );
+    m_RawRefreshIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawRefresh_png_data,
+        EmbeddedTabIcons::RawRefresh_png_size,
+        "RawRefresh"
+    );
+    m_RawClearIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawClear_png_data,
+        EmbeddedTabIcons::RawClear_png_size,
+        "RawClear"
+    );
+    m_RawGridIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawGrid_png_data,
+        EmbeddedTabIcons::RawGrid_png_size,
+        "RawGrid"
+    );
+    m_RawListIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawList_png_data,
+        EmbeddedTabIcons::RawList_png_size,
+        "RawList"
+    );
+    m_RawGalleryIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawGallery_png_data,
+        EmbeddedTabIcons::RawGallery_png_size,
+        "RawGallery"
+    );
     g_ToneCurveIconTexture = LoadEditorResourceTexture(
         EmbeddedTabIcons::ToneCurve_png_data,
         EmbeddedTabIcons::ToneCurve_png_size,
@@ -188,6 +218,35 @@ void EditorModule::LoadResourceTextures() {
         "Denoise"
     );
     m_TexturesLoaded = true;
+}
+
+void EditorModule::UnloadResourceTextures() {
+    const auto deleteTexture = [](unsigned int& texture) {
+        if (texture != 0) {
+            glDeleteTextures(1, &texture);
+            texture = 0;
+        }
+    };
+
+    deleteTexture(m_NodeGraphIconTexture);
+    deleteTexture(m_PresetsIconTexture);
+    deleteTexture(m_ExportIconTexture);
+    deleteTexture(m_SettingsIconTexture);
+    deleteTexture(m_BackgroundRemoverIconTexture);
+    deleteTexture(m_ColorGradeIconTexture);
+    deleteTexture(m_RawFolderIconTexture);
+    deleteTexture(m_RawRefreshIconTexture);
+    deleteTexture(m_RawClearIconTexture);
+    deleteTexture(m_RawGridIconTexture);
+    deleteTexture(m_RawListIconTexture);
+    deleteTexture(m_RawGalleryIconTexture);
+    deleteTexture(g_ToneCurveIconTexture);
+    deleteTexture(g_ViewTransformIconTexture);
+    deleteTexture(g_HdrMergeIconTexture);
+    deleteTexture(g_CustomMaskIconTexture);
+    deleteTexture(g_LutIconTexture);
+    deleteTexture(g_DenoiseIconTexture);
+    m_TexturesLoaded = false;
 }
 
 void EditorModule::RenderFloatingToolbar() {

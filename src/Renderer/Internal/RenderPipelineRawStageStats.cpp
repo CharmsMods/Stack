@@ -94,9 +94,14 @@ Stack::RawAutoStartPoint::RawAutoStartPointStageDiagnostics BuildStageDiagnostic
         diagnostics.display.displaySpread =
             std::max(0.0f, readback.textureStats.p95Luma - readback.textureStats.p05Luma);
         diagnostics.display.readabilityScore = 0.0f;
-        diagnostics.display.metricsAreLinearDisplay = true;
+        const bool encodedDisplay =
+            readback.measurementDomain.find("sRGB") != std::string::npos ||
+            readback.measurementDomain.find("encoded") != std::string::npos;
+        diagnostics.display.metricsAreLinearDisplay = !encodedDisplay;
         diagnostics.display.statusMessage =
-            "Final display readback is display-mapped linear RGB; no encoded display transfer is assumed.";
+            encodedDisplay
+                ? "Final display readback contains explicitly sRGB-encoded display values."
+                : "Final display readback contains display-mapped linear RGB values.";
         return diagnostics;
     }
 
@@ -126,6 +131,7 @@ void RenderPipeline::ClearRawDevelopmentStageStatsReadbacks() {
     m_RawDevelopmentFinalDisplayStats = {};
     m_RawDevelopmentStageStatsReadbacks.clear();
     m_RawDevelopmentStageImageReadbacks.clear();
+    m_RawDevelopmentGraphScopeReadback = {};
 }
 
 Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics

@@ -5,6 +5,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "ThirdParty/stb_image.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <limits>
@@ -275,12 +276,16 @@ bool DecodePngBytesClipboard(const std::vector<unsigned char>& pngBytes, EditorN
         return false;
     }
     payload.pngBytes = pngBytes;
-    payload.pixels.assign(pixels, pixels + (width * height * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, width, height, 4, payload.pixels);
+    stbi_image_free(pixels);
+    if (!copied) {
+        return false;
+    }
     payload.width = width;
     payload.height = height;
     payload.channels = 4;
     payload.originalChannels = channels;
-    stbi_image_free(pixels);
     return true;
 }
 
@@ -288,7 +293,8 @@ std::string BuildGraphText(const nlohmann::json& clipboardPayload) {
     std::ostringstream stream;
     stream << "STACK_NODE_GRAPH 1\n";
     stream << "scope: " << clipboardPayload.value("scope", std::string("selection")) << "\n";
-    stream << "mode: " << clipboardPayload.value("mode", std::string("tree+state")) << "\n\n";
+    stream << "mode: " << clipboardPayload.value("mode", std::string("tree+state")) << "\n";
+    stream << "layout: " << clipboardPayload.value("layout", std::string("preserved")) << "\n\n";
     stream << clipboardPayload.dump(2);
     return stream.str();
 }
@@ -422,6 +428,10 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         tempGraph.RemoveNode(nodeId);
     }
 
+    if (clipboardPayload.value("layout", std::string("preserved")) == "omitted") {
+        tempGraph.AutoLayout();
+    }
+
     const auto& nodes = tempGraph.GetNodes();
     if (nodes.empty()) {
         if (outSummary) *outSummary = "Graph payload did not contain any nodes.";
@@ -500,7 +510,7 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
             nodeCopy.layerIndex = layerIt->second;
         }
 
-        targetGraph.GetNodes().push_back(nodeCopy);
+        targetGraph.EditNodes().push_back(nodeCopy);
         if (nodeCopy.kind == EditorNodeGraph::NodeKind::Compound) {
             targetGraph.ResolveCompoundNode(nodeCopy.id);
         }
@@ -635,7 +645,11 @@ void EditorNodeGraphUI::PasteNodes(EditorModule* editor, bool preferSystemClipbo
     }
 }
 
-void EditorNodeGraphUI::CopyGraphInfo(EditorModule* editor, bool wholeGraph, bool includeState) {
+void EditorNodeGraphUI::CopyGraphInfo(
+    EditorModule* editor,
+    bool wholeGraph,
+    bool includeState,
+    bool includeLayout) {
     if (!editor) {
         return;
     }
@@ -658,7 +672,13 @@ void EditorNodeGraphUI::CopyGraphInfo(EditorModule* editor, bool wholeGraph, boo
         return;
     }
 
-    nlohmann::json payload = EditorNodeGraphSelectionExport::BuildExport(editor, nodeIds, includeState, wholeGraph).clipboardPayload;
+    const EditorNodeGraphSelectionExport::LayoutMode layoutMode =
+        includeLayout
+            ? EditorNodeGraphSelectionExport::LayoutMode::Preserve
+            : EditorNodeGraphSelectionExport::LayoutMode::Omit;
+    nlohmann::json payload =
+        EditorNodeGraphSelectionExport::BuildExport(
+            editor, nodeIds, includeState, wholeGraph, layoutMode).clipboardPayload;
     const std::string text = BuildGraphText(payload);
     ImGui::SetClipboardText(text.c_str());
     m_Clipboard = payload;
@@ -666,9 +686,11 @@ void EditorNodeGraphUI::CopyGraphInfo(EditorModule* editor, bool wholeGraph, boo
     PostNodeGraphClipboardNotification(
         editor,
         UiNotificationSeverity::Success,
-        wholeGraph
-            ? (includeState ? "Whole graph copied with state." : "Whole graph copied as tree only.")
-            : (includeState ? "Selected graph copied with state." : "Selected graph copied as tree only."),
+        !includeLayout
+            ? "Whole graph copied in node/link order without layout."
+            : (wholeGraph
+                ? (includeState ? "Whole graph copied with state." : "Whole graph copied as tree only.")
+                : (includeState ? "Selected graph copied with state." : "Selected graph copied as tree only.")),
         "editor-node-graph-clipboard");
 }
 

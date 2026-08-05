@@ -13,6 +13,8 @@
 #include "Editor/GraphCapture.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GLStateGuards.h"
+#include "Utils/PixelBufferUtils.h"
 #include "Renderer/GLLoader.h"
 #include "Utils/ImageClipboard.h"
 
@@ -27,6 +29,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -324,13 +328,28 @@ void AppShell::ProcessGraphCaptureRequest() {
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    const std::size_t rgbaBytes =
-        static_cast<std::size_t>(outputWidth) * static_cast<std::size_t>(outputHeight) * 4u;
-    std::vector<unsigned char> pixels(rgbaBytes);
+    std::size_t rgbaBytes = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            outputWidth, outputHeight, 4, rgbaBytes)) {
+        failAfterContext("The requested graph capture dimensions exceed CPU buffer limits.");
+        return;
+    }
+    std::vector<unsigned char> pixels;
+    try {
+        pixels.resize(rgbaBytes);
+    } catch (const std::bad_alloc&) {
+        failAfterContext("Stack could not allocate memory for the graph capture.");
+        return;
+    } catch (const std::length_error&) {
+        failAfterContext("The requested graph capture dimensions exceed CPU buffer limits.");
+        return;
+    }
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
     while (glGetError() != GL_NO_ERROR) {}
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, outputWidth, outputHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     const GLenum readbackError = glGetError();
+    savedPackState.Restore();
     const bool transparent = request.settings.background == GraphCapture::Background::Transparent;
     if (readbackError != GL_NO_ERROR ||
         !GraphCapture::NormalizeReadbackRgba(pixels, outputWidth, outputHeight, transparent)) {

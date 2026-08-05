@@ -1,6 +1,9 @@
 #include "Editor/EditorModule.h"
+#include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <vector>
@@ -75,6 +78,227 @@ bool CopyManagedLayerStateToRecipe(
 }
 
 } // namespace
+
+bool EditorModule::MigrateLoadedManagedRawProject(
+    LoadedProjectData& projectData,
+    std::string* outError) {
+    StackBinaryFormat::ProjectDocument metadataDocument;
+    metadataDocument.rawWorkspaceData = projectData.rawWorkspaceData;
+    Stack::RawWorkspace::ProjectInfo projectInfo;
+    Stack::RawRecipe::RawDevelopmentRecipe baseRecipe;
+    if (!Stack::RawWorkspace::ReadProjectInfoFromDocument(
+            metadataDocument,
+            projectInfo,
+            &baseRecipe) ||
+        projectInfo.mode != Stack::RawWorkspace::RawProjectMode::ManagedDecomposed) {
+        return true;
+    }
+
+    const Stack::RawWorkspace::ManagedRawSection section =
+        Stack::RawWorkspace::DeserializeManagedRawSection(
+            projectData.rawWorkspaceData.value(
+                "managedRawSection",
+                nlohmann::json::object()));
+    const Stack::RawWorkspace::ManagedRawValidationResult validation =
+        Stack::RawWorkspace::ValidateManagedRawSection(
+            m_NodeGraph,
+            section,
+            baseRecipe);
+    if (!validation.valid) {
+        if (outError) {
+            *outError = validation.message.empty()
+                ? "The legacy managed RAW graph cannot be converted exactly. The original project was not changed."
+                : validation.message + " The original project was not changed.";
+        }
+        return false;
+    }
+
+    Stack::RawRecipe::RawDevelopmentRecipe compactRecipe = validation.recipe;
+    if (!CopyManagedLayerStateToRecipe(
+            m_NodeGraph,
+            m_Layers,
+            section,
+            compactRecipe)) {
+        if (outError) {
+            *outError = "The legacy RAW tone/view layers cannot be converted exactly. The original project was not changed.";
+        }
+        return false;
+    }
+
+    const EditorNodeGraph::Node* sourceNode =
+        m_NodeGraph.FindNode(section.rawSourceNodeId);
+    const EditorNodeGraph::Node* toneNode =
+        m_NodeGraph.FindNode(section.toneCurveNodeId);
+    const EditorNodeGraph::Node* viewNode =
+        m_NodeGraph.FindNode(section.viewTransformNodeId);
+    if (!sourceNode || !toneNode || !viewNode ||
+        toneNode->kind != EditorNodeGraph::NodeKind::Layer ||
+        viewNode->kind != EditorNodeGraph::NodeKind::Layer) {
+        if (outError) {
+            *outError = "The legacy managed RAW section is incomplete. The original project was not changed.";
+        }
+        return false;
+    }
+
+    EditorNodeGraph::Graph compactGraph = m_NodeGraph;
+    std::vector<std::shared_ptr<LayerBase>> compactLayers = m_Layers;
+    std::vector<EditorNodeGraph::Link> downstreamLinks;
+    for (const EditorNodeGraph::Link& link : compactGraph.GetLinks()) {
+        if (link.fromNodeId == section.viewTransformNodeId) {
+            downstreamLinks.push_back(link);
+        }
+    }
+
+    std::vector<int> removedLayerIndices{
+        toneNode->layerIndex,
+        viewNode->layerIndex
+    };
+    std::sort(removedLayerIndices.begin(), removedLayerIndices.end(), std::greater<int>());
+    removedLayerIndices.erase(
+        std::unique(removedLayerIndices.begin(), removedLayerIndices.end()),
+        removedLayerIndices.end());
+    for (int layerIndex : removedLayerIndices) {
+        if (layerIndex < 0 ||
+            layerIndex >= static_cast<int>(compactLayers.size())) {
+            if (outError) {
+                *outError = "The legacy managed RAW layer mapping is invalid. The original project was not changed.";
+            }
+            return false;
+        }
+        compactLayers.erase(compactLayers.begin() + layerIndex);
+        compactGraph.RemoveLayerNode(layerIndex);
+    }
+    compactGraph.RemoveNode(section.rawDecodeNodeId);
+    compactGraph.RemoveNode(section.rawSourceNodeId);
+    if (section.groupId > 0) {
+        compactGraph.RemoveGroup(section.groupId);
+    }
+
+    EditorNodeGraph::RawDevelopmentPayload compactPayload;
+    compactPayload.recipe = compactRecipe;
+    compactPayload.projectStatus = "Edited";
+    compactPayload.edited = true;
+    compactPayload.autosaved = true;
+    EditorNodeGraph::Node* compactNode = compactGraph.AddRawDevelopmentNode(
+        std::move(compactPayload),
+        sourceNode->position);
+    if (!compactNode) {
+        if (outError) {
+            *outError = "The compact RAW Development node could not be created. The original project was not changed.";
+        }
+        return false;
+    }
+    const int compactNodeId = compactNode->id;
+    for (const EditorNodeGraph::Link& link : downstreamLinks) {
+        std::string connectionError;
+        if (!compactGraph.TryConnectSockets(
+                compactNodeId,
+                EditorNodeGraph::kImageOutputSocketId,
+                link.toNodeId,
+                link.toSocketId,
+                &connectionError)) {
+            if (outError) {
+                *outError = connectionError.empty()
+                    ? "The compact RAW node could not be reconnected without changing the graph. The original project was not changed."
+                    : connectionError + " The original project was not changed.";
+            }
+            return false;
+        }
+    }
+    compactGraph.SelectNode(compactNodeId, false);
+
+    nlohmann::json layerArray = nlohmann::json::array();
+    for (const std::shared_ptr<LayerBase>& layer : compactLayers) {
+        if (!layer) {
+            if (outError) {
+                *outError = "The legacy project contains a missing layer. The original project was not changed.";
+            }
+            return false;
+        }
+        layerArray.push_back(layer->Serialize());
+    }
+    nlohmann::json compactPipeline =
+        EditorNodeGraph::SerializeGraphPayload(layerArray, compactGraph);
+    if (projectData.pipelineData.is_object()) {
+        for (const char* key : { "editorComposite", "editorTimeline" }) {
+            if (projectData.pipelineData.contains(key)) {
+                compactPipeline[key] = projectData.pipelineData[key];
+            }
+        }
+    }
+
+    const std::filesystem::path originalPath =
+        std::filesystem::path(projectData.projectFileName).lexically_normal();
+    const std::filesystem::path migrationDirectory =
+        originalPath.parent_path() / "Stack Migrated Projects";
+    std::error_code filesystemError;
+    std::filesystem::create_directories(migrationDirectory, filesystemError);
+    if (filesystemError) {
+        if (outError) {
+            *outError = "Stack could not create the sibling migration folder. The original project was not changed.";
+        }
+        return false;
+    }
+    const std::string baseStem = originalPath.stem().string() + " (Compact)";
+    std::filesystem::path migratedPath = migrationDirectory / (baseStem + ".stack");
+    for (int suffix = 2; std::filesystem::exists(migratedPath) && suffix < 10000; ++suffix) {
+        migratedPath = migrationDirectory /
+            (baseStem + " " + std::to_string(suffix) + ".stack");
+    }
+
+    StackBinaryFormat::ProjectDocument migratedDocument;
+    if (!StackBinaryFormat::ReadProjectFile(originalPath, migratedDocument)) {
+        if (outError) {
+            *outError = "The original legacy RAW project could not be reread for migration. It was not changed.";
+        }
+        return false;
+    }
+    migratedDocument.metadata.projectKind = StackBinaryFormat::kRawProjectKind;
+    migratedDocument.pipelineData = compactPipeline;
+    migratedDocument.nodeBrowserThumbnailEntries.clear();
+    migratedDocument.rawWorkspaceData = projectData.rawWorkspaceData;
+    migratedDocument.rawWorkspaceData["schema"] = "stack.rawWorkspace.project";
+    migratedDocument.rawWorkspaceData["rawWorkspaceSchemaVersion"] = 2;
+    migratedDocument.rawWorkspaceData["rawWorkspaceMode"] = "recipe-backed";
+    migratedDocument.rawWorkspaceData["rawRecipe"] =
+        Stack::RawRecipe::SerializeRecipe(compactRecipe);
+    migratedDocument.rawWorkspaceData["managedRawSection"] = nullptr;
+    migratedDocument.rawWorkspaceData["customRawSection"] = nullptr;
+    migratedDocument.rawWorkspaceData["readOnlyReason"] = nullptr;
+    migratedDocument.rawWorkspaceData.erase("downstreamGraph");
+
+    const std::filesystem::path temporaryPath = migratedPath.string() + ".tmp";
+    if (!StackBinaryFormat::WriteProjectFile(temporaryPath, migratedDocument)) {
+        if (outError) {
+            *outError = "The compact migrated copy could not be written. The original project was not changed.";
+        }
+        return false;
+    }
+    std::filesystem::rename(temporaryPath, migratedPath, filesystemError);
+    if (filesystemError) {
+        std::filesystem::remove(temporaryPath, filesystemError);
+        if (outError) {
+            *outError = "The compact migrated copy could not be finalized. The original project was not changed.";
+        }
+        return false;
+    }
+
+    m_NodeGraph = std::move(compactGraph);
+    m_Layers = std::move(compactLayers);
+    ResetNodeBrowserThumbnailState();
+    RefreshGraphLayerMetadata();
+    ApplyGraphLayerOrder();
+    projectData.pipelineData = std::move(compactPipeline);
+    projectData.rawWorkspaceData = std::move(migratedDocument.rawWorkspaceData);
+    projectData.projectKind = StackBinaryFormat::kRawProjectKind;
+    projectData.projectFileName = migratedPath.string();
+    projectData.nodeBrowserThumbnailEntries.clear();
+    QueueUiNotification(
+        UiNotificationSeverity::Success,
+        "Legacy RAW project migrated to a compact copy. The original project was left unchanged.",
+        "raw-workspace-managed-migrated");
+    return true;
+}
 
 bool EditorModule::ApplyActiveRawWorkspaceModeDataToDocument(StackBinaryFormat::ProjectDocument& document) const {
     if (!document.rawWorkspaceData.is_object()) {

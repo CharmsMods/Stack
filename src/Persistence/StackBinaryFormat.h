@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "Persistence/ProjectStore.h"
 #include "ThirdParty/json.hpp"
 
 namespace StackBinaryFormat {
@@ -11,6 +12,7 @@ namespace StackBinaryFormat {
 using json = nlohmann::json;
 
 inline constexpr const char* kEditorProjectKind = "editor";
+inline constexpr const char* kRawProjectKind = "raw";
 inline constexpr const char* kRenderProjectKind = "render";
 inline constexpr const char* kCompositeProjectKind = "composite";
 
@@ -83,6 +85,10 @@ struct ProjectDocument {
     json pipelineData = json();
     std::vector<NodeBrowserThumbnailEntry> nodeBrowserThumbnailEntries;
     json rawWorkspaceData = json();
+    // RAW Workspace v3 keeps exact originals behind a lazy store handle. The
+    // legacy sourceImageBytes member remains for v1/v2 compatibility only.
+    Stack::Project::ProjectStoreHandle projectStore;
+    std::shared_ptr<Stack::Project::RawProjectSnapshot> rawProjectSnapshot;
 };
 
 struct BundledProjectDocument {

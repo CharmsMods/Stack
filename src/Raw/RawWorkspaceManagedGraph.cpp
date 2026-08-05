@@ -32,22 +32,11 @@ bool IsSupportedRotation(int degrees) {
     return normalized == 0 || normalized == 90 || normalized == 180 || normalized == 270;
 }
 
-bool RawMosaicDenoiseMatchesDefault(const Raw::RawMosaicDenoiseSettings& settings) {
-    const Raw::RawMosaicDenoiseSettings defaults;
-    return settings.enabled == defaults.enabled &&
-        settings.hotPixelSuppression == defaults.hotPixelSuppression &&
-        AlmostEqual(settings.hotPixelThreshold, defaults.hotPixelThreshold) &&
-        AlmostEqual(settings.lumaStrength, defaults.lumaStrength) &&
-        AlmostEqual(settings.chromaStrength, defaults.chromaStrength) &&
-        settings.radius == defaults.radius &&
-        AlmostEqual(settings.edgeProtection, defaults.edgeProtection) &&
-        settings.iterations == defaults.iterations;
-}
-
 bool RawDecodeSettingsUseOnlyManagedFields(
     const Raw::RawDevelopSettings& settings,
     std::string* outReason) {
     const Raw::RawDevelopSettings defaults;
+    const bool truthful = settings.processingVersion == Raw::RawProcessingVersion::TruthfulV1;
     auto fail = [&](const std::string& reason) {
         if (outReason) {
             *outReason = reason;
@@ -72,27 +61,26 @@ bool RawDecodeSettingsUseOnlyManagedFields(
         !AlmostEqual(settings.highlightThreshold, defaults.highlightThreshold)) {
         return fail("RAW Decode highlight reconstruction settings are outside the managed RAW recipe mapping.");
     }
-    if (settings.demosaicMethod != defaults.demosaicMethod ||
-        settings.cameraTransformEnabled != defaults.cameraTransformEnabled ||
+    if (settings.cameraTransformEnabled != defaults.cameraTransformEnabled ||
         settings.cameraTransformSource != defaults.cameraTransformSource ||
         settings.debugBypassCameraTransform != defaults.debugBypassCameraTransform ||
         settings.debugTransposeCameraMatrix != defaults.debugTransposeCameraMatrix ||
         settings.debugView != defaults.debugView) {
         return fail("RAW Decode camera transform/debug settings are outside the managed RAW recipe mapping.");
     }
-    if (settings.rotateToFitFrame != defaults.rotateToFitFrame ||
-        settings.flipHorizontally != defaults.flipHorizontally ||
-        settings.flipVertically != defaults.flipVertically) {
-        return fail("RAW Decode orientation controls beyond recipe rotation are outside the managed RAW recipe mapping.");
+    if (settings.rotateToFitFrame != defaults.rotateToFitFrame) {
+        return fail("RAW Decode rotate-to-fit is outside the managed RAW recipe mapping.");
     }
-    if (!AlmostEqual(settings.falseColorSuppression, defaults.falseColorSuppression) ||
-        !AlmostEqual(settings.defringeStrength, defaults.defringeStrength) ||
-        !AlmostEqual(settings.highlightEdgeCleanup, defaults.highlightEdgeCleanup) ||
+    const float expectedFalseColor = truthful ? 0.0f : defaults.falseColorSuppression;
+    const float expectedDefringe = truthful ? 0.0f : defaults.defringeStrength;
+    const float expectedHighlightCleanup = truthful ? 0.0f : defaults.highlightEdgeCleanup;
+    if (!AlmostEqual(settings.falseColorSuppression, expectedFalseColor) ||
+        !AlmostEqual(settings.defringeStrength, expectedDefringe) ||
+        !AlmostEqual(settings.highlightEdgeCleanup, expectedHighlightCleanup) ||
         settings.chromaRadius != defaults.chromaRadius ||
         !AlmostEqual(settings.preserveRealColor, defaults.preserveRealColor) ||
         !AlmostEqual(settings.lateralRedCyan, defaults.lateralRedCyan) ||
-        !AlmostEqual(settings.lateralBlueYellow, defaults.lateralBlueYellow) ||
-        !RawMosaicDenoiseMatchesDefault(settings.mosaicDenoise)) {
+        !AlmostEqual(settings.lateralBlueYellow, defaults.lateralBlueYellow)) {
         return fail("RAW Decode detail/color cleanup settings are outside the managed RAW recipe mapping.");
     }
     if (outReason) {
@@ -231,8 +219,16 @@ Stack::RawRecipe::RawDevelopmentRecipe RecipeFromDecodeSettings(
     const Stack::RawRecipe::RawDevelopmentRecipe& baseRecipe,
     const Raw::RawDevelopSettings& settings) {
     Stack::RawRecipe::RawDevelopmentRecipe recipe = baseRecipe;
+    recipe.technical.processingVersion = settings.processingVersion;
+    recipe.technical.demosaicMethod = settings.demosaicMethod;
+    recipe.technical.workingSpace = settings.workingSpace;
+    recipe.technical.applyBaselineExposure = settings.applyBaselineExposure;
+    recipe.technical.encodeSrgbOutput = settings.encodeSrgbOutput;
+    recipe.technical.mosaicDenoise = settings.mosaicDenoise;
     recipe.preToneExposureEv = settings.exposureStops;
     recipe.cropRotation.rotationDegrees = ((settings.rotationDegrees % 360) + 360) % 360;
+    recipe.cropRotation.flipHorizontally = settings.flipHorizontally;
+    recipe.cropRotation.flipVertically = settings.flipVertically;
 
     recipe.whiteBalance.hasTemperatureKelvin = false;
     recipe.whiteBalance.temperatureKelvin = 0.0f;
@@ -304,6 +300,9 @@ bool IsRecipeRepresentableAsManagedGraph(
     }
     if (Stack::RawRecipe::IsLocalRangeEnabled(recipe)) {
         return fail("Local range cannot round-trip through the managed graph contract yet.");
+    }
+    if (recipe.rgbDenoise.enabled) {
+        return fail("Post-demosaic RGB denoise cannot round-trip through the managed graph contract yet.");
     }
     if (recipe.cropRotation.cropEnabled) {
         return fail("Crop edits cannot be represented by the managed graph contract yet.");
@@ -387,7 +386,10 @@ nlohmann::json SerializeManagedRawSection(const ManagedRawSection& section) {
             { "rawSourceRef", "rawSource.metadata" },
             { "preToneExposureEv", "rawDecode.settings.exposureStops" },
             { "whiteBalance", "rawDecode.settings.whiteBalance" },
+            { "technical.mosaicDenoise", "rawDecode.settings.mosaicDenoise" },
             { "cropRotation.rotationDegrees", "rawDecode.settings.rotationDegrees" },
+            { "cropRotation.flipHorizontally", "rawDecode.settings.flipHorizontally" },
+            { "cropRotation.flipVertically", "rawDecode.settings.flipVertically" },
             { "finishTone", "toneCurve.layer" },
             { "viewTransform", "viewTransform.layer" }
         } },

@@ -12,6 +12,7 @@ enum class SemanticImageNodeKind {
     Identity,
     Geometry,
     TechnicalOperation,
+    DeclaredColorOutput,
     StraightSourceOver,
     PremultipliedSourceOver,
     DirectOutput
@@ -24,6 +25,10 @@ struct SemanticImageNode {
     TechnicalImageOperation technicalOperation = TechnicalImageOperation::Exposure;
     float exposureValue = 0.0f;
     SpatialDescriptor geometryOutputSpatial;
+    ColorIdentity declaredColor;
+    TransferDescriptor declaredTransfer;
+    ReferenceState declaredReference = ReferenceState::Display;
+    std::string declaredOperationIdentity;
 };
 
 struct SemanticImageEdge {

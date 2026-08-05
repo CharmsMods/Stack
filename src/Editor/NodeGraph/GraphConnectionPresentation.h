@@ -19,6 +19,12 @@ struct RotatedBounds {
     ImVec2 maximum {};
 };
 
+inline constexpr float kConnectionLabelRevealMinimumAlpha = 0.001f;
+
+inline bool ConnectionLabelsAreVisible(bool revealKeyDown, float revealAlpha) {
+    return revealKeyDown || revealAlpha > kConnectionLabelRevealMinimumAlpha;
+}
+
 inline float ConnectionTextSize(
     float baseSize,
     float zoom,

@@ -1,0 +1,118 @@
+Bottom line
+Stack’s intended processing order is broadly sound and is closer to darktable’s modern scene-referred workflow than it is to Adobe Camera Raw’s user-facing workflow.
+But Stack is not yet a trustworthy “transparent RAW importer” in practice. The biggest reasons are:
+The active demosaic is only bilinear.
+The interactive preview downsamples the sensor mosaic using a shortcut that can lose or alias fine detail before demosaicing.
+Temperature and Tint appear disconnected from the multipliers the renderer actually uses.
+Highlight reconstruction happens after demosaicing.
+The UI presents the display transform too early and gives users several overlapping ways to change brightness and contrast.
+Some artifact-suppression processing is enabled by default despite the goal of a neutral starting point.
+So my honest assessment is:
+Stack’s pipeline diagram is respectable. Its current RAW decoding quality and control design are not yet at the level implied by that diagram.
+
+What Adobe recommends
+Adobe says adjustments technically can be made in any order, but recommends a common top-down working sequence:
+Evaluate the image, histogram, clipping, and starting profile.
+Establish white balance.
+Set global tonal scale using Exposure, Highlights, Shadows, Whites, and Blacks.
+Refine contrast with the tone curve.
+Adjust color.
+Apply local corrections.
+Handle detail, noise, lens corrections, soft proofing, and output.
+Adobe’s more detailed tone procedure recommends setting Exposure for the midtones first, then Highlights/Shadows/Whites/Blacks, followed by Contrast and a final Exposure check. See Adobe’s Develop workflow, tone-control procedure, and Camera Raw color and tonal controls.
+Adobe is not actually presenting “sensor truth” by default. Adobe Color is normally the starting profile and deliberately adds a color and contrast interpretation; Adobe Neutral is the more subdued option. The profile is treated as the rendering foundation. Adobe’s profile documentation is explicit about this.
+Adobe’s DNG specification gives a more technical foundation:
+Linearize the encoded sensor values.
+Subtract black.
+Rescale using the sensor white level.
+Preserve useful below-black information where practical.
+Apply camera calibration based partly on the chosen white balance.
+Demosaic mosaic RAW data before later RGB operations.
+Adobe also defines BaselineExposure, which shifts where the exposure control’s zero point should sit for a particular camera model. DNG Specification 1.7.1.
+Adobe does not publicly document the ordinary Camera Raw demosaic algorithm in enough detail to reproduce it. Its optional Raw Details path promises improved edge rendering, color detail, and fewer artifacts, but that does not tell us what the normal demosaic does. Adobe Raw Details documentation.
+What darktable recommends
+Darktable is more directly comparable to Stack because it explicitly separates scene-referred editing from the final display transform:
+Perform technical sensor operations in a fixed pixel-pipeline order.
+Establish technical white balance and input color interpretation.
+Use Exposure to place the subject and midtones.
+Use scene-referred tools such as Tone Equalizer for tonal-range corrections.
+Perform most creative and corrective work upstream.
+Use exactly one late view transform—normally sigmoid or filmic RGB—to compress scene dynamic range into the display range.
+Darktable emphasizes that module processing order is fixed for technical reasons. For example, highlight reconstruction belongs before demosaicing, and demosaicing belongs before the input color profile. Darktable pixelpipe documentation.
+Its Exposure module is a scene-linear global brightness adjustment. Its Tone Equalizer uses exposure-value zones and a guided mask to alter tonal regions while protecting local structure. That is conceptually very close to Stack’s Local Range graph.
+Darktable’s sigmoid and filmic RGB documentation makes an important point: set the important midtones with Exposure and do most work upstream. The view transform should not become a second general-purpose exposure editor.
+How Stack compares
+Stack’s actual render order is:
+RAW normalization
+→ optional mosaic cleanup
+→ demosaic
+→ highlight reconstruction
+→ white balance
+→ camera-to-working-space transform
+→ global RAW Exposure
+→ Local Range
+→ Finish Tone
+→ View Transform
+That structure is visible in [RawGpuPipeline.cpp (line 241)](/D:/Program Development/Stack/src/Raw/RawGpuPipeline.cpp:241) and [RenderPipelineGraphRawDevelopmentNode.cpp (line 429)](/D:/Program Development/Stack/src/Renderer/Internal/RenderPipelineGraphRawDevelopmentNode.cpp:429).
+Area	Assessment
+Global RAW Exposure before local/tone/display work	Correct; aligned with darktable
+Local Range before the view transform	Correct and promising
+Finish Tone before the view transform	Defensible, but its responsibility needs narrowing
+One late View Transform	Correct architectural idea
+View Transform shown early in “Base Light”	Misleading UI organization
+Highlight reconstruction after demosaic	Technically questionable; opposite darktable’s order
+Bilinear-only active demosaic	Not competitive for high-quality RAW editing
+Temperature/Tint wiring	Apparently incomplete
+Neutral starting state	Not fully neutral or sufficiently disclosed
+
+What Stack’s controls should mean
+The controls are currently too easy to confuse because several can produce superficially similar changes.
+RAW Exposure should be the main photographic brightness control. It multiplies scene-linear values before Local Range, Finish Tone, and display rendering.
+
+Local Range should be the tonal-zone correction tool: lift dark regions, restrain bright regions, or perform guided dodge-and-burn in exposure-value space. Stack’s implementation calculates scene luminance in EV, consults the graph for an EV correction, and multiplies the RGB value accordingly. That is a good semantic model. See [RenderPipelinePrograms.cpp (line 1610)](/D:/Program Development/Stack/src/Renderer/Internal/RenderPipelinePrograms.cpp:1610).
+
+Finish Tone should be optional creative shaping of midtone relationships. It should not also be responsible for fitting the image onto the display.
+
+View Transform is the required scene-to-display conversion. It takes scene values that may extend well above display white and compresses them into the screen’s range. Stack’s black/white EV bounds, middle gray, toe, shoulder, contrast, saturation, and gamut controls perform that job in [ToneLayerRendering.cpp (line 313)](/D:/Program Development/Stack/src/Editor/Layers/ToneLayerRendering.cpp:313).
+
+Display Exposure is especially problematic. It is another brightness multiplier inside the View Transform, so users can brighten an image with RAW Exposure, Display Exposure, Finish Tone, View contrast, or combinations of all four. That is too much overlapping authority.
+
+The old Display Fit automation was effectively estimating the View Transform’s black point, white point, middle gray, and shoulder from image percentiles. It was not changing the sensor exposure. That explains why it felt mysterious: the UI exposed an output-rendering mechanism as though it were part of ordinary photographic correction.
+My recommendation is to provide a stable default View Transform and move its detailed parameters into an advanced “Display Rendering” window. Most photographs should not require manually tuning its output parameters.
+The demosaicing finding
+You were close, but the exact term is important: Stack’s active demosaic is bilinear, not bilateral.
+The public enum exposes only Bilinear, and the renderer hard-wires that choice. There is a more edge-directed qualityDemosaic shader present internally, but the active path does not select it. The current UI accurately admits that only bilinear is available in [EditorModuleDevelopManualRawControls.cpp (line 161)](/D:/Program Development/Stack/src/Editor/Internal/EditorModuleDevelopManualRawControls.cpp:161).
+There are bilateral-like, range-weighted operations elsewhere:
+Optional same-CFA mosaic noise cleanup.
+The edge-aware guide used by Local Range.
+Those are probably the source of the terminology confusion, but they are not the demosaic itself.
+Bilinear demosaicing is acceptable for a fast thumbnail or emergency fallback. It is not a good final-quality default. It tends to produce weaker fine detail, false color, zippering along edges, and moiré. Darktable defaults to RCD and offers AMaZE, LMMSE, VNG4, and dual-demosaic strategies for different image content and noise levels. Darktable’s demosaic documentation explains those tradeoffs.
+There is another significant problem: Stack’s preview proxy downsamples the Bayer mosaic before demosaicing by selecting a nearby sensor sample with matching CFA parity. See [RawPreviewProxy.cpp (line 117)](/D:/Program Development/Stack/src/Renderer/RawPreviewProxy.cpp:117). That is fast, but it is not a proper filtered reduction. It can alias or discard fine structure, so the image being judged interactively may differ materially from a full-resolution interpretation.
+Other critical gaps
+White balance needs immediate attention. The UI changes Temperature and Tint fields, but the render conversion uses RGB multipliers. I did not find code translating the current Temperature/Tint values into those multipliers. On the active path, those sliders therefore appear to be disconnected or cosmetic. The gray-point picker is also still marked pending. See [RawDevelopmentRecipe.cpp (line 880)](/D:/Program Development/Stack/src/Raw/RawDevelopmentRecipe.cpp:880) and [EditorModuleRawWorkspace.cpp (line 3938)](/D:/Program Development/Stack/src/Editor/Internal/EditorModuleRawWorkspace.cpp:3938).
+The UI’s order is also wrong even though the render order is mostly right. “Base Light” currently presents RAW Exposure and the full View Transform before White Balance, Local Range, and Finish Tone. That teaches the user to manipulate the final display mapping before establishing the image. See [EditorModuleRawWorkspace.cpp (line 3771)](/D:/Program Development/Stack/src/Editor/Internal/EditorModuleRawWorkspace.cpp:3771).
+Finally, Stack defaults some false-color suppression, defringing, and highlight-edge cleanup above zero. Those may be useful, but they are hidden interpretation. A truthful mode should either start them at zero or explicitly report them as active technical corrections.
+Recommended manual Stack workflow
+I would build the new interface around this sequence:
+Decode
+Sensor normalization, bad-pixel handling, highlight reconstruction, demosaic, lens metadata, and preview-quality selection. Mostly automatic infrastructure, but completely inspectable.
+
+Balance
+White balance, camera profile, color calibration, and channel clipping.
+
+Expose
+One primary global RAW Exposure control, histogram, clipping indicators, and headroom readout.
+
+Relight
+Local Range graph and spatial masks.
+
+Shape
+Optional Finish Tone curve with a narrowly defined creative purpose.
+
+Render
+One View Transform selected as a stable output preset. Advanced toe, shoulder, bounds, gamut, and display exposure remain tucked away.
+
+Finish
+Color grading, capture sharpening, noise reduction, crop, output sharpening, proofing, and export.
+
+The first engineering priorities should be the demosaic/full-resolution preview path and functional white balance. Rearranging windows around the current bilinear preview would improve usability, but it would not yet deliver the “transparent and truthful” foundation you are aiming for.

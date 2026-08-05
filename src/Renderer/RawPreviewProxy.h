@@ -16,6 +16,7 @@ struct Summary {
     std::size_t rawSampleCount = 0;
     std::size_t linearUInt16SampleCount = 0;
     std::size_t linearFloatSampleCount = 0;
+    std::size_t normalizedMosaicSampleCount = 0;
     int dngGainMapCount = 0;
 };
 

@@ -26,7 +26,15 @@ bool RawLoader::IsRawPath(const std::string& path) {
 #else
     try {
         const std::string ext = ToLower(std::filesystem::path(path).extension().string());
-        return ext == ".arw" || ext == ".srf" || ext == ".sr2" || ext == ".raw" || ext == ".dng";
+        static const char* kRawExtensions[] = {
+            ".3fr", ".arw", ".cr2", ".cr3", ".dng", ".fff", ".iiq",
+            ".nef", ".nrw", ".orf", ".pef", ".raf", ".raw", ".rw2",
+            ".rwl", ".sr2", ".srf"
+        };
+        return std::find(
+            std::begin(kRawExtensions),
+            std::end(kRawExtensions),
+            ext) != std::end(kRawExtensions);
     } catch (...) {
         return false;
     }
@@ -34,13 +42,18 @@ bool RawLoader::IsRawPath(const std::string& path) {
 }
 
 bool RawLoader::LoadMetadata(const std::string& path, RawMetadata& outMetadata) {
-    RawImageData data;
-    if (!LoadFile(path, data)) {
-        outMetadata = data.metadata;
+    outMetadata = {};
+    outMetadata.sourcePath = path;
+    if (path.empty()) {
+        outMetadata.error = "No RAW source path.";
         return false;
     }
-    outMetadata = data.metadata;
-    return outMetadata.error.empty();
+    const LibRawRuntimeStatus& runtimeStatus = GetLibRawRuntimeStatus();
+    if (!runtimeStatus.runtimeAvailable) {
+        outMetadata.error = runtimeStatus.message;
+        return false;
+    }
+    return ProbeMetadataWithLibRaw(path, outMetadata);
 }
 
 bool RawLoader::LoadFile(

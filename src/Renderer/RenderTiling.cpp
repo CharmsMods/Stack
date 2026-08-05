@@ -41,6 +41,90 @@ struct Locality {
     std::string reason;
 };
 
+using RenderNodeIndex =
+    std::unordered_map<int, const RenderGraphNode*>;
+using IncomingLinkIndex =
+    std::unordered_map<int, std::vector<const RenderGraphLink*>>;
+
+struct ReachableGraphOrder {
+    bool valid = false;
+    std::vector<int> preorder;
+    std::vector<int> postorder;
+    std::string reason;
+};
+
+template <typename IncludeLink>
+ReachableGraphOrder BuildReachableGraphOrder(
+    int rootNodeId,
+    const RenderNodeIndex& nodes,
+    const IncomingLinkIndex& incomingLinks,
+    IncludeLink&& includeLink,
+    const char* cycleReason,
+    const char* missingNodeReason) {
+    struct Frame {
+        int nodeId = -1;
+        std::size_t nextInput = 0;
+    };
+
+    ReachableGraphOrder result;
+    result.preorder.reserve(nodes.size());
+    result.postorder.reserve(nodes.size());
+    std::unordered_map<int, std::uint8_t> states;
+    states.reserve(nodes.size());
+    std::vector<Frame> pending;
+    pending.reserve(nodes.size());
+
+    if (nodes.find(rootNodeId) == nodes.end()) {
+        result.reason = missingNodeReason;
+        return result;
+    }
+    states.emplace(rootNodeId, 1u);
+    result.preorder.push_back(rootNodeId);
+    pending.push_back({ rootNodeId, 0 });
+
+    while (!pending.empty()) {
+        Frame& frame = pending.back();
+        const auto incoming = incomingLinks.find(frame.nodeId);
+        const std::vector<const RenderGraphLink*>* inputs =
+            incoming == incomingLinks.end() ? nullptr : &incoming->second;
+
+        bool descended = false;
+        while (inputs && frame.nextInput < inputs->size()) {
+            const RenderGraphLink& link = *(*inputs)[frame.nextInput++];
+            if (!includeLink(link)) {
+                continue;
+            }
+            if (nodes.find(link.fromNodeId) == nodes.end()) {
+                result.reason = missingNodeReason;
+                return result;
+            }
+            const auto state = states.find(link.fromNodeId);
+            if (state != states.end()) {
+                if (state->second == 1u) {
+                    result.reason = cycleReason;
+                    return result;
+                }
+                continue;
+            }
+            states.emplace(link.fromNodeId, 1u);
+            result.preorder.push_back(link.fromNodeId);
+            pending.push_back({ link.fromNodeId, 0 });
+            descended = true;
+            break;
+        }
+        if (descended) {
+            continue;
+        }
+
+        states[frame.nodeId] = 2u;
+        result.postorder.push_back(frame.nodeId);
+        pending.pop_back();
+    }
+
+    result.valid = true;
+    return result;
+}
+
 Locality ClassifyNode(
     const RenderGraphNode& node,
     const Stack::NodeMath::RenderScale& scale,
@@ -62,6 +146,7 @@ Locality ClassifyNode(
         case RenderGraphNodeKind::Mix:
         case RenderGraphNodeKind::ChannelSplit:
         case RenderGraphNodeKind::ChannelCombine:
+        case RenderGraphNodeKind::ConstantChannel:
         case RenderGraphNodeKind::DataMath:
         case RenderGraphNodeKind::TechnicalImage:
             return result;
@@ -134,6 +219,17 @@ Locality ClassifyNode(
             result.reason = specialized.reason;
             return result;
         }
+        case RenderGraphNodeKind::RawProjectSourceSet:
+            result.recognized = false;
+            result.capability = CapabilityClass::SpecializedExternal;
+            result.specializedKind =
+                Stack::NodeMath::SpecializedStageKind::RawDevelopment;
+            result.regionRequirement = Stack::NodeMath::RegionRequirement::FullFrame;
+            result.cancellation = Stack::NodeMath::CancellationPolicy::BetweenStages;
+            result.reason = node.rawProjectSourceSet.resultAvailable
+                ? "The adopted multi-frame Bayer result is developed through the ordinary full-frame RAW pipeline."
+                : "The multi-frame RAW result is not available yet.";
+            return result;
         case RenderGraphNodeKind::FrequencyFft: {
             const auto kind = Stack::NodeMath::SpecializedStageKind::FrequencyTransform;
             const auto specialized = Stack::NodeMath::PlanSpecializedStage(kind);
@@ -159,6 +255,12 @@ Locality ClassifyNode(
             return result;
         }
         case RenderGraphNodeKind::SpectrumView:
+        case RenderGraphNodeKind::FrequencyFilter:
+        case RenderGraphNodeKind::FrequencyResponse:
+        case RenderGraphNodeKind::ApplyFrequencyResponse:
+        case RenderGraphNodeKind::CombineSpectra:
+        case RenderGraphNodeKind::SpectrumSeparate:
+        case RenderGraphNodeKind::SpectrumRecombine:
         case RenderGraphNodeKind::FrequencyMask:
         case RenderGraphNodeKind::SpectrumMath:
         case RenderGraphNodeKind::MagnitudePhase:
@@ -323,20 +425,31 @@ RenderGraphRegionPlan PlanGraphRegions(
         plan.reason = "missing source dimensions";
         return plan;
     }
-    if (graph.nodes.empty() || graph.outputNodeId <= 0) {
+    if (graph.nodes.empty()) {
         plan.reason = "empty graph";
         return plan;
     }
 
-    std::unordered_map<int, const RenderGraphNode*> nodes;
+    RenderNodeIndex nodes;
     nodes.reserve(graph.nodes.size());
     for (const RenderGraphNode& node : graph.nodes) {
         nodes[node.nodeId] = &node;
     }
+    if (nodes.find(graph.outputNodeId) == nodes.end()) {
+        plan.reason = "missing output node";
+        return plan;
+    }
+
+    IncomingLinkIndex incomingLinks;
+    incomingLinks.reserve(nodes.size());
+    for (const RenderGraphLink& link : graph.links) {
+        incomingLinks[link.toNodeId].push_back(&link);
+    }
+
     bool extentFailure = false;
     std::string extentFailureReason;
     std::unordered_map<int, Stack::NodeMath::SpatialDescriptor> spatialMemo;
-    std::unordered_set<int> spatialVisiting;
+    spatialMemo.reserve(nodes.size());
     const auto fallbackSpatial = [&]() {
         Stack::NodeMath::SpatialDescriptor spatial;
         spatial.kind = Stack::NodeMath::SpatialExtentKind::Finite;
@@ -346,24 +459,36 @@ RenderGraphRegionPlan PlanGraphRegions(
         spatial.pixelAspect = 1.0;
         return spatial;
     };
-    std::function<Stack::NodeMath::SpatialDescriptor(int)> resolveSpatial =
-        [&](int nodeId) -> Stack::NodeMath::SpatialDescriptor {
-        if (const auto memo = spatialMemo.find(nodeId); memo != spatialMemo.end()) {
-            return memo->second;
+
+    const auto isSpatialDependency = [&](const RenderGraphLink& link) {
+        const auto destination = nodes.find(link.toNodeId);
+        if (destination != nodes.end() && destination->second &&
+            destination->second->kind == RenderGraphNodeKind::Image &&
+            destination->second->image.width > 0 &&
+            destination->second->image.height > 0) {
+            return false;
         }
-        if (!spatialVisiting.insert(nodeId).second) {
-            extentFailure = true;
-            extentFailureReason = "reachable graph contains a cycle while propagating extents";
-            return {};
+        if (link.toSocketId == EditorNodeGraph::kExposureValueInputSocketId) {
+            return false;
         }
-        const auto found = nodes.find(nodeId);
-        if (found == nodes.end() || found->second == nullptr) {
-            extentFailure = true;
-            extentFailureReason = "extent propagation reached a missing node";
-            spatialVisiting.erase(nodeId);
-            return {};
-        }
-        const RenderGraphNode& node = *found->second;
+        const auto source = nodes.find(link.fromNodeId);
+        return source == nodes.end() || !source->second ||
+            source->second->kind != RenderGraphNodeKind::FieldMean;
+    };
+    const ReachableGraphOrder spatialOrder = BuildReachableGraphOrder(
+        graph.outputNodeId,
+        nodes,
+        incomingLinks,
+        isSpatialDependency,
+        "reachable graph contains a cycle while propagating extents",
+        "extent propagation reached a missing node");
+    if (!spatialOrder.valid) {
+        extentFailure = true;
+        extentFailureReason = spatialOrder.reason;
+    }
+
+    for (const int nodeId : spatialOrder.postorder) {
+        const RenderGraphNode& node = *nodes.at(nodeId);
         Stack::NodeMath::SpatialDescriptor result;
         if (node.kind == RenderGraphNodeKind::Image &&
             node.image.width > 0 && node.image.height > 0) {
@@ -372,34 +497,32 @@ RenderGraphRegionPlan PlanGraphRegions(
             result.fullWindow.height = node.image.height;
             result.dataWindow = result.fullWindow;
         } else {
-            std::vector<Stack::NodeMath::SpatialDescriptor> inputs;
-            for (const RenderGraphLink& link : graph.links) {
-                if (link.toNodeId != nodeId ||
-                    link.toSocketId == EditorNodeGraph::kExposureValueInputSocketId) {
-                    continue;
-                }
-                const auto source = nodes.find(link.fromNodeId);
-                if (source != nodes.end() && source->second &&
-                    source->second->kind == RenderGraphNodeKind::FieldMean) {
-                    continue;
-                }
-                const auto inputSpatial = resolveSpatial(link.fromNodeId);
-                if (inputSpatial.kind == Stack::NodeMath::SpatialExtentKind::Finite) {
-                    inputs.push_back(inputSpatial);
-                }
-            }
-            result = inputs.empty() ? fallbackSpatial() : inputs.front();
-            if (node.kind != RenderGraphNodeKind::Reformat) {
-                for (std::size_t index = 1; index < inputs.size(); ++index) {
-                    if (!(inputs[index] == inputs.front())) {
-                        extentFailure = true;
-                        extentFailureReason =
-                            "node " + std::to_string(nodeId) +
-                            " received mismatched image extents; add an explicit Reformat before combining them";
-                        break;
+            bool hasFiniteInput = false;
+            Stack::NodeMath::SpatialDescriptor firstInput;
+            const auto incoming = incomingLinks.find(nodeId);
+            if (incoming != incomingLinks.end()) {
+                for (const RenderGraphLink* link : incoming->second) {
+                    if (!link || !isSpatialDependency(*link)) {
+                        continue;
+                    }
+                    const auto inputSpatial = spatialMemo.find(link->fromNodeId);
+                    if (inputSpatial != spatialMemo.end() &&
+                        inputSpatial->second.kind ==
+                            Stack::NodeMath::SpatialExtentKind::Finite) {
+                        if (!hasFiniteInput) {
+                            firstInput = inputSpatial->second;
+                            hasFiniteInput = true;
+                        } else if (node.kind != RenderGraphNodeKind::Reformat &&
+                                   !(inputSpatial->second == firstInput)) {
+                            extentFailure = true;
+                            extentFailureReason =
+                                "node " + std::to_string(nodeId) +
+                                " received mismatched image extents; add an explicit Reformat before combining them";
+                        }
                     }
                 }
             }
+            result = hasFiniteInput ? firstInput : fallbackSpatial();
             if (node.kind == RenderGraphNodeKind::Reformat) {
                 const auto issues = Stack::NodeMath::ValidateReformatSettings(
                     node.reformatSettings);
@@ -413,82 +536,104 @@ RenderGraphRegionPlan PlanGraphRegions(
                 }
             }
         }
-        spatialVisiting.erase(nodeId);
-        spatialMemo[nodeId] = result;
-        return result;
-    };
+        spatialMemo.emplace(nodeId, std::move(result));
+    }
+    const auto outputSpatial = spatialMemo.find(graph.outputNodeId);
     const Stack::NodeMath::SpatialDescriptor resolvedOutputSpatial =
-        resolveSpatial(graph.outputNodeId);
-    std::unordered_map<int, std::pair<int, int>> memo;
-    std::unordered_set<int> visiting;
-    std::unordered_set<int> staged;
+        outputSpatial == spatialMemo.end()
+            ? Stack::NodeMath::SpatialDescriptor{}
+            : outputSpatial->second;
+
     bool structuralFailure = false;
     bool fullFrameBoundary = false;
     std::string failureReason;
-    std::function<std::pair<int, int>(int)> requiredHalo = [&](int nodeId) {
-        const auto memoIt = memo.find(nodeId);
-        if (memoIt != memo.end()) return memoIt->second;
-        if (!visiting.insert(nodeId).second) {
-            structuralFailure = true;
-            failureReason = "reachable graph contains a cycle";
-            return std::pair<int, int>{ 0, 0 };
-        }
-        const auto nodeIt = nodes.find(nodeId);
-        if (nodeIt == nodes.end() || !nodeIt->second) {
-            structuralFailure = true;
-            failureReason = "missing reachable node";
-            visiting.erase(nodeId);
-            return std::pair<int, int>{ 0, 0 };
-        }
-        const RenderGraphNode& node = *nodeIt->second;
-        const Locality locality = ClassifyNode(node, renderScale, fullWidth, fullHeight);
-        if (staged.insert(nodeId).second) {
-            RenderGraphRegionStage stage;
-            stage.nodeId = node.nodeId;
-            stage.definitionId = node.definitionId;
-            stage.capability = locality.capability;
-            stage.support = locality.support;
-            stage.border = locality.border;
-            stage.specializedKind = locality.specializedKind;
-            stage.regionRequirement = locality.regionRequirement;
-            stage.scalePolicy = locality.scalePolicy;
-            stage.cancellation = locality.cancellation;
-            stage.outputSpatial = resolveSpatial(nodeId);
-            plan.stages.push_back(std::move(stage));
-        }
+    const ReachableGraphOrder haloOrder = BuildReachableGraphOrder(
+        graph.outputNodeId,
+        nodes,
+        incomingLinks,
+        [](const RenderGraphLink&) { return true; },
+        "reachable graph contains a cycle",
+        "missing reachable node");
+    if (!haloOrder.valid) {
+        structuralFailure = true;
+        failureReason = haloOrder.reason;
+    }
+
+    std::unordered_map<int, Locality> localities;
+    localities.reserve(haloOrder.preorder.size());
+    plan.stages.reserve(haloOrder.preorder.size());
+    for (const int nodeId : haloOrder.preorder) {
+        const RenderGraphNode& node = *nodes.at(nodeId);
+        Locality locality =
+            ClassifyNode(node, renderScale, fullWidth, fullHeight);
         if (!locality.recognized) {
             fullFrameBoundary = true;
-            if (failureReason.empty()) failureReason = locality.reason;
-            for (const RenderGraphLink& link : graph.links) {
-                if (link.toNodeId == nodeId) {
-                    (void)requiredHalo(link.fromNodeId);
-                }
+            if (failureReason.empty()) {
+                failureReason = locality.reason;
             }
-            visiting.erase(nodeId);
-            return std::pair<int, int>{ 0, 0 };
+        }
+        RenderGraphRegionStage stage;
+        stage.nodeId = node.nodeId;
+        stage.definitionId = node.definitionId;
+        stage.capability = locality.capability;
+        stage.support = locality.support;
+        stage.border = locality.border;
+        stage.specializedKind = locality.specializedKind;
+        stage.regionRequirement = locality.regionRequirement;
+        stage.scalePolicy = locality.scalePolicy;
+        stage.cancellation = locality.cancellation;
+        const auto spatial = spatialMemo.find(nodeId);
+        if (spatial != spatialMemo.end()) {
+            stage.outputSpatial = spatial->second;
+        }
+        plan.stages.push_back(std::move(stage));
+        localities.emplace(nodeId, std::move(locality));
+    }
+
+    std::unordered_map<int, std::pair<int, int>> haloMemo;
+    haloMemo.reserve(haloOrder.postorder.size());
+    for (const int nodeId : haloOrder.postorder) {
+        const Locality& locality = localities.at(nodeId);
+        if (!locality.recognized) {
+            haloMemo.emplace(nodeId, std::pair<int, int>{ 0, 0 });
+            continue;
         }
         int upstreamX = 0;
         int upstreamY = 0;
-        for (const RenderGraphLink& link : graph.links) {
-            if (link.toNodeId != nodeId) continue;
-            const auto inputHalo = requiredHalo(link.fromNodeId);
-            upstreamX = std::max(upstreamX, inputHalo.first);
-            upstreamY = std::max(upstreamY, inputHalo.second);
+        const auto incoming = incomingLinks.find(nodeId);
+        if (incoming != incomingLinks.end()) {
+            for (const RenderGraphLink* link : incoming->second) {
+                if (!link) {
+                    continue;
+                }
+                const auto inputHalo = haloMemo.find(link->fromNodeId);
+                if (inputHalo == haloMemo.end()) {
+                    structuralFailure = true;
+                    if (failureReason.empty()) {
+                        failureReason = "missing reachable node";
+                    }
+                    continue;
+                }
+                upstreamX = std::max(upstreamX, inputHalo->second.first);
+                upstreamY = std::max(upstreamY, inputHalo->second.second);
+            }
         }
-        visiting.erase(nodeId);
-        const int localX = static_cast<int>(std::max(locality.support.left, locality.support.right));
-        const int localY = static_cast<int>(std::max(locality.support.bottom, locality.support.top));
-        const std::pair<int, int> result {
+        const int localX = static_cast<int>(
+            std::max(locality.support.left, locality.support.right));
+        const int localY = static_cast<int>(
+            std::max(locality.support.bottom, locality.support.top));
+        haloMemo.emplace(nodeId, std::pair<int, int>{
             upstreamX > std::numeric_limits<int>::max() - localX
                 ? std::numeric_limits<int>::max() : upstreamX + localX,
             upstreamY > std::numeric_limits<int>::max() - localY
                 ? std::numeric_limits<int>::max() : upstreamY + localY
-        };
-        memo[nodeId] = result;
-        return result;
-    };
-
-    const auto halo = requiredHalo(graph.outputNodeId);
+        });
+    }
+    const auto outputHalo = haloMemo.find(graph.outputNodeId);
+    const std::pair<int, int> halo =
+        outputHalo == haloMemo.end()
+            ? std::pair<int, int>{ 0, 0 }
+            : outputHalo->second;
     plan.valid = !structuralFailure && !extentFailure &&
         resolvedOutputSpatial.kind == Stack::NodeMath::SpatialExtentKind::Finite;
     plan.tileable = plan.valid && !fullFrameBoundary;

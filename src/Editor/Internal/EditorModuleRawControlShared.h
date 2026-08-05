@@ -59,10 +59,50 @@ inline std::array<float, 3> EffectiveWhiteBalance(
     return { r / g, 1.0f, b / g };
 }
 
+inline bool RenderManualWhiteBalanceModeCombo(
+    const char* label,
+    Raw::WhiteBalanceMode& mode,
+    float controlWidth) {
+    ImGui::SetNextItemWidth(controlWidth);
+    if (mode == Raw::WhiteBalanceMode::Auto) {
+        const char* legacyLabels[] = {
+            "Auto WB (legacy)",
+            "Camera WB",
+            "Neutral",
+            "Manual"
+        };
+        int legacyIndex = 0;
+        if (!ImGui::Combo(label, &legacyIndex, legacyLabels, 4) || legacyIndex == 0) {
+            return false;
+        }
+        mode = legacyIndex == 1
+            ? Raw::WhiteBalanceMode::AsShot
+            : (legacyIndex == 2
+                ? Raw::WhiteBalanceMode::Neutral
+                : Raw::WhiteBalanceMode::Manual);
+        return true;
+    }
+
+    const char* manualLabels[] = { "Camera WB", "Neutral", "Manual" };
+    int manualIndex = mode == Raw::WhiteBalanceMode::Neutral
+        ? 1
+        : (mode == Raw::WhiteBalanceMode::Manual ? 2 : 0);
+    if (!ImGui::Combo(label, &manualIndex, manualLabels, 3)) {
+        return false;
+    }
+    mode = manualIndex == 1
+        ? Raw::WhiteBalanceMode::Neutral
+        : (manualIndex == 2
+            ? Raw::WhiteBalanceMode::Manual
+            : Raw::WhiteBalanceMode::AsShot);
+    return true;
+}
+
 inline bool SameRawMosaicDenoiseSettings(
     const Raw::RawMosaicDenoiseSettings& a,
     const Raw::RawMosaicDenoiseSettings& b) {
     return a.enabled == b.enabled &&
+        a.mode == b.mode &&
         a.hotPixelSuppression == b.hotPixelSuppression &&
         a.hotPixelThreshold == b.hotPixelThreshold &&
         a.lumaStrength == b.lumaStrength &&
@@ -75,7 +115,11 @@ inline bool SameRawMosaicDenoiseSettings(
 inline bool SameRawDevelopSettings(
     const Raw::RawDevelopSettings& a,
     const Raw::RawDevelopSettings& b) {
-    return a.exposureStops == b.exposureStops &&
+    return a.processingVersion == b.processingVersion &&
+        a.workingSpace == b.workingSpace &&
+        a.applyBaselineExposure == b.applyBaselineExposure &&
+        a.encodeSrgbOutput == b.encodeSrgbOutput &&
+        a.exposureStops == b.exposureStops &&
         a.whiteBalanceMode == b.whiteBalanceMode &&
         a.manualWhiteBalance == b.manualWhiteBalance &&
         a.overrideBlackLevel == b.overrideBlackLevel &&

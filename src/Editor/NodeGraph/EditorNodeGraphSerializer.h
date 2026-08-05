@@ -9,6 +9,7 @@ namespace EditorNodeGraph {
 
 nlohmann::json ExtractLayerArray(const nlohmann::json& pipelineData);
 nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Graph& graph);
+void RemoveGraphLayoutFromPayload(nlohmann::json& pipelineData);
 void DeserializeGraphPayload(
     const nlohmann::json& pipelineData,
     Graph& graph,

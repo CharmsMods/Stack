@@ -9,32 +9,37 @@ unsigned int RenderPipeline::GenerateMaskTexture(const RenderMaskSource& mask) {
     }
 
     unsigned int texture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
-    unsigned int fbo = GLHelpers::CreateFBO(texture);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glViewport(0, 0, m_Width, m_Height);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glUseProgram(m_MaskProgram);
-    glUniform1i(glGetUniformLocation(m_MaskProgram, "uKind"), static_cast<int>(mask.kind));
-    glUniform1f(glGetUniformLocation(m_MaskProgram, "uValue"), std::clamp(mask.settings.value, 0.0f, 1.0f));
-    glUniform1f(glGetUniformLocation(m_MaskProgram, "uAngle"), mask.settings.angle);
-    glUniform1f(glGetUniformLocation(m_MaskProgram, "uOffset"), mask.settings.offset);
-    glUniform1f(glGetUniformLocation(m_MaskProgram, "uScale"), mask.settings.scale);
-    glUniform2f(glGetUniformLocation(m_MaskProgram, "uCenter"), mask.settings.centerX, mask.settings.centerY);
-    glUniform1f(glGetUniformLocation(m_MaskProgram, "uRadius"), mask.settings.radius);
-    glUniform1f(glGetUniformLocation(m_MaskProgram, "uFeather"), mask.settings.feather);
-    glUniform1i(glGetUniformLocation(m_MaskProgram, "uInvert"), mask.settings.invert ? 1 : 0);
-    m_Quad.Draw();
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDeleteFramebuffers(1, &fbo);
+    if (texture == 0) {
+        return 0;
+    }
+    const bool rendered = RenderIntoGraphTargetTexture(
+        texture,
+        [&](unsigned int fbo) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glUseProgram(m_MaskProgram);
+            glUniform1i(glGetUniformLocation(m_MaskProgram, "uKind"), static_cast<int>(mask.kind));
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uValue"), std::clamp(mask.settings.value, 0.0f, 1.0f));
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uAngle"), mask.settings.angle);
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uOffset"), mask.settings.offset);
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uScale"), mask.settings.scale);
+            glUniform2f(glGetUniformLocation(m_MaskProgram, "uCenter"), mask.settings.centerX, mask.settings.centerY);
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uRadius"), mask.settings.radius);
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uFeather"), mask.settings.feather);
+            glUniform1i(glGetUniformLocation(m_MaskProgram, "uInvert"), mask.settings.invert ? 1 : 0);
+            m_Quad.Draw();
+        });
+    if (!rendered) {
+        glDeleteTextures(1, &texture);
+        return 0;
+    }
     return texture;
 }
 
-void RenderPipeline::RenderMaskBlend(unsigned int originalTexture, unsigned int processedTexture, unsigned int maskTexture, unsigned int targetFBO) {
+bool RenderPipeline::RenderMaskBlend(unsigned int originalTexture, unsigned int processedTexture, unsigned int maskTexture, unsigned int targetFBO) {
     EnsureMaskPrograms();
-    if (!m_MaskBlendProgram || !originalTexture || !processedTexture || !maskTexture) {
-        return;
+    if (!m_MaskBlendProgram || !originalTexture || !processedTexture ||
+        !maskTexture || !targetFBO) {
+        return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -56,12 +61,13 @@ void RenderPipeline::RenderMaskBlend(unsigned int originalTexture, unsigned int 
     m_Quad.Draw();
 
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
-void RenderPipeline::RenderMaskCombine(unsigned int maskA, unsigned int maskB, RenderMaskCombineMode mode, unsigned int targetFBO) {
+bool RenderPipeline::RenderMaskCombine(unsigned int maskA, unsigned int maskB, RenderMaskCombineMode mode, unsigned int targetFBO) {
     EnsureMaskPrograms();
-    if (!m_MaskCombineProgram || !maskA || !maskB) {
-        return;
+    if (!m_MaskCombineProgram || !maskA || !maskB || !targetFBO) {
+        return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -80,12 +86,13 @@ void RenderPipeline::RenderMaskCombine(unsigned int maskA, unsigned int maskB, R
     m_Quad.Draw();
 
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
-void RenderPipeline::RenderMixBlend(unsigned int textureA, unsigned int textureB, unsigned int factorTexture, float factor, RenderMixBlendMode mode, unsigned int targetFBO) {
+bool RenderPipeline::RenderMixBlend(unsigned int textureA, unsigned int textureB, unsigned int factorTexture, float factor, RenderMixBlendMode mode, unsigned int targetFBO) {
     EnsureMixProgram();
-    if (!m_MixProgram || !textureA || !textureB) {
-        return;
+    if (!m_MixProgram || !textureA || !textureB || !targetFBO) {
+        return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -110,15 +117,16 @@ void RenderPipeline::RenderMixBlend(unsigned int textureA, unsigned int textureB
     m_Quad.Draw();
 
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
-void RenderPipeline::RenderTechnicalImage(
+bool RenderPipeline::RenderTechnicalImage(
     unsigned int texture,
     Stack::NodeMath::TechnicalImageOperation operation,
     float exposureValue,
     unsigned int targetFBO) {
     EnsureTechnicalImageProgram();
-    if (!m_TechnicalImageProgram || !texture) return;
+    if (!m_TechnicalImageProgram || !texture || !targetFBO) return false;
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(m_TechnicalImageProgram);
@@ -128,6 +136,7 @@ void RenderPipeline::RenderTechnicalImage(
     glUniform1i(glGetUniformLocation(m_TechnicalImageProgram, "uOperation"), static_cast<int>(operation));
     glUniform1f(glGetUniformLocation(m_TechnicalImageProgram, "uExposureValue"), exposureValue);
     m_Quad.Draw();
+    return true;
 }
 
 bool RenderPipeline::RenderReformat(
@@ -155,7 +164,7 @@ bool RenderPipeline::RenderReformat(
     return glGetError() == GL_NO_ERROR;
 }
 
-void RenderPipeline::RenderDataMath(
+bool RenderPipeline::RenderDataMath(
     unsigned int textureA,
     unsigned int textureB,
     bool hasA,
@@ -167,8 +176,9 @@ void RenderPipeline::RenderDataMath(
     bool scalarOutput,
     unsigned int targetFBO) {
     EnsureDataMathProgram();
-    if (!m_DataMathProgram || (!textureA && hasA) || (!textureB && hasB)) {
-        return;
+    if (!m_DataMathProgram || !targetFBO ||
+        (!textureA && hasA) || (!textureB && hasB)) {
+        return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -200,12 +210,13 @@ void RenderPipeline::RenderDataMath(
     m_Quad.Draw();
 
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
-void RenderPipeline::RenderMaskUtility(unsigned int inputMask, const RenderGraphNode& node, unsigned int targetFBO) {
+bool RenderPipeline::RenderMaskUtility(unsigned int inputMask, const RenderGraphNode& node, unsigned int targetFBO) {
     EnsureUtilityPrograms();
-    if (!m_MaskUtilityProgram || !inputMask) {
-        return;
+    if (!m_MaskUtilityProgram || !inputMask || !targetFBO) {
+        return false;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -223,12 +234,13 @@ void RenderPipeline::RenderMaskUtility(unsigned int inputMask, const RenderGraph
     glUniform1i(glGetUniformLocation(m_MaskUtilityProgram, "uInvert"), node.maskUtilitySettings.invert ? 1 : 0);
     m_Quad.Draw();
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
-void RenderPipeline::RenderImageToMask(unsigned int inputImage, const RenderGraphNode& node, unsigned int targetFBO) {
+bool RenderPipeline::RenderImageToMask(unsigned int inputImage, const RenderGraphNode& node, unsigned int targetFBO) {
     EnsureUtilityPrograms();
-    if (!m_ImageToMaskProgram || !inputImage) {
-        return;
+    if (!m_ImageToMaskProgram || !inputImage || !targetFBO) {
+        return false;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -269,13 +281,14 @@ void RenderPipeline::RenderImageToMask(unsigned int inputImage, const RenderGrap
         m_Height > 0 ? 1.0f / static_cast<float>(m_Height) : 0.0f);
     m_Quad.Draw();
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
 
-void RenderPipeline::RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO) {
+bool RenderPipeline::RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO) {
     EnsureChannelPrograms();
-    if (!m_ChannelSplitProgram || !inputTexture) {
-        return;
+    if (!m_ChannelSplitProgram || !inputTexture || !targetFBO) {
+        return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -289,13 +302,16 @@ void RenderPipeline::RenderChannelSplit(unsigned int inputTexture, int channel, 
 
     m_Quad.Draw();
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
-void RenderPipeline::RenderChannelCombine(unsigned int texR, unsigned int texG, unsigned int texB, unsigned int texA,
+bool RenderPipeline::RenderChannelCombine(unsigned int texR, unsigned int texG, unsigned int texB, unsigned int texA,
                                          bool hasR, bool hasG, bool hasB, bool hasA, unsigned int targetFBO) {
     EnsureChannelPrograms();
-    if (!m_ChannelCombineProgram) {
-        return;
+    if (!m_ChannelCombineProgram || !targetFBO ||
+        (hasR && !texR) || (hasG && !texG) ||
+        (hasB && !texB) || (hasA && !texA)) {
+        return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -345,4 +361,5 @@ void RenderPipeline::RenderChannelCombine(unsigned int texR, unsigned int texG, 
 
     m_Quad.Draw();
     glActiveTexture(GL_TEXTURE0);
+    return true;
 }

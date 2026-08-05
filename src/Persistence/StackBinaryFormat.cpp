@@ -13,6 +13,16 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
 
 namespace StackBinaryFormat {
@@ -273,16 +283,16 @@ bool EncodeJsonValue(ByteWriter& writer, const json& value) {
         return true;
     }
 
-    if (value.is_number_integer()) {
-        writer.WritePod(static_cast<std::uint8_t>(ValueType::Int64));
-        const std::int64_t integerValue = value.get<std::int64_t>();
+    if (value.is_number_unsigned()) {
+        writer.WritePod(static_cast<std::uint8_t>(ValueType::UInt64));
+        const std::uint64_t integerValue = value.get<std::uint64_t>();
         writer.WritePod(integerValue);
         return true;
     }
 
-    if (value.is_number_unsigned()) {
-        writer.WritePod(static_cast<std::uint8_t>(ValueType::UInt64));
-        const std::uint64_t integerValue = value.get<std::uint64_t>();
+    if (value.is_number_integer()) {
+        writer.WritePod(static_cast<std::uint8_t>(ValueType::Int64));
+        const std::int64_t integerValue = value.get<std::int64_t>();
         writer.WritePod(integerValue);
         return true;
     }
@@ -425,6 +435,21 @@ bool DeserializeJson(const std::vector<unsigned char>& bytes, json& value) {
     return DecodeJsonValue(reader, value);
 }
 
+bool ReplaceFileAtomically(
+    const std::filesystem::path& temporaryPath,
+    const std::filesystem::path& destinationPath) {
+#if defined(_WIN32)
+    return MoveFileExW(
+               temporaryPath.c_str(),
+               destinationPath.c_str(),
+               MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+#else
+    std::error_code ec;
+    std::filesystem::rename(temporaryPath, destinationPath, ec);
+    return !ec;
+#endif
+}
+
 bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const std::vector<SectionData>& sections) {
     std::filesystem::path tempPath = path;
     tempPath += ".tmp";
@@ -484,13 +509,14 @@ bool WriteSectionedFile(const std::filesystem::path& path, FileKind kind, const 
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::rename(tempPath, path, ec);
-    if (ec) {
-        // Fallback for cross-device renames or other filesystem issues
-        std::filesystem::copy_file(tempPath, path, std::filesystem::copy_options::overwrite_existing, ec);
-        std::filesystem::remove(tempPath, ec);
-        if (ec) return false;
+    if (!ReplaceFileAtomically(tempPath, path)) {
+        // The temporary file lives beside the destination, so replacement
+        // should be one filesystem operation. Never fall back to copying over
+        // a valid project in place: a crash during that copy would corrupt
+        // both the previous save and the attempted replacement.
+        std::error_code cleanupError;
+        std::filesystem::remove(tempPath, cleanupError);
+        return false;
     }
 
     return true;
@@ -806,6 +832,54 @@ bool AssetFromJson(const json& value, AssetDocument& asset) {
 } // namespace
 
 bool WriteProjectFile(const std::filesystem::path& path, const ProjectDocument& document) {
+    if (document.rawProjectSnapshot) {
+        Stack::Project::RawProjectSnapshot snapshot = *document.rawProjectSnapshot;
+        snapshot.projectName = document.metadata.projectName;
+        snapshot.pipelineData = document.pipelineData.is_null()
+            ? json::object()
+            : document.pipelineData;
+        snapshot.rawWorkspaceData = document.rawWorkspaceData.is_null()
+            ? json::object()
+            : document.rawWorkspaceData;
+        snapshot.coverThumbnailBytes = document.thumbnailBytes;
+
+        if (document.projectStore) {
+            const std::filesystem::path currentPath =
+                document.projectStore->StoragePath().lexically_normal();
+            const std::filesystem::path destination = path.lexically_normal();
+            if (currentPath != destination) {
+                const Stack::Project::ProjectStorageKind kind =
+                    destination.extension() == ".stackbundle"
+                    ? Stack::Project::ProjectStorageKind::DirectoryBundle
+                    : Stack::Project::ProjectStorageKind::PortableFile;
+                return static_cast<bool>(Stack::Project::ConvertProjectStore(
+                    document.projectStore, snapshot, destination, kind));
+            }
+            const Stack::Project::ProjectStoreTransaction transaction =
+                document.projectStore->BeginTransaction(
+                    snapshot.persistedStorageRevision);
+            if (!transaction) return false;
+            const Stack::Project::ProjectStoreCommitResult commit =
+                document.projectStore->Commit(transaction, snapshot);
+            if (!commit) {
+                document.projectStore->Abort(transaction);
+                return false;
+            }
+            return true;
+        }
+
+        if (!snapshot.embeddedAssets.empty()) {
+            // Original bytes are intentionally unavailable without a store;
+            // never manufacture a v3 project whose manifest references them.
+            return false;
+        }
+        const Stack::Project::ProjectStorageKind kind =
+            path.extension() == ".stackbundle"
+            ? Stack::Project::ProjectStorageKind::DirectoryBundle
+            : Stack::Project::ProjectStorageKind::PortableFile;
+        return static_cast<bool>(Stack::Project::CreateProjectStore(path, kind, snapshot));
+    }
+
     json nodeBrowserThumbs = json::array();
     for (const NodeBrowserThumbnailEntry& entry : document.nodeBrowserThumbnailEntries) {
         nodeBrowserThumbs.push_back({
@@ -827,6 +901,41 @@ bool WriteProjectFile(const std::filesystem::path& path, const ProjectDocument& 
 }
 
 bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& document, const ProjectLoadOptions& options) {
+    if (Stack::Project::IsDirectoryProjectBundle(path) ||
+        Stack::Project::IsPortableV3Project(path)) {
+        Stack::Project::ProjectStoreOpenResult opened =
+            Stack::Project::OpenProjectStore(path);
+        if (!opened) return false;
+        document = {};
+        document.metadata.projectKind = kRawProjectKind;
+        document.metadata.projectName = opened.snapshot.projectName;
+        document.metadata.sourceWidth = 1;
+        document.metadata.sourceHeight = 1;
+        if (options.includeThumbnail) {
+            document.thumbnailBytes = opened.snapshot.coverThumbnailBytes;
+        }
+        if (options.includePipelineData) {
+            document.pipelineData = opened.snapshot.pipelineData;
+        }
+        if (options.includeRawWorkspaceData) {
+            document.rawWorkspaceData = opened.snapshot.rawWorkspaceData;
+            if (!document.rawWorkspaceData.is_object()) {
+                document.rawWorkspaceData = json::object();
+            }
+            document.rawWorkspaceData["schema"] = "stack.rawWorkspace.project";
+            document.rawWorkspaceData["schemaVersion"] = 3;
+            document.rawWorkspaceData["rawProjectModel"] =
+                Stack::Project::kRawProjectModelSourceSets;
+            document.rawWorkspaceData["activeSourceSetId"] =
+                opened.snapshot.activeSourceSetId;
+        }
+        document.projectStore = std::move(opened.store);
+        document.rawProjectSnapshot =
+            std::make_shared<Stack::Project::RawProjectSnapshot>(
+                std::move(opened.snapshot));
+        return true;
+    }
+
     std::ifstream file;
     std::unordered_map<std::string, SectionInfo> sections;
     if (!ReadSectionTable(path, FileKind::Project, file, sections, options.verifyChecksum)) {
@@ -1063,6 +1172,11 @@ bool AreProjectsIdentical(const ProjectDocument& a, const ProjectDocument& b) {
     if (a.sourceImageBytes != b.sourceImageBytes) return false;
     if (a.pipelineData != b.pipelineData) return false;
     if (a.rawWorkspaceData != b.rawWorkspaceData) return false;
+    if (static_cast<bool>(a.rawProjectSnapshot) !=
+        static_cast<bool>(b.rawProjectSnapshot)) return false;
+    if (a.rawProjectSnapshot && b.rawProjectSnapshot &&
+        Stack::Project::SerializeRawProjectSnapshot(*a.rawProjectSnapshot) !=
+            Stack::Project::SerializeRawProjectSnapshot(*b.rawProjectSnapshot)) return false;
     return true;
 }
 

@@ -1,6 +1,7 @@
 #include "NodeMath/SemanticSpine.h"
 
 #include "NodeMath/DescriptorSerialization.h"
+#include "NodeMath/OutputInspection.h"
 
 #include <algorithm>
 #include <map>
@@ -164,7 +165,8 @@ SemanticAnalysisResult AnalyzeSemanticImageGraph(
                 output.descriptor = input->descriptor;
                 output.executable = input->executable;
                 if (node.kind == SemanticImageNodeKind::DirectOutput) {
-                    DirectOutputPolicy policy = EvaluateDirectPngOutputPolicy(output.descriptor);
+                    OutputInspectionPolicy policy =
+                        EvaluateOutputInspectionPolicy(output.descriptor);
                     output.executable = output.executable && policy.executable;
                     for (Diagnostic& diagnostic : policy.diagnostics) {
                         RebindDiagnostic(diagnostic, nodeId);
@@ -221,6 +223,31 @@ SemanticAnalysisResult AnalyzeSemanticImageGraph(
                     if (IsHard(diagnostic.severity)) output.executable = false;
                     result.diagnostics.push_back(std::move(diagnostic));
                 }
+            }
+            break;
+        }
+        case SemanticImageNodeKind::DeclaredColorOutput: {
+            const SemanticNodeOutput* input = requireInput("image");
+            if (input) {
+                output.descriptor = input->descriptor;
+                output.executable = input->executable;
+                output.descriptor.color =
+                    SemanticField<ColorIdentity>::Known(node.declaredColor);
+                output.descriptor.transfer =
+                    SemanticField<TransferDescriptor>::Known(node.declaredTransfer);
+                output.descriptor.reference =
+                    SemanticField<ReferenceState>::Known(node.declaredReference);
+                output.descriptor.range = SemanticField<NumericRange>::Known({
+                    0.0, 1.0, false, false, NonFinitePolicy::Forbidden
+                });
+                output.descriptor.provenance =
+                    SemanticField<ProvenanceDescriptor>::Known({
+                        ProvenanceKind::Converted,
+                        input->descriptorIdentity,
+                        node.declaredOperationIdentity.empty()
+                            ? "color.declared-output.v1"
+                            : node.declaredOperationIdentity
+                    });
             }
             break;
         }

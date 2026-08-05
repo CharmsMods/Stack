@@ -4,7 +4,9 @@
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
+#include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/NodeGraph/GraphConnectionPresentation.h"
+#include "Editor/NodeGraph/GraphWireReadout.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/SocketPresentation.h"
 #include "Editor/LayerRegistry.h"
@@ -270,9 +272,288 @@ std::vector<float> EvaluatePhase5CanonicalCpu(
     return result;
 }
 
+bool Phase5Check(bool condition, const std::string& message);
+
+bool ValidateChannelRoleMaskRendering(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    double tolerance) {
+    RenderGraphNode split;
+    split.nodeId = 2;
+    split.kind = RenderGraphNodeKind::ChannelSplit;
+    split.definitionId = "stack:graph/channel-split";
+
+    RenderGraphNode contrast;
+    contrast.nodeId = 3;
+    contrast.kind = RenderGraphNodeKind::Layer;
+    contrast.definitionId = "stack:layer/contrast";
+    contrast.layerJson = {
+        { "type", "Contrast" },
+        { "contrast", 1.0f }
+    };
+
+    RenderGraphSnapshot graph;
+    graph.outputNodeId = 4;
+    graph.outputSocketId = EditorNodeGraph::kImageInputSocketId;
+    graph.executionInspectionEnabled = true;
+    graph.nodes = {
+        Phase5ImageNode(1),
+        std::move(split),
+        std::move(contrast),
+        Phase5OutputNode(4)
+    };
+    graph.links = {
+        Phase5Link(
+            1,
+            EditorNodeGraph::kImageOutputSocketId,
+            2,
+            EditorNodeGraph::kImageInputSocketId),
+        Phase5Link(
+            1,
+            EditorNodeGraph::kImageOutputSocketId,
+            3,
+            EditorNodeGraph::kImageInputSocketId),
+        Phase5Link(
+            2,
+            "r",
+            3,
+            EditorNodeGraph::kMaskInputSocketId),
+        Phase5Link(
+            3,
+            EditorNodeGraph::kImageOutputSocketId,
+            4,
+            EditorNodeGraph::kImageInputSocketId)
+    };
+
+    RenderPipeline pipeline;
+    pipeline.Initialize();
+    pipeline.LoadSourceFromPixels(
+        pixels.data(),
+        width,
+        height,
+        4);
+    pipeline.ExecuteGraph(graph);
+    const std::vector<float> rendered = ReadPhase5Texture(
+        pipeline.GetOutputTexture(),
+        width,
+        height);
+
+    std::vector<float> expected;
+    expected.reserve(pixels.size());
+    for (std::size_t index = 0; index < pixels.size(); index += 4u) {
+        const float mask = std::clamp(
+            pixels[index] / 255.0f,
+            0.0f,
+            1.0f);
+        for (std::size_t component = 0; component < 4u; ++component) {
+            const float original = pixels[index + component] / 255.0f;
+            const float processed = component < 3u
+                ? std::clamp((original - 0.5f) * 2.0f + 0.5f, 0.0f, 1.0f)
+                : original;
+            expected.push_back(
+                original + (processed - original) * mask);
+        }
+    }
+
+    return Phase5Check(
+        !rendered.empty() &&
+        Phase5MaximumDifference(rendered, expected) <= tolerance,
+        "Channel Split R did not execute as Contrast's per-pixel Mask");
+}
+
 bool Phase5Check(bool condition, const std::string& message) {
     if (!condition) std::cerr << "Phase 5 validation failed: " << message << '\n';
     return condition;
+}
+
+bool ValidateConnectionLabelInformationSystem() {
+    using namespace Stack::NodeMath;
+    using namespace EditorNodeGraph::WireReadout;
+    bool ok = true;
+
+    Input image;
+    image.sourceSocket.logicalType = LogicalValueType::ColorImage;
+    image.hasDescriptor = true;
+    image.descriptor.logicalType = LogicalValueType::ColorImage;
+    image.descriptor.presentImageComponents = SemanticField<ImageComponentSet>::Known(
+        MakeImageComponentSet({
+            ImageComponent::Red,
+            ImageComponent::Green,
+            ImageComponent::Blue,
+            ImageComponent::Alpha }));
+    image.descriptor.color = SemanticField<ColorIdentity>::Known(
+        { "srgb-d65", {}, ColorRelation::Standard });
+    image.descriptor.transfer = SemanticField<TransferDescriptor>::Known(
+        { TransferKind::Srgb, 0.0, {} });
+    image.descriptor.reference = SemanticField<ReferenceState>::Known(ReferenceState::Scene);
+    image.descriptor.alpha = SemanticField<AlphaMode>::Known(AlphaMode::Straight);
+    const Readout imageReadout = Build(image);
+    ok &= Phase5Check(
+        imageReadout.primary == "Image · R, G, B, A" &&
+            imageReadout.secondary == "sRGB · scene encoded · straight alpha" &&
+            imageReadout.accessibleText ==
+                "Image · R, G, B, A. sRGB · scene encoded · straight alpha.",
+        "image wire readout does not expose the required source-oriented state");
+
+    Input unknownImage;
+    unknownImage.sourceSocket.logicalType = LogicalValueType::ColorImage;
+    unknownImage.hasDescriptor = true;
+    unknownImage.descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
+    const Readout unknownImageReadout = Build(unknownImage);
+    ok &= Phase5Check(
+        unknownImageReadout.primary == "Image · Unknown components" &&
+            unknownImageReadout.attention == Attention::None &&
+            unknownImageReadout.secondary.find("Unknown") != std::string::npos,
+        "unknown image metadata is not explicit and calm");
+
+    Input field;
+    field.sourceSocket.logicalType = LogicalValueType::ScalarField;
+    field.hasDescriptor = true;
+    field.descriptor.logicalType = LogicalValueType::ScalarField;
+    field.descriptor.units = SemanticField<UnitDescriptor>::Known(
+        { UnitKind::ExposureValue, {} });
+    field.descriptor.range = SemanticField<NumericRange>::Known(
+        { 0.0, 1.0, false, false, NonFinitePolicy::Forbidden });
+    field.descriptor.spatial = SemanticField<SpatialDescriptor>::Known(
+        { SpatialExtentKind::Finite, {}, { 0, 0, 1920, 1080 } });
+    const Readout fieldReadout = Build(field);
+    ok &= Phase5Check(
+        fieldReadout.primary == "Field · Scalar" &&
+            fieldReadout.secondary == "EV · 0 to 1",
+        "field wire readout does not prioritize units and declared range");
+
+    Input mask;
+    mask.sourceSocket.logicalType = LogicalValueType::Mask;
+    const Readout maskReadout = Build(mask);
+    ok &= Phase5Check(maskReadout.primary == "Channel · Mask",
+        "mask wire readout is not normalized as Channel · Mask");
+
+    Input vectorValue;
+    vectorValue.sourceSocket.logicalType = LogicalValueType::Vector3;
+    FirstClassValue vectorPayload;
+    vectorPayload.logicalType = LogicalValueType::Vector3;
+    vectorPayload.storage = ValueStorageClass::Uniform;
+    vectorPayload.availability = ValueAvailability::Known;
+    vectorPayload.units = { UnitKind::ExposureValue, {} };
+    vectorPayload.payload = std::array<double, 3>{ 1.23456, 0.0, -2.0 };
+    vectorValue.value = vectorPayload;
+    const Readout vectorReadout = Build(vectorValue);
+    ok &= Phase5Check(
+        vectorReadout.primary == "Value · Vector 3" &&
+            vectorReadout.secondary == "1.235, 0, -2 · EV",
+        "compact finite vector payload formatting is not deterministic");
+
+    Input matrixValue;
+    matrixValue.sourceSocket.logicalType = LogicalValueType::Matrix3;
+    FirstClassValue matrixPayload;
+    matrixPayload.logicalType = LogicalValueType::Matrix3;
+    matrixPayload.storage = ValueStorageClass::Uniform;
+    matrixPayload.availability = ValueAvailability::Known;
+    matrixPayload.units = { UnitKind::ExposureValue, {} };
+    matrixPayload.payload = std::array<double, 9>{};
+    matrixValue.value = matrixPayload;
+    const Readout matrixReadout = Build(matrixValue);
+    ok &= Phase5Check(
+        matrixReadout.primary == "Value · Matrix 3 x 3" &&
+            matrixReadout.secondary == "EV",
+        "matrices do not fall back to type and unit wording");
+
+    Input nonFiniteValue = vectorValue;
+    std::get<std::array<double, 3>>(nonFiniteValue.value->payload)[1] =
+        std::numeric_limits<double>::infinity();
+    const Readout nonFiniteReadout = Build(nonFiniteValue);
+    ok &= Phase5Check(nonFiniteReadout.secondary == "EV",
+        "non-finite compact payloads do not fall back to semantic wording");
+
+    Input histogram;
+    histogram.sourceSocket.logicalType = LogicalValueType::Histogram;
+    FirstClassValue histogramPayload;
+    histogramPayload.logicalType = LogicalValueType::Histogram;
+    histogramPayload.storage = ValueStorageClass::StructuredResource;
+    histogramPayload.availability = ValueAvailability::Known;
+    histogramPayload.payload = HistogramValue{ 0.0, 1.0, { 0.1, 0.4, 0.5 }, "fixture" };
+    histogram.value = histogramPayload;
+    const Readout histogramReadout = Build(histogram);
+    ok &= Phase5Check(
+        histogramReadout.primary == "Histogram" &&
+            histogramReadout.secondary == "3 bins · 0 to 1",
+        "data readouts do not use their deterministic type-specific summary");
+
+    Input failure;
+    failure.sourceSocket.logicalType = LogicalValueType::Scalar;
+    failure.value = MakeFailureValue(
+        LogicalValueType::Scalar,
+        ValueStorageClass::Uniform,
+        "Field Mean could not produce a finite result");
+    const Readout failureReadout = Build(failure);
+    ok &= Phase5Check(
+        failureReadout.attention == Attention::Error &&
+            failureReadout.secondary.find("Field Mean") != std::string::npos,
+        "source failure does not replace the normal lower line");
+
+    Diagnostic warning;
+    warning.affectedIdentity = "node-7";
+    warning.severity = DiagnosticSeverity::Warning;
+    warning.message = "The source range is wider than expected.";
+    warning.suggestedRepair = "Clamp the source range.";
+    Diagnostic error = warning;
+    error.severity = DiagnosticSeverity::HardError;
+    error.message = "The source descriptor is invalid.";
+    error.suggestedRepair.clear();
+    Input diagnosticInput = field;
+    diagnosticInput.sourceDiagnostics = { warning, error };
+    const Readout diagnosticReadout = Build(diagnosticInput);
+    ok &= Phase5Check(
+        diagnosticReadout.attention == Attention::Error &&
+            diagnosticReadout.secondary.find("source descriptor") != std::string::npos,
+        "source errors do not take precedence over actionable warnings");
+    const std::vector<Diagnostic> sourceOnly = FilterSourceOutputDiagnostics(
+        { warning, Diagnostic{ "target", DiagnosticStage::Connection,
+            DiagnosticSeverity::HardError, {}, "node-8", {}, "Target rejected", {} } },
+        "node-7",
+        true);
+    ok &= Phase5Check(
+        sourceOnly.size() == 1 && sourceOnly.front().affectedIdentity == "node-7" &&
+            FilterSourceOutputDiagnostics({ warning }, "node-7", false).empty(),
+        "wire readout diagnostics are not filtered to the exact source output");
+
+    EditorNodeGraph::Graph persistenceGraph;
+    persistenceGraph.Clear();
+    EditorNodeGraph::ImagePayload sourceImage;
+    sourceImage.width = 1;
+    sourceImage.height = 1;
+    sourceImage.channels = 4;
+    sourceImage.originalChannels = 4;
+    sourceImage.pixels = { 0, 0, 0, 255 };
+    const int sourceId = persistenceGraph.AddImageNode(std::move(sourceImage), { 0.0f, 0.0f })->id;
+    const int outputId = persistenceGraph.AddOutputNode({ 180.0f, 0.0f }, true)->id;
+    std::string connectionError;
+    const bool connected = persistenceGraph.TryConnectSockets(
+        sourceId,
+        EditorNodeGraph::kImageOutputSocketId,
+        outputId,
+        EditorNodeGraph::kImageInputSocketId,
+        &connectionError);
+    const nlohmann::json persisted = EditorNodeGraph::SerializeGraphPayload(
+        nlohmann::json::array(), persistenceGraph);
+    EditorNodeGraph::Graph reloadedGraph;
+    EditorNodeGraph::DeserializeGraphPayload(
+        persisted,
+        reloadedGraph,
+        0,
+        {},
+        0,
+        0,
+        0);
+    const std::string serialized = persisted.dump();
+    ok &= Phase5Check(
+        connected && reloadedGraph.HasLink(sourceId, outputId) &&
+            serialized.find("wireReadout") == std::string::npos &&
+            serialized.find("linkLabel") == std::string::npos &&
+            serialized.find("presentationLabel") == std::string::npos,
+        "wire readouts are persisted as authored per-wire presentation data");
+    return ok;
 }
 
 bool ValidatePhase5BSocketPresentation() {
@@ -291,8 +572,10 @@ bool ValidatePhase5BSocketPresentation() {
             ok &= Phase5Check(!socket.semanticRoleKey.empty(),
                 "a registered socket is missing its normalized semantic role key");
             ok &= Phase5Check(
-                socket.logicalType != Stack::NodeMath::LogicalValueType::Invalid,
-                "a registered socket has no valid logical type");
+                socket.logicalType != Stack::NodeMath::LogicalValueType::Invalid ||
+                    socket.type ==
+                        EditorNodeGraph::SocketType::ImageOrChannel,
+                "a registered socket has neither a valid logical type nor an explicit union type");
             ok &= Phase5Check(
                 socket.visibilityTier ==
                     (!socket.visible
@@ -324,15 +607,29 @@ bool ValidatePhase5BSocketPresentation() {
         }
     }
 
-    const int outputId = compatibilityGraph.AddOutputNode({ 0.0f, 0.0f }, true)->id;
+    const int splitId =
+        compatibilityGraph.AddChannelSplitNode({ 0.0f, 0.0f })->id;
     EditorNodeGraph::SocketDefinition redChannel;
     ok &= Phase5Check(
-        compatibilityGraph.FindSocket(outputId, "r", &redChannel) &&
-        redChannel.type == EditorNodeGraph::SocketType::ScalarField &&
-        redChannel.logicalType == Stack::NodeMath::LogicalValueType::ScalarField,
-        "dynamic channel lookup still disagrees with the scalar-field socket catalog");
+        compatibilityGraph.FindSocket(splitId, "r", &redChannel) &&
+        redChannel.type == EditorNodeGraph::SocketType::Channel &&
+        redChannel.logicalType == Stack::NodeMath::LogicalValueType::Channel,
+        "dynamic channel lookup still disagrees with the exact Channel socket catalog");
+    const int outputId =
+        compatibilityGraph.AddOutputNode({ 0.0f, 0.0f }, true)->id;
+    EditorNodeGraph::SocketDefinition outputValue;
+    ok &= Phase5Check(
+        compatibilityGraph.FindSocket(
+            outputId,
+            EditorNodeGraph::kImageInputSocketId,
+            &outputValue) &&
+            outputValue.type ==
+                EditorNodeGraph::SocketType::ImageOrChannel &&
+            PrimaryDescription(outputValue) == "Image or Channel",
+        "Output v2 does not expose its exact Color Image or Channel union");
 
     const EditorNodeGraph::SocketType formatterTypes[] = {
+        EditorNodeGraph::SocketType::ImageOrChannel,
         EditorNodeGraph::SocketType::Image,
         EditorNodeGraph::SocketType::Mask,
         EditorNodeGraph::SocketType::ScalarField,
@@ -350,9 +647,9 @@ bool ValidatePhase5BSocketPresentation() {
             "a socket family produced no plain-language wire description");
     }
     EditorNodeGraph::SocketDefinition spectrum {
-        EditorNodeGraph::kImageOutputSocketId, 1,
+        EditorNodeGraph::kSpectrumOutputSocketId, 1,
         EditorNodeGraph::SocketDirection::Output,
-        EditorNodeGraph::SocketType::Image, "Spectrum", false, true };
+        EditorNodeGraph::SocketType::Spectrum, "Spectrum", false, true };
     NormalizeSocketDefinition(EditorNodeGraph::NodeKind::FrequencyFft, spectrum);
     ok &= Phase5Check(
         PrimaryDescription(spectrum) == "Complex spectrum · 2 components",
@@ -386,6 +683,11 @@ bool ValidatePhase5BSocketPresentation() {
         VisibleLineCount(StackAppearance::GraphConnectionLabelVisibility::InteractionOnly,
             0.2f, 20.0f, true) == 2,
         "adaptive wire-label zoom/length/interaction thresholds changed");
+    ok &= Phase5Check(
+        ConnectionLabelsAreVisible(true, 0.0f) &&
+        ConnectionLabelsAreVisible(false, 0.5f) &&
+        !ConnectionLabelsAreVisible(false, kConnectionLabelRevealMinimumAlpha),
+        "connection labels do not retain their fade-out visibility boundary");
     float gapStart = -1.0f;
     float gapEnd = -1.0f;
     ok &= Phase5Check(
@@ -463,6 +765,12 @@ bool RunPhase5ValidationWithContext() {
 
     const std::vector<float> cpuPixels = EvaluatePhase5CanonicalCpu(pixels, exposure);
     bool ok = ValidatePhase5BSocketPresentation();
+    ok &= ValidateConnectionLabelInformationSystem();
+    ok &= ValidateChannelRoleMaskRendering(
+        pixels,
+        width,
+        height,
+        rgba16fTolerance);
     ok &= Phase5Check(
         optimizedStats.fusedPointwiseGroups == 1 &&
         optimizedStats.fusedPointwiseNodes == 2 &&

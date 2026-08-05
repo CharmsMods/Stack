@@ -10,6 +10,7 @@ public:
     ~FullscreenQuad();
 
     void Initialize();
+    void Shutdown();
     void Draw();
 
 private:

@@ -12,6 +12,8 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -96,6 +98,35 @@ EditorNodeGraph::Vec2 ClampGraphPosition(EditorNodeGraph::Vec2 position) {
     return position;
 }
 
+class ScopedGraphPositionRestore {
+public:
+    explicit ScopedGraphPositionRestore(
+        EditorNodeGraph::Graph& graph)
+        : m_Graph(graph) {
+        m_Positions.reserve(graph.GetNodes().size());
+        for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+            m_Positions.push_back(node.position);
+        }
+    }
+
+    ~ScopedGraphPositionRestore() {
+        const std::size_t restoreCount =
+            std::min(m_Positions.size(), m_Graph.GetNodes().size());
+        for (std::size_t index = 0; index < restoreCount; ++index) {
+            m_Graph.GetNodes()[index].position = m_Positions[index];
+        }
+    }
+
+    ScopedGraphPositionRestore(
+        const ScopedGraphPositionRestore&) = delete;
+    ScopedGraphPositionRestore& operator=(
+        const ScopedGraphPositionRestore&) = delete;
+
+private:
+    EditorNodeGraph::Graph& m_Graph;
+    std::vector<EditorNodeGraph::Vec2> m_Positions;
+};
+
 bool InsertNewNodeOnExistingLink(
     EditorNodeGraphUI* ui,
     EditorModule* editor,
@@ -105,24 +136,71 @@ bool InsertNewNodeOnExistingLink(
         return false;
     }
 
-    if (!editor->RemoveGraphLink(link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId)) {
+    if (editor->GraphLinkRequiresManagedRawConfirmation(
+            link.fromNodeId,
+            link.fromSocketId,
+            link.toNodeId,
+            link.toSocketId)) {
+        editor->RemoveGraphNode(newNodeId);
+        editor->ShowUiNotification(
+            UiNotificationSeverity::Info,
+            "Insertion was not applied because this link belongs to the managed RAW chain. Switch the image to Custom Graph Mode before inserting a node here.",
+            "editor-node-graph-managed-insert");
         return false;
     }
 
-    const bool connectedFirst = EditorNodeGraphUI::ConnectOutputToBestInput(
-        editor,
-        link.fromNodeId,
-        link.fromSocketId,
-        newNodeId);
-    const bool connectedSecond = connectedFirst
-        ? EditorNodeGraphUI::ConnectBestOutputToInput(editor, newNodeId, link.toNodeId, link.toSocketId)
-        : false;
+    bool connectedFirst = false;
+    bool connectedSecond = false;
+    try {
+        // Keep the original link live until the second connection commits.
+        // Graph input replacement publishes its prepared Link only after all
+        // allocations succeed, so either bridge can fail without first
+        // disconnecting the user's existing chain.
+        connectedFirst =
+            EditorNodeGraphUI::ConnectOutputToBestInput(
+                editor,
+                link.fromNodeId,
+                link.fromSocketId,
+                newNodeId);
+        connectedSecond = connectedFirst
+            ? EditorNodeGraphUI::ConnectBestOutputToInput(
+                editor,
+                newNodeId,
+                link.toNodeId,
+                link.toSocketId)
+            : false;
+    } catch (const std::bad_alloc&) {
+        connectedSecond = false;
+    } catch (const std::length_error&) {
+        connectedSecond = false;
+    }
     if (connectedFirst && connectedSecond) {
         return true;
     }
 
     editor->RemoveGraphNode(newNodeId);
-    editor->ConnectGraphSockets(link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId, nullptr);
+    EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
+    if (!graph.HasLink(
+            link.fromNodeId,
+            link.fromSocketId,
+            link.toNodeId,
+            link.toSocketId)) {
+        std::string restoreError;
+        if (!editor->ConnectGraphSockets(
+                link.fromNodeId,
+                link.fromSocketId,
+                link.toNodeId,
+                link.toSocketId,
+                &restoreError)) {
+            editor->ShowUiNotification(
+                UiNotificationSeverity::Error,
+                restoreError.empty()
+                    ? "The node could not be inserted and the original link could not be restored."
+                    : "The node could not be inserted: " +
+                        restoreError,
+                "editor-node-graph-insert-rollback");
+        }
+    }
     return false;
 }
 
@@ -185,6 +263,13 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
         case EditorNodeGraph::NodeKind::Compound:
             editor->AddCompoundTemplateNodeAt(static_cast<std::size_t>(entry.value), graphPos);
             break;
+        case EditorNodeGraph::NodeKind::FrequencyFilter:
+            editor->AddFrequencyFilterNodeAt(
+                static_cast<EditorNodeGraph::FrequencyFilterMode>(entry.value), graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::FrequencyResponse:
+            editor->AddFrequencyResponseNodeAt(graphPos);
+            break;
         case EditorNodeGraph::NodeKind::FrequencyFft:
             editor->AddFrequencyFftNodeAt(graphPos);
             break;
@@ -193,6 +278,18 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::SpectrumView:
             editor->AddSpectrumViewNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::ApplyFrequencyResponse:
+            editor->AddApplyFrequencyResponseNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::CombineSpectra:
+            editor->AddCombineSpectraNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumSeparate:
+            editor->AddSpectrumSeparateNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::SpectrumRecombine:
+            editor->AddSpectrumRecombineNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::FrequencyMask:
             editor->AddFrequencyMaskNodeAt(static_cast<EditorNodeGraph::FrequencyMaskShape>(entry.value), graphPos);
@@ -211,6 +308,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::ChannelCombine:
             editor->AddChannelCombineNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::ConstantChannel:
+            editor->AddConstantChannelNodeAt(graphPos);
             break;
         case EditorNodeGraph::NodeKind::RawDevelopment:
             editor->AddRawDevelopmentNodeAt(graphPos);
@@ -241,6 +341,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Image:
         case EditorNodeGraph::NodeKind::RawSource:
+        case EditorNodeGraph::NodeKind::RawProjectFrame:
+        case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Composite:
             break;
     }
@@ -253,13 +356,18 @@ void EditorNodeGraphUI::Render(EditorModule* editor) {
     m_ActiveEditor = editor;
     EditorNodeGraph::Graph& graph = GetActiveGraph(editor);
     const std::uint64_t structureRevision = graph.GetStructureRevision();
+    bool syncVisualCaches = false;
     if (m_LastGraphStructureRevision == 0) {
         m_LastGraphStructureRevision = structureRevision;
+        syncVisualCaches = true;
     } else if (structureRevision != m_LastGraphStructureRevision) {
         ResetPerGraphVisualCaches();
         m_LastGraphStructureRevision = structureRevision;
+        syncVisualCaches = true;
     }
-    SyncPerGraphVisualCaches(graph);
+    if (syncVisualCaches) {
+        SyncPerGraphVisualCaches(graph);
+    }
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const ImVec2 canvasSize = ImVec2(std::max(320.0f, available.x), std::max(320.0f, available.y));
     ImGui::Dummy(canvasSize);
@@ -316,7 +424,6 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             }
         }
     }
-    graph.SetForceOutputFourPins(draggingMask);
     if (options.interactive && IsGraphCanvasHovered() && (draggingMask || draggingImage)) {
         graph.SetSocketPreviewIntent(
             FindNodeAt(graph, ToGraphVec2(ImGui::GetMousePos())),
@@ -332,7 +439,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     m_GraphInteractionBlocked = false;
     m_MouseOwner = GraphMouseOwner::None;
     m_LastNodeControlId = 0;
-    m_NodeLayoutCache.clear();
+    m_NodeLayoutCache.reserve(graph.GetNodes().size());
 
     if (options.allowDropTarget && ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ADD_NODE_DRAG_PAYLOAD")) {
@@ -537,14 +644,21 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     graphSplitter.Split(drawList, 2);
     graphSplitter.SetCurrentChannel(drawList, 1);
     const std::vector<int>& nodeRenderOrder = GetNodeRenderOrder(graph);
+    m_VisibleNodeFrameRects.clear();
+    m_VisibleNodeFrameRects.reserve(nodeRenderOrder.size());
     for (int nodeId : nodeRenderOrder) {
         const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
         const bool forceRenderForInteraction =
             nodeId == m_DragNodeId ||
             nodeId == m_DragOutputNodeId ||
             nodeId == m_DragInputNodeId;
-        if (!forceRenderForInteraction && layout && !rectOverlapsCanvas(layout->frameRect)) {
+        if (!forceRenderForInteraction &&
+            layout &&
+            !rectOverlapsCanvas(layout->persistentVisualRect)) {
             continue;
+        }
+        if (layout) {
+            m_VisibleNodeFrameRects.push_back(layout->frameRect);
         }
         if (EditorNodeGraph::Node* node = FindCachedNode(graph, nodeId)) {
             RenderNode(editor, *node);
@@ -606,11 +720,11 @@ void EditorNodeGraphUI::FitGraphPreviewToCanvas(
     float maxY = -std::numeric_limits<float>::max();
 
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        const EditorNodeGraph::Vec2 size = NodeSize(node);
-        minX = std::min(minX, node.position.x);
-        minY = std::min(minY, node.position.y);
-        maxX = std::max(maxX, node.position.x + size.x);
-        maxY = std::max(maxY, node.position.y + size.y);
+        const auto nodeBounds = NodeGraphBounds(graph, node);
+        minX = std::min(minX, nodeBounds.min.x);
+        minY = std::min(minY, nodeBounds.min.y);
+        maxX = std::max(maxX, nodeBounds.max.x);
+        maxY = std::max(maxY, nodeBounds.max.y);
     }
     for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
         minX = std::min(minX, group.position.x);
@@ -647,18 +761,18 @@ void EditorNodeGraphUI::FitGraphCaptureToCanvas(
     (void)editor;
     Stack::EditorGraphCapture::FloatBounds bounds;
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        const EditorNodeGraph::Vec2 size = NodeSize(node);
+        const auto nodeBounds = NodeGraphBounds(graph, node);
         if (!bounds.valid) {
-            bounds.minX = node.position.x;
-            bounds.minY = node.position.y;
-            bounds.maxX = node.position.x + size.x;
-            bounds.maxY = node.position.y + size.y;
+            bounds.minX = nodeBounds.min.x;
+            bounds.minY = nodeBounds.min.y;
+            bounds.maxX = nodeBounds.max.x;
+            bounds.maxY = nodeBounds.max.y;
             bounds.valid = true;
         } else {
-            bounds.minX = std::min(bounds.minX, node.position.x);
-            bounds.minY = std::min(bounds.minY, node.position.y);
-            bounds.maxX = std::max(bounds.maxX, node.position.x + size.x);
-            bounds.maxY = std::max(bounds.maxY, node.position.y + size.y);
+            bounds.minX = std::min(bounds.minX, nodeBounds.min.x);
+            bounds.minY = std::min(bounds.minY, nodeBounds.min.y);
+            bounds.maxX = std::max(bounds.maxX, nodeBounds.max.x);
+            bounds.maxY = std::max(bounds.maxY, nodeBounds.max.y);
         }
     }
     for (const EditorNodeGraph::NodeGroup& group : graph.GetGroups()) {
@@ -794,12 +908,13 @@ void EditorNodeGraphUI::RenderStaticGraphPreview(
     options.showNodeBrowser = false;
     options.showZoomDial = false;
 
-    // Preview rendering can clamp node positions for fitting, so render a copy
-    // to keep cached preset layouts stable across repeated hovers and opens.
-    EditorNodeGraph::Graph previewGraph = graph;
+    // Preview rendering clamps positions for safety. Preserve only the small
+    // position array instead of deep-copying every graph payload (including
+    // embedded source pixels and custom-mask rasters) on each preview frame.
+    ScopedGraphPositionRestore positionRestore(graph);
 
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::clamp(opacity, 0.0f, 1.0f));
-    RenderGraphCanvas(editor, previewGraph, canvasMin, canvasMax, options);
+    RenderGraphCanvas(editor, graph, canvasMin, canvasMax, options);
     ImGui::PopStyleVar();
 
     m_RenderGraphOverride = previousGraphOverride;

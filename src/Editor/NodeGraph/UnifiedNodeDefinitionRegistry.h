@@ -26,6 +26,7 @@ struct LiveParameterDefinition {
     double maximum = 0.0;
     std::string uiHint;
     bool serialized = true;
+    bool graphInputCapable = false;
     LiveAnimationPolicy animation = LiveAnimationPolicy::NotAnimatable;
     std::string storageKey;
 };
@@ -37,6 +38,7 @@ struct LiveNodeDefinition {
     Stack::NodeMath::Inspectability inspectability = Stack::NodeMath::Inspectability::TransparentGraph;
     std::string label;
     std::string category;
+    std::string searchAliases;
     std::string previewKey;
     std::uint32_t previewRecipeVersion = 1;
     NodeCatalogPreviewStrategy previewStrategy = NodeCatalogPreviewStrategy::Auto;

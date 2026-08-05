@@ -2,8 +2,8 @@
 
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
-#include <functional>
-#include <set>
+#include <cstddef>
+#include <unordered_set>
 
 namespace Stack::Renderer::GraphExecution {
 
@@ -33,99 +33,182 @@ bool IsChannelSocketId(std::string_view socketId) {
 }
 
 bool IsScalarRenderSocket(const GraphExecutionContext& executionContext, int nodeId, std::string_view socketId) {
-    std::set<std::string> visiting;
-    std::function<bool(int, std::string_view)> isScalar = [&](int currentNodeId, std::string_view currentSocketId) -> bool {
-        const std::string key = MakeNodeSocketKey(currentNodeId, currentSocketId);
-        if (!visiting.insert(key).second) {
-            return false;
-        }
-        auto finish = [&](bool result) {
-            visiting.erase(key);
-            return result;
-        };
+    struct ScalarPlan {
+        bool immediate = true;
+        bool result = false;
+        std::vector<const RenderGraphLink*> dependencies;
+    };
+    struct ScalarFrame {
+        std::string key;
+        int nodeId = -1;
+        std::string socketId;
+        ScalarPlan plan;
+        std::size_t nextDependency = 0;
+        bool allDependenciesScalar = true;
+        bool initialized = false;
+    };
 
+    const std::string rootKey = MakeNodeSocketKey(nodeId, socketId);
+    if (const auto cached = executionContext.scalarSocketCache.find(rootKey);
+        cached != executionContext.scalarSocketCache.end()) {
+        return cached->second;
+    }
+
+    const auto makePlan = [&](int currentNodeId, std::string_view currentSocketId) {
+        ScalarPlan plan;
         const auto nodeIt = executionContext.nodes.find(currentNodeId);
         if (nodeIt == executionContext.nodes.end() || !nodeIt->second) {
-            return finish(false);
+            return plan;
+        }
+
+        if (IsChannelSocketId(currentSocketId) ||
+            currentSocketId == EditorNodeGraph::kChannelOutputSocketId ||
+            currentSocketId == EditorNodeGraph::kMaskOutputSocketId) {
+            plan.result = true;
+            return plan;
         }
 
         const RenderGraphNode& node = *nodeIt->second;
-        auto inputIsScalar = [&](std::string_view inputSocketId) {
-            const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, inputSocketId);
-            return input ? isScalar(input->fromNodeId, input->fromSocketId) : false;
+        const auto requireInput = [&](std::string_view inputSocketId) {
+            const RenderGraphLink* input =
+                executionContext.FindInputLink(node.nodeId, inputSocketId);
+            if (!input) {
+                return false;
+            }
+            plan.dependencies.push_back(input);
+            return true;
+        };
+        const auto optionalInput = [&](std::string_view inputSocketId) {
+            if (const RenderGraphLink* input =
+                    executionContext.FindInputLink(node.nodeId, inputSocketId)) {
+                plan.dependencies.push_back(input);
+                return true;
+            }
+            return false;
         };
 
-        bool result = false;
-        if (IsChannelSocketId(currentSocketId)) {
-            result = true;
-        } else {
-            switch (node.kind) {
-                case RenderGraphNodeKind::MaskGenerator:
-                case RenderGraphNodeKind::MaskCombine:
-                case RenderGraphNodeKind::MaskUtility:
-                case RenderGraphNodeKind::CustomMask:
-                case RenderGraphNodeKind::ImageToMask:
-                    result = currentSocketId == "maskOut";
-                    break;
-                case RenderGraphNodeKind::RawDetailAutoMask:
-                case RenderGraphNodeKind::RawDetailFusion:
-                    result = currentSocketId == "maskOut" || (currentSocketId == "imageOut" && inputIsScalar("imageIn"));
-                    break;
-                case RenderGraphNodeKind::Layer:
-                case RenderGraphNodeKind::Lut:
-                    result = currentSocketId == "imageOut" && inputIsScalar("imageIn");
-                    break;
-                case RenderGraphNodeKind::Mix: {
-                    const RenderGraphLink* inputA = executionContext.FindInputLink(node.nodeId, "imageA");
-                    const RenderGraphLink* inputB = executionContext.FindInputLink(node.nodeId, "imageB");
-                    const bool hasA = inputA != nullptr;
-                    const bool hasB = inputB != nullptr;
-                    result = currentSocketId == "imageOut" &&
-                        (hasA || hasB) &&
-                        (!hasA || isScalar(inputA->fromNodeId, inputA->fromSocketId)) &&
-                        (!hasB || isScalar(inputB->fromNodeId, inputB->fromSocketId));
+        switch (node.kind) {
+            case RenderGraphNodeKind::RawDetailAutoMask:
+            case RenderGraphNodeKind::RawDetailFusion:
+            case RenderGraphNodeKind::Layer:
+            case RenderGraphNodeKind::Lut:
+            case RenderGraphNodeKind::TechnicalImage:
+            case RenderGraphNodeKind::Reformat:
+                if (currentSocketId == EditorNodeGraph::kImageOutputSocketId &&
+                    requireInput(EditorNodeGraph::kImageInputSocketId)) {
+                    plan.immediate = false;
+                }
+                break;
+            case RenderGraphNodeKind::Mix:
+                if (currentSocketId == EditorNodeGraph::kImageOutputSocketId) {
+                    const bool hasImageInput =
+                        optionalInput(EditorNodeGraph::kMixInputASocketId) |
+                        optionalInput(EditorNodeGraph::kMixInputBSocketId);
+                    if (hasImageInput) {
+                        plan.immediate = false;
+                    }
+                }
+                break;
+            case RenderGraphNodeKind::DataMath:
+                if (currentSocketId != EditorNodeGraph::kImageOutputSocketId) {
                     break;
                 }
-                case RenderGraphNodeKind::DataMath: {
-                    if (currentSocketId == "imageOut" && node.dataMathMode == RenderDataMathMode::Average) {
-                        return finish(FindFirstDataMathAverageInput(executionContext, node.nodeId) != nullptr);
-                    }
-                    if (currentSocketId == "imageOut" && node.dataMathMode == RenderDataMathMode::ImageAverage) {
-                        return finish(false);
-                    }
-                    const auto inputs = CollectDataMathAverageInputs(executionContext, node.nodeId);
-                    bool allScalar = !inputs.empty();
-                    for (const DataMathInputLinkInfo& input : inputs) {
-                        allScalar = allScalar && isScalar(input.link->fromNodeId, input.link->fromSocketId);
-                        if (!allScalar) {
-                            break;
-                        }
-                    }
-                    if (allScalar) {
-                        if (const RenderGraphLink* baseInput = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kDataMathBaseInputSocketId)) {
-                            allScalar = isScalar(baseInput->fromNodeId, baseInput->fromSocketId);
-                        }
-                    }
-                    if (allScalar) {
-                        if (const RenderGraphLink* maskInput = executionContext.FindInputLink(node.nodeId, EditorNodeGraph::kMaskInputSocketId)) {
-                            allScalar = isScalar(maskInput->fromNodeId, maskInput->fromSocketId);
-                        }
-                    }
-                    result = currentSocketId == "imageOut" && allScalar;
+                if (node.dataMathMode == RenderDataMathMode::Average) {
+                    plan.result =
+                        FindFirstDataMathAverageInput(
+                            executionContext,
+                            node.nodeId) != nullptr;
                     break;
                 }
-                case RenderGraphNodeKind::ChannelSplit:
-                    result = IsChannelSocketId(currentSocketId);
+                if (node.dataMathMode == RenderDataMathMode::ImageAverage) {
                     break;
-                default:
-                    result = false;
-                    break;
-            }
+                }
+                for (const DataMathInputLinkInfo& input :
+                        CollectDataMathAverageInputs(
+                            executionContext,
+                            node.nodeId)) {
+                    plan.dependencies.push_back(input.link);
+                }
+                if (!plan.dependencies.empty()) {
+                    optionalInput(EditorNodeGraph::kDataMathBaseInputSocketId);
+                    optionalInput(EditorNodeGraph::kMaskInputSocketId);
+                    plan.immediate = false;
+                }
+                break;
+            default:
+                break;
         }
-        return finish(result);
+        return plan;
     };
 
-    return isScalar(nodeId, socketId);
+    std::unordered_set<std::string> visiting;
+    visiting.reserve(executionContext.nodes.size());
+    std::vector<ScalarFrame> pending;
+    pending.push_back(
+        ScalarFrame{
+            rootKey,
+            nodeId,
+            std::string(socketId)
+        });
+
+    while (!pending.empty()) {
+        ScalarFrame& frame = pending.back();
+        if (!frame.initialized) {
+            if (executionContext.scalarSocketCache.count(frame.key) > 0) {
+                pending.pop_back();
+                continue;
+            }
+            visiting.insert(frame.key);
+            frame.plan = makePlan(frame.nodeId, frame.socketId);
+            frame.initialized = true;
+            if (frame.plan.immediate) {
+                executionContext.scalarSocketCache[frame.key] =
+                    frame.plan.result;
+                visiting.erase(frame.key);
+                pending.pop_back();
+                continue;
+            }
+        }
+
+        if (frame.nextDependency < frame.plan.dependencies.size()) {
+            const RenderGraphLink& dependency =
+                *frame.plan.dependencies[frame.nextDependency];
+            const std::string dependencyKey =
+                MakeNodeSocketKey(
+                    dependency.fromNodeId,
+                    dependency.fromSocketId);
+            if (const auto cached =
+                    executionContext.scalarSocketCache.find(dependencyKey);
+                cached != executionContext.scalarSocketCache.end()) {
+                frame.allDependenciesScalar =
+                    frame.allDependenciesScalar && cached->second;
+                ++frame.nextDependency;
+                continue;
+            }
+            if (visiting.count(dependencyKey) > 0) {
+                frame.allDependenciesScalar = false;
+                ++frame.nextDependency;
+                continue;
+            }
+            pending.push_back(
+                ScalarFrame{
+                    dependencyKey,
+                    dependency.fromNodeId,
+                    dependency.fromSocketId
+                });
+            continue;
+        }
+
+        executionContext.scalarSocketCache[frame.key] =
+            frame.allDependenciesScalar;
+        visiting.erase(frame.key);
+        pending.pop_back();
+    }
+
+    const auto resolved =
+        executionContext.scalarSocketCache.find(rootKey);
+    return resolved != executionContext.scalarSocketCache.end() &&
+        resolved->second;
 }
 
 } // namespace Stack::Renderer::GraphExecution

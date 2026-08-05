@@ -54,7 +54,9 @@ bool TestSpatialDescriptorV2() {
         TestSampling(),
         LogicalPrecision::UInt8,
         "phase6-spatial-source");
-    ok &= Check(source.schemaVersion == 2, "new descriptors use spatial schema v2");
+    ok &= Check(
+        source.schemaVersion == kSemanticDescriptorSchemaVersion,
+        "new descriptors use the current semantic schema");
     const nlohmann::json serialized = SerializeValueDescriptor(source);
     ok &= Check(
         serialized["spatial"]["value"].value("rasterOrigin", std::string()) == "top-left",
@@ -69,7 +71,7 @@ bool TestSpatialDescriptorV2() {
     const DescriptorParseResult migrated = ParseValueDescriptor(legacy);
     ok &= Check(
         migrated.descriptor.has_value() && migrated.issues.empty() &&
-        migrated.descriptor->schemaVersion == 2 &&
+        migrated.descriptor->schemaVersion == kSemanticDescriptorSchemaVersion &&
         migrated.descriptor->spatial.value.rasterOrigin == RasterOrigin::BottomLeft,
         "schema v1 migrates to the established bottom-left live graph origin");
 
@@ -239,12 +241,13 @@ bool TestSpecializedBoundaries() {
     const SpecializedStagePlan frequency = PlanSpecializedStage(SpecializedStageKind::FrequencyTransform);
     ok &= Check(frequency.valid && frequency.capability == CapabilityClass::MultipassIterative &&
         frequency.regionRequirement == RegionRequirement::FullFrame &&
+        frequency.inputType == LogicalValueType::Channel &&
         frequency.outputType == LogicalValueType::ComplexSpectrum,
         "frequency transforms are typed global multipass boundaries");
     const SpecializedStagePlan inverse =
         PlanSpecializedStage(SpecializedStageKind::FrequencyInverseTransform);
     ok &= Check(inverse.valid && inverse.inputType == LogicalValueType::ComplexSpectrum &&
-        inverse.outputType == LogicalValueType::DataImage &&
+        inverse.outputType == LogicalValueType::Channel &&
         inverse.capability == CapabilityClass::MultipassIterative,
         "inverse frequency transforms declare the opposite typed boundary explicitly");
     const SpecializedStagePlan external =

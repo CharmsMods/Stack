@@ -70,12 +70,16 @@ bool EditorNodeGraphUI::CanOpenChannelSplitConfirm(const EditorNodeGraph::Graph&
         if (!graph.FindInputLink(nodeId, EditorNodeGraph::kImageInputSocketId)) {
             return false;
         }
-        for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
-            if (link.fromNodeId == nodeId && link.fromSocketId == EditorNodeGraph::kImageOutputSocketId) {
-                return true;
+        bool hasImageOutput = false;
+        graph.ForEachOutgoingLink(
+            nodeId,
+            [&](const EditorNodeGraph::Link& link) {
+            if (link.fromSocketId ==
+                EditorNodeGraph::kImageOutputSocketId) {
+                hasImageOutput = true;
             }
-        }
-        return false;
+        });
+        return hasImageOutput;
     }
 
     if (node->kind == EditorNodeGraph::NodeKind::DataMath &&
@@ -568,12 +572,13 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     
                     // Shift nodes whose visible bounds overlap the group.
                     for (auto& node : editor->GetNodeGraph().GetNodes()) {
-                        const EditorNodeGraph::Vec2 nodeSize = NodeGraphFootprintSize(node);
+                        const auto nodeBounds =
+                            NodeGraphBounds(graph, node);
                         const bool overlapsGroup =
-                            node.position.x < group->position.x + group->size.x &&
-                            node.position.x + nodeSize.x > group->position.x &&
-                            node.position.y < group->position.y + group->size.y &&
-                            node.position.y + nodeSize.y > group->position.y;
+                            nodeBounds.min.x < group->position.x + group->size.x &&
+                            nodeBounds.max.x > group->position.x &&
+                            nodeBounds.min.y < group->position.y + group->size.y &&
+                            nodeBounds.max.y > group->position.y;
                         if (overlapsGroup) {
                             
                             node.position.x += dx;
@@ -711,6 +716,13 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         hoveredNodeId > 0 &&
         ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(hoveredNodeId);
+        if (node &&
+            (node->kind == EditorNodeGraph::NodeKind::RawProjectFrame ||
+             node->kind == EditorNodeGraph::NodeKind::MultiFrameDenoise)) {
+            TouchNodeFront(node->id);
+            editor->OpenManagedMfdGraphNode(node->id);
+            return;
+        }
         if (node && ResolveNodeHasDedicatedComplexEditor(editor, *node)) {
             TouchNodeFront(node->id);
             editor->SwitchToComplexNodeSubWindow(node->id);
@@ -750,6 +762,11 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 return;
             }
             TouchNodeFront(node->id);
+            if (node->kind == EditorNodeGraph::NodeKind::RawProjectFrame ||
+                node->kind == EditorNodeGraph::NodeKind::MultiFrameDenoise) {
+                editor->OpenManagedMfdGraphNode(node->id);
+                return;
+            }
             if (ResolveNodeHasDedicatedComplexEditor(editor, *node)) {
                 editor->SwitchToComplexNodeSubWindow(node->id);
                 return;
@@ -759,7 +776,17 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             node->expanded = !node->expanded;
             editor->SelectGraphNode(node->id);
             if (expanding) {
-                editor->RequestGraphNodeAutoFocus(node->id, node->position, NodeGraphFootprintSize(*node), m_Pan.x, m_Pan.y, m_Zoom);
+                const auto bounds = NodeGraphBounds(graph, *node);
+                editor->RequestGraphNodeAutoFocus(
+                    node->id,
+                    bounds.min,
+                    {
+                        bounds.max.x - bounds.min.x,
+                        bounds.max.y - bounds.min.y
+                    },
+                    m_Pan.x,
+                    m_Pan.y,
+                    m_Zoom);
             } else {
                 editor->ClearGraphAutoFocusIfTrackedNode(node->id);
             }
@@ -788,11 +815,19 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
             if (!additiveSelect) {
                 mutableGraph.ClearSelection();
             }
-            mutableGraph.SelectNodesInRect(
+            mutableGraph.SelectNodesInBounds(
                 m_BoxSelectStart,
                 m_BoxSelectCurrent,
                 [this](const EditorNodeGraph::Node& node) {
-                    return NodeGraphFootprintSize(node);
+                    const EditorNodeGraph::Vec2 size =
+                        NodeSize(node);
+                    return EditorNodeGraph::GraphRect {
+                        node.position,
+                        {
+                            node.position.x + size.x,
+                            node.position.y + size.y
+                        }
+                    };
                 },
                 true);
             m_BoxSelecting = false;
@@ -829,10 +864,15 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         if (editor->SelectAdjacentMainChainNode(direction)) {
             const int selectedNodeId = editor->GetNodeGraph().GetSelectedNodeId();
             if (const EditorNodeGraph::Node* selectedNode = editor->GetNodeGraph().FindNode(selectedNodeId)) {
+                const auto bounds =
+                    NodeGraphBounds(graph, *selectedNode);
                 editor->RequestGraphNodeAutoFocus(
                     selectedNode->id,
-                    selectedNode->position,
-                    NodeGraphFootprintSize(*selectedNode),
+                    bounds.min,
+                    {
+                        bounds.max.x - bounds.min.x,
+                        bounds.max.y - bounds.min.y
+                    },
                     m_Pan.x,
                     m_Pan.y,
                     m_Zoom);
@@ -866,6 +906,20 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         !anyPopupOpen &&
         !HasDrawerOpen() &&
         !graphHotkeysBlockedByNodeControls) {
+        if (ImGui::GetIO().KeyCtrl &&
+            !ImGui::GetIO().KeyShift &&
+            ImGui::IsKeyPressed(ImGuiKey_Z, false) &&
+            editor->CanUndoFrequencyGraphAction()) {
+            editor->UndoFrequencyGraphAction();
+            return;
+        }
+        if (ImGui::GetIO().KeyCtrl &&
+            ((ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) ||
+             ImGui::IsKeyPressed(ImGuiKey_Y, false)) &&
+            editor->CanRedoFrequencyGraphAction()) {
+            editor->RedoFrequencyGraphAction();
+            return;
+        }
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
             CopySelectedNodes(editor, true);
         }
@@ -896,11 +950,12 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                 bool hasNodes = false;
                 for (int nodeId : selectedIds) {
                     if (const auto* node = editor->GetNodeGraph().FindNode(nodeId)) {
-                        EditorNodeGraph::Vec2 size = NodeGraphFootprintSize(*node);
-                        minX = std::min(minX, node->position.x);
-                        minY = std::min(minY, node->position.y);
-                        maxX = std::max(maxX, node->position.x + size.x);
-                        maxY = std::max(maxY, node->position.y + size.y);
+                        const auto bounds =
+                            NodeGraphBounds(graph, *node);
+                        minX = std::min(minX, bounds.min.x);
+                        minY = std::min(minY, bounds.min.y);
+                        maxX = std::max(maxX, bounds.max.x);
+                        maxY = std::max(maxY, bounds.max.y);
                         hasNodes = true;
                     }
                 }

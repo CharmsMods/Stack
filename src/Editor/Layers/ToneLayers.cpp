@@ -479,6 +479,8 @@ void ViewTransformLayer::ResetDisplayDefaults() {
     m_Saturation = 1.0f;
     m_PreserveHue = true;
     m_DebugFalseColor = false;
+    m_InputIsRec2020 = false;
+    m_EncodeSrgbOutput = false;
 }
 
 void ViewTransformLayer::StoreProbeStats(const RenderTextureStats& stats) {
@@ -559,6 +561,21 @@ void ViewTransformLayer::RenderExpandedNodeSurface(EditorModule* editor, const N
     ImGuiExtras::NodeSliderFloat("Saturation", "##ViewSaturation", &m_Saturation, 0.0f, 2.0f, "%.2f", context.safeContentWidth);
     ImGuiExtras::NodeCheckbox("Preserve Hue", "##ViewPreserveHue", &m_PreserveHue, context.safeContentWidth);
     ImGuiExtras::NodeCheckbox("EV False Color", "##ViewFalseColor", &m_DebugFalseColor, context.safeContentWidth);
+    const char* inputSpaces[] = {
+        "Linear sRGB / D65",
+        "Linear Rec. 2020 / D65"
+    };
+    int inputSpace = m_InputIsRec2020 ? 1 : 0;
+    if (ImGuiExtras::NodeCombo(
+            "Input Space",
+            "##ViewInputSpace",
+            &inputSpace,
+            inputSpaces,
+            IM_ARRAYSIZE(inputSpaces),
+            context.safeContentWidth)) {
+        m_InputIsRec2020 = inputSpace == 1;
+    }
+    ImGuiExtras::NodeCheckbox("Encode sRGB Output", "##ViewEncodeSrgb", &m_EncodeSrgbOutput, context.safeContentWidth);
     ImGui::TextDisabled("False color: blue < -4, cyan -4..-2, green -2..0, yellow 0..2, orange 2..4, red > 4 EV.");
 }
 
@@ -574,7 +591,9 @@ json ViewTransformLayer::Serialize() const {
         { "contrast", m_Contrast },
         { "saturation", m_Saturation },
         { "preserveHue", m_PreserveHue },
-        { "debugFalseColor", m_DebugFalseColor }
+        { "debugFalseColor", m_DebugFalseColor },
+        { "inputWorkingSpace", m_InputIsRec2020 ? "linear-rec2020-d65" : "linear-srgb-d65" },
+        { "encodeSrgbOutput", m_EncodeSrgbOutput }
     };
 }
 
@@ -589,6 +608,8 @@ void ViewTransformLayer::Deserialize(const json& j) {
     m_Saturation = j.value("saturation", m_Saturation);
     m_PreserveHue = j.value("preserveHue", m_PreserveHue);
     m_DebugFalseColor = j.value("debugFalseColor", m_DebugFalseColor);
+    m_InputIsRec2020 = j.value("inputWorkingSpace", std::string("linear-srgb-d65")) == "linear-rec2020-d65";
+    m_EncodeSrgbOutput = j.value("encodeSrgbOutput", false);
 }
 
 ShadowsHighlightsLayer::ShadowsHighlightsLayer() = default;

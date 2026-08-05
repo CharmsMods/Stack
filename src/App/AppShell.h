@@ -9,11 +9,11 @@
 #include "../Editor/EditorModule.h"
 #include "../Editor/LoadedProjectData.h"
 #include "../Library/LibraryModule.h"
-#include "../Tools/ToolsModule.h"
 #include "../Utils/UiNotifications.h"
 #include "../Utils/ImGuiExtras.h"
 #include "imgui.h"
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <vector>
 
@@ -42,11 +42,27 @@ private:
         EditorReveal
     };
 
+    enum class PendingFileAction {
+        None,
+        NewEditorProject,
+        OpenProject,
+        CloseCurrent
+    };
+
     void ShowSplashScreen();
     void RenderUI();
     void RenderClosingFrame();
     void RenderEditorSavePrompts();
+    void RenderFileCommandPrompts();
+    void RequestFileMenuSave();
+    void RequestFileMenuSaveAs();
+    void QueueFileAction(
+        PendingFileAction action,
+        std::filesystem::path projectPath = {});
+    bool ExecutePendingFileAction(bool discardCurrent);
+    void ClearPendingFileAction();
     void RequestMainWindowClose(const char* source);
+    void BeginMainWindowClose(const std::string& source);
     void CancelWorkForMainWindowClose();
     void BeginLibraryToEditorProjectLoad(const std::string& projectFileName);
     void RequestDeferredLibraryProjectLoad();
@@ -69,7 +85,7 @@ private:
     void OnTabChanged(int oldTab, int newTab);
     void BeginRootTabBodyFade(int oldTab, int newTab);
     float ConsumeRootTabBodyFadeAlpha(int* outRenderTabId);
-    void RenderHeaderSettingsPopup(const ImVec2& gearButtonMin, const ImVec2& gearButtonMax, bool gearButtonHovered);
+    void RenderHeaderSettingsPopup(bool buttonHovered);
     void ProcessGraphCaptureRequest();
     void InstallDetachedPreviewPlatformHooks();
     void UninstallDetachedPreviewPlatformHooks();
@@ -79,7 +95,7 @@ private:
     void CompleteDetachedPreviewPlatformPresent();
     void TraceDetachedPreviewNativeWindow(
         const char* event,
-        const EditorModule::DetachedPreviewNativeWindowRequest* request = nullptr,
+        const EditorModule::DetachedNativeWindowRequest* request = nullptr,
         bool themeApplied = false,
         bool focusAttempted = false,
         bool focused = false);
@@ -87,7 +103,9 @@ private:
     void TraceMainWindowState(const char* event);
     void TraceMainWindowState(const char* event, const char* detail);
     void TraceShutdownPhase(const char* phase, double elapsedMs = -1.0, const char* detail = nullptr);
-    bool IsDetachedPreviewViewport(const ImGuiViewport* viewport, EditorModule::DetachedPreviewNativeWindowRequest* request = nullptr) const;
+    bool IsDetachedSurfaceViewport(
+        const ImGuiViewport* viewport,
+        EditorModule::DetachedNativeWindowRequest* request = nullptr) const;
     static void OnWindowClose(GLFWwindow* window);
     static void DetachedPreviewPlatformCreateWindowHook(ImGuiViewport* viewport);
     static void DetachedPreviewPlatformShowWindowHook(ImGuiViewport* viewport);
@@ -114,9 +132,12 @@ private:
     unsigned int m_SplashTexture = 0;
     unsigned int m_EditorTabTexture = 0;
     unsigned int m_LibraryTabTexture = 0;
-    unsigned int m_ToolsTabTexture = 0;
     unsigned int m_RawTabTexture = 0;
-    unsigned int m_HeaderSettingsTexture = 0;
+    unsigned int m_RawLabTabTexture = 0;
+    unsigned int m_FileNewTexture = 0;
+    unsigned int m_FileOpenProjectTexture = 0;
+    unsigned int m_FileSaveTexture = 0;
+    unsigned int m_FileExitProgramTexture = 0;
     unsigned int m_BackgroundImageTexture = 0;
     int m_BackgroundImageWidth = 0;
     int m_BackgroundImageHeight = 0;
@@ -146,7 +167,7 @@ private:
     double m_MainWindowShownTime = 0.0;
     bool m_AppStartupMotionActive = false;
     double m_AppStartupMotionStartedAt = 0.0;
-    int m_RequestedTab = 0; // 0 = Library, 1 = Editor, 2 = Tools
+    int m_RequestedTab = 0; // 0 = Library, 1 = Editor, 3 = legacy RAW, 5 = RAW Lab
     int m_CurrentTabId = 0;
     bool m_RootTabBodyFadeActive = false;
     double m_RootTabBodyFadeStartedAt = 0.0;
@@ -177,8 +198,21 @@ private:
     std::string m_ActiveSyncLayerId;
     bool m_ShowEditorSavePrompt = false;
     bool m_ShowEditorNamePrompt = false;
+    bool m_ProjectLoadSavePending = false;
+    bool m_ProjectLoadCurrentProjectDispositionApproved = false;
+    std::string m_PendingProjectLoadFileName;
+    bool m_ShowRawWorkspaceSwitchPrompt = false;
+    bool m_RawWorkspaceSwitchSavePending = false;
+    bool m_ShowUnnamedEditorClosePrompt = false;
+    bool m_MainWindowCloseSavePending = false;
+    std::string m_PendingMainWindowCloseSource;
     bool m_SettingsPopupOpen = false;
     double m_SettingsPopupOpenedAt = 0.0;
+    bool m_ShowOpenProjectPrompt = false;
+    bool m_ShowFileDispositionPrompt = false;
+    bool m_FileActionSavePending = false;
+    PendingFileAction m_PendingFileAction = PendingFileAction::None;
+    std::filesystem::path m_PendingFileProjectPath;
     char m_SaveNameBuffer[256] = {};
     std::vector<ActiveToast> m_ActiveToasts;
     void (*m_OriginalPlatformCreateWindow)(ImGuiViewport*) = nullptr;
@@ -193,6 +227,5 @@ private:
     AppSettingsPopup::State m_SettingsPopupState;
     EditorModule m_Editor;
     LibraryModule m_Library;
-    ToolsModule m_Tools;
     CompositeModule m_Composite;
 };

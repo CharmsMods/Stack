@@ -3,6 +3,7 @@
 #include "Editor/LayerRegistry.h"
 #include "Editor/Layers/ToneLayers.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <algorithm>
 #include <functional>
@@ -22,6 +23,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
     const std::function<unsigned int(int, const std::string&)>& evalMask,
     const std::function<std::size_t(int, const std::string&)>& fingerprintImage) {
     GraphNodeRenderResult result;
+    Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup
+        resultExceptionCleanup(result.texture, result.owned);
 
     const std::string preFinishKey =
         std::to_string(node.nodeId) + ":" + EditorNodeGraph::kPreFinishImageOutputSocketId;
@@ -61,6 +64,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
         if (preToneTexture == 0) {
             return result;
         }
+        const int preToneWidth = m_Width;
+        const int preToneHeight = m_Height;
 
         std::shared_ptr<LayerBase> integratedToneLayer = LayerRegistry::CreateLayerFromTypeId("ToneCurve");
         if (!integratedToneLayer) {
@@ -79,22 +84,22 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
                 node.rawDevelop.scenePrepSettings.maxEvBias);
         }
 
-        unsigned int finishedResult = CreateGraphRenderTargetTexture();
-        const bool renderedIntegratedTone = RenderIntoGraphTargetTexture(finishedResult, [&](unsigned int) {
+        Stack::Renderer::ScopedGLTexture finishedResult(
+            CreateGraphRenderTargetTexture());
+        const bool renderedIntegratedTone = RenderIntoGraphTargetTexture(finishedResult.Get(), [&](unsigned int) {
             integratedToneLayer->ExecuteWithSource(preToneTexture, preToneTexture, m_Width, m_Height, m_Quad);
         });
-        bool useFinishedResult = renderedIntegratedTone && finishedResult != 0;
+        bool useFinishedResult = renderedIntegratedTone && finishedResult;
         if (useFinishedResult) {
             const QuickTextureStats inputStats = ProbeTextureStats(preToneTexture, m_Width, m_Height);
-            const QuickTextureStats outputStats = ProbeTextureStats(finishedResult, m_Width, m_Height);
+            const QuickTextureStats outputStats = ProbeTextureStats(finishedResult.Get(), m_Width, m_Height);
             const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
             const bool outputIsBlank =
                 outputStats.valid &&
                 outputStats.p99Luma <= 0.000001f &&
                 outputStats.maxRgb <= 0.00001f;
             if (inputHasSignal && outputIsBlank) {
-                glDeleteTextures(1, &finishedResult);
-                finishedResult = 0;
+                finishedResult.Reset();
                 useFinishedResult = false;
                 std::cerr << "[RenderPipeline] Integrated Develop ToneCurve produced a blank output for RawDevelop node "
                           << node.nodeId << " (input p99 luma " << inputStats.p99Luma
@@ -104,12 +109,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
         }
 
         if (useFinishedResult) {
-            result.texture = finishedResult;
+            result.texture = finishedResult.Release();
             result.owned = true;
         } else {
-            if (finishedResult != 0) {
-                glDeleteTextures(1, &finishedResult);
-            }
             result.texture = preToneTexture;
             result.owned = false;
         }
@@ -119,19 +121,42 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
             m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
         }
 
-        if (useFinishedResult && finishedResult != 0) {
+        if (useFinishedResult && result.texture != 0) {
             const RenderGraphLink* maskLink = executionContext.FindInputLink(node.nodeId, "maskIn");
             const unsigned int finishMaskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
-            if (finishMaskTexture != 0) {
-                unsigned int blended = CreateGraphRenderTargetTexture();
-                RenderIntoGraphTargetTexture(blended, [&](unsigned int fbo) {
-                    RenderMaskBlend(preToneTexture, finishedResult, finishMaskTexture, fbo);
-                });
-                if (blended != 0 && finishedResult != 0) {
-                    glDeleteTextures(1, &finishedResult);
+            m_Width = preToneWidth;
+            m_Height = preToneHeight;
+            if (maskLink != nullptr && finishMaskTexture == 0) {
+                glDeleteTextures(1, &result.texture);
+                result.texture = 0;
+                result.owned = false;
+                result.texture = preToneTexture;
+                std::cerr << "[RenderPipeline] Connected finish mask could not be rendered for RawDevelop node "
+                          << node.nodeId << "; passing pre-finish texture through.\n";
+            } else if (finishMaskTexture != 0) {
+                EnsureMaskPrograms();
+                Stack::Renderer::ScopedGLTexture blended(
+                    CreateGraphRenderTargetTexture());
+                bool blendPassExecuted = false;
+                const bool renderedBlend =
+                    m_MaskBlendProgram != 0 &&
+                    RenderIntoGraphTargetTexture(blended.Get(), [&](unsigned int fbo) {
+                        blendPassExecuted = RenderMaskBlend(
+                            preToneTexture, result.texture, finishMaskTexture, fbo);
+                    }) &&
+                    blendPassExecuted;
+                if (renderedBlend && blended && result.texture != 0) {
+                    glDeleteTextures(1, &result.texture);
+                    result.texture = blended.Release();
+                    result.owned = true;
+                } else {
+                    glDeleteTextures(1, &result.texture);
+                    result.texture = 0;
+                    result.owned = false;
+                    result.texture = preToneTexture;
+                    std::cerr << "[RenderPipeline] Finish-mask blend failed for RawDevelop node "
+                              << node.nodeId << "; passing pre-finish texture through.\n";
                 }
-                result.texture = blended != 0 ? blended : finishedResult;
-                result.owned = true;
             }
         }
 
@@ -169,30 +194,36 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopGraphNode(
         prepMapNode.kind = RenderGraphNodeKind::RawDetailFusion;
         prepMapNode.rawDetailFusion.settings = prepSettings;
         const unsigned int preScenePrepTexture = result.texture;
-        unsigned int prepExposureMap = RenderRawDetailAutoMask(result.texture, prepMapNode, 0, false);
-        if (unsigned int preparedResult = prepExposureMap != 0
-            ? RenderRawDetailFusion(result.texture, prepExposureMap, prepSettings)
-            : 0) {
+        Stack::Renderer::ScopedGLTexture prepExposureMap(
+            RenderRawDetailAutoMask(
+                result.texture,
+                prepMapNode,
+                0,
+                false));
+        Stack::Renderer::ScopedGLTexture preparedResult(
+            prepExposureMap
+                ? RenderRawDetailFusion(
+                    result.texture,
+                    prepExposureMap.Get(),
+                    prepSettings)
+                : 0);
+        if (preparedResult) {
             const QuickTextureStats inputStats = ProbeTextureStats(preScenePrepTexture, m_Width, m_Height);
-            const QuickTextureStats outputStats = ProbeTextureStats(preparedResult, m_Width, m_Height);
+            const QuickTextureStats outputStats = ProbeTextureStats(preparedResult.Get(), m_Width, m_Height);
             const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
             const bool outputIsBlank =
                 outputStats.valid &&
                 outputStats.p99Luma <= 0.000001f &&
                 outputStats.maxRgb <= 0.00001f;
             if (inputHasSignal && outputIsBlank) {
-                glDeleteTextures(1, &preparedResult);
                 std::cerr << "[RenderPipeline] Develop scene prep produced a blank output for RawDevelop node "
                           << node.nodeId << " (input p99 luma " << inputStats.p99Luma
                           << ", output p99 luma " << outputStats.p99Luma
                           << "); passing RAW base texture through.\n";
             } else {
-                result.texture = preparedResult;
+                result.texture = preparedResult.Release();
                 result.owned = true;
             }
-        }
-        if (prepExposureMap != 0) {
-            glDeleteTextures(1, &prepExposureMap);
         }
     }
 

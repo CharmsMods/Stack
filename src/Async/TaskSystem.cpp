@@ -22,14 +22,35 @@ void TaskSystem::Initialize() {
 
     m_StopRequested = false;
     const std::size_t workerCount = ResolveWorkerCount();
-    m_Workers.reserve(workerCount);
-    for (std::size_t i = 0; i < workerCount; ++i) {
-        m_Workers.emplace_back([this]() { WorkerLoop(false); });
+    try {
+        m_Workers.reserve(workerCount);
+        for (std::size_t i = 0; i < workerCount; ++i) {
+            m_Workers.emplace_back([this]() { WorkerLoop(false); });
+        }
+        // Keep one worker exclusively available for foreground actions such
+        // as Add Slice. The normal pool is often busy with library scans,
+        // thumbnails, or saves, and priority alone cannot pre-empt
+        // already-running work.
+        m_InteractiveWorker =
+            std::thread([this]() { WorkerLoop(true); });
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(m_WorkMutex);
+            m_StopRequested = true;
+        }
+        m_WorkCv.notify_all();
+        for (std::thread& worker : m_Workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        m_Workers.clear();
+        if (m_InteractiveWorker.joinable()) {
+            m_InteractiveWorker.join();
+        }
+        m_StopRequested = false;
+        throw;
     }
-    // Keep one worker exclusively available for foreground actions such as
-    // Add Slice. The normal pool is often busy with library scans, thumbnails,
-    // or saves, and priority alone cannot pre-empt already-running work.
-    m_InteractiveWorker = std::thread([this]() { WorkerLoop(true); });
 
     m_Initialized = true;
 }
@@ -92,51 +113,70 @@ bool TaskSystem::IsDrainedForShutdown() const {
     return m_ActiveWorkers.load() == 0;
 }
 
-void TaskSystem::Submit(Task task) {
+bool TaskSystem::Submit(Task task) {
     if (!task) {
-        return;
+        return false;
     }
 
     if (!m_Initialized) {
-        Initialize();
+        try {
+            Initialize();
+        } catch (...) {
+            return false;
+        }
     }
 
-    {
+    try {
         std::lock_guard<std::mutex> lock(m_WorkMutex);
         if (m_StopRequested) {
-            return;
+            return false;
         }
         m_WorkQueue.push(std::move(task));
+    } catch (...) {
+        return false;
     }
     m_WorkCv.notify_one();
+    return true;
 }
 
-void TaskSystem::SubmitHighPriority(Task task) {
+bool TaskSystem::SubmitHighPriority(Task task) {
     if (!task) {
-        return;
+        return false;
     }
 
     if (!m_Initialized) {
-        Initialize();
+        try {
+            Initialize();
+        } catch (...) {
+            return false;
+        }
     }
 
-    {
+    try {
         std::lock_guard<std::mutex> lock(m_WorkMutex);
         if (m_StopRequested) {
-            return;
+            return false;
         }
         m_HighPriorityWorkQueue.push(std::move(task));
+    } catch (...) {
+        return false;
     }
     m_WorkCv.notify_one();
+    return true;
 }
 
-void TaskSystem::PostToMain(Task task) {
+bool TaskSystem::PostToMain(Task task) {
     if (!task) {
-        return;
+        return false;
     }
 
-    std::lock_guard<std::mutex> lock(m_MainMutex);
-    m_MainQueue.push(std::move(task));
+    try {
+        std::lock_guard<std::mutex> lock(m_MainMutex);
+        m_MainQueue.push(std::move(task));
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 
 void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks) {
@@ -193,6 +233,12 @@ void TaskSystem::WorkerLoop(bool interactiveOnly) {
                 task = std::move(m_WorkQueue.front());
                 m_WorkQueue.pop();
             }
+            if (task) {
+                // Publish the task as active before releasing the queue lock.
+                // Otherwise shutdown can observe an empty queue and zero
+                // active workers during the small pop-to-increment window.
+                m_ActiveWorkers.fetch_add(1, std::memory_order_release);
+            }
         }
 
         if (!task) {
@@ -200,14 +246,13 @@ void TaskSystem::WorkerLoop(bool interactiveOnly) {
         }
 
         try {
-            m_ActiveWorkers.fetch_add(1);
             task();
         } catch (const std::exception& e) {
             std::cerr << "[TaskSystem] Worker task failed: " << e.what() << "\n";
         } catch (...) {
             std::cerr << "[TaskSystem] Worker task failed: unknown exception\n";
         }
-        m_ActiveWorkers.fetch_sub(1);
+        m_ActiveWorkers.fetch_sub(1, std::memory_order_release);
     }
 }
 

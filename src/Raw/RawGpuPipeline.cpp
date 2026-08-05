@@ -1,5 +1,6 @@
 #include "RawGpuPipeline.h"
 
+#include "RawProcessingMath.h"
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
@@ -9,6 +10,11 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <new>
+
+#ifndef GL_R32F
+#define GL_R32F 0x822E
+#endif
 
 namespace Raw {
 namespace {
@@ -34,9 +40,12 @@ out vec4 FragColor;
 uniform usampler2D uRaw;
 uniform sampler2D uCorrectedRaw;
 uniform int uUseCorrectedRaw;
+uniform sampler2D uRawNoiseVariance;
+uniform int uUseRawNoiseVariance;
 uniform ivec2 uRawSize;
 uniform ivec2 uVisibleSize;
 uniform ivec2 uCropOrigin;
+uniform int uClampToActiveArea;
 uniform int uOrientation;
 uniform int uRotateToFitFrame;
 uniform int uFlipHorizontally;
@@ -46,6 +55,7 @@ uniform float uBlackLevel;
 uniform vec4 uChannelBlack;
 uniform float uWhiteLevel;
 uniform vec3 uWhiteBalance;
+uniform int uWhiteBalanceBeforeDemosaic;
 uniform mat3 uCameraToWorking;
 uniform int uUseCameraTransform;
 uniform int uDebugView;
@@ -132,7 +142,11 @@ float blackForColor(int color) {
 }
 
 float rawNormalizedAt(ivec2 rawP, ivec2 visibleP) {
-    ivec2 q = clamp(rawP, ivec2(0), uRawSize - ivec2(1));
+    ivec2 minimumP = uClampToActiveArea != 0 ? uCropOrigin : ivec2(0);
+    ivec2 maximumP = uClampToActiveArea != 0
+        ? min(uRawSize - ivec2(1), uCropOrigin + uVisibleSize - ivec2(1))
+        : uRawSize - ivec2(1);
+    ivec2 q = clamp(rawP, minimumP, maximumP);
     if (uUseCorrectedRaw != 0) {
         return texelFetch(uCorrectedRaw, q, 0).r;
     }
@@ -144,12 +158,36 @@ float rawNormalizedAt(ivec2 rawP, ivec2 visibleP) {
     return (v - black) / max(1.0, white - black);
 }
 
-float sameCfaNeighborMean(ivec2 rawP, ivec2 visibleP, float center, int radius, out float neighborMin, out float neighborMax) {
+float noiseVarianceAt(ivec2 rawP) {
+    if (uUseRawNoiseVariance == 0) {
+        return 0.0;
+    }
+    ivec2 minimumP = uClampToActiveArea != 0 ? uCropOrigin : ivec2(0);
+    ivec2 maximumP = uClampToActiveArea != 0
+        ? min(uRawSize - ivec2(1), uCropOrigin + uVisibleSize - ivec2(1))
+        : uRawSize - ivec2(1);
+    return max(0.0, texelFetch(
+        uRawNoiseVariance,
+        clamp(rawP, minimumP, maximumP),
+        0).r);
+}
+
+float sameCfaNeighborMean(
+    ivec2 rawP,
+    ivec2 visibleP,
+    float center,
+    int radius,
+    bool useNoiseProfile,
+    out float neighborMin,
+    out float neighborMax) {
     float sum = 0.0;
     float weightSum = 0.0;
     neighborMin = 1.0e20;
     neighborMax = -1.0e20;
     float edge = mix(0.85, 0.045, clamp(uMosaicEdgeProtection, 0.0, 1.0));
+    float centerVariance = useNoiseProfile ? noiseVarianceAt(rawP) : 0.0;
+    float supportSigma =
+        mix(3.0, 1.0, clamp(uMosaicEdgeProtection, 0.0, 1.0));
     int r = clamp(radius, 1, 4);
     for (int y = -4; y <= 4; ++y) {
         for (int x = -4; x <= 4; ++x) {
@@ -158,7 +196,20 @@ float sameCfaNeighborMean(ivec2 rawP, ivec2 visibleP, float center, int radius, 
             ivec2 stepOffset = ivec2(x * 2, y * 2);
             float v = rawNormalizedAt(rawP + stepOffset, visibleP + stepOffset);
             float spatial = exp(-float(x * x + y * y) * 0.18);
-            float rangeW = exp(-abs(v - center) / max(0.0001, edge));
+            float rangeW = 0.0;
+            if (useNoiseProfile) {
+                float differenceSigma = sqrt(max(
+                    1.0e-12,
+                    centerVariance +
+                        noiseVarianceAt(rawP + stepOffset)));
+                float normalizedDifference =
+                    abs(v - center) /
+                    max(1.0e-6, differenceSigma * supportSigma);
+                rangeW = exp(
+                    -0.5 * normalizedDifference * normalizedDifference);
+            } else {
+                rangeW = exp(-abs(v - center) / max(0.0001, edge));
+            }
             float w = spatial * rangeW;
             sum += v * w;
             weightSum += w;
@@ -179,7 +230,14 @@ float hotPixelMaskAt(ivec2 rawP, ivec2 visibleP) {
     float center = rawNormalizedAt(rawP, visibleP);
     float neighborMin = center;
     float neighborMax = center;
-    float mean = sameCfaNeighborMean(rawP, visibleP, center, 1, neighborMin, neighborMax);
+    float mean = sameCfaNeighborMean(
+        rawP,
+        visibleP,
+        center,
+        1,
+        false,
+        neighborMin,
+        neighborMax);
     float threshold = max(0.0001, uMosaicHotPixelThreshold);
     float highOutlier = center > neighborMax + threshold ? 1.0 : 0.0;
     float lowOutlier = center < neighborMin - threshold ? 1.0 : 0.0;
@@ -201,7 +259,14 @@ float denoisedRawAt(ivec2 rawP, ivec2 visibleP) {
         if (i >= iterations) break;
         float neighborMin = value;
         float neighborMax = value;
-        float mean = sameCfaNeighborMean(rawP, visibleP, value, uMosaicRadius, neighborMin, neighborMax);
+        float mean = sameCfaNeighborMean(
+            rawP,
+            visibleP,
+            value,
+            uMosaicRadius,
+            uUseRawNoiseVariance != 0,
+            neighborMin,
+            neighborMax);
         float cleaned = mean;
         if (uMosaicHotPixelSuppression != 0 && hotPixelMaskAt(rawP, visibleP) > 0.5) {
             cleaned = clamp(mean, neighborMin, neighborMax);
@@ -215,8 +280,24 @@ float rawAt(ivec2 rawP, ivec2 visibleP) {
     return denoisedRawAt(rawP, visibleP);
 }
 
+float demosaicSampleAt(ivec2 rawP, ivec2 visibleP) {
+    float value = rawAt(rawP, visibleP);
+    if (uWhiteBalanceBeforeDemosaic == 0) {
+        return value;
+    }
+    ivec2 visibleQ = clamp(visibleP, ivec2(0), uVisibleSize - ivec2(1));
+    int color = cfaAt(visibleQ);
+    if (color == 0) return value * uWhiteBalance.r;
+    if (color == 2) return value * uWhiteBalance.b;
+    return value * uWhiteBalance.g;
+}
+
 vec3 clippedMaskAt(ivec2 rawP, ivec2 visibleP) {
-    ivec2 q = clamp(rawP, ivec2(0), uRawSize - ivec2(1));
+    ivec2 minimumP = uClampToActiveArea != 0 ? uCropOrigin : ivec2(0);
+    ivec2 maximumP = uClampToActiveArea != 0
+        ? min(uRawSize - ivec2(1), uCropOrigin + uVisibleSize - ivec2(1))
+        : uRawSize - ivec2(1);
+    ivec2 q = clamp(rawP, minimumP, maximumP);
     ivec2 visibleQ = clamp(visibleP, ivec2(0), uVisibleSize - ivec2(1));
     int color = cfaAt(visibleQ);
     float black = blackForColor(color);
@@ -239,16 +320,16 @@ vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP);
 vec3 reconstructHighlights(vec3 rgb, vec3 clipMask);
 
 vec3 bilinearDemosaic(ivec2 rawP, ivec2 visibleP) {
-    float c = rawAt(rawP, visibleP);
+    float c = demosaicSampleAt(rawP, visibleP);
     int color = cfaAt(visibleP);
-    float l = rawAt(rawP + ivec2(-1, 0), visibleP + ivec2(-1, 0));
-    float r = rawAt(rawP + ivec2( 1, 0), visibleP + ivec2( 1, 0));
-    float u = rawAt(rawP + ivec2( 0,-1), visibleP + ivec2( 0,-1));
-    float d = rawAt(rawP + ivec2( 0, 1), visibleP + ivec2( 0, 1));
-    float ul = rawAt(rawP + ivec2(-1,-1), visibleP + ivec2(-1,-1));
-    float ur = rawAt(rawP + ivec2( 1,-1), visibleP + ivec2( 1,-1));
-    float dl = rawAt(rawP + ivec2(-1, 1), visibleP + ivec2(-1, 1));
-    float dr = rawAt(rawP + ivec2( 1, 1), visibleP + ivec2( 1, 1));
+    float l = demosaicSampleAt(rawP + ivec2(-1, 0), visibleP + ivec2(-1, 0));
+    float r = demosaicSampleAt(rawP + ivec2( 1, 0), visibleP + ivec2( 1, 0));
+    float u = demosaicSampleAt(rawP + ivec2( 0,-1), visibleP + ivec2( 0,-1));
+    float d = demosaicSampleAt(rawP + ivec2( 0, 1), visibleP + ivec2( 0, 1));
+    float ul = demosaicSampleAt(rawP + ivec2(-1,-1), visibleP + ivec2(-1,-1));
+    float ur = demosaicSampleAt(rawP + ivec2( 1,-1), visibleP + ivec2( 1,-1));
+    float dl = demosaicSampleAt(rawP + ivec2(-1, 1), visibleP + ivec2(-1, 1));
+    float dr = demosaicSampleAt(rawP + ivec2( 1, 1), visibleP + ivec2( 1, 1));
 
     if (color == 0) {
         return vec3(c, (l + r + u + d) * 0.25, (ul + ur + dl + dr) * 0.25);
@@ -265,76 +346,88 @@ vec3 bilinearDemosaic(ivec2 rawP, ivec2 visibleP) {
     return vec3(red, c, blue);
 }
 
-float edgeDirectedGreenAt(ivec2 rawP, ivec2 visibleP) {
-    float c = rawAt(rawP, visibleP);
-    if (cfaAt(visibleP) == 1) {
-        return c;
-    }
-    float l = rawAt(rawP + ivec2(-1, 0), visibleP + ivec2(-1, 0));
-    float r = rawAt(rawP + ivec2( 1, 0), visibleP + ivec2( 1, 0));
-    float u = rawAt(rawP + ivec2( 0,-1), visibleP + ivec2( 0,-1));
-    float d = rawAt(rawP + ivec2( 0, 1), visibleP + ivec2( 0, 1));
-    float l2 = rawAt(rawP + ivec2(-2, 0), visibleP + ivec2(-2, 0));
-    float r2 = rawAt(rawP + ivec2( 2, 0), visibleP + ivec2( 2, 0));
-    float u2 = rawAt(rawP + ivec2( 0,-2), visibleP + ivec2( 0,-2));
-    float d2 = rawAt(rawP + ivec2( 0, 2), visibleP + ivec2( 0, 2));
-    float h = (l + r) * 0.5;
-    float v = (u + d) * 0.5;
-    float hGrad = abs(l - r) + abs(l2 - c) + abs(r2 - c);
-    float vGrad = abs(u - d) + abs(u2 - c) + abs(d2 - c);
-    float t = smoothstep(-0.04, 0.04, hGrad - vGrad);
-    return mix(h, v, t);
-}
-
-float colorDifferenceAt(ivec2 rawP, ivec2 visibleP, int targetColor) {
-    if (cfaAt(visibleP) != targetColor) {
-        return 0.0;
-    }
-    return rawAt(rawP, visibleP) - edgeDirectedGreenAt(rawP, visibleP);
-}
-
-float interpolatedColorDifference(ivec2 rawP, ivec2 visibleP, int targetColor) {
-    int color = cfaAt(visibleP);
-    float sum = 0.0;
-    float weightSum = 0.0;
-    if (color == 1) {
-        bool horizontalTarget =
-            cfaAt(visibleP + ivec2(-1, 0)) == targetColor ||
-            cfaAt(visibleP + ivec2( 1, 0)) == targetColor;
-        ivec2 a = horizontalTarget ? ivec2(-1, 0) : ivec2(0, -1);
-        ivec2 b = horizontalTarget ? ivec2( 1, 0) : ivec2(0,  1);
-        sum += colorDifferenceAt(rawP + a, visibleP + a, targetColor);
-        sum += colorDifferenceAt(rawP + b, visibleP + b, targetColor);
-        weightSum += 2.0;
-    } else {
-        ivec2 offsets[4] = ivec2[4](ivec2(-1,-1), ivec2(1,-1), ivec2(-1,1), ivec2(1,1));
-        for (int i = 0; i < 4; ++i) {
-            ivec2 o = offsets[i];
-            sum += colorDifferenceAt(rawP + o, visibleP + o, targetColor);
-            weightSum += 1.0;
-        }
-    }
-    return weightSum > 0.0 ? sum / weightSum : 0.0;
-}
-
 )GLSL"
 R"GLSL(
+float mhcSample(ivec2 rawP, ivec2 visibleP, int x, int y) {
+    ivec2 offset = ivec2(x, y);
+    return demosaicSampleAt(rawP + offset, visibleP + offset);
+}
+
+float mhcGreenAtRedOrBlue(ivec2 rawP, ivec2 visibleP) {
+    return (
+        -mhcSample(rawP, visibleP,  0, -2) +
+        2.0 * mhcSample(rawP, visibleP,  0, -1) -
+        mhcSample(rawP, visibleP, -2,  0) +
+        2.0 * mhcSample(rawP, visibleP, -1,  0) +
+        4.0 * mhcSample(rawP, visibleP,  0,  0) +
+        2.0 * mhcSample(rawP, visibleP,  1,  0) -
+        mhcSample(rawP, visibleP,  2,  0) +
+        2.0 * mhcSample(rawP, visibleP,  0,  1) -
+        mhcSample(rawP, visibleP,  0,  2)) * 0.125;
+}
+
+float mhcOppositeAtRedOrBlue(ivec2 rawP, ivec2 visibleP) {
+    return (
+        -1.5 * mhcSample(rawP, visibleP,  0, -2) +
+         2.0 * mhcSample(rawP, visibleP, -1, -1) +
+         2.0 * mhcSample(rawP, visibleP,  1, -1) -
+         1.5 * mhcSample(rawP, visibleP, -2,  0) +
+         6.0 * mhcSample(rawP, visibleP,  0,  0) -
+         1.5 * mhcSample(rawP, visibleP,  2,  0) +
+         2.0 * mhcSample(rawP, visibleP, -1,  1) +
+         2.0 * mhcSample(rawP, visibleP,  1,  1) -
+         1.5 * mhcSample(rawP, visibleP,  0,  2)) * 0.125;
+}
+
+float mhcAtGreen(ivec2 rawP, ivec2 visibleP, bool targetIsHorizontal) {
+    if (!targetIsHorizontal) {
+        return (
+             0.5 * mhcSample(rawP, visibleP, -2,  0) -
+                   mhcSample(rawP, visibleP, -1, -1) -
+                   mhcSample(rawP, visibleP,  1, -1) -
+                   mhcSample(rawP, visibleP,  0, -2) +
+             4.0 * mhcSample(rawP, visibleP,  0, -1) +
+             5.0 * mhcSample(rawP, visibleP,  0,  0) +
+             4.0 * mhcSample(rawP, visibleP,  0,  1) -
+                   mhcSample(rawP, visibleP,  0,  2) -
+                   mhcSample(rawP, visibleP, -1,  1) -
+                   mhcSample(rawP, visibleP,  1,  1) +
+             0.5 * mhcSample(rawP, visibleP,  2,  0)) * 0.125;
+    }
+    return (
+         0.5 * mhcSample(rawP, visibleP,  0, -2) -
+               mhcSample(rawP, visibleP, -1, -1) -
+               mhcSample(rawP, visibleP,  1, -1) -
+               mhcSample(rawP, visibleP, -2,  0) +
+         4.0 * mhcSample(rawP, visibleP, -1,  0) +
+         5.0 * mhcSample(rawP, visibleP,  0,  0) +
+         4.0 * mhcSample(rawP, visibleP,  1,  0) -
+               mhcSample(rawP, visibleP,  2,  0) -
+               mhcSample(rawP, visibleP, -1,  1) -
+               mhcSample(rawP, visibleP,  1,  1) +
+         0.5 * mhcSample(rawP, visibleP,  0,  2)) * 0.125;
+}
+
 vec3 qualityDemosaic(ivec2 rawP, ivec2 visibleP) {
     int color = cfaAt(visibleP);
-    float green = edgeDirectedGreenAt(rawP, visibleP);
-    float red = green;
-    float blue = green;
+    // Keep the measured CFA channel in the same white-balanced domain as the
+    // neighboring samples used by the MHC reconstruction kernels. Mixing an
+    // unbalanced center with balanced interpolated channels exposes the 2x2
+    // Bayer phase as a colored checker/dot pattern.
+    float center = demosaicSampleAt(rawP, visibleP);
     if (color == 0) {
-        red = rawAt(rawP, visibleP);
-        blue = green + interpolatedColorDifference(rawP, visibleP, 2);
-    } else if (color == 2) {
-        blue = rawAt(rawP, visibleP);
-        red = green + interpolatedColorDifference(rawP, visibleP, 0);
-    } else {
-        red = green + interpolatedColorDifference(rawP, visibleP, 0);
-        blue = green + interpolatedColorDifference(rawP, visibleP, 2);
+        return vec3(center, mhcGreenAtRedOrBlue(rawP, visibleP), mhcOppositeAtRedOrBlue(rawP, visibleP));
     }
-    return max(vec3(red, green, blue), vec3(0.0));
+    if (color == 2) {
+        return vec3(mhcOppositeAtRedOrBlue(rawP, visibleP), mhcGreenAtRedOrBlue(rawP, visibleP), center);
+    }
+    bool horizontalRed =
+        cfaAt(visibleP + ivec2(-1, 0)) == 0 ||
+        cfaAt(visibleP + ivec2( 1, 0)) == 0;
+    return vec3(
+        mhcAtGreen(rawP, visibleP, horizontalRed),
+        center,
+        mhcAtGreen(rawP, visibleP, !horizontalRed));
 }
 
 vec3 rawDemosaicAt(ivec2 rawP, ivec2 visibleP) {
@@ -358,7 +451,7 @@ vec3 rawDemosaicAtUv(vec2 uv) {
 vec3 developedCameraRgbAtUv(vec2 uv) {
     vec3 rgb = rawDemosaicAtUv(uv);
     rgb = reconstructHighlights(rgb, clippedMaskAtUv(uv));
-    return rgb * uWhiteBalance;
+    return uWhiteBalanceBeforeDemosaic != 0 ? rgb : rgb * uWhiteBalance;
 }
 
 float lumaOf(vec3 rgb) {
@@ -579,7 +672,9 @@ void main() {
         return;
     }
 
-    rgb *= uWhiteBalance;
+    if (uWhiteBalanceBeforeDemosaic == 0) {
+        rgb *= uWhiteBalance;
+    }
     float falseColorMask = 0.0;
     float defringeMask = 0.0;
     float highlightEdgeMask = 0.0;
@@ -918,17 +1013,108 @@ std::array<float, 9> DngXyzD50ToLinearSrgb() {
     };
 }
 
+std::array<float, 9> DngXyzD50ToLinearRec2020() {
+    static constexpr std::array<float, 9> kBradfordD50ToD65 = {
+         0.9555766f, -0.0230393f,  0.0631636f,
+        -0.0282895f,  1.0099416f,  0.0210077f,
+         0.0122982f, -0.0204830f,  1.3299098f
+    };
+    static constexpr std::array<float, 9> kXyzD65ToLinearRec2020 = {
+         1.7166512f, -0.3556708f, -0.2533663f,
+        -0.6666844f,  1.6164812f,  0.0157685f,
+         0.0176399f, -0.0427706f,  0.9421031f
+    };
+    return MultiplyMatrix3(kXyzD65ToLinearRec2020, kBradfordD50ToD65);
+}
+
+std::array<float, 9> DngXyzD50ToWorking(const RawDevelopSettings& settings) {
+    return settings.workingSpace == RawWorkingSpace::LinearRec2020D65
+        ? DngXyzD50ToLinearRec2020()
+        : DngXyzD50ToLinearSrgb();
+}
+
+std::array<float, 9> LinearSrgbToLinearRec2020() {
+    return {
+        0.6274039f, 0.3292830f, 0.0433131f,
+        0.0690973f, 0.9195404f, 0.0113623f,
+        0.0163914f, 0.0880133f, 0.8955953f
+    };
+}
+
+float CalibrationIlluminantTemperature(int illuminant) {
+    switch (illuminant) {
+        case 17: return 2856.0f; // Standard light A
+        case 18: return 4874.0f; // Standard light B
+        case 19: return 6774.0f; // Standard light C
+        case 20: return 5500.0f; // D55
+        case 21: return 6500.0f; // D65
+        case 22: return 7500.0f; // D75
+        case 23: return 5000.0f; // D50
+        case 24: return 3200.0f; // ISO studio tungsten
+        case 9: return 5500.0f;  // Fine weather
+        case 10: return 6500.0f; // Cloudy
+        case 11: return 7500.0f; // Shade
+        default: return 0.0f;
+    }
+}
+
+float CorrelatedColorTemperature(const std::array<float, 3>& xyz) {
+    const float sum = xyz[0] + xyz[1] + xyz[2];
+    if (!std::isfinite(sum) || sum <= 0.000001f) {
+        return 0.0f;
+    }
+    const float x = xyz[0] / sum;
+    const float y = xyz[1] / sum;
+    const float denominator = 0.1858f - y;
+    if (std::abs(denominator) < 0.000001f) {
+        return 0.0f;
+    }
+    const float n = (x - 0.3320f) / denominator;
+    const float cct = 449.0f * n * n * n + 3525.0f * n * n + 6823.3f * n + 5520.33f;
+    return std::isfinite(cct) ? std::clamp(cct, 1667.0f, 25000.0f) : 0.0f;
+}
+
 float DngWarmthFromAsShotNeutral(const RawMetadata& metadata) {
-    if (!metadata.hasDngAsShotNeutral) {
+    const float temperature1 = CalibrationIlluminantTemperature(metadata.dngIlluminant1);
+    const float temperature2 = CalibrationIlluminantTemperature(metadata.dngIlluminant2);
+    if (!metadata.hasDngAsShotNeutral ||
+        !metadata.hasDngColorMatrix1 ||
+        !metadata.hasDngColorMatrix2 ||
+        temperature1 <= 0.0f ||
+        temperature2 <= 0.0f ||
+        std::abs(temperature1 - temperature2) < 1.0f) {
         return 0.5f;
     }
-    // Most phone DNGs store set 1 near daylight and set 2 near tungsten/Standard A.
-    // AsShotNeutral blue falls as the captured illuminant gets warmer.
-    const float blueNeutral = metadata.dngAsShotNeutral[2];
-    if (metadata.dngIlluminant1 == 17 && metadata.dngIlluminant2 != 17) {
-        return 1.0f - std::clamp((blueNeutral - 0.35f) / 0.55f, 0.0f, 1.0f);
+
+    float weight = 0.5f;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const std::array<float, 9> colorMatrix =
+            LerpMatrix3(metadata.dngColorMatrix1, metadata.dngColorMatrix2, weight);
+        std::array<float, 9> cameraToXyz {};
+        if (!InvertMatrix3(colorMatrix, cameraToXyz)) {
+            break;
+        }
+        const std::array<float, 3> xyz =
+            MultiplyMatrixVector3(cameraToXyz, metadata.dngAsShotNeutral);
+        const float targetTemperature = CorrelatedColorTemperature(xyz);
+        if (targetTemperature <= 0.0f) {
+            break;
+        }
+        const float denominator = 1.0f / temperature2 - 1.0f / temperature1;
+        if (std::abs(denominator) < 0.0000001f) {
+            break;
+        }
+        const float nextWeight = std::clamp(
+            (1.0f / targetTemperature - 1.0f / temperature1) / denominator,
+            0.0f,
+            1.0f);
+        if (std::abs(nextWeight - weight) < 0.0001f) {
+            weight = nextWeight;
+            break;
+        }
+        weight = nextWeight;
     }
-    return std::clamp((0.85f - blueNeutral) / 0.50f, 0.0f, 1.0f);
+    return weight;
 }
 
 std::array<float, 9> SelectDngForwardMatrix(const RawMetadata& metadata, RawCameraTransformSource source) {
@@ -1006,13 +1192,13 @@ std::array<float, 9> BuildDngForwardMatrixToWorking(
 
     std::array<float, 9> inverseAnalogCalibration {};
     if (!InvertMatrix3(analogCalibration, inverseAnalogCalibration)) {
-        return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), forwardMatrix);
+        return MultiplyMatrix3(DngXyzD50ToWorking(settings), forwardMatrix);
     }
 
     const std::array<float, 3> cameraNeutral = CameraNeutralFromWhiteBalance(metadata, settings);
     const std::array<float, 3> referenceNeutral = MultiplyMatrixVector3(inverseAnalogCalibration, cameraNeutral);
     if (!IsUsableNeutral(cameraNeutral) || !IsUsableNeutral(referenceNeutral)) {
-        return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), forwardMatrix);
+        return MultiplyMatrix3(DngXyzD50ToWorking(settings), forwardMatrix);
     }
 
     // DNG ForwardMatrix expects raw camera RGB. The Bayer shader has already
@@ -1029,7 +1215,7 @@ std::array<float, 9> BuildDngForwardMatrixToWorking(
         cameraToXyz = MultiplyMatrix3(cameraToXyz, DiagonalMatrix3(cameraNeutral));
     }
 
-    return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), cameraToXyz);
+    return MultiplyMatrix3(DngXyzD50ToWorking(settings), cameraToXyz);
 }
 
 std::array<float, 9> SelectDngColorMatrix(const RawMetadata& metadata) {
@@ -1076,7 +1262,7 @@ std::array<float, 9> BuildCameraToWorking(
             std::array<float, 9> inverse {};
             if ((metadata.hasDngColorMatrix1 || metadata.hasDngColorMatrix2) &&
                 InvertMatrix3(SelectDngColorMatrix(metadata), inverse)) {
-                return MultiplyMatrix3(DngXyzD50ToLinearSrgb(), inverse);
+                return MultiplyMatrix3(DngXyzD50ToWorking(settings), inverse);
             }
         }
         if (settings.cameraTransformSource == RawCameraTransformSource::DngForwardMatrix1 && metadata.hasDngForwardMatrix2) {
@@ -1089,7 +1275,9 @@ std::array<float, 9> BuildCameraToWorking(
     if (!metadata.hasCameraMatrix) {
         return IdentityMatrix3();
     }
-    return metadata.cameraToSrgb;
+    return settings.workingSpace == RawWorkingSpace::LinearRec2020D65
+        ? MultiplyMatrix3(LinearSrgbToLinearRec2020(), metadata.cameraToSrgb)
+        : metadata.cameraToSrgb;
 }
 
 bool OrientationSwapsDimensions(int orientation) {
@@ -1107,6 +1295,7 @@ void RawGpuPipeline::Clear() {
     if (m_LinearProgram) glDeleteProgram(m_LinearProgram);
     if (m_RawTexture) glDeleteTextures(1, &m_RawTexture);
     if (m_CorrectedRawTexture) glDeleteTextures(1, &m_CorrectedRawTexture);
+    if (m_RawNoiseVarianceTexture) glDeleteTextures(1, &m_RawNoiseVarianceTexture);
     if (m_LinearTexture) glDeleteTextures(1, &m_LinearTexture);
     if (m_OutputTexture) glDeleteTextures(1, &m_OutputTexture);
     if (m_OutputFbo) glDeleteFramebuffers(1, &m_OutputFbo);
@@ -1116,6 +1305,7 @@ void RawGpuPipeline::Clear() {
     m_LinearProgram = 0;
     m_RawTexture = 0;
     m_CorrectedRawTexture = 0;
+    m_RawNoiseVarianceTexture = 0;
     m_LinearTexture = 0;
     m_OutputTexture = 0;
     m_OutputFbo = 0;
@@ -1127,6 +1317,7 @@ void RawGpuPipeline::Clear() {
     m_OutputHeight = 0;
     m_RawFingerprint = 0;
     m_CorrectedRawFingerprint = 0;
+    m_RawNoiseVarianceFingerprint = 0;
     m_LinearFingerprint = 0;
 }
 
@@ -1292,7 +1483,100 @@ std::size_t HashDngGainMaps(const std::vector<DngGainMapOpcode>& maps) {
 bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const RawDevelopSettings& settings, bool& outHasCorrectedRaw) {
     outHasCorrectedRaw = false;
     const RawMetadata& metadata = raw.metadata;
-    if (metadata.dngGainMaps.empty()) {
+    const bool hasNormalizedMosaic =
+        raw.normalizedMosaicBuffer &&
+        metadata.rawWidth > 0 &&
+        metadata.rawHeight > 0 &&
+        raw.normalizedMosaicBuffer->size() >=
+            static_cast<std::size_t>(metadata.rawWidth) *
+                static_cast<std::size_t>(metadata.rawHeight);
+    if (hasNormalizedMosaic) {
+        const int width = metadata.rawWidth;
+        const int height = metadata.rawHeight;
+        const std::vector<float>& normalized =
+            *raw.normalizedMosaicBuffer;
+        std::size_t fingerprint = raw.normalizedMosaicContentHash != 0u
+            ? static_cast<std::size_t>(raw.normalizedMosaicContentHash)
+            : HashBuffer(normalized);
+        MixHash(fingerprint, normalized.size());
+        MixHash(fingerprint, HashDngGainMaps(metadata.dngGainMaps));
+        if (m_CorrectedRawTexture != 0 &&
+            m_RawWidth == width &&
+            m_RawHeight == height &&
+            m_CorrectedRawFingerprint == fingerprint) {
+            outHasCorrectedRaw = true;
+            return true;
+        }
+
+        // MFD publishes pre-reference-gain samples. Apply the reference DNG
+        // GainMap here exactly once, at the same seam used by ordinary
+        // truthful RAW development. Linearization and black/white
+        // normalization are intentionally not repeated.
+        const float* uploadSamples = normalized.data();
+        std::vector<float> gainCorrected;
+        if (!metadata.dngGainMaps.empty()) {
+            try {
+                gainCorrected.assign(
+                    normalized.begin(),
+                    normalized.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            static_cast<std::size_t>(width) *
+                            static_cast<std::size_t>(height)));
+            } catch (const std::bad_alloc&) {
+                m_LastError =
+                    "Normalized RAW GainMap correction could not allocate its working buffer.";
+                return false;
+            }
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    float& value = gainCorrected[
+                        static_cast<std::size_t>(y) *
+                            static_cast<std::size_t>(width) +
+                        static_cast<std::size_t>(x)];
+                    for (const DngGainMapOpcode& map :
+                         metadata.dngGainMaps) {
+                        value *= SampleGainMap(map, x, y);
+                    }
+                }
+            }
+            uploadSamples = gainCorrected.data();
+        }
+
+        if (m_CorrectedRawTexture) {
+            glDeleteTextures(1, &m_CorrectedRawTexture);
+            m_CorrectedRawTexture = 0;
+        }
+        glGenTextures(1, &m_CorrectedRawTexture);
+        glBindTexture(GL_TEXTURE_2D, m_CorrectedRawTexture);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_R32F,
+            width,
+            height,
+            0,
+            GL_RED,
+            GL_FLOAT,
+            uploadSamples);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (m_CorrectedRawTexture == 0) {
+            m_LastError =
+                "Normalized RAW upload failed: GPU texture allocation returned 0.";
+            return false;
+        }
+        m_RawWidth = width;
+        m_RawHeight = height;
+        m_CorrectedRawFingerprint = fingerprint;
+        outHasCorrectedRaw = true;
+        return true;
+    }
+
+    const bool truthful = settings.processingVersion == RawProcessingVersion::TruthfulV1;
+    if (!truthful && metadata.dngGainMaps.empty()) {
         return true;
     }
     const int width = metadata.rawWidth;
@@ -1313,12 +1597,35 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
     MixHash(fingerprint, static_cast<std::size_t>(metadata.orientation));
     MixHash(fingerprint, static_cast<std::size_t>(metadata.cfaPattern));
     MixHash(fingerprint, static_cast<std::size_t>(metadata.pixelLayout));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.hasDngActiveArea));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.dngActiveArea.top));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.dngActiveArea.left));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.dngActiveArea.bottom));
+    MixHash(fingerprint, static_cast<std::size_t>(metadata.dngActiveArea.right));
+    for (int value : metadata.dngCfaRepeatPatternDim) {
+        MixHash(fingerprint, static_cast<std::size_t>(value));
+    }
+    for (int value : metadata.dngCfaPattern) {
+        MixHash(fingerprint, static_cast<std::size_t>(value));
+    }
+    for (int value : metadata.dngCfaPlaneColor) {
+        MixHash(fingerprint, static_cast<std::size_t>(value));
+    }
+    for (int value : metadata.dngBlackLevelRepeatDim) {
+        MixHash(fingerprint, static_cast<std::size_t>(value));
+    }
     MixFloatHash(fingerprint, metadata.blackLevel);
     for (float value : metadata.perChannelBlack) {
         MixFloatHash(fingerprint, value);
     }
     MixFloatHash(fingerprint, metadata.whiteLevel);
+    MixHash(fingerprint, HashBuffer(metadata.dngLinearizationTable));
+    MixHash(fingerprint, HashBuffer(metadata.dngBlackLevelValues));
+    MixHash(fingerprint, HashBuffer(metadata.dngBlackLevelDeltaH));
+    MixHash(fingerprint, HashBuffer(metadata.dngBlackLevelDeltaV));
+    MixHash(fingerprint, HashBuffer(metadata.dngWhiteLevelValues));
     MixHash(fingerprint, HashDngGainMaps(metadata.dngGainMaps));
+    MixHash(fingerprint, static_cast<std::size_t>(settings.processingVersion));
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideBlackLevel));
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideWhiteLevel));
     MixFloatHash(fingerprint, settings.blackLevelOverride);
@@ -1328,33 +1635,41 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
         return true;
     }
 
-    const float black = settings.overrideBlackLevel ? settings.blackLevelOverride : metadata.blackLevel;
-    const float white = std::max(black + 1.0f, settings.overrideWhiteLevel ? settings.whiteLevelOverride : metadata.whiteLevel);
-    std::array<float, 4> channelBlack = metadata.perChannelBlack;
-    if (settings.overrideBlackLevel) {
-        channelBlack = { 0.0f, 0.0f, 0.0f, 0.0f };
-    } else if (channelBlack[1] > 0.0f && channelBlack[3] > 0.0f) {
-        channelBlack[1] = (channelBlack[1] + channelBlack[3]) * 0.5f;
-    }
-
     std::vector<float> corrected(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0f);
-    const int cropX = std::max(0, metadata.leftMargin);
-    const int cropY = std::max(0, metadata.topMargin);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const int visibleX = x - cropX;
-            const int visibleY = y - cropY;
-            const int color = CfaColorAt(metadata.cfaPattern, std::max(0, visibleX), std::max(0, visibleY));
-            const float b = BlackForColor(channelBlack, black, color);
-            const float w = std::max(b + 1.0f, white);
-            float value = (static_cast<float>(raw.rawBuffer[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)]) - b) /
-                std::max(1.0f, w - b);
-            if (visibleX >= 0 && visibleY >= 0) {
-                for (const DngGainMapOpcode& map : metadata.dngGainMaps) {
-                    value *= SampleGainMap(map, visibleX, visibleY);
+    if (truthful) {
+        std::string normalizationError;
+        if (!Processing::BuildTruthfulNormalizedMosaic(raw, settings, corrected, &normalizationError)) {
+            m_LastError = normalizationError;
+            return false;
+        }
+    } else {
+        const float black = settings.overrideBlackLevel ? settings.blackLevelOverride : metadata.blackLevel;
+        const float white = std::max(black + 1.0f, settings.overrideWhiteLevel ? settings.whiteLevelOverride : metadata.whiteLevel);
+        std::array<float, 4> channelBlack = metadata.perChannelBlack;
+        if (settings.overrideBlackLevel) {
+            channelBlack = { 0.0f, 0.0f, 0.0f, 0.0f };
+        } else if (channelBlack[1] > 0.0f && channelBlack[3] > 0.0f) {
+            channelBlack[1] = (channelBlack[1] + channelBlack[3]) * 0.5f;
+        }
+
+        const int cropX = std::max(0, metadata.leftMargin);
+        const int cropY = std::max(0, metadata.topMargin);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const int visibleX = x - cropX;
+                const int visibleY = y - cropY;
+                const int color = CfaColorAt(metadata.cfaPattern, std::max(0, visibleX), std::max(0, visibleY));
+                const float b = BlackForColor(channelBlack, black, color);
+                const float w = std::max(b + 1.0f, white);
+                float value = (static_cast<float>(raw.rawBuffer[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)]) - b) /
+                    std::max(1.0f, w - b);
+                if (visibleX >= 0 && visibleY >= 0) {
+                    for (const DngGainMapOpcode& map : metadata.dngGainMaps) {
+                        value *= SampleGainMap(map, visibleX, visibleY);
+                    }
                 }
+                corrected[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] = value;
             }
-            corrected[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] = value;
         }
     }
 
@@ -1362,16 +1677,9 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
         glDeleteTextures(1, &m_CorrectedRawTexture);
         m_CorrectedRawTexture = 0;
     }
-    std::vector<float> correctedRgba(corrected.size() * 4, 1.0f);
-    for (std::size_t i = 0; i < corrected.size(); ++i) {
-        correctedRgba[i * 4] = corrected[i];
-        correctedRgba[i * 4 + 1] = corrected[i];
-        correctedRgba[i * 4 + 2] = corrected[i];
-    }
-
     glGenTextures(1, &m_CorrectedRawTexture);
     glBindTexture(GL_TEXTURE_2D, m_CorrectedRawTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, correctedRgba.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0, GL_RED, GL_FLOAT, corrected.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1386,6 +1694,97 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
     m_RawHeight = height;
     m_CorrectedRawFingerprint = fingerprint;
     outHasCorrectedRaw = true;
+    return true;
+}
+
+bool RawGpuPipeline::UploadRawNoiseVarianceTexture(
+    const RawImageData& raw,
+    const RawDevelopSettings& settings,
+    bool& outHasNoiseVariance) {
+    outHasNoiseVariance = false;
+    // A normalized multi-frame source has already received its CFA-domain
+    // noise reduction. The single-frame DNG noise profile does not describe
+    // the fused residual variance, so do not apply that denoiser a second
+    // time.
+    if (raw.normalizedMosaicBuffer) {
+        return true;
+    }
+    if (!settings.mosaicDenoise.enabled ||
+        settings.mosaicDenoise.mode !=
+            RawMosaicDenoiseMode::DngNoiseProfile ||
+        settings.processingVersion != RawProcessingVersion::TruthfulV1 ||
+        !raw.metadata.hasDngNoiseProfile ||
+        m_CorrectedRawTexture == 0) {
+        return true;
+    }
+
+    std::array<DngNoiseProfilePlane, 3> resolvedProfiles {};
+    if (!Processing::ResolveDngNoiseProfile(
+            raw.metadata,
+            resolvedProfiles)) {
+        // Missing or malformed metadata is an explicit fixed-threshold
+        // fallback, not a render failure.
+        return true;
+    }
+
+    std::size_t fingerprint = m_CorrectedRawFingerprint;
+    MixHash(
+        fingerprint,
+        static_cast<std::size_t>(settings.mosaicDenoise.mode));
+    for (const DngNoiseProfilePlane& profile : resolvedProfiles) {
+        MixDoubleHash(fingerprint, profile.shotScale);
+        MixDoubleHash(fingerprint, profile.readNoiseVariance);
+    }
+    if (m_RawNoiseVarianceTexture != 0 &&
+        m_RawWidth == raw.metadata.rawWidth &&
+        m_RawHeight == raw.metadata.rawHeight &&
+        m_RawNoiseVarianceFingerprint == fingerprint) {
+        outHasNoiseVariance = true;
+        return true;
+    }
+
+    std::vector<float> variance;
+    std::string varianceError;
+    if (!Processing::BuildTruthfulNoiseVarianceMosaic(
+            raw,
+            settings,
+            variance,
+            &varianceError)) {
+        // A source without a complete DNG profile keeps the historical
+        // fixed-threshold behavior. Invalid dimensions were already rejected
+        // by the corrected-mosaic upload.
+        return true;
+    }
+
+    if (m_RawNoiseVarianceTexture) {
+        glDeleteTextures(1, &m_RawNoiseVarianceTexture);
+        m_RawNoiseVarianceTexture = 0;
+    }
+    glGenTextures(1, &m_RawNoiseVarianceTexture);
+    glBindTexture(GL_TEXTURE_2D, m_RawNoiseVarianceTexture);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_R32F,
+        raw.metadata.rawWidth,
+        raw.metadata.rawHeight,
+        0,
+        GL_RED,
+        GL_FLOAT,
+        variance.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (m_RawNoiseVarianceTexture == 0) {
+        m_LastError =
+            "DNG noise-variance upload failed: GPU texture allocation returned 0.";
+        return false;
+    }
+    m_RawNoiseVarianceFingerprint = fingerprint;
+    outHasNoiseVariance = true;
     return true;
 }
 
@@ -1609,8 +2008,22 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         else if (finalSteps == 3) effectiveOrientation = 5;
     }
 
-    const int visibleWidth = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
-    const int visibleHeight = metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
+    const bool truthfulMosaic =
+        settings.processingVersion == RawProcessingVersion::TruthfulV1 &&
+        metadata.pixelLayout == RawPixelLayout::MosaicBayer;
+    const RawSensorRect activeArea = Processing::ResolveActiveArea(metadata);
+    const int visibleWidth = truthfulMosaic
+        ? std::max(1, activeArea.right - activeArea.left)
+        : (metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth);
+    const int visibleHeight = truthfulMosaic
+        ? std::max(1, activeArea.bottom - activeArea.top)
+        : (metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight);
+    const int cropOriginX = truthfulMosaic
+        ? std::max(0, activeArea.left)
+        : std::max(0, metadata.leftMargin);
+    const int cropOriginY = truthfulMosaic
+        ? std::max(0, activeArea.top)
+        : std::max(0, metadata.topMargin);
     const bool swapsDimensions = OrientationSwapsDimensions(effectiveOrientation);
     const int nativeOutWidth = settings.rotateToFitFrame ? visibleWidth : (swapsDimensions ? visibleHeight : visibleWidth);
     const int nativeOutHeight = settings.rotateToFitFrame ? visibleHeight : (swapsDimensions ? visibleWidth : visibleHeight);
@@ -1643,7 +2056,11 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         glUseProgram(m_LinearProgram);
 
         const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings, false);
-        const float exposure = std::pow(2.0f, settings.exposureStops);
+        const float baselineExposure =
+            settings.applyBaselineExposure && metadata.hasDngBaselineExposure
+            ? metadata.dngBaselineExposure
+            : 0.0f;
+        const float exposure = std::pow(2.0f, settings.exposureStops + baselineExposure);
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_LinearTexture);
@@ -1685,9 +2102,19 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         return 0;
     }
     bool hasCorrectedRaw = false;
+    bool hasNoiseVariance = false;
+    const bool hasNormalizedMosaic =
+        raw.normalizedMosaicBuffer &&
+        raw.normalizedMosaicBuffer->size() >=
+            static_cast<std::size_t>(metadata.rawWidth) *
+                static_cast<std::size_t>(metadata.rawHeight);
     if (!EnsureProgram() ||
-        !UploadRawTexture(raw) ||
+        (!hasNormalizedMosaic && !UploadRawTexture(raw)) ||
         !UploadCorrectedRawTexture(raw, settings, hasCorrectedRaw) ||
+        !UploadRawNoiseVarianceTexture(
+            raw,
+            settings,
+            hasNoiseVariance) ||
         !EnsureOutput(outWidth, outHeight)) {
         return 0;
     }
@@ -1706,7 +2133,11 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     const float white = std::max(black + 1.0f, settings.overrideWhiteLevel ? settings.whiteLevelOverride : metadata.whiteLevel);
     const std::array<float, 3> wb = ResolveWhiteBalance(metadata, settings);
     const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings, true);
-    const float exposure = std::pow(2.0f, settings.exposureStops);
+    const float baselineExposure =
+        settings.applyBaselineExposure && metadata.hasDngBaselineExposure
+        ? metadata.dngBaselineExposure
+        : 0.0f;
+    const float exposure = std::pow(2.0f, settings.exposureStops + baselineExposure);
     std::array<float, 4> channelBlack = metadata.perChannelBlack;
     if (settings.overrideBlackLevel) {
         channelBlack = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1721,9 +2152,20 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glBindTexture(GL_TEXTURE_2D, hasCorrectedRaw ? m_CorrectedRawTexture : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uCorrectedRaw"), 1);
     glUniform1i(glGetUniformLocation(m_Program, "uUseCorrectedRaw"), hasCorrectedRaw ? 1 : 0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        hasNoiseVariance ? m_RawNoiseVarianceTexture : 0);
+    glUniform1i(glGetUniformLocation(m_Program, "uRawNoiseVariance"), 2);
+    glUniform1i(
+        glGetUniformLocation(m_Program, "uUseRawNoiseVariance"),
+        hasNoiseVariance ? 1 : 0);
     glUniform2i(glGetUniformLocation(m_Program, "uRawSize"), metadata.rawWidth, metadata.rawHeight);
     glUniform2i(glGetUniformLocation(m_Program, "uVisibleSize"), visibleWidth, visibleHeight);
-    glUniform2i(glGetUniformLocation(m_Program, "uCropOrigin"), std::max(0, metadata.leftMargin), std::max(0, metadata.topMargin));
+    glUniform2i(glGetUniformLocation(m_Program, "uCropOrigin"), cropOriginX, cropOriginY);
+    glUniform1i(
+        glGetUniformLocation(m_Program, "uClampToActiveArea"),
+        settings.processingVersion == RawProcessingVersion::TruthfulV1 ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uOrientation"), effectiveOrientation);
     glUniform1i(glGetUniformLocation(m_Program, "uRotateToFitFrame"), settings.rotateToFitFrame ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uFlipHorizontally"), settings.flipHorizontally ? 1 : 0);
@@ -1737,6 +2179,9 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         channelBlack[3]);
     glUniform1f(glGetUniformLocation(m_Program, "uWhiteLevel"), white);
     glUniform3f(glGetUniformLocation(m_Program, "uWhiteBalance"), wb[0], wb[1], wb[2]);
+    glUniform1i(
+        glGetUniformLocation(m_Program, "uWhiteBalanceBeforeDemosaic"),
+        settings.processingVersion == RawProcessingVersion::TruthfulV1 ? 1 : 0);
     glUniformMatrix3fv(glGetUniformLocation(m_Program, "uCameraToWorking"), 1, settings.debugTransposeCameraMatrix ? GL_FALSE : GL_TRUE, cameraToWorking.data());
     glUniform1i(glGetUniformLocation(m_Program, "uUseCameraTransform"), settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_Program, "uDebugView"), DebugViewUniform(settings.debugView));
@@ -1745,7 +2190,7 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glUniform1i(glGetUniformLocation(m_Program, "uHighlightMode"), static_cast<int>(settings.highlightMode));
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightStrength"), settings.highlightStrength);
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightThreshold"), settings.highlightThreshold);
-    glUniform1i(glGetUniformLocation(m_Program, "uDemosaicMethod"), static_cast<int>(Raw::DemosaicMethod::Bilinear));
+    glUniform1i(glGetUniformLocation(m_Program, "uDemosaicMethod"), static_cast<int>(settings.demosaicMethod));
     glUniform1f(glGetUniformLocation(m_Program, "uFalseColorSuppression"), settings.falseColorSuppression);
     glUniform1f(glGetUniformLocation(m_Program, "uDefringeStrength"), settings.defringeStrength);
     glUniform1f(glGetUniformLocation(m_Program, "uHighlightEdgeCleanup"), settings.highlightEdgeCleanup);
@@ -1772,6 +2217,10 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
     glBindVertexArray(m_QuadVao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgram(0);
 

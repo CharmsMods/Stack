@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -82,6 +83,9 @@ public:
         std::string sourceSocketId;
         bool maskInput = false;
         bool directSourceOutput = false;
+        bool frequencySpectrumInput = false;
+        RenderFrequencyEdgePolicy frequencyEdgePolicy =
+            RenderFrequencyEdgePolicy::Mirror;
         SharedPixelBuffer sourcePixels;
         int width = 0;
         int height = 0;
@@ -306,9 +310,14 @@ public:
         bool hasRecipe = false;
         Stack::RawRecipe::RawDevelopmentRecipe recipe;
         bool localRangeTargetSampleRequested = false;
+        bool localRangeTargetHoverSample = false;
         float localRangeTargetSampleU = 0.0f;
         float localRangeTargetSampleV = 0.0f;
+        RawLocalRangeTargetPreviewRequest localRangeTargetPreview;
         bool analysisRequested = true;
+        RawDevelopmentGraphScopeStage graphScopeStage =
+            RawDevelopmentGraphScopeStage::None;
+        std::size_t graphScopeInputFingerprint = 0;
         std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>
             startPointCandidateRenderRequests;
         std::optional<Stack::PreciseIntegration::NativeSolveRequest>
@@ -324,6 +333,8 @@ public:
         float sceneB = 0.0f;
         float u = 0.0f;
         float v = 0.0f;
+        std::uint32_t authoredZoneHitBits = 0;
+        float strongestAuthoredZoneWeight = 0.0f;
     };
 
     using RawWorkspaceStartPointCandidateRenderResult =
@@ -332,13 +343,20 @@ public:
     struct RawWorkspaceResult {
         std::string sourceKey;
         std::uint64_t sourceHash = 0;
+        bool analysisCaptured = false;
         std::string localRangeOverlayMode;
-        std::vector<unsigned char> localRangeOverlayPixels;
+        SharedTextureResult localRangeOverlayTexture;
         int localRangeOverlayWidth = 0;
         int localRangeOverlayHeight = 0;
+        std::uint64_t localRangeTargetPreviewGeneration = 0;
+        bool localRangeTargetPreviewRefined = false;
+        bool localRangeTargetPreviewRefinementPending = false;
+        RawLocalRangeTargetPreviewMetrics localRangeTargetPreviewMetrics;
         RenderTextureStats viewTransformInputStats;
         RenderTextureStats finalDisplayStats;
         std::vector<RawDevelopmentStageStatsReadback> stageStatsReadbacks;
+        RawDevelopmentGraphScopeReadback graphScopeReadback;
+        std::size_t graphScopeInputFingerprint = 0;
         Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics startPointDiagnostics;
         std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>
             startPointCandidateRenderRequests;
@@ -414,7 +432,7 @@ public:
     void RequestStopForShutdown();
     void Shutdown();
     void InvalidateSnapshotsBefore(std::uint64_t generation);
-    void Submit(Snapshot snapshot);
+    bool Submit(Snapshot snapshot);
     bool TryConsumeCompleted(Result& result);
     bool IsBusy() const { return m_Busy.load(); }
     bool HasPendingOrBusyForShutdown() const;
@@ -450,6 +468,7 @@ public:
 
 private:
     void ThreadMain();
+    void HandleThreadFailure(const char* message) noexcept;
     Result RenderSnapshot(const Snapshot& snapshot);
     void RenderDevelopCandidateRequests(
         const Snapshot& snapshot,
@@ -472,8 +491,10 @@ private:
     bool m_HasPending = false;
     Snapshot m_Pending;
     std::queue<Result> m_Completed;
+    std::optional<Result> m_FallbackCompleted;
     std::atomic<bool> m_Busy = false;
     std::uint64_t m_InvalidBeforeGeneration = 0;
+    std::uint64_t m_LatestSubmittedGeneration = 0;
     int m_ProgressCompletedSteps = 0;
     int m_ProgressTotalSteps = 0;
     std::string m_ProgressLabel;

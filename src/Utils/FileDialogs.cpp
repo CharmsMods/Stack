@@ -542,6 +542,30 @@ std::string OpenProjectFileDialog(const char* title) {
     return "";
 }
 
+std::string OpenStackProjectFileDialog(const char* title) {
+#ifdef _WIN32
+    char filename[MAX_PATH] = "";
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter =
+        "Stack Projects\0*.stack;project.stackmanifest\0"
+        "Portable Stack Project\0*.stack\0"
+        "Stack Bundle Manifest\0project.stackmanifest\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = title;
+
+    if (RunOpenFileDialog(ofn, "OpenStackProjectFileDialog", title)) {
+        return std::string(filename);
+    }
+#else
+    (void)title;
+#endif
+    return "";
+}
+
 std::string SaveProjectFileDialog(const char* title, const char* defaultFileName) {
 #ifdef _WIN32
     char filename[MAX_PATH] = "";
@@ -562,6 +586,37 @@ std::string SaveProjectFileDialog(const char* title, const char* defaultFileName
     ofn.lpstrDefExt = "stack";
 
     if (RunSaveFileDialog(ofn, "SaveProjectFileDialog", title)) {
+        return std::string(filename);
+    }
+#else
+    (void)title;
+    (void)defaultFileName;
+#endif
+    return "";
+}
+
+std::string SaveProjectBundleDialog(
+    const char* title,
+    const char* defaultFileName) {
+#ifdef _WIN32
+    char filename[MAX_PATH] = "";
+    if (defaultFileName && defaultFileName[0]) {
+        strncpy_s(filename, defaultFileName, _TRUNCATE);
+    } else {
+        strncpy_s(filename, "project.stackbundle", _TRUNCATE);
+    }
+
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "Stack Project Bundle\0*.stackbundle\0All Files\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = title;
+    ofn.lpstrDefExt = "stackbundle";
+
+    if (RunSaveFileDialog(ofn, "SaveProjectBundleDialog", title)) {
         return std::string(filename);
     }
 #else

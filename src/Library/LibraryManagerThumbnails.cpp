@@ -4,7 +4,8 @@
 #include "Editor/EditorModule.h"
 #include "Library/Internal/LibraryImageHelpers.h"
 #include "Renderer/GLHelpers.h"
-#include "ThirdParty/stb_image_write.h"
+#include "Utils/PixelBufferUtils.h"
+#include "Utils/PngEncodingUtils.h"
 
 #include <algorithm>
 #include <chrono>
@@ -44,12 +45,6 @@ struct DecodedAssetPreview {
     int height = 0;
 };
 
-void PngWriteCallback(void* context, void* data, int size) {
-    auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-    const auto* begin = static_cast<unsigned char*>(data);
-    bytes->insert(bytes->end(), begin, begin + size);
-}
-
 bool PixelsDifferMeaningfully(
     const std::vector<unsigned char>& aPixels,
     int aWidth,
@@ -67,11 +62,10 @@ bool PixelsDifferMeaningfully(
         return false;
     }
 
-    const std::size_t aExpected =
-        static_cast<std::size_t>(aWidth) * static_cast<std::size_t>(aHeight) * static_cast<std::size_t>(aChannels);
-    const std::size_t bExpected =
-        static_cast<std::size_t>(bWidth) * static_cast<std::size_t>(bHeight) * static_cast<std::size_t>(bChannels);
-    if (aPixels.size() < aExpected || bPixels.size() < bExpected) {
+    if (!Stack::PixelBuffer::HasCompletePixelBuffer(
+            aPixels.size(), aWidth, aHeight, aChannels) ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            bPixels.size(), bWidth, bHeight, bChannels)) {
         return false;
     }
 
@@ -92,11 +86,27 @@ bool PixelsDifferMeaningfully(
     };
 
     for (int sy = 0; sy < sampleRows; ++sy) {
-        const int ay = (sampleRows == 1) ? (aHeight / 2) : (sy * (aHeight - 1)) / (sampleRows - 1);
-        const int by = (sampleRows == 1) ? (bHeight / 2) : (sy * (bHeight - 1)) / (sampleRows - 1);
+        const int ay = (sampleRows == 1)
+            ? (aHeight / 2)
+            : static_cast<int>(
+                (static_cast<std::int64_t>(sy) * (aHeight - 1)) /
+                (sampleRows - 1));
+        const int by = (sampleRows == 1)
+            ? (bHeight / 2)
+            : static_cast<int>(
+                (static_cast<std::int64_t>(sy) * (bHeight - 1)) /
+                (sampleRows - 1));
         for (int sx = 0; sx < sampleColumns; ++sx) {
-            const int ax = (sampleColumns == 1) ? (aWidth / 2) : (sx * (aWidth - 1)) / (sampleColumns - 1);
-            const int bx = (sampleColumns == 1) ? (bWidth / 2) : (sx * (bWidth - 1)) / (sampleColumns - 1);
+            const int ax = (sampleColumns == 1)
+                ? (aWidth / 2)
+                : static_cast<int>(
+                    (static_cast<std::int64_t>(sx) * (aWidth - 1)) /
+                    (sampleColumns - 1));
+            const int bx = (sampleColumns == 1)
+                ? (bWidth / 2)
+                : static_cast<int>(
+                    (static_cast<std::int64_t>(sx) * (bWidth - 1)) /
+                    (sampleColumns - 1));
 
             const int dr = std::abs(sampleChannel(aPixels, aWidth, aChannels, ax, ay, 0) -
                                     sampleChannel(bPixels, bWidth, bChannels, bx, by, 0));
@@ -383,9 +393,8 @@ std::vector<unsigned char> LibraryManager::GenerateThumbnailBytes(const std::vec
     std::vector<unsigned char> thumbPixels = LibraryImage::ResizePixelsNearest(pixels, width, height, thumbW, thumbH);
     if (thumbPixels.empty()) return {};
 
-    std::vector<unsigned char> pngData;
-    stbi_write_png_to_func(PngWriteCallback, &pngData, thumbW, thumbH, 4, thumbPixels.data(), thumbW * 4);
-    return pngData;
+    return Stack::PngEncoding::EncodeInterleaved(
+        thumbPixels, thumbW, thumbH, 4);
 }
 
 void LibraryManager::InitializeThumbnail(std::shared_ptr<ProjectEntry> project) {
@@ -397,18 +406,19 @@ void LibraryManager::InitializeThumbnail(std::shared_ptr<ProjectEntry> project) 
         return;
     }
 
-    project->thumbnailTex = GLHelpers::CreateTextureFromPixels(
+    const unsigned int replacementTexture = GLHelpers::CreateTextureFromPixels(
         project->thumbnailPixels.data(),
         project->thumbnailPixelWidth,
         project->thumbnailPixelHeight,
         4);
-    project->thumbnailPixels.clear();
-    project->thumbnailPixelWidth = 0;
-    project->thumbnailPixelHeight = 0;
-    if (project->thumbnailTex != 0) {
+    if (replacementTexture != 0) {
+        project->thumbnailTex = replacementTexture;
+        project->thumbnailPixels.clear();
+        project->thumbnailPixelWidth = 0;
+        project->thumbnailPixelHeight = 0;
         project->thumbnailDecodeState = Async::TaskState::Idle;
     } else {
-        project->thumbnailDecodeState = Async::TaskState::Failed;
+        project->thumbnailDecodeState = Async::TaskState::Ready;
     }
 }
 
@@ -421,18 +431,19 @@ void LibraryManager::InitializeAssetThumbnail(std::shared_ptr<AssetEntry> asset)
         return;
     }
 
-    asset->thumbnailTex = GLHelpers::CreateTextureFromPixels(
+    const unsigned int replacementTexture = GLHelpers::CreateTextureFromPixels(
         asset->thumbnailPixels.data(),
         asset->thumbnailPixelWidth,
         asset->thumbnailPixelHeight,
         4);
-    asset->thumbnailPixels.clear();
-    asset->thumbnailPixelWidth = 0;
-    asset->thumbnailPixelHeight = 0;
-    if (asset->thumbnailTex != 0) {
+    if (replacementTexture != 0) {
+        asset->thumbnailTex = replacementTexture;
+        asset->thumbnailPixels.clear();
+        asset->thumbnailPixelWidth = 0;
+        asset->thumbnailPixelHeight = 0;
         asset->thumbnailDecodeState = Async::TaskState::Idle;
     } else {
-        asset->thumbnailDecodeState = Async::TaskState::Failed;
+        asset->thumbnailDecodeState = Async::TaskState::Ready;
     }
 }
 
@@ -449,37 +460,57 @@ void LibraryManager::QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEn
     project->thumbnailDecodeState = Async::TaskState::Queued;
     std::vector<unsigned char> thumbnailBytes = project->thumbnailBytes;
 
-    Async::TaskSystem::Get().Submit([project, thumbnailBytes = std::move(thumbnailBytes)]() mutable {
-        std::vector<unsigned char> pixels;
-        int width = 0;
-        int height = 0;
-        int channels = 0;
-        const bool decoded = LibraryManager::DecodeImageBytes(thumbnailBytes, pixels, width, height, channels);
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit(
+            [project, thumbnailBytes = std::move(thumbnailBytes)]() mutable {
+                std::vector<unsigned char> pixels;
+                int width = 0;
+                int height = 0;
+                int channels = 0;
+                bool decoded = false;
+                try {
+                    decoded = LibraryManager::DecodeImageBytes(
+                        thumbnailBytes,
+                        pixels,
+                        width,
+                        height,
+                        channels);
+                } catch (...) {
+                    decoded = false;
+                }
 
-        Async::TaskSystem::Get().PostToMain([
-            project,
-            decoded,
-            pixels = std::move(pixels),
-            width,
-            height]() mutable {
-            if (!project || project->thumbnailTex != 0) {
-                return;
-            }
+                Async::TaskSystem::Get().PostToMain([
+                    project,
+                    decoded,
+                    pixels = std::move(pixels),
+                    width,
+                    height]() mutable {
+                    if (!project || project->thumbnailTex != 0) {
+                        return;
+                    }
 
-            if (!decoded || pixels.empty() || width <= 0 || height <= 0) {
-                project->thumbnailDecodeState = Async::TaskState::Failed;
-                project->thumbnailPixels.clear();
-                project->thumbnailPixelWidth = 0;
-                project->thumbnailPixelHeight = 0;
-                return;
-            }
+                    if (!decoded || pixels.empty() || width <= 0 || height <= 0) {
+                        project->thumbnailDecodeState = Async::TaskState::Failed;
+                        project->thumbnailPixels.clear();
+                        project->thumbnailPixelWidth = 0;
+                        project->thumbnailPixelHeight = 0;
+                        return;
+                    }
 
-            project->thumbnailPixels = std::move(pixels);
-            project->thumbnailPixelWidth = width;
-            project->thumbnailPixelHeight = height;
-            project->thumbnailDecodeState = Async::TaskState::Ready;
-        });
-    });
+                    project->thumbnailPixels = std::move(pixels);
+                    project->thumbnailPixelWidth = width;
+                    project->thumbnailPixelHeight = height;
+                    project->thumbnailDecodeState = Async::TaskState::Ready;
+                });
+            });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted) {
+        project->thumbnailDecodeAttempted = false;
+        project->thumbnailDecodeState = Async::TaskState::Idle;
+    }
 }
 
 void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>& asset) {
@@ -494,7 +525,9 @@ void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>
     asset->thumbnailDecodeState = Async::TaskState::Queued;
     const std::filesystem::path assetPath = m_AssetsPath / asset->fileName;
 
-    Async::TaskSystem::Get().Submit([asset, assetPath]() mutable {
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit([asset, assetPath]() mutable {
         std::vector<unsigned char> pixels;
         int width = 0;
         int height = 0;
@@ -539,7 +572,14 @@ void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>
             asset->thumbnailPixelHeight = thumbH;
             asset->thumbnailDecodeState = Async::TaskState::Ready;
         });
-    });
+        });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted) {
+        asset->thumbnailLoadAttempted = false;
+        asset->thumbnailDecodeState = Async::TaskState::Idle;
+    }
 }
 
 void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& project) {
@@ -557,51 +597,73 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
     project->previewTaskState = Async::TaskState::Queued;
     project->previewStatusText = "Preparing project preview...";
 
-    Async::TaskSystem::Get().Submit([this, generation, project]() {
-        StackFormat::ProjectLoadOptions options;
-        options.includeThumbnail = false;
-        options.includeSourceImage = true;
-        options.includePipelineData = true;
-
-        StackFormat::ProjectDocument document;
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit([this, generation, project]() {
         DecodedProjectPreview preview;
-        preview.success = LoadProjectDocument(project->fileName, document, options);
-        if (preview.success) {
-            preview.projectKind = document.metadata.projectKind.empty()
-                ? StackFormat::kEditorProjectKind
-                : document.metadata.projectKind;
-            preview.renderProject = document.metadata.projectKind == StackFormat::kRenderProjectKind;
-            std::vector<unsigned char> sourcePngBytes = document.sourceImageBytes;
-            std::vector<unsigned char> graphSourcePngBytes;
-            if (preview.projectKind == StackFormat::kEditorProjectKind &&
-                LibraryImage::ExtractEmbeddedGraphSourcePng(document.pipelineData, graphSourcePngBytes)) {
-                sourcePngBytes = std::move(graphSourcePngBytes);
-            }
-            preview.success = DecodeImageBytes(
-                sourcePngBytes,
-                preview.sourcePixels,
-                preview.width,
-                preview.height,
-                preview.channels);
+        try {
+            StackFormat::ProjectLoadOptions options;
+            options.includeThumbnail = false;
+            options.includeSourceImage = true;
+            options.includePipelineData = true;
+
+            StackFormat::ProjectDocument document;
+            preview.success =
+                LoadProjectDocument(project->fileName, document, options);
             if (preview.success) {
-                const bool isComposite = preview.projectKind == StackFormat::kCompositeProjectKind;
-                preview.pipelineData = document.pipelineData.is_null()
-                    ? ((preview.renderProject || isComposite) ? StackFormat::json::object() : StackFormat::json::array())
-                    : document.pipelineData;
-                if (!isComposite) {
-                    preview.fallbackAssetSuccess = LibraryImage::LoadRgbaImageFromFile(
-                        BuildAssetPathForProjectFile(project->fileName),
-                        preview.fallbackAssetPixels,
-                        preview.fallbackAssetWidth,
-                        preview.fallbackAssetHeight);
+                preview.projectKind = document.metadata.projectKind.empty()
+                    ? StackFormat::kEditorProjectKind
+                    : document.metadata.projectKind;
+                preview.renderProject =
+                    document.metadata.projectKind ==
+                    StackFormat::kRenderProjectKind;
+                std::vector<unsigned char> sourcePngBytes =
+                    std::move(document.sourceImageBytes);
+                std::vector<unsigned char> graphSourcePngBytes;
+                if (preview.projectKind == StackFormat::kEditorProjectKind &&
+                    LibraryImage::ExtractEmbeddedGraphSourcePng(
+                        document.pipelineData,
+                        graphSourcePngBytes)) {
+                    sourcePngBytes = std::move(graphSourcePngBytes);
+                }
+                preview.success = DecodeImageBytes(
+                    sourcePngBytes,
+                    preview.sourcePixels,
+                    preview.width,
+                    preview.height,
+                    preview.channels);
+                if (preview.success) {
+                    const bool isComposite =
+                        preview.projectKind ==
+                        StackFormat::kCompositeProjectKind;
+                    preview.pipelineData = document.pipelineData.is_null()
+                        ? ((preview.renderProject || isComposite)
+                               ? StackFormat::json::object()
+                               : StackFormat::json::array())
+                        : std::move(document.pipelineData);
+                    if (!isComposite) {
+                        preview.fallbackAssetSuccess =
+                            LibraryImage::LoadRgbaImageFromFile(
+                                BuildAssetPathForProjectFile(project->fileName),
+                                preview.fallbackAssetPixels,
+                                preview.fallbackAssetWidth,
+                                preview.fallbackAssetHeight);
+                    }
                 }
             }
+        } catch (...) {
+            preview = {};
         }
 
         Async::TaskSystem::Get().PostToMain([this, generation, project, preview = std::move(preview)]() mutable {
             if (!project ||
                 generation != m_ProjectPreviewGeneration ||
                 project->previewRequestGeneration != generation) {
+                if (project &&
+                    project->previewRequestGeneration == generation) {
+                    project->previewTaskState = Async::TaskState::Idle;
+                    project->previewStatusText = "Preview request superseded.";
+                }
                 return;
             }
 
@@ -617,7 +679,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                 : (preview.projectKind == StackFormat::kCompositeProjectKind
                         ? "Loading saved composite export preview..."
                         : "Rendering full-quality preview...");
-            project->pipelineData = preview.pipelineData;
+            project->pipelineData = std::move(preview.pipelineData);
             project->projectKind = preview.projectKind;
             project->sourceWidth = preview.width;
             project->sourceHeight = preview.height;
@@ -656,28 +718,6 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                     !renderedPixels.empty() &&
                     !LibraryImage::HasMeaningfulPixels(renderedPixels) &&
                     LibraryImage::HasMeaningfulPixels(preview.sourcePixels);
-            }
-
-            unsigned int newSourcePreviewTex = 0;
-            if (!comparePixels.empty() && compareW > 0 && compareH > 0) {
-                FlipImageRowsInPlace(comparePixels, compareW, compareH, 4);
-                newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
-                    comparePixels.data(),
-                    compareW,
-                    compareH,
-                    4);
-            } else {
-                newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
-                    preview.sourcePixels.data(),
-                    preview.width,
-                    preview.height,
-                    preview.channels);
-            }
-
-            if (newSourcePreviewTex == 0) {
-                project->previewTaskState = Async::TaskState::Failed;
-                project->previewStatusText = "Preview render failed.";
-                return;
             }
 
             std::vector<unsigned char> finalPreviewPixels;
@@ -720,7 +760,28 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             }
 
             if (finalPreviewPixels.empty() || finalPreviewWidth <= 0 || finalPreviewHeight <= 0) {
-                glDeleteTextures(1, &newSourcePreviewTex);
+                project->previewTaskState = Async::TaskState::Failed;
+                project->previewStatusText = "Preview render failed.";
+                return;
+            }
+
+            unsigned int newSourcePreviewTex = 0;
+            if (!comparePixels.empty() && compareW > 0 && compareH > 0) {
+                FlipImageRowsInPlace(comparePixels, compareW, compareH, 4);
+                newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
+                    comparePixels.data(),
+                    compareW,
+                    compareH,
+                    4);
+            } else {
+                newSourcePreviewTex = GLHelpers::CreateTextureFromPixels(
+                    preview.sourcePixels.data(),
+                    preview.width,
+                    preview.height,
+                    preview.channels);
+            }
+
+            if (newSourcePreviewTex == 0) {
                 project->previewTaskState = Async::TaskState::Failed;
                 project->previewStatusText = "Preview render failed.";
                 return;
@@ -752,7 +813,15 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                 ? "Preview ready (saved render)."
                 : "Preview ready.";
         });
-    });
+        });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted &&
+        project->previewRequestGeneration == generation) {
+        project->previewTaskState = Async::TaskState::Failed;
+        project->previewStatusText = "Project preview could not be queued.";
+    }
 }
 
 void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asset) {
@@ -770,14 +839,29 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
     asset->previewTaskState = Async::TaskState::Queued;
     asset->previewStatusText = "Loading asset preview...";
 
-    Async::TaskSystem::Get().Submit([this, generation, asset]() {
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit([this, generation, asset]() {
         DecodedAssetPreview preview;
-        preview.success = LibraryImage::LoadRgbaImageFromFile(m_AssetsPath / asset->fileName, preview.pixels, preview.width, preview.height);
+        try {
+            preview.success = LibraryImage::LoadRgbaImageFromFile(
+                m_AssetsPath / asset->fileName,
+                preview.pixels,
+                preview.width,
+                preview.height);
+        } catch (...) {
+            preview.success = false;
+        }
 
         Async::TaskSystem::Get().PostToMain([this, generation, asset, preview = std::move(preview)]() mutable {
             if (!asset ||
                 generation != m_AssetPreviewGeneration ||
                 asset->previewRequestGeneration != generation) {
+                if (asset &&
+                    asset->previewRequestGeneration == generation) {
+                    asset->previewTaskState = Async::TaskState::Idle;
+                    asset->previewStatusText = "Preview request superseded.";
+                }
                 return;
             }
 
@@ -792,16 +876,33 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
             asset->width = preview.width;
             asset->height = preview.height;
 
+            const unsigned int replacementTexture =
+                GLHelpers::CreateTextureFromPixels(
+                    preview.pixels.data(),
+                    preview.width,
+                    preview.height,
+                    4);
+            if (replacementTexture == 0) {
+                asset->previewTaskState = Async::TaskState::Failed;
+                asset->previewStatusText = "Asset preview upload failed.";
+                return;
+            }
             if (asset->fullPreviewTex) {
                 glDeleteTextures(1, &asset->fullPreviewTex);
-                asset->fullPreviewTex = 0;
             }
-
-            asset->fullPreviewTex = GLHelpers::CreateTextureFromPixels(preview.pixels.data(), preview.width, preview.height, 4);
+            asset->fullPreviewTex = replacementTexture;
             asset->previewTaskState = Async::TaskState::Idle;
             asset->previewStatusText = "Preview ready.";
         });
-    });
+        });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted &&
+        asset->previewRequestGeneration == generation) {
+        asset->previewTaskState = Async::TaskState::Failed;
+        asset->previewStatusText = "Asset preview could not be queued.";
+    }
 }
 
 void LibraryManager::CancelProjectPreviewRequests() {

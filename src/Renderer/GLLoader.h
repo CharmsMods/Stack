@@ -77,7 +77,7 @@ typedef struct __GLsync* GLsync;
 #define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
 #endif
 #ifndef GL_DRAW_FRAMEBUFFER_BINDING
-#define GL_DRAW_FRAMEBUFFER_BINDING 0x8919
+#define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
 #endif
 #ifndef GL_TEXTURE0
 #define GL_TEXTURE0 0x84C0
@@ -90,6 +90,30 @@ typedef struct __GLsync* GLsync;
 #endif
 #ifndef GL_TEXTURE3
 #define GL_TEXTURE3 0x84C3
+#endif
+#ifndef GL_ACTIVE_TEXTURE
+#define GL_ACTIVE_TEXTURE 0x84E0
+#endif
+#ifndef GL_CURRENT_PROGRAM
+#define GL_CURRENT_PROGRAM 0x8B8D
+#endif
+#ifndef GL_IMAGE_BINDING_NAME
+#define GL_IMAGE_BINDING_NAME 0x8F3A
+#endif
+#ifndef GL_IMAGE_BINDING_LEVEL
+#define GL_IMAGE_BINDING_LEVEL 0x8F3B
+#endif
+#ifndef GL_IMAGE_BINDING_LAYERED
+#define GL_IMAGE_BINDING_LAYERED 0x8F3C
+#endif
+#ifndef GL_IMAGE_BINDING_LAYER
+#define GL_IMAGE_BINDING_LAYER 0x8F3D
+#endif
+#ifndef GL_IMAGE_BINDING_ACCESS
+#define GL_IMAGE_BINDING_ACCESS 0x8F3E
+#endif
+#ifndef GL_IMAGE_BINDING_FORMAT
+#define GL_IMAGE_BINDING_FORMAT 0x906E
 #endif
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
@@ -117,6 +141,51 @@ typedef struct __GLsync* GLsync;
 #endif
 #ifndef GL_TEXTURE_2D_ARRAY
 #define GL_TEXTURE_2D_ARRAY 0x8C1A
+#endif
+#ifndef GL_TEXTURE_BINDING_2D
+#define GL_TEXTURE_BINDING_2D 0x8069
+#endif
+#ifndef GL_TEXTURE_BINDING_3D
+#define GL_TEXTURE_BINDING_3D 0x806A
+#endif
+#ifndef GL_TEXTURE_BINDING_2D_ARRAY
+#define GL_TEXTURE_BINDING_2D_ARRAY 0x8C1D
+#endif
+#ifndef GL_MAX_TEXTURE_SIZE
+#define GL_MAX_TEXTURE_SIZE 0x0D33
+#endif
+#ifndef GL_MAX_3D_TEXTURE_SIZE
+#define GL_MAX_3D_TEXTURE_SIZE 0x8073
+#endif
+#ifndef GL_PIXEL_PACK_BUFFER
+#define GL_PIXEL_PACK_BUFFER 0x88EB
+#endif
+#ifndef GL_PIXEL_UNPACK_BUFFER
+#define GL_PIXEL_UNPACK_BUFFER 0x88EC
+#endif
+#ifndef GL_PIXEL_PACK_BUFFER_BINDING
+#define GL_PIXEL_PACK_BUFFER_BINDING 0x88ED
+#endif
+#ifndef GL_PIXEL_UNPACK_BUFFER_BINDING
+#define GL_PIXEL_UNPACK_BUFFER_BINDING 0x88EF
+#endif
+#ifndef GL_PACK_ROW_LENGTH
+#define GL_PACK_ROW_LENGTH 0x0D02
+#endif
+#ifndef GL_PACK_SKIP_ROWS
+#define GL_PACK_SKIP_ROWS 0x0D03
+#endif
+#ifndef GL_PACK_SKIP_PIXELS
+#define GL_PACK_SKIP_PIXELS 0x0D04
+#endif
+#ifndef GL_UNPACK_ROW_LENGTH
+#define GL_UNPACK_ROW_LENGTH 0x0CF2
+#endif
+#ifndef GL_UNPACK_SKIP_ROWS
+#define GL_UNPACK_SKIP_ROWS 0x0CF3
+#endif
+#ifndef GL_UNPACK_SKIP_PIXELS
+#define GL_UNPACK_SKIP_PIXELS 0x0CF4
 #endif
 #ifndef GL_DEPTH_COMPONENT24
 #define GL_DEPTH_COMPONENT24 0x81A6
@@ -234,6 +303,7 @@ extern void(APIENTRY* glTexStorage2D_)(GLenum target, GLsizei levels, GLenum int
 extern void(APIENTRY* glTexStorage3D_)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
 extern void(APIENTRY* glTexSubImage3D_)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
 extern void(APIENTRY* glBindImageTexture_)(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
+extern void(APIENTRY* glGetIntegeri_v_)(GLenum target, GLuint index, GLint* data);
 extern void(APIENTRY* glDrawBuffers_)(GLsizei n, const GLenum* bufs);
 
 // Compute / synchronization
@@ -292,6 +362,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glTexStorage3D glTexStorage3D_
 #define glTexSubImage3D glTexSubImage3D_
 #define glBindImageTexture glBindImageTexture_
+#define glGetIntegeri_v glGetIntegeri_v_
 #define glDrawBuffers glDrawBuffers_
 #define glDispatchCompute glDispatchCompute_
 #define glMemoryBarrier glMemoryBarrier_

@@ -2010,6 +2010,14 @@ void EditorModule::TryContinueRawWorkspaceStartingPointOnAnalysis() {
         return;
     }
 
+    CancelRawWorkspacePendingStartingPoint(
+        "Automatic Starting Point is archived in the manual-first RAW editor.");
+    return;
+
+#if 0
+    // Archived continuation implementation. Keep with the retired automatic
+    // solver backend until a later cleanup pass decides its compatibility
+    // boundary.
     const Stack::RawWorkspace::SourceRecord* source =
         FindRawWorkspaceSourceByKey(pending.sourceKey);
     Stack::RawRecipe::RawDevelopmentRecipe recipe = m_ActiveRawWorkspaceRecipe;
@@ -2225,6 +2233,7 @@ void EditorModule::TryContinueRawWorkspaceStartingPointOnAnalysis() {
         "Applied",
         "None",
         m_RawWorkspaceAutoBaseUi.hasRevertSnapshot);
+#endif
 }
 
 bool EditorModule::RenderRawWorkspaceAutoBasePanel(

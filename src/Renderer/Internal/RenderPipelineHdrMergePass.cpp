@@ -1,10 +1,14 @@
 #include "Renderer/RenderPipeline.h"
+#include "Renderer/GLStateGuards.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -56,17 +60,42 @@ bool ReadTextureToFloatRgba(unsigned int texture, int width, int height, std::ve
         return false;
     }
 
+    std::size_t elementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            width, height, 4, elementCount)) {
+        return false;
+    }
+
+    try {
+        outPixels.assign(elementCount, 0.0f);
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+
+    const Stack::Renderer::GLState::FramebufferState savedFramebufferState;
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    savedPackState.ConfigureTightCpuReadback();
     const unsigned int fbo = GLHelpers::CreateFBO(texture);
     if (!fbo) {
+        savedPackState.Restore();
+        outPixels.clear();
         return false;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    outPixels.assign(static_cast<std::size_t>(width * height * 4), 0.0f);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    while (glGetError() != GL_NO_ERROR) {
+    }
     glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, outPixels.data());
     const GLenum readError = glGetError();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    savedPackState.Restore();
+    savedFramebufferState.Restore();
     glDeleteFramebuffers(1, &fbo);
+    if (readError != GL_NO_ERROR) {
+        outPixels.clear();
+    }
     return readError == GL_NO_ERROR;
 }
 
@@ -82,6 +111,12 @@ HdrMergeFeatureImage BuildHdrMergeFeatureImage(
     if (rgbaPixels.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
         return feature;
     }
+    std::size_t sourceElementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            sourceWidth, sourceHeight, 4, sourceElementCount) ||
+        rgbaPixels.size() < sourceElementCount) {
+        return feature;
+    }
 
     const float scale = std::min(1.0f, static_cast<float>(std::max(32, maxDimension)) / static_cast<float>(std::max(sourceWidth, sourceHeight)));
     feature.width = std::max(24, static_cast<int>(std::round(sourceWidth * scale)));
@@ -89,11 +124,24 @@ HdrMergeFeatureImage BuildHdrMergeFeatureImage(
     feature.scaleX = static_cast<float>(sourceWidth) / static_cast<float>(feature.width);
     feature.scaleY = static_cast<float>(sourceHeight) / static_cast<float>(feature.height);
 
-    std::vector<float> logLuma(static_cast<std::size_t>(feature.width * feature.height), 0.0f);
-    std::vector<float> sourceLuma(static_cast<std::size_t>(feature.width * feature.height), 0.0f);
-    feature.values.assign(static_cast<std::size_t>(feature.width * feature.height), 0.0f);
-    feature.thresholdBits.assign(static_cast<std::size_t>(feature.width * feature.height), 0u);
-    feature.excludeBits.assign(static_cast<std::size_t>(feature.width * feature.height), 0u);
+    std::size_t featureElementCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            feature.width, feature.height, 1, featureElementCount)) {
+        return {};
+    }
+    std::vector<float> logLuma;
+    std::vector<float> sourceLuma;
+    try {
+        logLuma.assign(featureElementCount, 0.0f);
+        sourceLuma.assign(featureElementCount, 0.0f);
+        feature.values.assign(featureElementCount, 0.0f);
+        feature.thresholdBits.assign(featureElementCount, 0u);
+        feature.excludeBits.assign(featureElementCount, 0u);
+    } catch (const std::bad_alloc&) {
+        return {};
+    } catch (const std::length_error&) {
+        return {};
+    }
     float clippedCount = 0.0f;
     float blackCount = 0.0f;
     const float exposureScale = std::exp2(-exposureEv);

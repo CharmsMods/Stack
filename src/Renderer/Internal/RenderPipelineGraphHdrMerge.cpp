@@ -6,128 +6,241 @@
 #include <array>
 #include <cmath>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 using namespace Stack::Renderer::GraphExecution;
 
 int RenderPipeline::FindReferenceSourceNode(const GraphExecutionContext& executionContext, int nodeId) {
-    const auto nodeIt = executionContext.nodes.find(nodeId);
-    if (nodeIt == executionContext.nodes.end() || !nodeIt->second) {
-        return -1;
-    }
-
-    const RenderGraphNode& node = *nodeIt->second;
-    auto findInputLink = [&](int inputNodeId, std::string_view socketId) {
-        return executionContext.FindInputLink(inputNodeId, socketId);
+    struct ReferenceResult {
+        bool visiting = false;
+        int sourceNodeId = -1;
+    };
+    struct ReferencePlan {
+        bool immediate = false;
+        int immediateResult = -1;
+        bool mixSelection = false;
+        std::vector<const RenderGraphLink*> dependencies;
+    };
+    struct ReferenceFrame {
+        int nodeId = -1;
+        ReferencePlan plan;
+        std::vector<int> dependencyResults;
+        std::size_t nextDependency = 0;
+        bool initialized = false;
     };
 
-    switch (node.kind) {
-        case RenderGraphNodeKind::Image:
-        case RenderGraphNodeKind::RawSource:
-        case RenderGraphNodeKind::RawDevelopment:
-        case RenderGraphNodeKind::ImageGenerator:
-        case RenderGraphNodeKind::RawDecode:
-        case RenderGraphNodeKind::RawDevelop:
-            return node.nodeId;
-        case RenderGraphNodeKind::RawDetailFusion: {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            return input ? FindReferenceSourceNode(executionContext, input->fromNodeId) : -1;
+    const auto makePlan = [&](int currentNodeId) {
+        ReferencePlan plan;
+        const auto nodeIt = executionContext.nodes.find(currentNodeId);
+        if (nodeIt == executionContext.nodes.end() || !nodeIt->second) {
+            plan.immediate = true;
+            return plan;
         }
-        case RenderGraphNodeKind::HdrMerge: {
-            const char* sockets[] = { "image1", "image2", "image3" };
-            for (const char* socket : sockets) {
-                if (const RenderGraphLink* input = findInputLink(node.nodeId, socket)) {
-                    const int source = FindReferenceSourceNode(executionContext, input->fromNodeId);
-                    if (source > 0) {
-                        return source;
-                    }
+
+        const RenderGraphNode& node = *nodeIt->second;
+        const auto addInput = [&](std::string_view socketId) {
+            if (const RenderGraphLink* input =
+                    executionContext.FindInputLink(node.nodeId, socketId)) {
+                plan.dependencies.push_back(input);
+                return true;
+            }
+            return false;
+        };
+        const auto useCurrentNode = [&]() {
+            plan.immediate = true;
+            plan.immediateResult = node.nodeId;
+        };
+
+        switch (node.kind) {
+            case RenderGraphNodeKind::Image:
+            case RenderGraphNodeKind::RawSource:
+            case RenderGraphNodeKind::RawDevelopment:
+            case RenderGraphNodeKind::RawProjectSourceSet:
+            case RenderGraphNodeKind::ImageGenerator:
+            case RenderGraphNodeKind::RawDecode:
+            case RenderGraphNodeKind::RawDevelop:
+                useCurrentNode();
+                break;
+            case RenderGraphNodeKind::RawNeuralDenoise:
+                addInput(EditorNodeGraph::kRawInputSocketId);
+                break;
+            case RenderGraphNodeKind::Layer:
+            case RenderGraphNodeKind::TechnicalImage:
+            case RenderGraphNodeKind::Reformat:
+            case RenderGraphNodeKind::RawDetailFusion:
+            case RenderGraphNodeKind::RawDetailAutoMask:
+            case RenderGraphNodeKind::ChannelSplit:
+            case RenderGraphNodeKind::ImageToMask:
+                addInput(EditorNodeGraph::kImageInputSocketId);
+                break;
+            case RenderGraphNodeKind::Lut:
+                if (!addInput(EditorNodeGraph::kImageInputSocketId)) {
+                    addInput("r");
+                    addInput("g");
+                    addInput("b");
+                    addInput("a");
                 }
-            }
-            return -1;
-        }
-        case RenderGraphNodeKind::Mfsr: {
-            const RenderGraphLink* input = findInputLink(node.nodeId, EditorNodeGraph::kMfsrReferenceInputSocketId);
-            return input ? FindReferenceSourceNode(executionContext, input->fromNodeId) : -1;
-        }
-        case RenderGraphNodeKind::RawDetailAutoMask: {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            return input ? FindReferenceSourceNode(executionContext, input->fromNodeId) : -1;
-        }
-        case RenderGraphNodeKind::RawNeuralDenoise: {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "rawIn");
-            return input ? FindReferenceSourceNode(executionContext, input->fromNodeId) : -1;
-        }
-        case RenderGraphNodeKind::Lut: {
-            if (const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn")) {
-                return FindReferenceSourceNode(executionContext, input->fromNodeId);
-            }
-            for (const char* socket : { "r", "g", "b", "a" }) {
-                if (const RenderGraphLink* input = findInputLink(node.nodeId, socket)) {
-                    const int source = FindReferenceSourceNode(executionContext, input->fromNodeId);
-                    if (source > 0) {
-                        return source;
-                    }
+                break;
+            case RenderGraphNodeKind::HdrMerge:
+                addInput(EditorNodeGraph::kHdrMergeInput1SocketId);
+                addInput(EditorNodeGraph::kHdrMergeInput2SocketId);
+                addInput(EditorNodeGraph::kHdrMergeInput3SocketId);
+                break;
+            case RenderGraphNodeKind::Mfsr:
+                addInput(EditorNodeGraph::kMfsrReferenceInputSocketId);
+                break;
+            case RenderGraphNodeKind::Mix:
+                addInput(EditorNodeGraph::kMixInputASocketId);
+                addInput(EditorNodeGraph::kMixInputBSocketId);
+                plan.mixSelection = true;
+                break;
+            case RenderGraphNodeKind::DataMath:
+                for (int inputIndex = 0;
+                     inputIndex < EditorNodeGraph::kMaxDataMathInputCount;
+                     ++inputIndex) {
+                    addInput(
+                        EditorNodeGraph::DataMathInputSocketId(inputIndex));
                 }
-            }
-            return -1;
-        }
-        case RenderGraphNodeKind::Layer:
-        case RenderGraphNodeKind::Output:
-        case RenderGraphNodeKind::ImageToMask:
-        case RenderGraphNodeKind::MaskCombine:
-        case RenderGraphNodeKind::MaskUtility:
-        case RenderGraphNodeKind::ChannelSplit: {
-            const RenderGraphLink* input = findInputLink(node.nodeId, "imageIn");
-            if (!input && node.kind == RenderGraphNodeKind::MaskCombine) {
-                input = findInputLink(node.nodeId, "maskA");
-            }
-            if (!input && node.kind == RenderGraphNodeKind::MaskUtility) {
-                input = findInputLink(node.nodeId, "maskIn");
-            }
-            if (!input && node.kind == RenderGraphNodeKind::ChannelSplit) {
-                input = findInputLink(node.nodeId, "imageIn");
-            }
-            return input ? FindReferenceSourceNode(executionContext, input->fromNodeId) : -1;
-        }
-        case RenderGraphNodeKind::Mix: {
-            const RenderGraphLink* inputA = findInputLink(node.nodeId, "imageA");
-            const RenderGraphLink* inputB = findInputLink(node.nodeId, "imageB");
-            const int sourceA = inputA ? FindReferenceSourceNode(executionContext, inputA->fromNodeId) : -1;
-            const int sourceB = inputB ? FindReferenceSourceNode(executionContext, inputB->fromNodeId) : -1;
-            auto isGeneratedReference = [&](int sourceId) {
-                const auto sourceIt = executionContext.nodes.find(sourceId);
-                if (sourceIt == executionContext.nodes.end() || !sourceIt->second) {
-                    return false;
+                addInput(EditorNodeGraph::kDataMathBaseInputSocketId);
+                break;
+            case RenderGraphNodeKind::Output:
+                if (!addInput(EditorNodeGraph::kImageInputSocketId)) {
+                    addInput("r");
+                    addInput("g");
+                    addInput("b");
+                    addInput("a");
                 }
-                return sourceIt->second->kind == RenderGraphNodeKind::ImageGenerator ||
-                       sourceIt->second->kind == RenderGraphNodeKind::MaskGenerator ||
-                       sourceIt->second->kind == RenderGraphNodeKind::CustomMask;
+                break;
+            case RenderGraphNodeKind::ChannelCombine:
+                addInput("r");
+                addInput("g");
+                addInput("b");
+                addInput("a");
+                break;
+            case RenderGraphNodeKind::ConstantChannel:
+                addInput(EditorNodeGraph::kMatchExtentInputSocketId);
+                break;
+            case RenderGraphNodeKind::MaskUtility:
+                addInput(EditorNodeGraph::kMaskUtilityInputSocketId);
+                break;
+            case RenderGraphNodeKind::MaskCombine:
+                addInput(EditorNodeGraph::kMaskCombineInputASocketId);
+                addInput(EditorNodeGraph::kMaskCombineInputBSocketId);
+                break;
+            case RenderGraphNodeKind::FrequencyFilter:
+            case RenderGraphNodeKind::FrequencyFft:
+                addInput(EditorNodeGraph::kChannelInputSocketId);
+                break;
+            case RenderGraphNodeKind::FrequencyIfft:
+            case RenderGraphNodeKind::SpectrumView:
+            case RenderGraphNodeKind::SpectrumSeparate:
+            case RenderGraphNodeKind::SpectrumAnalyzer:
+                addInput(EditorNodeGraph::kSpectrumInputSocketId);
+                break;
+            case RenderGraphNodeKind::ApplyFrequencyResponse:
+                addInput(EditorNodeGraph::kSpectrumInputSocketId);
+                break;
+            case RenderGraphNodeKind::CombineSpectra:
+                addInput(EditorNodeGraph::kSpectrumInputASocketId);
+                break;
+            case RenderGraphNodeKind::SpectrumRecombine:
+                addInput(EditorNodeGraph::kSpectrumMagnitudeInputSocketId);
+                break;
+            case RenderGraphNodeKind::SpectrumMath:
+                addInput(EditorNodeGraph::kMixInputASocketId);
+                break;
+            case RenderGraphNodeKind::MagnitudePhase:
+                addInput(
+                    node.magnitudePhaseMode ==
+                            RenderMagnitudePhaseMode::Recombine
+                        ? EditorNodeGraph::kSpectrumMagnitudeInputSocketId
+                        : EditorNodeGraph::kImageInputSocketId);
+                break;
+            default:
+                break;
+        }
+        return plan;
+    };
+
+    std::unordered_map<int, ReferenceResult> results;
+    results.reserve(executionContext.nodes.size());
+    std::vector<ReferenceFrame> pending;
+    pending.push_back(ReferenceFrame{ nodeId });
+
+    while (!pending.empty()) {
+        ReferenceFrame& frame = pending.back();
+        if (!frame.initialized) {
+            if (results.count(frame.nodeId) > 0) {
+                pending.pop_back();
+                continue;
+            }
+            results.emplace(frame.nodeId, ReferenceResult{ true, -1 });
+            frame.plan = makePlan(frame.nodeId);
+            frame.initialized = true;
+            if (frame.plan.immediate) {
+                results[frame.nodeId] =
+                    ReferenceResult{ false, frame.plan.immediateResult };
+                pending.pop_back();
+                continue;
+            }
+        }
+
+        if (frame.nextDependency < frame.plan.dependencies.size()) {
+            const int dependencyNodeId =
+                frame.plan.dependencies[frame.nextDependency]->fromNodeId;
+            const auto dependencyResult = results.find(dependencyNodeId);
+            if (dependencyResult == results.end()) {
+                pending.push_back(ReferenceFrame{ dependencyNodeId });
+                continue;
+            }
+            frame.dependencyResults.push_back(
+                dependencyResult->second.visiting
+                    ? -1
+                    : dependencyResult->second.sourceNodeId);
+            ++frame.nextDependency;
+            continue;
+        }
+
+        int resolvedSourceNodeId = -1;
+        if (frame.plan.mixSelection &&
+            frame.dependencyResults.size() >= 2) {
+            const int sourceA = frame.dependencyResults[0];
+            const int sourceB = frame.dependencyResults[1];
+            const auto isGeneratedReference = [&](int sourceId) {
+                const auto sourceIt =
+                    executionContext.nodes.find(sourceId);
+                return sourceIt != executionContext.nodes.end() &&
+                    sourceIt->second &&
+                    sourceIt->second->kind ==
+                        RenderGraphNodeKind::ImageGenerator;
             };
-            if (sourceA > 0 && sourceB > 0 && isGeneratedReference(sourceA) && !isGeneratedReference(sourceB)) {
-                return sourceB;
+            if (sourceA > 0 &&
+                sourceB > 0 &&
+                isGeneratedReference(sourceA) &&
+                !isGeneratedReference(sourceB)) {
+                resolvedSourceNodeId = sourceB;
+            } else {
+                resolvedSourceNodeId = sourceA > 0 ? sourceA : sourceB;
             }
-            return sourceA > 0 ? sourceA : sourceB;
-        }
-        case RenderGraphNodeKind::DataMath: {
-            const RenderGraphLink* input = FindFirstDataMathAverageInput(executionContext, node.nodeId);
-            return input ? FindReferenceSourceNode(executionContext, input->fromNodeId) : -1;
-        }
-        case RenderGraphNodeKind::ChannelCombine: {
-            const char* sockets[] = { "r", "g", "b", "a" };
-            for (const char* socket : sockets) {
-                if (const RenderGraphLink* input = findInputLink(node.nodeId, socket)) {
-                    const int source = FindReferenceSourceNode(executionContext, input->fromNodeId);
-                    if (source > 0) {
-                        return source;
-                    }
+        } else {
+            for (int dependencyResult : frame.dependencyResults) {
+                if (dependencyResult > 0) {
+                    resolvedSourceNodeId = dependencyResult;
+                    break;
                 }
             }
-            return -1;
         }
-        case RenderGraphNodeKind::MaskGenerator:
-        default:
-            return -1;
+
+        results[frame.nodeId] =
+            ReferenceResult{ false, resolvedSourceNodeId };
+        pending.pop_back();
     }
+
+    const auto resolved = results.find(nodeId);
+    return resolved != results.end() && !resolved->second.visiting
+        ? resolved->second.sourceNodeId
+        : -1;
 }
 
 RenderPipeline::HdrMergeInputContext RenderPipeline::ResolveHdrMergeInputContext(

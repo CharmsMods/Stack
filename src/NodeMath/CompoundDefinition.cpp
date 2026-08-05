@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <functional>
 #include <iomanip>
 #include <map>
 #include <random>
@@ -387,24 +386,49 @@ std::vector<ContractIssue> ValidateCompoundCatalog(const std::vector<CompoundDef
         }
     }
 
-    std::set<std::string> visiting;
-    std::set<std::string> visited;
-    std::function<bool(const std::string&)> hasCycle = [&](const std::string& key) {
-        if (visiting.count(key)) return true;
-        if (visited.count(key)) return false;
-        visiting.insert(key);
+    std::unordered_map<std::string, std::size_t> indegree;
+    indegree.reserve(exactDefinitions.size());
+    for (const auto& [key, definition] : exactDefinitions) {
+        (void)definition;
+        indegree.emplace(key, 0u);
+    }
+    for (const auto& [key, dependencies] : edges) {
+        (void)key;
+        for (const std::string& dependency : dependencies) {
+            auto degree = indegree.find(dependency);
+            if (degree != indegree.end()) {
+                ++degree->second;
+            }
+        }
+    }
+
+    std::vector<std::string> ready;
+    ready.reserve(indegree.size());
+    for (const auto& [key, degree] : indegree) {
+        if (degree == 0u) {
+            ready.push_back(key);
+        }
+    }
+    std::size_t processedDefinitionCount = 0;
+    while (!ready.empty()) {
+        std::string key = std::move(ready.back());
+        ready.pop_back();
+        ++processedDefinitionCount;
         for (const std::string& dependency : edges[key]) {
-            if (hasCycle(dependency)) return true;
+            auto degree = indegree.find(dependency);
+            if (degree != indegree.end() &&
+                degree->second > 0u &&
+                --degree->second == 0u) {
+                ready.push_back(dependency);
+            }
         }
-        visiting.erase(key);
-        visited.insert(key);
-        return false;
-    };
-    for (const auto& item : exactDefinitions) {
-        if (hasCycle(item.first)) {
-            issues.push_back({ "catalog.recursion", "recursive compound dependency is not allowed" });
-            break;
-        }
+    }
+    if (processedDefinitionCount != indegree.size()) {
+        issues.push_back(
+            {
+                "catalog.recursion",
+                "recursive compound dependency is not allowed"
+            });
     }
     return issues;
 }
@@ -608,31 +632,100 @@ std::vector<DefinitionReference> CollectCompoundDependencyClosure(
     const std::vector<DefinitionReference>& roots,
     std::string* error) {
     std::vector<DefinitionReference> result;
-    std::set<std::string> visited;
-    std::set<std::string> visiting;
-    std::function<bool(const DefinitionReference&)> visit = [&](const DefinitionReference& reference) {
-        const std::string key = reference.id + "@" + ToString(reference.version) + "#" + reference.contentHash;
-        if (visiting.count(key)) {
-            if (error) *error = "Recursive compound dependency is not allowed.";
-            return false;
-        }
-        if (visited.count(key)) return true;
-        const CompoundDefinition* definition = FindExactCompoundDefinition(definitions, reference);
-        if (!definition) {
-            if (error) *error = "Exact compound dependency is missing: " + reference.id;
-            return false;
-        }
-        visiting.insert(key);
-        for (const DefinitionReference& dependency : definition->dependencies) {
-            if (!visit(dependency)) return false;
-        }
-        visiting.erase(key);
-        visited.insert(key);
-        result.push_back(reference);
-        return true;
+    const auto referenceKey = [](const DefinitionReference& reference) {
+        return reference.id + "@" +
+            ToString(reference.version) + "#" +
+            reference.contentHash;
     };
+
+    std::unordered_map<std::string, const CompoundDefinition*> definitionsByKey;
+    definitionsByKey.reserve(definitions.size());
+    for (const CompoundDefinition& definition : definitions) {
+        definitionsByKey.emplace(
+            referenceKey(definition.identity),
+            &definition);
+    }
+
+    enum class ClosureVisitState {
+        Visiting,
+        Visited
+    };
+    struct ClosureFrame {
+        DefinitionReference reference;
+        const CompoundDefinition* definition = nullptr;
+        std::size_t nextDependency = 0;
+        bool initialized = false;
+    };
+
+    std::unordered_map<std::string, ClosureVisitState> states;
+    states.reserve(definitions.size());
     for (const DefinitionReference& root : roots) {
-        if (!visit(root)) return {};
+        const std::string rootKey = referenceKey(root);
+        if (states.count(rootKey) > 0) {
+            continue;
+        }
+
+        std::vector<ClosureFrame> pending;
+        pending.push_back(ClosureFrame{ root });
+        while (!pending.empty()) {
+            ClosureFrame& frame = pending.back();
+            const std::string key = referenceKey(frame.reference);
+            if (!frame.initialized) {
+                const auto state = states.find(key);
+                if (state != states.end()) {
+                    pending.pop_back();
+                    continue;
+                }
+                const auto definition = definitionsByKey.find(key);
+                if (definition == definitionsByKey.end()) {
+                    if (error) {
+                        *error =
+                            "Exact compound dependency is missing: " +
+                            frame.reference.id;
+                    }
+                    return {};
+                }
+                frame.definition = definition->second;
+                frame.initialized = true;
+                states.emplace(key, ClosureVisitState::Visiting);
+            }
+
+            if (frame.nextDependency <
+                frame.definition->dependencies.size()) {
+                const DefinitionReference& dependency =
+                    frame.definition
+                        ->dependencies[frame.nextDependency];
+                const std::string dependencyKey =
+                    referenceKey(dependency);
+                const auto dependencyState =
+                    states.find(dependencyKey);
+                if (dependencyState == states.end()) {
+                    pending.push_back(
+                        ClosureFrame{ dependency });
+                    continue;
+                }
+                if (dependencyState->second ==
+                    ClosureVisitState::Visiting) {
+                    if (error) {
+                        *error =
+                            "Recursive compound dependency is not allowed.";
+                    }
+                    return {};
+                }
+                ++frame.nextDependency;
+                continue;
+            }
+
+            states[key] = ClosureVisitState::Visited;
+            result.push_back(frame.reference);
+            pending.pop_back();
+            if (!pending.empty()) {
+                ++pending.back().nextDependency;
+            }
+        }
+    }
+    if (error) {
+        error->clear();
     }
     return result;
 }

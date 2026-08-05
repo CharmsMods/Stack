@@ -130,6 +130,7 @@ std::optional<double> NumericDefault(const ParameterDefinition& parameter) {
 std::vector<FieldDispositionRule> CompleteExternalPolicy() {
     return {
         { DescriptorField::Channels, FieldDisposition::Replace },
+        { DescriptorField::PresentImageComponents, FieldDisposition::Invalidate },
         { DescriptorField::Color, FieldDisposition::Invalidate },
         { DescriptorField::Transfer, FieldDisposition::Invalidate },
         { DescriptorField::Reference, FieldDisposition::Invalidate },
@@ -271,6 +272,10 @@ std::string CanonicalNodeDefinitionContent(const NodeDefinition& definition) {
         AppendText(content, port.id);
         AppendEnum(content, port.direction);
         AppendEnum(content, port.logicalType);
+        AppendUnsigned(content, port.acceptedLogicalTypes.size());
+        for (LogicalValueType acceptedType : port.acceptedLogicalTypes) {
+            AppendEnum(content, acceptedType);
+        }
         AppendEnum(content, port.arity);
         AppendUnsigned(content, port.minimumConnections);
         AppendUnsigned(content, port.maximumConnections);
@@ -386,6 +391,23 @@ std::vector<ContractIssue> ValidateNodeDefinition(const NodeDefinition& definiti
         if (port.logicalType == LogicalValueType::Invalid) {
             issues.push_back({ "ports.logicalType", "port type cannot be Invalid" });
         }
+        std::set<LogicalValueType> acceptedTypes;
+        for (LogicalValueType acceptedType : port.acceptedLogicalTypes) {
+            if (acceptedType == LogicalValueType::Invalid ||
+                !acceptedTypes.insert(acceptedType).second) {
+                issues.push_back({
+                    "ports.acceptedLogicalTypes",
+                    "accepted port types must be valid and unique: " + port.id
+                });
+            }
+        }
+        if (!port.acceptedLogicalTypes.empty() &&
+            acceptedTypes.count(port.logicalType) == 0) {
+            issues.push_back({
+                "ports.acceptedLogicalTypes",
+                "accepted port type union must include the primary logical type: " + port.id
+            });
+        }
         if (port.arity == PortArity::Single && port.maximumConnections != 1) {
             issues.push_back({ "ports.arity", "single port must permit exactly one maximum connection" });
         }
@@ -488,7 +510,7 @@ std::vector<ContractIssue> ValidateNodeDefinition(const NodeDefinition& definiti
                 issues.push_back({ "externalFieldPolicy", "descriptor field has duplicate disposition" });
             }
         }
-        constexpr std::size_t kDescriptorFieldCount = 11;
+        constexpr std::size_t kDescriptorFieldCount = 12;
         if (fields.size() != kDescriptorFieldCount) {
             issues.push_back({ "externalFieldPolicy", "external definition must declare all descriptor fields" });
         }
@@ -672,7 +694,16 @@ std::vector<NodeDefinition> BuildRepresentativeDefinitions() {
         "Expose the connected graph result without tone mapping, normalization, encoding, or repair.",
         CapabilityClass::SpecializedExternal, Inspectability::TransparentGraph,
         DescriptorPropagationKind::DirectOutput);
-    output.ports = { Input("image", LogicalValueType::ColorImage) };
+    PortDefinition outputInput =
+        Input("result", LogicalValueType::ColorImage);
+    outputInput.acceptedLogicalTypes = {
+        LogicalValueType::ColorImage,
+        LogicalValueType::Channel
+    };
+    outputInput.requirementDescription =
+        "accept exactly Color Image or Channel and preserve the connected descriptor";
+    output.ports = { std::move(outputInput) };
+    output.identity.version = { 2, 0, 0 };
     output.policies = Policies(RangeBehavior::Preserve, AlphaBehavior::Preserve,
         SpatialBehavior::Preserve, MetadataBehavior::Preserve, "direct graph result");
     definitions.push_back(std::move(output));

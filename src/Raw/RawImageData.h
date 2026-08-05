@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,8 +23,19 @@ enum class WhiteBalanceMode {
     Manual
 };
 
+enum class RawProcessingVersion {
+    LegacyV1,
+    TruthfulV1
+};
+
 enum class DemosaicMethod {
-    Bilinear
+    Bilinear,
+    MalvarHeCutler
+};
+
+enum class RawWorkingSpace {
+    LinearSrgbD65,
+    LinearRec2020D65
 };
 
 enum class RawPixelLayout {
@@ -131,10 +143,21 @@ struct DngNoiseProfilePlane {
     double readNoiseVariance = 0.0;
 };
 
+enum class RawMosaicDenoiseMode {
+    LegacyFixedThreshold = 0,
+    DngNoiseProfile = 1
+};
+
 struct RawMosaicDenoiseSettings {
     bool enabled = false;
+    // New settings use the DNG model when it is available. Deserialization
+    // explicitly assigns LegacyFixedThreshold when this field is absent so
+    // previously-authored graphs retain their original pixels.
+    RawMosaicDenoiseMode mode = RawMosaicDenoiseMode::DngNoiseProfile;
     bool hotPixelSuppression = true;
     float hotPixelThreshold = 0.12f;
+    // Compatibility names: these are green-plane and red/blue-plane strengths
+    // in the pre-demosaic CFA domain, not perceptual luminance/chroma controls.
     float lumaStrength = 0.35f;
     float chromaStrength = 0.55f;
     int radius = 2;
@@ -378,6 +401,10 @@ struct RawMetadata {
 };
 
 struct RawDevelopSettings {
+    RawProcessingVersion processingVersion = RawProcessingVersion::LegacyV1;
+    RawWorkingSpace workingSpace = RawWorkingSpace::LinearSrgbD65;
+    bool applyBaselineExposure = false;
+    bool encodeSrgbOutput = false;
     float exposureStops = 0.0f;
     WhiteBalanceMode whiteBalanceMode = WhiteBalanceMode::AsShot;
     std::array<float, 3> manualWhiteBalance { 1.0f, 1.0f, 1.0f };
@@ -414,11 +441,20 @@ struct RawImageData {
     std::vector<std::uint16_t> rawBuffer;
     std::vector<std::uint16_t> linearUInt16Buffer;
     std::vector<float> linearFloatBuffer;
+    // Optional packed Bayer samples that have already passed DNG
+    // linearization and black/white normalization. Samples remain in the
+    // camera-native, pre-white-balance and pre-gain-map domain. Keeping the
+    // buffer shared lets an atomic multi-frame result enter the ordinary RAW
+    // development pipeline without copying a full-resolution float mosaic.
+    std::shared_ptr<const std::vector<float>> normalizedMosaicBuffer;
+    std::uint64_t normalizedMosaicContentHash = 0u;
 };
 
 const char* CfaPatternName(CfaPattern pattern);
 const char* WhiteBalanceModeName(WhiteBalanceMode mode);
+const char* RawProcessingVersionName(RawProcessingVersion version);
 const char* DemosaicMethodName(DemosaicMethod method);
+const char* RawWorkingSpaceName(RawWorkingSpace workingSpace);
 const char* RawPixelLayoutName(RawPixelLayout layout);
 const char* RawSampleFormatName(RawSampleFormat format);
 const char* RawDebugViewName(RawDebugView view);

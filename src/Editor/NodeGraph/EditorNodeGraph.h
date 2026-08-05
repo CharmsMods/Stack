@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -16,6 +17,8 @@ struct CompoundExpansionResult {
     std::vector<int> expandedNodeIds;
     std::vector<int> authoredCompoundNodeIds;
 };
+
+struct GraphLookupCache;
 
 class Graph {
 public:
@@ -33,6 +36,9 @@ public:
     Node* AddRawDetailFusionNode(RawDetailFusionPayload payload, Vec2 position);
     Node* AddHdrMergeNode(HdrMergePayload payload, Vec2 position);
     Node* AddMfsrNode(MfsrPayload payload, Vec2 position);
+    Node* AddRawProjectFrameNode(RawProjectFramePayload payload, Vec2 position);
+    Node* AddMultiFrameDenoiseNode(MultiFrameDenoisePayload payload, Vec2 position);
+    Node* AddRawProjectSourceSetNode(RawProjectSourceSetPayload payload, Vec2 position);
     Node* AddLutNode(LutPayload payload, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
     Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
@@ -49,9 +55,15 @@ public:
     Node* AddReformatNode(Vec2 position);
     Node* AddTechnicalImageNode(Stack::NodeMath::TechnicalImageOperation operation, Vec2 position);
     Node* AddCompoundNode(const Stack::NodeMath::DefinitionReference& definition, Vec2 position);
+    Node* AddFrequencyFilterNode(FrequencyFilterMode mode, Vec2 position);
+    Node* AddFrequencyResponseNode(Vec2 position);
     Node* AddFrequencyFftNode(Vec2 position);
     Node* AddFrequencyIfftNode(Vec2 position);
     Node* AddSpectrumViewNode(Vec2 position);
+    Node* AddApplyFrequencyResponseNode(Vec2 position);
+    Node* AddCombineSpectraNode(Vec2 position);
+    Node* AddSpectrumSeparateNode(Vec2 position);
+    Node* AddSpectrumRecombineNode(Vec2 position);
     Node* AddFrequencyMaskNode(FrequencyMaskShape shape, Vec2 position);
     Node* AddSpectrumMathNode(SpectrumMathMode mode, Vec2 position);
     Node* AddMagnitudePhaseNode(MagnitudePhaseMode mode, Vec2 position);
@@ -59,6 +71,7 @@ public:
     Node* AddPreviewNode(Vec2 position);
     Node* AddChannelSplitNode(Vec2 position);
     Node* AddChannelCombineNode(Vec2 position);
+    Node* AddConstantChannelNode(Vec2 position);
     Node* AddOutputNode(Vec2 position, bool makePrimary = false);
     Node* AddCompositeNode(Vec2 position);
     Node* EnsureOutputNode();
@@ -69,10 +82,19 @@ public:
     Node* FindNodeByLayerIndex(int layerIndex);
     const Node* FindNodeByLayerIndex(int layerIndex) const;
 
+    // Mutable node access is for payload/layout edits. Call EditNodes() before
+    // changing the vector's membership or node IDs.
     std::vector<Node>& GetNodes() { return m_Nodes; }
     const std::vector<Node>& GetNodes() const { return m_Nodes; }
+    std::vector<Node>& EditNodes() {
+        TouchStructure();
+        return m_Nodes;
+    }
     const std::vector<Link>& GetLinks() const { return m_Links; }
-    std::vector<Link>& GetLinks() { return m_Links; }
+    std::vector<Link>& EditLinks() {
+        TouchStructure();
+        return m_Links;
+    }
 
     NodeGroup* AddGroup(std::string title, Vec2 position, Vec2 size);
     bool RemoveGroup(int groupId);
@@ -106,8 +128,6 @@ public:
     int GetSelectedNodeId() const { return m_SelectedNodeId; }
     bool IsNodeSelected(int nodeId) const;
     void ClearSelection();
-    void SetForceOutputFourPins(bool force) { m_ForceOutputFourPins = force; }
-    bool IsOutputFourPinsForced() const { return m_ForceOutputFourPins; }
     void SetSocketPreviewIntent(int nodeId, SocketPreviewIntent intent) {
         m_SocketPreviewNodeId = nodeId;
         m_SocketPreviewIntent = intent;
@@ -120,6 +140,11 @@ public:
         Vec2 min,
         Vec2 max,
         const std::function<Vec2(const Node&)>& sizeResolver,
+        bool additive = false);
+    void SelectNodesInBounds(
+        Vec2 min,
+        Vec2 max,
+        const std::function<GraphRect(const Node&)>& boundsResolver,
         bool additive = false);
     const std::vector<int>& GetSelectedNodeIds() const { return m_SelectedNodeIds; }
     void SelectLink(int fromNodeId, int toNodeId);
@@ -147,6 +172,11 @@ public:
         std::string* errorMessage = nullptr) const;
     bool TryConnectSockets(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId, std::string* errorMessage = nullptr);
     bool SetOutputNodeEnabled(int nodeId, bool enabled);
+    bool SetParameterExposed(int nodeId, const std::string& parameterId, bool exposed);
+    bool SetDataMathMode(int nodeId, DataMathMode mode);
+    bool SetMaskCombineMode(int nodeId, MaskCombineMode mode);
+    bool SetImageToMaskKind(int nodeId, ImageToMaskKind kind);
+    bool SetLayerNodeType(int nodeId, LayerType type);
     bool RemoveNode(int nodeId);
     bool RemoveLink(int fromNodeId, int toNodeId);
     bool RemoveLink(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId);
@@ -156,10 +186,11 @@ public:
     int GetActiveImageNodeId() const { return m_ActiveImageNodeId; }
     void SetActiveImageNodeId(int nodeId) { m_ActiveImageNodeId = nodeId; }
     bool IsOutputConnected() const;
+    bool IsOutputChannelInspection(int outputNodeId) const;
     std::string GetOutputConnectionDiagnostic() const;
     std::vector<int> GetOutputNodeIds() const;
     std::vector<int> GetConnectedOutputNodeIds() const;
-    std::vector<CompletedChainInfo> GetCompletedChains() const;
+    const std::vector<CompletedChainInfo>& GetCompletedChains() const;
     std::vector<int> GetDownstreamRenderNodeIds(int nodeId) const;
     std::vector<int> GetDownstreamOutputNodeIds(int nodeId) const;
     int FindAdjacentMainChainNodeId(int nodeId, int direction) const;
@@ -205,9 +236,22 @@ public:
     const Link* FindAnyInputLink(int nodeId, const std::string& socketId) const;
     const Link* FindOutputLink(int nodeId, const std::string& socketId = kImageOutputSocketId) const;
     const Link* FindScopeInputLink(int nodeId) const;
+    void ForEachIncomingLink(
+        int nodeId,
+        const std::function<void(const Link&)>& visitor) const;
+    void ForEachOutgoingLink(
+        int nodeId,
+        const std::function<void(const Link&)>& visitor) const;
+    void ForEachIncomingRenderLink(
+        int nodeId,
+        const std::function<void(const Link&)>& visitor) const;
+    void ForEachOutgoingRenderLink(
+        int nodeId,
+        const std::function<void(const Link&)>& visitor) const;
     bool IsRenderLink(const Link& link) const;
 
 private:
+    bool EnsureLookupCache() const;
     int AllocateNodeId();
     void TouchStructure();
     Vec2 DefaultLayerPosition(int layerIndex) const;
@@ -231,7 +275,6 @@ private:
     bool m_HasSelectedLink = false;
     int m_ActiveImageNodeId = -1;
     int m_OutputNodeId = -1;
-    bool m_ForceOutputFourPins = false;
     bool m_AllowNoOutput = false;
     int m_SocketPreviewNodeId = -1;
     SocketPreviewIntent m_SocketPreviewIntent = SocketPreviewIntent::None;
@@ -239,6 +282,7 @@ private:
     mutable std::uint64_t m_CompletedChainsCacheRevision = 0;
     mutable std::vector<CompletedChainInfo> m_CompletedChainsCache;
     mutable std::string m_OutputConnectionDiagnosticCache;
+    mutable std::shared_ptr<const GraphLookupCache> m_LookupCache;
 };
 
 struct ScenePathInfo {

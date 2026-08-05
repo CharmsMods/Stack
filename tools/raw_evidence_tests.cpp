@@ -1,4 +1,5 @@
 #include "Raw/RawTechnicalEvidence.h"
+#include "Raw/RawProcessingMath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -200,6 +201,197 @@ void TestNormalization() {
     }
 }
 
+void TestTruthfulProcessingMath() {
+    Raw::RawImageData raw = MakeRaw(4, 4, 64.0f, 1024.0f);
+    raw.metadata.isDng = true;
+    raw.metadata.dngBlackLevelRepeatDim = { 2, 2 };
+    raw.metadata.dngBlackLevelValues = { 64.0f, 32.0f, 32.0f, 16.0f };
+    raw.metadata.dngBlackLevelDeltaH = { 0.0f, 8.0f, 0.0f, 8.0f };
+    raw.metadata.dngBlackLevelDeltaV = { 0.0f, 16.0f, 0.0f, 16.0f };
+    raw.metadata.dngLinearizationTable = { 0, 128, 544 };
+    raw.metadata.dngWhiteLevelValues = { 1024.0f };
+    Raw::RawDevelopSettings settings;
+    settings.processingVersion = Raw::RawProcessingVersion::TruthfulV1;
+
+    const Raw::RawSensorRect active = Raw::Processing::ResolveActiveArea(raw.metadata);
+    const float lastEntry = Raw::Processing::NormalizeStoredSample(
+        raw.metadata, settings, active, 0, 0, 400);
+    Check(Near(lastEntry, 0.5), "RAW-TRUTH-01",
+        "linearization-table indices above the table must use the final table entry before black subtraction");
+
+    raw.metadata.dngLinearizationTable.clear();
+    const float negative = Raw::Processing::NormalizeStoredSample(
+        raw.metadata, settings, active, 1, 1, 20);
+    Check(negative < 0.0f, "RAW-TRUTH-02",
+        "truthful normalization must preserve below-black negative samples");
+    const float clippedHigh = Raw::Processing::NormalizeStoredSample(
+        raw.metadata, settings, active, 0, 0, 2048);
+    Check(Near(clippedHigh, 1.0), "RAW-TRUTH-03",
+        "truthful normalization must identify values above sensor white without carrying impossible sensor code values");
+
+    raw.metadata.dngBlackLevelDeltaH.clear();
+    raw.metadata.dngBlackLevelDeltaV.clear();
+    std::fill(raw.rawBuffer.begin(), raw.rawBuffer.end(), 544);
+    std::vector<float> normalized;
+    std::string error;
+    Check(Raw::Processing::BuildTruthfulNormalizedMosaic(raw, settings, normalized, &error) &&
+            normalized.size() == raw.rawBuffer.size(),
+        "RAW-TRUTH-04", "truthful normalized mosaic must cover every sensor sample");
+    std::fill(normalized.begin(), normalized.end(), 1.0f);
+    Check(
+        Raw::Processing::ApplyWhiteBalanceToCfaMosaic(
+            raw.metadata,
+            { 2.0f, 1.0f, 3.0f },
+            normalized,
+            &error) &&
+        Near(normalized[0], 2.0) &&
+        Near(normalized[1], 1.0) &&
+        Near(normalized[4], 1.0) &&
+        Near(normalized[5], 3.0),
+        "RAW-WB-01",
+        "Truthful V1 white balance must scale the declared CFA planes before demosaic");
+
+    Raw::RawImageData gainRaw = MakeRaw(4, 4, 0.0f, 1000.0f);
+    std::fill(gainRaw.rawBuffer.begin(), gainRaw.rawBuffer.end(), 250);
+    Raw::DngGainMapOpcode gainMap;
+    gainMap.top = 0;
+    gainMap.left = 0;
+    gainMap.bottom = 4;
+    gainMap.right = 4;
+    gainMap.mapPointsV = 2;
+    gainMap.mapPointsH = 2;
+    gainMap.mapPlanes = 1;
+    gainMap.mapSpacingV = 0.75;
+    gainMap.mapSpacingH = 0.75;
+    gainMap.mapOriginV = 0.125;
+    gainMap.mapOriginH = 0.125;
+    gainMap.gains = { 1.0f, 2.0f, 3.0f, 4.0f };
+    gainRaw.metadata.dngGainMaps = { gainMap };
+    std::vector<float> gainCorrected;
+    Check(
+        Raw::Processing::BuildTruthfulNormalizedMosaic(
+            gainRaw,
+            settings,
+            gainCorrected,
+            &error) &&
+        Near(gainCorrected[0], 0.25) &&
+        Near(gainCorrected[3], 0.5) &&
+        Near(gainCorrected[12], 0.75) &&
+        Near(gainCorrected[15], 1.0),
+        "RAW-GAINMAP-01",
+        "OpcodeList2 gain-map interpolation must use pixel-center normalized image coordinates after sensor normalization");
+    std::fill(gainRaw.rawBuffer.begin(), gainRaw.rawBuffer.end(), 750);
+    Check(
+        Raw::Processing::BuildTruthfulNormalizedMosaic(
+            gainRaw,
+            settings,
+            gainCorrected,
+            &error) &&
+        Near(gainCorrected[15], 1.0),
+        "RAW-GAINMAP-02",
+        "OpcodeList2 processing must clip to the legal normalized image range after each opcode");
+
+    Raw::RawImageData croppedGainRaw = MakeRaw(6, 6, 0.0f, 1000.0f);
+    std::fill(croppedGainRaw.rawBuffer.begin(), croppedGainRaw.rawBuffer.end(), 250);
+    croppedGainRaw.metadata.hasDngActiveArea = true;
+    croppedGainRaw.metadata.dngActiveArea = { 1, 1, 5, 5 };
+    croppedGainRaw.metadata.dngGainMaps = { gainMap };
+    Check(
+        Raw::Processing::BuildTruthfulNormalizedMosaic(
+            croppedGainRaw,
+            settings,
+            gainCorrected,
+            &error) &&
+        Near(gainCorrected[0], 0.25) &&
+        Near(gainCorrected[7], 0.25) &&
+        Near(gainCorrected[10], 0.5) &&
+        Near(gainCorrected[25], 0.75) &&
+        Near(gainCorrected[28], 1.0),
+        "RAW-GAINMAP-03",
+        "OpcodeList2 bounds and normalized coordinates must be relative to the linearized DNG ActiveArea");
+
+    const std::vector<float> constantMosaic(64, 0.25f);
+    for (Raw::CfaPattern pattern : {
+            Raw::CfaPattern::RGGB,
+            Raw::CfaPattern::BGGR,
+            Raw::CfaPattern::GBRG,
+            Raw::CfaPattern::GRBG }) {
+        const std::array<float, 3> rgb =
+            Raw::Processing::DemosaicMalvarHeCutlerAt(constantMosaic, 8, 8, pattern, 3, 3);
+        Check(Near(rgb[0], 0.25) && Near(rgb[1], 0.25) && Near(rgb[2], 0.25),
+            "RAW-MHC-01", std::string("MHC must preserve constant fields for ") + Raw::CfaPatternName(pattern));
+    }
+
+    const std::array<float, 3> sensorPatch { 0.20f, 0.35f, 0.25f };
+    const std::array<float, 3> patchWhiteBalance { 2.0f, 1.0f, 1.6f };
+    const std::array<float, 3> expectedPatch {
+        sensorPatch[0] * patchWhiteBalance[0],
+        sensorPatch[1] * patchWhiteBalance[1],
+        sensorPatch[2] * patchWhiteBalance[2]
+    };
+    for (Raw::CfaPattern pattern : {
+            Raw::CfaPattern::RGGB,
+            Raw::CfaPattern::BGGR,
+            Raw::CfaPattern::GBRG,
+            Raw::CfaPattern::GRBG }) {
+        Raw::RawMetadata patchMetadata;
+        patchMetadata.rawWidth = 8;
+        patchMetadata.rawHeight = 8;
+        patchMetadata.visibleWidth = 8;
+        patchMetadata.visibleHeight = 8;
+        patchMetadata.pixelLayout = Raw::RawPixelLayout::MosaicBayer;
+        patchMetadata.cfaPattern = pattern;
+        const Raw::RawSensorRect patchArea =
+            Raw::Processing::ResolveActiveArea(patchMetadata);
+        std::vector<float> whiteBalancedPatch(64, 0.0f);
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                const int color =
+                    Raw::Processing::CfaColorAt(patchMetadata, patchArea, x, y);
+                whiteBalancedPatch[static_cast<std::size_t>(y * 8 + x)] =
+                    sensorPatch[static_cast<std::size_t>(color)];
+            }
+        }
+        Check(
+            Raw::Processing::ApplyWhiteBalanceToCfaMosaic(
+                patchMetadata,
+                patchWhiteBalance,
+                whiteBalancedPatch,
+                &error),
+            "RAW-MHC-WB-01",
+            std::string("white-balance fixture setup failed for ") +
+                Raw::CfaPatternName(pattern));
+        bool phaseStable = true;
+        for (int y = 2; y < 6; ++y) {
+            for (int x = 2; x < 6; ++x) {
+                const std::array<float, 3> rgb =
+                    Raw::Processing::DemosaicMalvarHeCutlerAt(
+                        whiteBalancedPatch,
+                        8,
+                        8,
+                        pattern,
+                        x,
+                        y);
+                phaseStable =
+                    phaseStable &&
+                    Near(rgb[0], expectedPatch[0]) &&
+                    Near(rgb[1], expectedPatch[1]) &&
+                    Near(rgb[2], expectedPatch[2]);
+            }
+        }
+        Check(
+            phaseStable,
+            "RAW-MHC-WB-01",
+            std::string("MHC must preserve a non-neutral white-balanced patch across every CFA phase for ") +
+                Raw::CfaPatternName(pattern));
+    }
+
+    Check(Near(Raw::Processing::EncodeSrgb(0.0f), 0.0) &&
+            Near(Raw::Processing::EncodeSrgb(0.0031308f), 0.040449936, 1.0e-6) &&
+            Near(Raw::Processing::EncodeSrgb(1.0f), 1.0),
+        "RAW-OUTPUT-01", "sRGB output transfer must match the IEC piecewise curve");
+}
+
 void TestAreasAndOrientation() {
     Raw::RawImageData raw = MakeRaw(6, 6);
     raw.metadata.dngActiveArea = { 1, 1, 5, 5 };
@@ -322,6 +514,136 @@ void TestNoiseAndMetadata() {
         "P01-NOISE-01", "missing profile must not become a zero coefficient");
 }
 
+void TestNoiseAwareFastDenoiseMath() {
+    Raw::RawMetadata metadata;
+    metadata.hasDngNoiseProfile = true;
+    metadata.dngCfaPlaneColor = { 2, 0, 1 };
+    metadata.dngNoiseProfile = {
+        Raw::DngNoiseProfilePlane { 0.030, 0.0030 },
+        Raw::DngNoiseProfilePlane { 0.010, 0.0010 },
+        Raw::DngNoiseProfilePlane { 0.020, 0.0020 }
+    };
+    std::array<Raw::DngNoiseProfilePlane, 3> profiles {};
+    Check(
+        Raw::Processing::ResolveDngNoiseProfile(metadata, profiles) &&
+            Near(profiles[0].shotScale, 0.010) &&
+            Near(profiles[1].shotScale, 0.020) &&
+            Near(profiles[2].shotScale, 0.030),
+        "DENOISE-PROFILE-01",
+        "DNG profile coefficients must follow CFAPlaneColor rather than assuming RGB storage order");
+
+    metadata.dngNoiseProfile = {
+        Raw::DngNoiseProfilePlane { 0.012, 0.0002 }
+    };
+    Check(
+        Raw::Processing::ResolveDngNoiseProfile(metadata, profiles) &&
+            Near(profiles[0].shotScale, 0.012) &&
+            Near(profiles[1].shotScale, 0.012) &&
+            Near(profiles[2].shotScale, 0.012),
+        "DENOISE-PROFILE-02",
+        "a single DNG profile pair must apply to every sensor color plane");
+    Check(
+        Near(
+            Raw::Processing::DngNoiseVariance(profiles[0], 0.25f),
+            0.012 * 0.25 + 0.0002),
+        "DENOISE-PROFILE-03",
+        "noise variance must implement the DNG S*x+O model in normalized sensor space");
+
+    const float lowNoiseWeight = Raw::Processing::NoiseAwareRangeWeight(
+        0.20f,
+        0.22f,
+        1.0e-6f,
+        1.0e-6f,
+        0.5f);
+    const float highNoiseWeight = Raw::Processing::NoiseAwareRangeWeight(
+        0.20f,
+        0.22f,
+        1.0e-3f,
+        1.0e-3f,
+        0.5f);
+    const float protectedWeight = Raw::Processing::NoiseAwareRangeWeight(
+        0.20f,
+        0.22f,
+        1.0e-4f,
+        1.0e-4f,
+        1.0f);
+    const float permissiveWeight = Raw::Processing::NoiseAwareRangeWeight(
+        0.20f,
+        0.22f,
+        1.0e-4f,
+        1.0e-4f,
+        0.0f);
+    Check(
+        highNoiseWeight > lowNoiseWeight &&
+            protectedWeight < permissiveWeight &&
+            Near(
+                Raw::Processing::NoiseAwareRangeWeight(
+                    0.20f,
+                    0.20f,
+                    0.0f,
+                    0.0f,
+                    1.0f),
+                1.0),
+        "DENOISE-WEIGHT-01",
+        "range weighting must accept expected noise, reject real edges more strongly, and preserve identical samples");
+
+    Raw::RawImageData raw = MakeRaw(4, 4, 0.0f, 1024.0f);
+    std::fill(raw.rawBuffer.begin(), raw.rawBuffer.end(), 256);
+    raw.metadata.hasDngNoiseProfile = true;
+    raw.metadata.dngNoiseProfile = {
+        Raw::DngNoiseProfilePlane { 0.01, 0.0001 }
+    };
+    Raw::DngGainMapOpcode gainMap;
+    gainMap.top = 0;
+    gainMap.left = 0;
+    gainMap.bottom = 4;
+    gainMap.right = 4;
+    gainMap.plane = 0;
+    gainMap.planes = 1;
+    gainMap.rowPitch = 1;
+    gainMap.colPitch = 1;
+    gainMap.mapPointsV = 1;
+    gainMap.mapPointsH = 1;
+    gainMap.mapPlanes = 1;
+    gainMap.mapSpacingV = 1.0;
+    gainMap.mapSpacingH = 1.0;
+    gainMap.mapOriginV = 0.0;
+    gainMap.mapOriginH = 0.0;
+    gainMap.gains = { 2.0f };
+    raw.metadata.dngGainMaps = { gainMap };
+    raw.metadata.dngGainMapCount = 1;
+
+    Raw::RawDevelopSettings settings;
+    settings.processingVersion = Raw::RawProcessingVersion::TruthfulV1;
+    std::vector<float> variance;
+    std::string error;
+    const double expectedGainMappedVariance =
+        (0.01 * 0.25 + 0.0001) * 4.0;
+    Check(
+        Raw::Processing::BuildTruthfulNoiseVarianceMosaic(
+            raw,
+            settings,
+            variance,
+            &error) &&
+            variance.size() == raw.rawBuffer.size() &&
+            Near(variance.front(), expectedGainMappedVariance),
+        "DENOISE-GAIN-01",
+        "OpcodeList2 gain must scale DNG noise variance by gain squared");
+
+    raw.metadata.hasDngNoiseProfile = false;
+    raw.metadata.dngNoiseProfile.clear();
+    variance.assign(1, 1.0f);
+    Check(
+        !Raw::Processing::BuildTruthfulNoiseVarianceMosaic(
+            raw,
+            settings,
+            variance,
+            &error) &&
+            variance.empty(),
+        "DENOISE-FALLBACK-01",
+        "missing DNG noise metadata must produce an explicit fallback instead of zero-noise coefficients");
+}
+
 void TestDefensiveStateAndCache() {
     Raw::RawImageData raw = MakeRaw(6, 6);
     std::fill(raw.rawBuffer.begin(), raw.rawBuffer.end(), 544);
@@ -377,9 +699,11 @@ int main() {
     TestIdentity();
     TestDecodeIdentity();
     TestNormalization();
+    TestTruthfulProcessingMath();
     TestAreasAndOrientation();
     TestClippingAndHeadroom();
     TestNoiseAndMetadata();
+    TestNoiseAwareFastDenoiseMath();
     TestDefensiveStateAndCache();
     if (g_Failures != 0) {
         std::cerr << "RAW evidence fixture suite failed with " << g_Failures << " assertion(s).\n";

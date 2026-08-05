@@ -3,7 +3,11 @@
 #include "Editor/Internal/EditorModuleDevelopDefaults.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 
+#include <algorithm>
 #include <functional>
+#include <new>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -36,6 +40,30 @@ const EditorNodeGraph::Node* FindUpstreamRawSourceNode(
         rawInput = graph.FindInputLink(upstream->id, EditorNodeGraph::kRawInputSocketId);
     }
     return nullptr;
+}
+
+std::string FindImageOutputSocket(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node) {
+    const std::string preferred = graph.DefaultOutputSocket(node);
+    for (const EditorNodeGraph::SocketDefinition& output :
+            graph.GetSockets(node, false)) {
+        if (output.direction ==
+                EditorNodeGraph::SocketDirection::Output &&
+            output.type == EditorNodeGraph::SocketType::Image &&
+            output.id == preferred) {
+            return output.id;
+        }
+    }
+    for (const EditorNodeGraph::SocketDefinition& output :
+            graph.GetSockets(node, false)) {
+        if (output.direction ==
+                EditorNodeGraph::SocketDirection::Output &&
+            output.type == EditorNodeGraph::SocketType::Image) {
+            return output.id;
+        }
+    }
+    return {};
 }
 
 template <typename T>
@@ -172,11 +200,10 @@ void EditorModule::AddRawDevelopNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     payload.scenePrepEnabled = true;
     payload.integratedToneEnabled = true;
     payload.integratedToneLayerJson = BuildDefaultIntegratedToneLayerJson();
-    payload.uiMode = EditorNodeGraph::RawDevelopUiMode::Auto;
+    payload.uiMode = EditorNodeGraph::RawDevelopUiMode::Manual;
     if (const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId())) {
         if (selected->kind == EditorNodeGraph::NodeKind::RawSource) {
             payload.settings = BuildRawDevelopSettingsFromMetadata(selected->rawSource.metadata);
-            ApplyDevelopAutoSolve(payload, selected->rawSource.metadata, true);
         }
     }
     AddRawDevelopNodeFromPayload(std::move(payload), graphPosition);
@@ -285,20 +312,11 @@ bool EditorModule::AddRawDetailAutoMaskNodeFromPayload(EditorNodeGraph::RawDetai
 
 void EditorModule::AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected &&
-        (selected->kind == EditorNodeGraph::NodeKind::Image ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         selected->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         selected->kind == EditorNodeGraph::NodeKind::Mfsr ||
-         selected->kind == EditorNodeGraph::NodeKind::Lut ||
-         selected->kind == EditorNodeGraph::NodeKind::Layer ||
-         selected->kind == EditorNodeGraph::NodeKind::Mix ||
-         selected->kind == EditorNodeGraph::NodeKind::DataMath ||
-         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
-         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
+    const std::string upstreamSocketId = selected
+        ? FindImageOutputSocket(m_NodeGraph, *selected)
+        : std::string();
+    const int upstreamNodeId =
+        !upstreamSocketId.empty() ? selected->id : -1;
 
     EditorNodeGraph::RawDetailFusionPayload fusionPayload;
     EditorNodeGraph::Node* fusionNode = m_NodeGraph.AddRawDetailFusionNode(std::move(fusionPayload), graphPosition);
@@ -309,7 +327,7 @@ void EditorModule::AddRawDetailFusionNodeAt(EditorNodeGraph::Vec2 graphPosition)
 
     std::string errorMessage;
     if (upstreamNodeId > 0) {
-        ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, fusionNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
+        ConnectGraphSockets(upstreamNodeId, upstreamSocketId, fusionNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
     }
     SelectGraphNode(fusionNodeId);
     MarkRenderDirty(fusionNodeId);
@@ -326,20 +344,11 @@ bool EditorModule::AddRawDetailFusionNodeFromPayload(EditorNodeGraph::RawDetailF
 
 void EditorModule::AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected &&
-        (selected->kind == EditorNodeGraph::NodeKind::Image ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         selected->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         selected->kind == EditorNodeGraph::NodeKind::Mfsr ||
-         selected->kind == EditorNodeGraph::NodeKind::Lut ||
-         selected->kind == EditorNodeGraph::NodeKind::Layer ||
-         selected->kind == EditorNodeGraph::NodeKind::Mix ||
-         selected->kind == EditorNodeGraph::NodeKind::DataMath ||
-         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
-         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
+    const std::string upstreamSocketId = selected
+        ? FindImageOutputSocket(m_NodeGraph, *selected)
+        : std::string();
+    const int upstreamNodeId =
+        !upstreamSocketId.empty() ? selected->id : -1;
 
     EditorNodeGraph::HdrMergePayload payload;
     EditorNodeGraph::Node* hdrNode = m_NodeGraph.AddHdrMergeNode(std::move(payload), graphPosition);
@@ -350,7 +359,7 @@ void EditorModule::AddHdrMergeNodeAt(EditorNodeGraph::Vec2 graphPosition) {
 
     std::string errorMessage;
     if (upstreamNodeId > 0) {
-        if (!ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, hdrNodeId, EditorNodeGraph::kHdrMergeInput1SocketId, &errorMessage) &&
+        if (!ConnectGraphSockets(upstreamNodeId, upstreamSocketId, hdrNodeId, EditorNodeGraph::kHdrMergeInput1SocketId, &errorMessage) &&
             !errorMessage.empty()) {
             QueueUiNotification(
                 UiNotificationSeverity::Error,
@@ -373,20 +382,11 @@ bool EditorModule::AddHdrMergeNodeFromPayload(EditorNodeGraph::HdrMergePayload p
 
 void EditorModule::AddMfsrNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected &&
-        (selected->kind == EditorNodeGraph::NodeKind::Image ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDecode ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDevelop ||
-         selected->kind == EditorNodeGraph::NodeKind::RawDetailFusion ||
-         selected->kind == EditorNodeGraph::NodeKind::HdrMerge ||
-         selected->kind == EditorNodeGraph::NodeKind::Mfsr ||
-         selected->kind == EditorNodeGraph::NodeKind::Lut ||
-         selected->kind == EditorNodeGraph::NodeKind::Layer ||
-         selected->kind == EditorNodeGraph::NodeKind::Mix ||
-         selected->kind == EditorNodeGraph::NodeKind::DataMath ||
-         selected->kind == EditorNodeGraph::NodeKind::ImageGenerator ||
-         selected->kind == EditorNodeGraph::NodeKind::ChannelCombine);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
+    const std::string upstreamSocketId = selected
+        ? FindImageOutputSocket(m_NodeGraph, *selected)
+        : std::string();
+    const int upstreamNodeId =
+        !upstreamSocketId.empty() ? selected->id : -1;
 
     EditorNodeGraph::MfsrPayload payload;
     EditorNodeGraph::Node* mfsrNode = m_NodeGraph.AddMfsrNode(std::move(payload), graphPosition);
@@ -397,7 +397,7 @@ void EditorModule::AddMfsrNodeAt(EditorNodeGraph::Vec2 graphPosition) {
 
     std::string errorMessage;
     if (upstreamNodeId > 0) {
-        if (!ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, mfsrNodeId, EditorNodeGraph::kMfsrReferenceInputSocketId, &errorMessage) &&
+        if (!ConnectGraphSockets(upstreamNodeId, upstreamSocketId, mfsrNodeId, EditorNodeGraph::kMfsrReferenceInputSocketId, &errorMessage) &&
             !errorMessage.empty()) {
             QueueUiNotification(
                 UiNotificationSeverity::Error,
@@ -418,34 +418,13 @@ bool EditorModule::AddMfsrNodeFromPayload(EditorNodeGraph::MfsrPayload payload, 
     return node != nullptr;
 }
 
-namespace {
-
-bool NodeKindHasImageOutput(EditorNodeGraph::NodeKind kind) {
-    switch (kind) {
-        case EditorNodeGraph::NodeKind::Image:
-        case EditorNodeGraph::NodeKind::RawDecode:
-        case EditorNodeGraph::NodeKind::RawDevelop:
-        case EditorNodeGraph::NodeKind::RawDetailFusion:
-        case EditorNodeGraph::NodeKind::HdrMerge:
-        case EditorNodeGraph::NodeKind::Mfsr:
-        case EditorNodeGraph::NodeKind::Lut:
-        case EditorNodeGraph::NodeKind::Layer:
-        case EditorNodeGraph::NodeKind::Mix:
-        case EditorNodeGraph::NodeKind::DataMath:
-        case EditorNodeGraph::NodeKind::ImageGenerator:
-        case EditorNodeGraph::NodeKind::ChannelCombine:
-            return true;
-        default:
-            return false;
-    }
-}
-
-} // namespace
-
 void EditorModule::AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
-    const bool selectedHasImageOutput = selected && NodeKindHasImageOutput(selected->kind);
-    const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
+    const std::string upstreamSocketId = selected
+        ? FindImageOutputSocket(m_NodeGraph, *selected)
+        : std::string();
+    const int upstreamNodeId =
+        !upstreamSocketId.empty() ? selected->id : -1;
 
     EditorNodeGraph::LutPayload payload;
     EditorNodeGraph::Node* lutNode = m_NodeGraph.AddLutNode(std::move(payload), graphPosition);
@@ -477,7 +456,7 @@ void EditorModule::AddLutNodeAt(EditorNodeGraph::Vec2 graphPosition) {
     }
 
     if (upstreamNodeId > 0) {
-        if (!ConnectGraphSockets(upstreamNodeId, EditorNodeGraph::kImageOutputSocketId, lutNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
+        if (!ConnectGraphSockets(upstreamNodeId, upstreamSocketId, lutNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
             !errorMessage.empty()) {
             QueueUiNotification(
                 UiNotificationSeverity::Error,
@@ -522,19 +501,58 @@ bool EditorModule::ConvertRawDetailFusionToHybrid(int fusionNodeId) {
         (autoMaskPosition.x + fusionPosition.x) * 0.5f,
         autoMaskPosition.y
     };
+    const int nextNodeIdBefore =
+        m_NodeGraph.GetNextNodeId();
+    const std::vector<int> selectionBefore =
+        m_NodeGraph.GetSelectedNodeIds();
+    const EditorNodeGraph::Link* selectedLinkBefore =
+        m_NodeGraph.GetSelectedLink();
+    const std::optional<EditorNodeGraph::Link>
+        selectedLinkSnapshot = selectedLinkBefore
+            ? std::optional<EditorNodeGraph::Link>(
+                *selectedLinkBefore)
+            : std::nullopt;
     EditorNodeGraph::Node* levelsNode = m_NodeGraph.AddMaskUtilityNode(EditorNodeGraph::MaskUtilityKind::Levels, pos);
     if (!levelsNode) {
         return false;
     }
+    const int levelsNodeId = levelsNode->id;
+    const auto rollbackLevelsInsertion = [&]() {
+        m_NodeGraph.RemoveNode(levelsNodeId);
+        m_NodeGraph.SetNextNodeId(nextNodeIdBefore);
+        m_NodeGraph.ClearSelection();
+        for (const int selectedNodeId : selectionBefore) {
+            m_NodeGraph.SelectNode(selectedNodeId, true);
+        }
+        if (selectedLinkSnapshot) {
+            const EditorNodeGraph::Link& selected =
+                *selectedLinkSnapshot;
+            m_NodeGraph.SelectLink(
+                selected.fromNodeId,
+                selected.fromSocketId,
+                selected.toNodeId,
+                selected.toSocketId);
+        }
+    };
 
     std::string errorMessage;
-    if (!ConnectGraphSockets(autoMaskNodeId, EditorNodeGraph::kMaskOutputSocketId, levelsNode->id, EditorNodeGraph::kMaskUtilityInputSocketId, &errorMessage)) {
+    if (!ConnectGraphSockets(
+            autoMaskNodeId,
+            EditorNodeGraph::kMaskOutputSocketId,
+            levelsNodeId,
+            EditorNodeGraph::kMaskUtilityInputSocketId,
+            &errorMessage) ||
+        !ConnectGraphSockets(
+            levelsNodeId,
+            EditorNodeGraph::kMaskOutputSocketId,
+            fusionNodeId,
+            EditorNodeGraph::kMaskInputSocketId,
+            &errorMessage)) {
+        rollbackLevelsInsertion();
+        MarkRenderDirty(fusionNodeId);
         return false;
     }
-    if (!ConnectGraphSockets(levelsNode->id, EditorNodeGraph::kMaskOutputSocketId, fusionNodeId, EditorNodeGraph::kMaskInputSocketId, &errorMessage)) {
-        return false;
-    }
-    SelectGraphNode(levelsNode->id);
+    SelectGraphNode(levelsNodeId);
     MarkRenderDirty(fusionNodeId);
     return true;
 }
@@ -547,30 +565,191 @@ bool EditorModule::AddFullRawTreeToSource(int rawSourceNodeId) {
 
     const int completedBefore = GetCompletedChainCount();
     const EditorNodeGraph::Vec2 sourcePosition = rawSourceNode->position;
-    SelectGraphNode(rawSourceNodeId);
-
-    constexpr float kNodeSpacing = 280.0f;
-    AddRawDecodeNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 1.0f, sourcePosition.y });
-    const int rawDecodeNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ToneCurve, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 2.0f, sourcePosition.y });
-    const int toneCurveNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddLayerNodeAt(LayerType::ViewTransform, EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 3.0f, sourcePosition.y });
-    const int viewTransformNodeId = m_NodeGraph.GetSelectedNodeId();
-    AddOutputNodeAt(EditorNodeGraph::Vec2{ sourcePosition.x + kNodeSpacing * 4.0f, sourcePosition.y });
-    const int outputNodeId = m_NodeGraph.GetSelectedNodeId();
-
-    if (rawDecodeNodeId <= 0 || toneCurveNodeId <= 0 || viewTransformNodeId <= 0 || outputNodeId <= 0) {
-        return false;
+    const int nextNodeIdBefore = m_NodeGraph.GetNextNodeId();
+    const int outputNodeIdBefore = m_NodeGraph.GetOutputNodeId();
+    const std::vector<int> selectionBefore =
+        m_NodeGraph.GetSelectedNodeIds();
+    const EditorNodeGraph::Link* selectedLinkBefore =
+        m_NodeGraph.GetSelectedLink();
+    const std::optional<EditorNodeGraph::Link>
+        selectedLinkSnapshot = selectedLinkBefore
+            ? std::optional<EditorNodeGraph::Link>(
+                *selectedLinkBefore)
+            : std::nullopt;
+    const int selectedLayerBefore = m_SelectedLayerIndex;
+    const bool focusSelectedTabBefore =
+        m_FocusSelectedTabNextRender;
+    const std::vector<std::shared_ptr<LayerBase>> layersSnapshot = m_Layers;
+    std::vector<int> originalNodeIds;
+    originalNodeIds.reserve(m_NodeGraph.GetNodes().size());
+    std::vector<std::pair<int, int>> originalLayerNodeIndices;
+    originalLayerNodeIndices.reserve(m_Layers.size());
+    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+        originalNodeIds.push_back(node.id);
+        if (node.kind == EditorNodeGraph::NodeKind::Layer) {
+            originalLayerNodeIndices.emplace_back(
+                node.id,
+                node.layerIndex);
+        }
     }
+    const auto isOriginalNodeId =
+        [&originalNodeIds](int nodeId) {
+            return std::find(
+                       originalNodeIds.begin(),
+                       originalNodeIds.end(),
+                       nodeId) != originalNodeIds.end();
+        };
+    const auto rollback = [&]() {
+        std::vector<EditorNodeGraph::Link>& links =
+            m_NodeGraph.EditLinks();
+        links.erase(
+            std::remove_if(
+                links.begin(),
+                links.end(),
+                [&isOriginalNodeId](
+                    const EditorNodeGraph::Link& link) {
+                    return !isOriginalNodeId(link.fromNodeId) ||
+                        !isOriginalNodeId(link.toNodeId);
+                }),
+            links.end());
 
-    std::string errorMessage;
-    const bool ok =
-        ConnectGraphSockets(rawSourceNodeId, EditorNodeGraph::kRawOutputSocketId, rawDecodeNodeId, EditorNodeGraph::kRawInputSocketId, &errorMessage) &&
-        ConnectGraphSockets(rawDecodeNodeId, EditorNodeGraph::kImageOutputSocketId, toneCurveNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
-        ConnectGraphSockets(toneCurveNodeId, EditorNodeGraph::kImageOutputSocketId, viewTransformNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage) &&
-        ConnectGraphSockets(viewTransformNodeId, EditorNodeGraph::kImageOutputSocketId, outputNodeId, EditorNodeGraph::kImageInputSocketId, &errorMessage);
-    if (!ok) {
+        std::vector<EditorNodeGraph::Node>& nodes =
+            m_NodeGraph.EditNodes();
+        nodes.erase(
+            std::remove_if(
+                nodes.begin(),
+                nodes.end(),
+                [&isOriginalNodeId](
+                    const EditorNodeGraph::Node& node) {
+                    return !isOriginalNodeId(node.id);
+                }),
+            nodes.end());
+
+        m_Layers = layersSnapshot;
+        for (const std::pair<int, int>& entry :
+                originalLayerNodeIndices) {
+            if (EditorNodeGraph::Node* node =
+                    m_NodeGraph.FindNode(entry.first)) {
+                node->layerIndex = entry.second;
+            }
+        }
+        m_NodeGraph.SetNextNodeId(nextNodeIdBefore);
+        m_NodeGraph.SetOutputNodeId(outputNodeIdBefore);
+        m_NodeGraph.ClearSelection();
+        for (const int selectedNodeId : selectionBefore) {
+            m_NodeGraph.SelectNode(selectedNodeId, true);
+        }
+        if (selectedLinkSnapshot) {
+            const EditorNodeGraph::Link& selected =
+                *selectedLinkSnapshot;
+            m_NodeGraph.SelectLink(
+                selected.fromNodeId,
+                selected.fromSocketId,
+                selected.toNodeId,
+                selected.toSocketId);
+        }
+        m_SelectedLayerIndex = selectedLayerBefore;
+        m_FocusSelectedTabNextRender =
+            focusSelectedTabBefore;
+        RefreshGraphLayerMetadata();
+        MarkRenderDirty(rawSourceNodeId);
         return false;
+    };
+
+    int rawDecodeNodeId = -1;
+    int toneCurveNodeId = -1;
+    int viewTransformNodeId = -1;
+    int outputNodeId = -1;
+    try {
+        SelectGraphNode(rawSourceNodeId);
+
+        constexpr float kNodeSpacing = 280.0f;
+        AddRawDecodeNodeAt(EditorNodeGraph::Vec2{
+            sourcePosition.x + kNodeSpacing * 1.0f,
+            sourcePosition.y });
+        rawDecodeNodeId = m_NodeGraph.GetSelectedNodeId();
+        const EditorNodeGraph::Node* rawDecodeNode =
+            m_NodeGraph.FindNode(rawDecodeNodeId);
+        if (!rawDecodeNode ||
+            rawDecodeNode->kind !=
+                EditorNodeGraph::NodeKind::RawDecode) {
+            return rollback();
+        }
+        AddLayerNodeAt(
+            LayerType::ToneCurve,
+            EditorNodeGraph::Vec2{
+                sourcePosition.x + kNodeSpacing * 2.0f,
+                sourcePosition.y });
+        toneCurveNodeId = m_NodeGraph.GetSelectedNodeId();
+        const EditorNodeGraph::Node* toneCurveNode =
+            m_NodeGraph.FindNode(toneCurveNodeId);
+        if (!toneCurveNode ||
+            toneCurveNode->kind !=
+                EditorNodeGraph::NodeKind::Layer ||
+            toneCurveNode->layerType != LayerType::ToneCurve) {
+            return rollback();
+        }
+        AddLayerNodeAt(
+            LayerType::ViewTransform,
+            EditorNodeGraph::Vec2{
+                sourcePosition.x + kNodeSpacing * 3.0f,
+                sourcePosition.y });
+        viewTransformNodeId = m_NodeGraph.GetSelectedNodeId();
+        const EditorNodeGraph::Node* viewTransformNode =
+            m_NodeGraph.FindNode(viewTransformNodeId);
+        if (!viewTransformNode ||
+            viewTransformNode->kind !=
+                EditorNodeGraph::NodeKind::Layer ||
+            viewTransformNode->layerType !=
+                LayerType::ViewTransform) {
+            return rollback();
+        }
+        AddOutputNodeAt(EditorNodeGraph::Vec2{
+            sourcePosition.x + kNodeSpacing * 4.0f,
+            sourcePosition.y });
+        outputNodeId = m_NodeGraph.GetSelectedNodeId();
+        const EditorNodeGraph::Node* outputNode =
+            m_NodeGraph.FindNode(outputNodeId);
+        if (!outputNode ||
+            outputNode->kind != EditorNodeGraph::NodeKind::Output) {
+            return rollback();
+        }
+
+        std::string errorMessage;
+        const bool ok =
+            ConnectGraphSockets(
+                rawSourceNodeId,
+                EditorNodeGraph::kRawOutputSocketId,
+                rawDecodeNodeId,
+                EditorNodeGraph::kRawInputSocketId,
+                &errorMessage) &&
+            ConnectGraphSockets(
+                rawDecodeNodeId,
+                EditorNodeGraph::kImageOutputSocketId,
+                toneCurveNodeId,
+                EditorNodeGraph::kImageInputSocketId,
+                &errorMessage) &&
+            ConnectGraphSockets(
+                toneCurveNodeId,
+                EditorNodeGraph::kImageOutputSocketId,
+                viewTransformNodeId,
+                EditorNodeGraph::kImageInputSocketId,
+                &errorMessage) &&
+            ConnectGraphSockets(
+                viewTransformNodeId,
+                EditorNodeGraph::kImageOutputSocketId,
+                outputNodeId,
+                EditorNodeGraph::kImageInputSocketId,
+                &errorMessage);
+        if (!ok) {
+            return rollback();
+        }
+    } catch (const std::bad_alloc&) {
+        return rollback();
+    } catch (const std::length_error&) {
+        return rollback();
+    } catch (const std::exception&) {
+        return rollback();
     }
 
     if (completedBefore < 2 && GetCompletedChainCount() >= 2) {

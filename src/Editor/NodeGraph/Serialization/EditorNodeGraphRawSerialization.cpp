@@ -36,12 +36,12 @@ Raw::WhiteBalanceMode WhiteBalanceModeFromString(const std::string& value) {
 }
 
 std::string DemosaicMethodToString(Raw::DemosaicMethod method) {
-    (void)method;
+    if (method == Raw::DemosaicMethod::MalvarHeCutler) return "MalvarHeCutler";
     return "Bilinear";
 }
 
 Raw::DemosaicMethod DemosaicMethodFromString(const std::string& value) {
-    (void)value;
+    if (value == "MalvarHeCutler" || value == "MHC") return Raw::DemosaicMethod::MalvarHeCutler;
     return Raw::DemosaicMethod::Bilinear;
 }
 
@@ -490,6 +490,16 @@ Raw::RawMetadata DeserializeRawMetadata(const nlohmann::json& value) {
 
 nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
     return {
+        { "processingVersion",
+            settings.processingVersion == Raw::RawProcessingVersion::TruthfulV1
+                ? "TruthfulV1"
+                : "LegacyV1" },
+        { "workingSpace",
+            settings.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
+                ? "LinearRec2020D65"
+                : "LinearSrgbD65" },
+        { "applyBaselineExposure", settings.applyBaselineExposure },
+        { "encodeSrgbOutput", settings.encodeSrgbOutput },
         { "exposureStops", settings.exposureStops },
         { "whiteBalanceMode", WhiteBalanceModeToString(settings.whiteBalanceMode) },
         { "manualWhiteBalance", settings.manualWhiteBalance },
@@ -518,6 +528,11 @@ nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
         { "lateralRedCyan", settings.lateralRedCyan },
         { "lateralBlueYellow", settings.lateralBlueYellow },
         { "mosaicDenoiseEnabled", settings.mosaicDenoise.enabled },
+        { "mosaicDenoiseMode",
+            settings.mosaicDenoise.mode ==
+                    Raw::RawMosaicDenoiseMode::DngNoiseProfile
+                ? "DngNoiseProfileV1"
+                : "LegacyFixedThreshold" },
         { "mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression },
         { "mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold },
         { "mosaicDenoiseLumaStrength", settings.mosaicDenoise.lumaStrength },
@@ -531,6 +546,18 @@ nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
 Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     Raw::RawDevelopSettings settings;
     if (!value.is_object()) return settings;
+    settings.processingVersion =
+        value.value("processingVersion", std::string("LegacyV1")) == "TruthfulV1"
+        ? Raw::RawProcessingVersion::TruthfulV1
+        : Raw::RawProcessingVersion::LegacyV1;
+    settings.workingSpace =
+        value.value("workingSpace", std::string("LinearSrgbD65")) == "LinearRec2020D65"
+        ? Raw::RawWorkingSpace::LinearRec2020D65
+        : Raw::RawWorkingSpace::LinearSrgbD65;
+    settings.applyBaselineExposure =
+        value.value("applyBaselineExposure", settings.applyBaselineExposure);
+    settings.encodeSrgbOutput =
+        value.value("encodeSrgbOutput", settings.encodeSrgbOutput);
     settings.exposureStops = value.value("exposureStops", settings.exposureStops);
     settings.whiteBalanceMode = WhiteBalanceModeFromString(value.value("whiteBalanceMode", std::string("AsShot")));
     settings.overrideBlackLevel = value.value("overrideBlackLevel", settings.overrideBlackLevel);
@@ -561,6 +588,14 @@ Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     settings.lateralRedCyan = value.value("lateralRedCyan", settings.lateralRedCyan);
     settings.lateralBlueYellow = value.value("lateralBlueYellow", settings.lateralBlueYellow);
     settings.mosaicDenoise.enabled = value.value("mosaicDenoiseEnabled", settings.mosaicDenoise.enabled);
+    // An absent mode identifies a graph authored before the noise-profile
+    // implementation and must retain its original fixed-threshold pixels.
+    settings.mosaicDenoise.mode =
+        value.value(
+            "mosaicDenoiseMode",
+            std::string("LegacyFixedThreshold")) == "DngNoiseProfileV1"
+        ? Raw::RawMosaicDenoiseMode::DngNoiseProfile
+        : Raw::RawMosaicDenoiseMode::LegacyFixedThreshold;
     settings.mosaicDenoise.hotPixelSuppression = value.value("mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression);
     settings.mosaicDenoise.hotPixelThreshold = value.value("mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold);
     settings.mosaicDenoise.lumaStrength = value.value("mosaicDenoiseLumaStrength", settings.mosaicDenoise.lumaStrength);

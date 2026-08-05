@@ -5,14 +5,14 @@
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Library/LibraryManager.h"
-#include "ThirdParty/stb_image_write.h"
+#include "Utils/PixelBufferUtils.h"
+#include "Utils/PngEncodingUtils.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <unordered_map>
 
 namespace {
@@ -21,10 +21,52 @@ constexpr int kNodeBrowserThumbnailMaxDimension = 256;
 constexpr int kFallbackCardWidth = 256;
 constexpr int kFallbackCardHeight = 160;
 
+struct EncodedNodeBrowserFallback {
+    std::string previewKey;
+    std::string previewSeedHash;
+    std::uint32_t previewRecipeVersion = 0;
+    std::vector<unsigned char> pngBytes;
+    std::vector<unsigned char> decodedPixels;
+    int width = 0;
+    int height = 0;
+    int channels = 4;
+};
+
+std::vector<unsigned char> EncodePngBytesTopLeft(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int channels);
+std::vector<unsigned char> BuildFallbackCardPixels(const std::string& previewKey);
+
 const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>& CachedNodeBrowserEntries() {
     static const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> entries =
         EditorNodeGraphDefinitions::BuildRegisteredNodeCatalogEntries();
     return entries;
+}
+
+std::vector<EncodedNodeBrowserFallback> EncodeNodeBrowserFallbacks(
+    const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry>& entries,
+    const std::string& seedHash) {
+    std::vector<EncodedNodeBrowserFallback> encoded;
+    encoded.reserve(entries.size());
+    for (const auto& entry : entries) {
+        EncodedNodeBrowserFallback thumbnail;
+        thumbnail.previewKey = entry.previewKey;
+        thumbnail.previewSeedHash = seedHash;
+        thumbnail.previewRecipeVersion = entry.previewRecipeVersion;
+        thumbnail.decodedPixels = BuildFallbackCardPixels(entry.previewKey);
+        thumbnail.width = kFallbackCardWidth;
+        thumbnail.height = kFallbackCardHeight;
+        thumbnail.channels = 4;
+        thumbnail.pngBytes = EncodePngBytesTopLeft(
+            thumbnail.decodedPixels,
+            thumbnail.width,
+            thumbnail.height,
+            thumbnail.channels);
+        encoded.push_back(std::move(thumbnail));
+    }
+    return encoded;
 }
 
 std::uint64_t HashBytes64(const unsigned char* data, std::size_t size, std::uint64_t seed = 1469598103934665603ull) {
@@ -50,26 +92,7 @@ std::string HexString64(std::uint64_t value) {
     return text;
 }
 
-bool TryComputePixelByteCount(int width, int height, int channels, std::size_t& outByteCount) {
-    outByteCount = 0;
-    if (width <= 0 || height <= 0 || channels <= 0) {
-        return false;
-    }
-
-    const std::size_t w = static_cast<std::size_t>(width);
-    const std::size_t h = static_cast<std::size_t>(height);
-    const std::size_t c = static_cast<std::size_t>(channels);
-    if (w > std::numeric_limits<std::size_t>::max() / h) {
-        return false;
-    }
-    const std::size_t pixelCount = w * h;
-    if (pixelCount > std::numeric_limits<std::size_t>::max() / c) {
-        return false;
-    }
-
-    outByteCount = pixelCount * c;
-    return true;
-}
+using Stack::PixelBuffer::TryComputePixelByteCount;
 
 bool HasCompletePixelBuffer(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
     std::size_t requiredBytes = 0;
@@ -78,41 +101,13 @@ bool HasCompletePixelBuffer(const std::vector<unsigned char>& pixels, int width,
 }
 
 void FlipRowsInPlace(std::vector<unsigned char>& pixels, int width, int height, int channels = 4) {
-    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0 ||
-        !HasCompletePixelBuffer(pixels, width, height, channels)) {
-        return;
-    }
-
-    const std::size_t rowStride = static_cast<std::size_t>(width) * static_cast<std::size_t>(channels);
-    std::vector<unsigned char> temp(rowStride, 0u);
-    for (int y = 0; y < height / 2; ++y) {
-        unsigned char* top = pixels.data() + static_cast<std::size_t>(y) * rowStride;
-        unsigned char* bottom = pixels.data() + static_cast<std::size_t>(height - 1 - y) * rowStride;
-        std::memcpy(temp.data(), top, rowStride);
-        std::memcpy(top, bottom, rowStride);
-        std::memcpy(bottom, temp.data(), rowStride);
-    }
+    LibraryManager::FlipImageRowsInPlace(
+        pixels, width, height, channels);
 }
 
 std::vector<unsigned char> EncodePngBytesTopLeft(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    std::vector<unsigned char> encoded;
-    if (pixels.empty() || width <= 0 || height <= 0 || channels <= 0 ||
-        !HasCompletePixelBuffer(pixels, width, height, channels)) {
-        return encoded;
-    }
-    const std::size_t rowStride = static_cast<std::size_t>(width) * static_cast<std::size_t>(channels);
-    if (rowStride > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        return encoded;
-    }
-
-    auto writeCallback = [](void* context, void* data, int size) {
-        auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-        const auto* src = static_cast<unsigned char*>(data);
-        bytes->insert(bytes->end(), src, src + size);
-    };
-
-    stbi_write_png_to_func(writeCallback, &encoded, width, height, channels, pixels.data(), static_cast<int>(rowStride));
-    return encoded;
+    return Stack::PngEncoding::EncodeInterleaved(
+        pixels, width, height, channels);
 }
 
 std::vector<unsigned char> EncodePngBytesFromBottomLeft(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
@@ -199,11 +194,7 @@ std::vector<unsigned char> ResizePixelsNearest(
 }
 
 std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    std::size_t byteCount = 0;
-    if (!TryComputePixelByteCount(width, height, 4, byteCount)) {
-        return {};
-    }
-    return std::vector<unsigned char>(byteCount, 0u);
+    return Stack::PixelBuffer::BuildTransparentRgbaPixels(width, height);
 }
 
 Raw::RawDevelopSettings BuildRawPreviewDevelopSettings(const Raw::RawMetadata& metadata) {
@@ -522,6 +513,13 @@ RenderGraphNode BuildRenderNodeFromPrototype(const EditorNodeGraph::Node& node) 
         case EditorNodeGraph::NodeKind::ChannelCombine:
             renderNode.kind = RenderGraphNodeKind::ChannelCombine;
             break;
+        case EditorNodeGraph::NodeKind::ConstantChannel:
+            renderNode.kind = RenderGraphNodeKind::ConstantChannel;
+            renderNode.constantChannelValue =
+                std::isfinite(node.constantChannelSettings.value)
+                    ? node.constantChannelSettings.value
+                    : 1.0f;
+            break;
         case EditorNodeGraph::NodeKind::CustomMask:
             renderNode.kind = RenderGraphNodeKind::CustomMask;
             break;
@@ -624,53 +622,79 @@ void EditorModule::WarmNodeBrowserThumbnailPixelsAsync() {
 
     const std::uint64_t generation = m_NodeBrowserThumbnailGeneration;
     m_NodeBrowserThumbnailWarmPendingEntries = pending.size();
-    Async::TaskSystem::Get().Submit([this, generation, pending = std::move(pending)]() mutable {
-        struct DecodedThumbnail {
-            std::string previewKey;
-            std::uint64_t revision = 0;
-            std::vector<unsigned char> pixels;
-            int width = 0;
-            int height = 0;
-            int channels = 4;
-        };
+    bool submitted = false;
+    try {
+        submitted = Async::TaskSystem::Get().Submit(
+            [this, generation, pending = std::move(pending)]() mutable {
+                try {
+                    struct DecodedThumbnail {
+                        std::string previewKey;
+                        std::uint64_t revision = 0;
+                        std::vector<unsigned char> pixels;
+                        int width = 0;
+                        int height = 0;
+                        int channels = 4;
+                    };
 
-        std::vector<DecodedThumbnail> decoded;
-        decoded.reserve(pending.size());
-        for (auto& item : pending) {
-            DecodedThumbnail thumb;
-            thumb.previewKey = std::move(item.previewKey);
-            thumb.revision = item.revision;
-            if (!LibraryManager::DecodeImageBytes(item.pngBytes, thumb.pixels, thumb.width, thumb.height, thumb.channels)) {
-                thumb.pixels = BuildFallbackCardPixels(thumb.previewKey);
-                thumb.width = kFallbackCardWidth;
-                thumb.height = kFallbackCardHeight;
-                thumb.channels = 4;
-            }
-            decoded.push_back(std::move(thumb));
-        }
+                    std::vector<DecodedThumbnail> decoded;
+                    decoded.reserve(pending.size());
+                    for (auto& item : pending) {
+                        DecodedThumbnail thumb;
+                        thumb.previewKey = std::move(item.previewKey);
+                        thumb.revision = item.revision;
+                        if (!LibraryManager::DecodeImageBytes(
+                                item.pngBytes,
+                                thumb.pixels,
+                                thumb.width,
+                                thumb.height,
+                                thumb.channels)) {
+                            thumb.pixels = BuildFallbackCardPixels(thumb.previewKey);
+                            thumb.width = kFallbackCardWidth;
+                            thumb.height = kFallbackCardHeight;
+                            thumb.channels = 4;
+                        }
+                        decoded.push_back(std::move(thumb));
+                    }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, decoded = std::move(decoded)]() mutable {
-            if (generation != m_NodeBrowserThumbnailGeneration) {
-                return;
-            }
-            std::size_t processedCount = 0;
-            for (auto& thumb : decoded) {
-                auto it = m_NodeBrowserThumbnailEntries.find(thumb.previewKey);
-                if (it != m_NodeBrowserThumbnailEntries.end() && it->second.revision == thumb.revision) {
-                    it->second.decodedPixels = std::move(thumb.pixels);
-                    it->second.width = thumb.width;
-                    it->second.height = thumb.height;
-                    it->second.channels = thumb.channels;
+                    Async::TaskSystem::Get().PostToMain(
+                        [this, generation, decoded = std::move(decoded)]() mutable {
+                            if (generation != m_NodeBrowserThumbnailGeneration) {
+                                return;
+                            }
+                            std::size_t processedCount = 0;
+                            for (auto& thumb : decoded) {
+                                auto it = m_NodeBrowserThumbnailEntries.find(
+                                    thumb.previewKey);
+                                if (it != m_NodeBrowserThumbnailEntries.end() &&
+                                    it->second.revision == thumb.revision) {
+                                    it->second.decodedPixels =
+                                        std::move(thumb.pixels);
+                                    it->second.width = thumb.width;
+                                    it->second.height = thumb.height;
+                                    it->second.channels = thumb.channels;
+                                }
+                                ++processedCount;
+                            }
+                            if (m_NodeBrowserThumbnailWarmPendingEntries >= processedCount) {
+                                m_NodeBrowserThumbnailWarmPendingEntries -= processedCount;
+                            } else {
+                                m_NodeBrowserThumbnailWarmPendingEntries = 0;
+                            }
+                        });
+                } catch (...) {
+                    Async::TaskSystem::Get().PostToMain([this, generation]() {
+                        if (generation == m_NodeBrowserThumbnailGeneration) {
+                            m_NodeBrowserThumbnailWarmPendingEntries = 0;
+                        }
+                    });
                 }
-                ++processedCount;
-            }
-            if (m_NodeBrowserThumbnailWarmPendingEntries >= processedCount) {
-                m_NodeBrowserThumbnailWarmPendingEntries -= processedCount;
-            } else {
-                m_NodeBrowserThumbnailWarmPendingEntries = 0;
-            }
-        });
-    });
+            });
+    } catch (...) {
+        submitted = false;
+    }
+    if (!submitted && generation == m_NodeBrowserThumbnailGeneration) {
+        m_NodeBrowserThumbnailWarmPendingEntries = 0;
+    }
 }
 
 EditorModule::NodeBrowserPreviewSeed EditorModule::ResolveNodeBrowserPreviewSeed() const {
@@ -807,6 +831,42 @@ void EditorModule::FinalizeNodeBrowserThumbnailBatch(std::uint64_t generation) {
 }
 
 void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
+    try {
+        StartNodeBrowserThumbnailGenerationImpl(forceRefresh);
+    } catch (...) {
+        ++m_NodeBrowserThumbnailGeneration;
+        for (auto& [previewKey, entry] : m_NodeBrowserThumbnailEntries) {
+            (void)previewKey;
+            entry.pending = false;
+        }
+        m_NodeBrowserThumbnailPendingEntries = 0;
+        m_NodeBrowserThumbnailGenerationQueued = false;
+        m_NodeBrowserThumbnailBatchHasChanges = false;
+        m_NodeBrowserThumbnailSeedHash.clear();
+        m_NodeBrowserPreviewRequestMeta.clear();
+    }
+}
+
+void EditorModule::FailNodeBrowserThumbnailEntries(
+    std::uint64_t generation,
+    const std::vector<std::string>& previewKeys) {
+    if (generation != m_NodeBrowserThumbnailGeneration) {
+        return;
+    }
+    for (const std::string& previewKey : previewKeys) {
+        const auto it = m_NodeBrowserThumbnailEntries.find(previewKey);
+        if (it == m_NodeBrowserThumbnailEntries.end() || !it->second.pending) {
+            continue;
+        }
+        it->second.pending = false;
+        if (m_NodeBrowserThumbnailPendingEntries > 0) {
+            --m_NodeBrowserThumbnailPendingEntries;
+        }
+    }
+    FinalizeNodeBrowserThumbnailBatch(generation);
+}
+
+void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
     const auto& entries = CachedNodeBrowserEntries();
     const NodeBrowserPreviewSeed seed = ResolveNodeBrowserPreviewSeed();
     const bool seedChanged = seed.seedHash != m_NodeBrowserThumbnailSeedHash;
@@ -878,6 +938,8 @@ void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
 
     std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> fallbackEntries;
     fallbackEntries.reserve(pendingEntries.size());
+    std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> renderableEntries;
+    renderableEntries.reserve(pendingEntries.size());
 
     int nextNodeId = 1;
     int nextPreviewId = 100000;
@@ -1393,117 +1455,97 @@ void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
 
         if (!renderable) {
             fallbackEntries.push_back(entry);
+        } else {
+            renderableEntries.push_back(entry);
         }
     }
 
-    if (!fallbackEntries.empty()) {
-        Async::TaskSystem::Get().Submit([this, generation, seedHash = seed.seedHash, fallbackEntries]() {
-            struct EncodedFallback {
-                std::string previewKey;
-                std::string previewSeedHash;
-                std::uint32_t previewRecipeVersion = 0;
-                std::vector<unsigned char> pngBytes;
-                std::vector<unsigned char> decodedPixels;
-                int width = 0;
-                int height = 0;
-                int channels = 4;
-            };
+    auto queueFallbackBatch = [this, generation, seedHash = seed.seedHash](
+                                  std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> batch) {
+        if (batch.empty()) {
+            return;
+        }
+        std::vector<std::string> previewKeys;
+        previewKeys.reserve(batch.size());
+        for (const auto& entry : batch) {
+            previewKeys.push_back(entry.previewKey);
+        }
 
-            std::vector<EncodedFallback> encoded;
-            encoded.reserve(fallbackEntries.size());
-            for (const auto& entry : fallbackEntries) {
-                EncodedFallback thumb;
-                thumb.previewKey = entry.previewKey;
-                thumb.previewSeedHash = seedHash;
-                thumb.previewRecipeVersion = entry.previewRecipeVersion;
-                thumb.decodedPixels = BuildFallbackCardPixels(entry.previewKey);
-                thumb.width = kFallbackCardWidth;
-                thumb.height = kFallbackCardHeight;
-                thumb.channels = 4;
-                thumb.pngBytes = EncodePngBytesTopLeft(thumb.decodedPixels, thumb.width, thumb.height, thumb.channels);
-                encoded.push_back(std::move(thumb));
-            }
-            Async::TaskSystem::Get().PostToMain([this, generation, encoded = std::move(encoded)]() mutable {
-                if (generation != m_NodeBrowserThumbnailGeneration) {
-                    return;
+        bool submitted = false;
+        try {
+            submitted = Async::TaskSystem::Get().Submit([
+                this,
+                generation,
+                seedHash,
+                batch = std::move(batch),
+                previewKeys
+            ]() mutable {
+                try {
+                    std::vector<EncodedNodeBrowserFallback> encoded =
+                        EncodeNodeBrowserFallbacks(batch, seedHash);
+                    Async::TaskSystem::Get().PostToMain([
+                        this,
+                        generation,
+                        encoded = std::move(encoded)
+                    ]() mutable {
+                        if (generation != m_NodeBrowserThumbnailGeneration) {
+                            return;
+                        }
+                        for (auto& entry : encoded) {
+                            const auto runtimeIt =
+                                m_NodeBrowserThumbnailEntries.find(entry.previewKey);
+                            if (runtimeIt == m_NodeBrowserThumbnailEntries.end() ||
+                                !runtimeIt->second.pending) {
+                                continue;
+                            }
+                            NodeBrowserThumbnailRuntimeEntry& runtime =
+                                runtimeIt->second;
+                            runtime.previewSeedHash = entry.previewSeedHash;
+                            runtime.previewRecipeVersion = entry.previewRecipeVersion;
+                            runtime.pngBytes = std::move(entry.pngBytes);
+                            runtime.decodedPixels = std::move(entry.decodedPixels);
+                            runtime.width = entry.width;
+                            runtime.height = entry.height;
+                            runtime.channels = entry.channels;
+                            runtime.revision =
+                                m_NodeBrowserThumbnailRevisionCounter++;
+                            runtime.pending = false;
+                            runtime.fallback = true;
+                            m_NodeBrowserThumbnailBatchHasChanges = true;
+                            if (m_NodeBrowserThumbnailPendingEntries > 0) {
+                                --m_NodeBrowserThumbnailPendingEntries;
+                            }
+                        }
+                        FinalizeNodeBrowserThumbnailBatch(generation);
+                    });
+                } catch (...) {
+                    Async::TaskSystem::Get().PostToMain([
+                        this,
+                        generation,
+                        previewKeys = std::move(previewKeys)
+                    ]() mutable {
+                        FailNodeBrowserThumbnailEntries(generation, previewKeys);
+                    });
                 }
-                for (auto& entry : encoded) {
-                    NodeBrowserThumbnailRuntimeEntry& runtime = m_NodeBrowserThumbnailEntries[entry.previewKey];
-                    runtime.previewSeedHash = entry.previewSeedHash;
-                    runtime.previewRecipeVersion = entry.previewRecipeVersion;
-                    runtime.pngBytes = std::move(entry.pngBytes);
-                    runtime.decodedPixels = std::move(entry.decodedPixels);
-                    runtime.width = entry.width;
-                    runtime.height = entry.height;
-                    runtime.channels = entry.channels;
-                    runtime.revision = m_NodeBrowserThumbnailRevisionCounter++;
-                    runtime.pending = false;
-                    runtime.fallback = true;
-                    m_NodeBrowserThumbnailBatchHasChanges = true;
-                    if (m_NodeBrowserThumbnailPendingEntries > 0) {
-                        --m_NodeBrowserThumbnailPendingEntries;
-                    }
-                }
-                FinalizeNodeBrowserThumbnailBatch(generation);
             });
-        });
-    }
+        } catch (...) {
+            submitted = false;
+        }
+        if (!submitted) {
+            FailNodeBrowserThumbnailEntries(generation, previewKeys);
+        }
+    };
+
+    queueFallbackBatch(fallbackEntries);
 
     if (!snapshot.previews.empty() &&
         m_NodeBrowserRenderWorkerAvailable &&
         !IsRawWorkspaceProjectActive()) {
-        m_NodeBrowserRenderWorker.Submit(std::move(snapshot));
+        if (!m_NodeBrowserRenderWorker.Submit(std::move(snapshot))) {
+            queueFallbackBatch(renderableEntries);
+        }
     } else if (!snapshot.previews.empty()) {
-        Async::TaskSystem::Get().Submit([this, generation, seedHash = seed.seedHash, pendingEntries]() {
-            struct EncodedFallback {
-                std::string previewKey;
-                std::string previewSeedHash;
-                std::uint32_t previewRecipeVersion = 0;
-                std::vector<unsigned char> pngBytes;
-                std::vector<unsigned char> decodedPixels;
-                int width = 0;
-                int height = 0;
-                int channels = 4;
-            };
-
-            std::vector<EncodedFallback> encoded;
-            encoded.reserve(pendingEntries.size());
-            for (const auto& entry : pendingEntries) {
-                EncodedFallback thumb;
-                thumb.previewKey = entry.previewKey;
-                thumb.previewSeedHash = seedHash;
-                thumb.previewRecipeVersion = entry.previewRecipeVersion;
-                thumb.decodedPixels = BuildFallbackCardPixels(entry.previewKey);
-                thumb.width = kFallbackCardWidth;
-                thumb.height = kFallbackCardHeight;
-                thumb.channels = 4;
-                thumb.pngBytes = EncodePngBytesTopLeft(thumb.decodedPixels, thumb.width, thumb.height, thumb.channels);
-                encoded.push_back(std::move(thumb));
-            }
-            Async::TaskSystem::Get().PostToMain([this, generation, encoded = std::move(encoded)]() mutable {
-                if (generation != m_NodeBrowserThumbnailGeneration) {
-                    return;
-                }
-                for (auto& entry : encoded) {
-                    NodeBrowserThumbnailRuntimeEntry& runtime = m_NodeBrowserThumbnailEntries[entry.previewKey];
-                    runtime.previewSeedHash = entry.previewSeedHash;
-                    runtime.previewRecipeVersion = entry.previewRecipeVersion;
-                    runtime.pngBytes = std::move(entry.pngBytes);
-                    runtime.decodedPixels = std::move(entry.decodedPixels);
-                    runtime.width = entry.width;
-                    runtime.height = entry.height;
-                    runtime.channels = entry.channels;
-                    runtime.revision = m_NodeBrowserThumbnailRevisionCounter++;
-                    runtime.pending = false;
-                    runtime.fallback = true;
-                    m_NodeBrowserThumbnailBatchHasChanges = true;
-                    if (m_NodeBrowserThumbnailPendingEntries > 0) {
-                        --m_NodeBrowserThumbnailPendingEntries;
-                    }
-                }
-                FinalizeNodeBrowserThumbnailBatch(generation);
-            });
-        });
+        queueFallbackBatch(renderableEntries);
     }
 }
 
@@ -1578,7 +1620,13 @@ void EditorModule::ConsumeNodeBrowserThumbnailWorkerResults() {
                 return;
             }
             for (auto& job : jobs) {
-                NodeBrowserThumbnailRuntimeEntry& runtime = m_NodeBrowserThumbnailEntries[job.previewKey];
+                const auto runtimeIt =
+                    m_NodeBrowserThumbnailEntries.find(job.previewKey);
+                if (runtimeIt == m_NodeBrowserThumbnailEntries.end() ||
+                    !runtimeIt->second.pending) {
+                    continue;
+                }
+                NodeBrowserThumbnailRuntimeEntry& runtime = runtimeIt->second;
                 runtime.previewSeedHash = job.previewSeedHash;
                 runtime.previewRecipeVersion = job.previewRecipeVersion;
                 runtime.pngBytes = std::move(job.pngBytes);

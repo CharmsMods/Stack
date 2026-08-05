@@ -210,7 +210,7 @@ struct RawDevelopPayload {
     nlohmann::json integratedToneLayerJson;
     AutoGuidance autoGuidance;
     SubjectImportanceMap subjectImportance;
-    RawDevelopUiMode uiMode = RawDevelopUiMode::Auto;
+    RawDevelopUiMode uiMode = RawDevelopUiMode::Manual;
 };
 
 } // namespace Stack::Develop

@@ -19,7 +19,7 @@ public:
     void Deserialize(const json& j) override;
 
 private:
-    void EnsureIntermediateTarget(int width, int height);
+    bool EnsureIntermediateTarget(int width, int height);
 
     unsigned int m_ShaderProgram = 0;
     unsigned int m_IntermediateTexture = 0;

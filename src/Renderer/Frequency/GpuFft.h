@@ -4,6 +4,12 @@
 
 namespace Stack::Renderer::Frequency {
 
+enum class FftEdgePolicy {
+    Mirror,
+    Wrap,
+    ZeroPad
+};
+
 // GpuFft is Stack's first compute-shader subsystem: a radix-2 Cooley-Tukey
 // FFT implemented as GL 4.3 compute passes over RG32F textures (R = real,
 // G = imaginary). It is intentionally self-contained so it can serve as the
@@ -29,21 +35,22 @@ public:
     GpuFft(const GpuFft&) = delete;
     GpuFft& operator=(const GpuFft&) = delete;
 
+    void Shutdown();
+
     // Transform a sampled source texture (RGBA16F) into a complex RG32F
     // spectrum of size paddedW x paddedH (both powers of two). When the
-    // source is smaller than the padded buffer it is zero-padded, which is
-    // the standard way to FFT arbitrarily sized images with a radix-2
-    // kernel. When luminanceOnly is true only the luma is transformed and
-    // the result still occupies a single RG32F texture; otherwise the red
-    // channel is transformed (color is handled by per-channel fan-out at
-    // the node level). Returns 0 on failure. The returned texture is owned
-    // by the instance and remains valid until the next call or destruction.
+    // source is smaller than the padded buffer, the declared edge policy
+    // supplies samples around the centered source extent. The red component
+    // is the exact scalar Channel value; color fan-out happens before this
+    // typed boundary. Returns a uniquely owned RG32F texture or 0 on failure.
     unsigned int Forward(unsigned int sourceTexture,
                          int sourceW,
                          int sourceH,
                          int paddedW,
                          int paddedH,
-                         bool luminanceOnly);
+                         int paddingOriginX,
+                         int paddingOriginY,
+                         FftEdgePolicy edgePolicy);
 
     // Transform a complex RG32F spectrum back into a spatial RG32F texture
     // (R = real part; imaginary output is discarded by the caller). The
@@ -61,9 +68,13 @@ public:
                            int sourceH,
                            int paddedW,
                            int paddedH,
-                           bool luminanceOnly);
+                           int paddingOriginX,
+                           int paddingOriginY,
+                           FftEdgePolicy edgePolicy);
 
-    // Smallest power of two not less than n, used to pick the zero-padded FFT size.
+    // Smallest representable power of two not less than n, used to pick the
+    // zero-padded FFT size. Returns 0 when the result cannot fit in a positive
+    // int.
     static int NextPowerOfTwo(int n);
 
     bool Ready() const {
@@ -75,7 +86,7 @@ public:
 
 private:
     void EnsurePrograms();
-    void EnsureScratch(int paddedW, int paddedH);
+    bool EnsureScratch(int paddedW, int paddedH);
 
     // Compute shader sources -------------------------------------------------
     // Pack: read a source RGBA16F texel, convert to complex (real = luma or

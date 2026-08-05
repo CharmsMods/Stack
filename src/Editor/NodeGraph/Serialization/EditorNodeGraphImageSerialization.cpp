@@ -2,30 +2,21 @@
 
 #include "Library/LibraryManager.h"
 #include "ThirdParty/stb_image.h"
-#include "ThirdParty/stb_image_write.h"
+#include "Utils/PixelBufferUtils.h"
+#include "Utils/PngEncodingUtils.h"
 
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <new>
+#include <stdexcept>
 
 namespace EditorNodeGraph {
 namespace {
 
-void PngWriteCallback(void* context, void* data, int size) {
-    auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-    const auto* begin = static_cast<unsigned char*>(data);
-    bytes->insert(bytes->end(), begin, begin + size);
-}
-
 std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    std::vector<unsigned char> pngBytes;
-    if (pixels.empty() || width <= 0 || height <= 0) {
-        return pngBytes;
-    }
-
-    const int safeChannels = std::max(1, channels);
-    stbi_write_png_to_func(PngWriteCallback, &pngBytes, width, height, safeChannels, pixels.data(), width * safeChannels);
-    return pngBytes;
+    return Stack::PngEncoding::EncodeInterleaved(
+        pixels, width, height, channels);
 }
 
 } // namespace
@@ -39,7 +30,18 @@ std::vector<unsigned char> EncodeImagePayloadPngForStorage(
         return {};
     }
 
-    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
+    if (!Stack::PixelBuffer::HasCompletePixelBuffer(
+            bottomLeftPixels.size(), width, height, channels)) {
+        return {};
+    }
+    std::vector<unsigned char> topLeftPixels;
+    try {
+        topLeftPixels = bottomLeftPixels;
+    } catch (const std::bad_alloc&) {
+        return {};
+    } catch (const std::length_error&) {
+        return {};
+    }
     LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
     return EncodePng(topLeftPixels, width, height, channels);
 }
@@ -57,17 +59,17 @@ void BuildImagePayloadPreview(
     outPixels.clear();
     outWidth = 0;
     outHeight = 0;
-    outChannels = std::max(1, channels);
+    outChannels = 0;
 
-    const int safeChannels = std::max(1, channels);
+    if (!Stack::PixelBuffer::IsSupportedInterleavedChannelCount(channels) ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            bottomLeftPixels.size(), width, height, channels)) {
+        return;
+    }
+    const int safeChannels = channels;
     const int safeMaxDimension = std::max(1, maxDimension);
     const int largestDimension = std::max(width, height);
-    const std::size_t requiredBytes =
-        static_cast<std::size_t>(std::max(0, width)) *
-        static_cast<std::size_t>(std::max(0, height)) *
-        static_cast<std::size_t>(safeChannels);
-    if (bottomLeftPixels.size() < requiredBytes || width <= 0 || height <= 0 ||
-        largestDimension <= safeMaxDimension) {
+    if (largestDimension <= safeMaxDimension) {
         return;
     }
 
@@ -76,10 +78,29 @@ void BuildImagePayloadPreview(
     outHeight = std::max(1, static_cast<int>(
         (static_cast<long long>(height) * safeMaxDimension + largestDimension / 2) / largestDimension));
     outChannels = safeChannels;
-    outPixels.resize(
-        static_cast<std::size_t>(outWidth) *
-        static_cast<std::size_t>(outHeight) *
-        static_cast<std::size_t>(safeChannels));
+    std::size_t outputByteCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            outWidth, outHeight, safeChannels, outputByteCount)) {
+        outWidth = 0;
+        outHeight = 0;
+        outChannels = 0;
+        return;
+    }
+    try {
+        outPixels.resize(outputByteCount);
+    } catch (const std::bad_alloc&) {
+        outPixels.clear();
+        outWidth = 0;
+        outHeight = 0;
+        outChannels = 0;
+        return;
+    } catch (const std::length_error&) {
+        outPixels.clear();
+        outWidth = 0;
+        outHeight = 0;
+        outChannels = 0;
+        return;
+    }
 
     // A nearest-neighbour sample is intentional here: this is only a bounded
     // graph thumbnail, so it must be cheap and must preserve alpha exactly.
@@ -124,7 +145,12 @@ bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, Imag
     }
 
     payload.pngBytes = pngBytes;
-    payload.pixels.assign(pixels, pixels + (width * height * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, width, height, 4, payload.pixels);
+    stbi_image_free(pixels);
+    if (!copied) {
+        return false;
+    }
     payload.width = width;
     payload.height = height;
     payload.channels = 4;
@@ -132,7 +158,6 @@ bool DecodeImagePayloadPngBytes(const std::vector<unsigned char>& pngBytes, Imag
     payload.sourceColorMetadata = Stack::NodeMath::InspectSourceColorMetadata(
         pngBytes, width, height, channels, Stack::NodeMath::LogicalPrecision::UInt8,
         payload.sourcePath.empty() ? payload.label : payload.sourcePath);
-    stbi_image_free(pixels);
     return true;
 }
 

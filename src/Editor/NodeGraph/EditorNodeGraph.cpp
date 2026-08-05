@@ -1,13 +1,18 @@
 #include "EditorNodeGraph.h"
 #include "EditorNodeGraphDefinitions.h"
+#include "Editor/NodeGraph/Model/EditorNodeGraphLookupCache.h"
 #include "Editor/NodeGraph/SocketPresentation.h"
 #include "UnifiedNodeDefinitionRegistry.h"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
+#include <new>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace EditorNodeGraph {
+
 namespace {
 
 bool IsChannelSocketId(const std::string& socketId) {
@@ -15,8 +20,7 @@ bool IsChannelSocketId(const std::string& socketId) {
 }
 
 bool SupportsDynamicChannelInputs(const EditorNodeGraph::Node& node) {
-    return node.kind == EditorNodeGraph::NodeKind::Output ||
-        node.kind == EditorNodeGraph::NodeKind::Lut;
+    return node.kind == EditorNodeGraph::NodeKind::Lut;
 }
 
 bool IsAverageMaskPreviewActive(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node) {
@@ -80,7 +84,6 @@ void Graph::Clear() {
     m_HasSelectedLink = false;
     m_ActiveImageNodeId = -1;
     m_OutputNodeId = -1;
-    m_ForceOutputFourPins = false;
     m_AllowNoOutput = false;
     m_SocketPreviewNodeId = -1;
     m_SocketPreviewIntent = SocketPreviewIntent::None;
@@ -104,6 +107,7 @@ void Graph::ResetFromLayers(int layerCount, bool hasActiveImage) {
         node.layerIndex = i;
         node.title = "Layer";
         node.position = DefaultLayerPosition(i);
+        EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
         m_Nodes.push_back(std::move(node));
     }
 
@@ -131,6 +135,7 @@ void Graph::SyncLayerNodes(int layerCount) {
         node.layerIndex = i;
         node.title = "Layer";
         node.position = DefaultLayerPosition(i);
+        EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
         m_Nodes.push_back(std::move(node));
         structureChanged = true;
     }
@@ -138,10 +143,20 @@ void Graph::SyncLayerNodes(int layerCount) {
     const std::size_t oldLinkCount = m_Links.size();
     m_Links.erase(
         std::remove_if(m_Links.begin(), m_Links.end(), [this](const Link& link) {
+            const Node* toNode = FindNode(link.toNodeId);
+            const bool preservesLegacyOutputComponent =
+                toNode &&
+                toNode->kind == NodeKind::Output &&
+                !toNode->definitionResolved &&
+                (link.toSocketId == "r" ||
+                 link.toSocketId == "g" ||
+                 link.toSocketId == "b" ||
+                 link.toSocketId == "a");
             return !FindNode(link.fromNodeId) ||
-                !FindNode(link.toNodeId) ||
+                !toNode ||
                 !FindSocket(link.fromNodeId, link.fromSocketId) ||
-                !FindSocket(link.toNodeId, link.toSocketId);
+                (!preservesLegacyOutputComponent &&
+                 !FindSocket(link.toNodeId, link.toSocketId));
         }),
         m_Links.end());
     structureChanged = structureChanged || oldLinkCount != m_Links.size();
@@ -283,6 +298,48 @@ Node* Graph::AddMfsrNode(MfsrPayload payload, Vec2 position) {
     return &m_Nodes.back();
 }
 
+Node* Graph::AddRawProjectFrameNode(
+    RawProjectFramePayload payload,
+    Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawProjectFrame;
+    node.position = position;
+    node.rawProjectFrame = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddMultiFrameDenoiseNode(
+    MultiFrameDenoisePayload payload,
+    Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::MultiFrameDenoise;
+    node.position = position;
+    node.multiFrameDenoise = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddRawProjectSourceSetNode(
+    RawProjectSourceSetPayload payload,
+    Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawProjectSourceSet;
+    node.position = position;
+    node.rawProjectSourceSet = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddLutNode(LutPayload payload, Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
@@ -360,12 +417,22 @@ Node* Graph::AddMaskUtilityNode(MaskUtilityKind utilityKind, Vec2 position) {
 }
 
 Node* Graph::AddCustomMaskNode(CustomMaskPayload payload, Vec2 position) {
-    if (payload.width <= 0) payload.width = 1024;
-    if (payload.height <= 0) payload.height = 1024;
+    payload.width = std::clamp(
+        payload.width <= 0 ? 1024 : payload.width,
+        1,
+        kMaximumCustomMaskDimension);
+    payload.height = std::clamp(
+        payload.height <= 0 ? 1024 : payload.height,
+        1,
+        kMaximumCustomMaskDimension);
     const std::size_t expected =
         static_cast<std::size_t>(payload.width) * static_cast<std::size_t>(payload.height);
-    if (payload.rasterLayer.size() != expected) {
-        payload.rasterLayer.assign(expected, 0.0f);
+    if (!payload.rasterLayer.empty() &&
+        payload.rasterLayer.size() != expected) {
+        // An empty vector is the canonical sparse representation of an
+        // all-zero raster. A malformed non-empty raster is also safer as zero
+        // than as a partially indexed buffer.
+        std::vector<float>().swap(payload.rasterLayer);
     }
 
     Node node;
@@ -518,6 +585,34 @@ Node* Graph::AddFrequencyFftNode(Vec2 position) {
     return &m_Nodes.back();
 }
 
+Node* Graph::AddFrequencyFilterNode(FrequencyFilterMode mode, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::FrequencyFilter;
+    node.position = position;
+    node.frequencyFilterSettings.localResponse.mode = mode;
+    if (mode == FrequencyFilterMode::NotchReject) {
+        node.frequencyFilterSettings.localResponse.notches.push_back({
+            Stack::NodeMath::GenerateCanonicalUuid(), 0.25f, 0.0f, 0.025f
+        });
+    }
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddFrequencyResponseNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::FrequencyResponse;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddFrequencyIfftNode(Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
@@ -533,6 +628,50 @@ Node* Graph::AddSpectrumViewNode(Vec2 position) {
     Node node;
     node.id = AllocateNodeId();
     node.kind = NodeKind::SpectrumView;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddApplyFrequencyResponseNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::ApplyFrequencyResponse;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddCombineSpectraNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::CombineSpectra;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddSpectrumSeparateNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::SpectrumSeparate;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddSpectrumRecombineNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::SpectrumRecombine;
     node.position = position;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
@@ -622,6 +761,17 @@ Node* Graph::AddChannelCombineNode(Vec2 position) {
     return &m_Nodes.back();
 }
 
+Node* Graph::AddConstantChannelNode(Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::ConstantChannel;
+    node.position = position;
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddOutputNode(Vec2 position, bool makePrimary) {
     Node node;
     node.id = AllocateNodeId();
@@ -698,17 +848,81 @@ void Graph::RemoveLayerNode(int layerIndex) {
     TouchStructure();
 }
 
+bool Graph::EnsureLookupCache() const {
+    const Node* nodesData = m_Nodes.empty() ? nullptr : m_Nodes.data();
+    const Link* linksData = m_Links.empty() ? nullptr : m_Links.data();
+    const std::shared_ptr<const GraphLookupCache> current = m_LookupCache;
+    const bool cacheMatches =
+        current &&
+        current->revision == m_StructureRevision &&
+        current->nodesData == nodesData &&
+        current->linksData == linksData &&
+        current->nodeCount == m_Nodes.size() &&
+        current->linkCount == m_Links.size();
+    if (cacheMatches) {
+        return true;
+    }
+
+    try {
+        std::shared_ptr<GraphLookupCache> rebuilt =
+            std::make_shared<GraphLookupCache>();
+        rebuilt->nodeIndexById.reserve(m_Nodes.size());
+        const std::size_t linkedNodeCapacity =
+            std::min(m_Nodes.size(), m_Links.size());
+        rebuilt->inputLinksByNode.reserve(linkedNodeCapacity);
+        rebuilt->outputLinksByNode.reserve(linkedNodeCapacity);
+        for (std::size_t index = 0; index < m_Nodes.size(); ++index) {
+            // Preserve FindNode's historical first-match behavior for malformed
+            // graphs containing duplicate IDs.
+            rebuilt->nodeIndexById.emplace(m_Nodes[index].id, index);
+        }
+        for (const Link& link : m_Links) {
+            rebuilt->inputLinksByNode[link.toNodeId].push_back(&link);
+            rebuilt->outputLinksByNode[link.fromNodeId].push_back(&link);
+        }
+        rebuilt->revision = m_StructureRevision;
+        rebuilt->nodesData = nodesData;
+        rebuilt->linksData = linksData;
+        rebuilt->nodeCount = m_Nodes.size();
+        rebuilt->linkCount = m_Links.size();
+        m_LookupCache = std::move(rebuilt);
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+}
+
 Node* Graph::FindNode(int nodeId) {
-    auto it = std::find_if(m_Nodes.begin(), m_Nodes.end(), [nodeId](const Node& node) {
-        return node.id == nodeId;
-    });
+    if (EnsureLookupCache()) {
+        const auto found = m_LookupCache->nodeIndexById.find(nodeId);
+        if (found == m_LookupCache->nodeIndexById.end() ||
+            found->second >= m_Nodes.size()) {
+            return nullptr;
+        }
+        return &m_Nodes[found->second];
+    }
+    auto it = std::find_if(
+        m_Nodes.begin(),
+        m_Nodes.end(),
+        [nodeId](const Node& node) { return node.id == nodeId; });
     return it != m_Nodes.end() ? &(*it) : nullptr;
 }
 
 const Node* Graph::FindNode(int nodeId) const {
-    auto it = std::find_if(m_Nodes.begin(), m_Nodes.end(), [nodeId](const Node& node) {
-        return node.id == nodeId;
-    });
+    if (EnsureLookupCache()) {
+        const auto found = m_LookupCache->nodeIndexById.find(nodeId);
+        if (found == m_LookupCache->nodeIndexById.end() ||
+            found->second >= m_Nodes.size()) {
+            return nullptr;
+        }
+        return &m_Nodes[found->second];
+    }
+    auto it = std::find_if(
+        m_Nodes.begin(),
+        m_Nodes.end(),
+        [nodeId](const Node& node) { return node.id == nodeId; });
     return it != m_Nodes.end() ? &(*it) : nullptr;
 }
 
@@ -717,6 +931,37 @@ Node* Graph::FindNodeByLayerIndex(int layerIndex) {
         return node.kind == NodeKind::Layer && node.layerIndex == layerIndex;
     });
     return it != m_Nodes.end() ? &(*it) : nullptr;
+}
+
+bool Graph::SetParameterExposed(
+    int nodeId,
+    const std::string& parameterId,
+    bool exposed) {
+    Node* node = FindNode(nodeId);
+    if (node == nullptr || parameterId.empty()) return false;
+    const auto existing = std::find(
+        node->exposedParameterIds.begin(),
+        node->exposedParameterIds.end(),
+        parameterId);
+    if (exposed) {
+        if (existing != node->exposedParameterIds.end()) return true;
+        node->exposedParameterIds.push_back(parameterId);
+    } else {
+        if (existing == node->exposedParameterIds.end()) return true;
+        const std::string socketId = ParameterInputSocketId(parameterId);
+        m_Links.erase(
+            std::remove_if(
+                m_Links.begin(),
+                m_Links.end(),
+                [&](const Link& link) {
+                    return link.toNodeId == nodeId &&
+                        link.toSocketId == socketId;
+                }),
+            m_Links.end());
+        node->exposedParameterIds.erase(existing);
+    }
+    ++m_StructureRevision;
+    return true;
 }
 
 const Node* Graph::FindNodeByLayerIndex(int layerIndex) const {
@@ -739,6 +984,11 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             using Logical = Stack::NodeMath::LogicalValueType;
             switch (type) {
                 case Logical::Mask: return SocketType::Mask;
+                case Logical::Channel: return SocketType::Channel;
+                case Logical::ComplexSpectrum: return SocketType::Spectrum;
+                case Logical::FrequencyResponse: return SocketType::FrequencyResponse;
+                case Logical::SpectrumMagnitude: return SocketType::SpectrumMagnitude;
+                case Logical::SpectrumPhase: return SocketType::SpectrumPhase;
                 case Logical::ScalarField: return SocketType::ScalarField;
                 case Logical::Boolean: return SocketType::Boolean;
                 case Logical::Integer: return SocketType::Integer;
@@ -761,7 +1011,6 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
                 case Logical::Vector2Field:
                 case Logical::Vector3Field:
                 case Logical::Vector4Field:
-                case Logical::ComplexSpectrum:
                 case Logical::Lut:
                 default:
                     return SocketType::Image;
@@ -783,17 +1032,17 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         return finalize(std::move(sockets));
     }
     if (SupportsDynamicChannelInputs(node)) {
-        bool useFourPins = node.kind == NodeKind::Output && m_ForceOutputFourPins;
-        if (!useFourPins) {
-            for (const Link& link : m_Links) {
-                if (link.toNodeId == node.id &&
-                    (IsChannelSocketId(link.toSocketId) ||
-                     (link.toSocketId == kImageInputSocketId && !ResolveSocketChannel(link.fromNodeId, link.fromSocketId).empty()))) {
-                    useFourPins = true;
-                    break;
-                }
+        bool useFourPins = false;
+        ForEachIncomingLink(node.id, [&](const Link& link) {
+            if (!useFourPins &&
+                (IsChannelSocketId(link.toSocketId) ||
+                 (link.toSocketId == kImageInputSocketId &&
+                  !ResolveSocketChannel(
+                      link.fromNodeId,
+                      link.fromSocketId).empty()))) {
+                useFourPins = true;
             }
-        }
+        });
 
         std::vector<SocketDefinition> sockets;
         auto add = [&](const char* id, SocketDirection direction, SocketType type, const char* label, bool optional, bool visible) {
@@ -804,17 +1053,17 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         };
 
         if (useFourPins) {
-            add("r", SocketDirection::Input, SocketType::ScalarField, "R", true, true);
-            add("g", SocketDirection::Input, SocketType::ScalarField, "G", true, true);
-            add("b", SocketDirection::Input, SocketType::ScalarField, "B", true, true);
-            add("a", SocketDirection::Input, SocketType::ScalarField, "A", true, true);
+            add("r", SocketDirection::Input, SocketType::Channel, "R", true, true);
+            add("g", SocketDirection::Input, SocketType::Channel, "G", true, true);
+            add("b", SocketDirection::Input, SocketType::Channel, "B", true, true);
+            add("a", SocketDirection::Input, SocketType::Channel, "A", true, true);
             add(kImageInputSocketId, SocketDirection::Input, SocketType::Image, "Image", false, false);
         } else {
             add(kImageInputSocketId, SocketDirection::Input, SocketType::Image, "Image", false, true);
-            add("r", SocketDirection::Input, SocketType::ScalarField, "R", true, false);
-            add("g", SocketDirection::Input, SocketType::ScalarField, "G", true, false);
-            add("b", SocketDirection::Input, SocketType::ScalarField, "B", true, false);
-            add("a", SocketDirection::Input, SocketType::ScalarField, "A", true, false);
+            add("r", SocketDirection::Input, SocketType::Channel, "R", true, false);
+            add("g", SocketDirection::Input, SocketType::Channel, "G", true, false);
+            add("b", SocketDirection::Input, SocketType::Channel, "B", true, false);
+            add("a", SocketDirection::Input, SocketType::Channel, "A", true, false);
         }
         if (node.kind == NodeKind::Lut) {
             add(kMaskInputSocketId, SocketDirection::Input, SocketType::Mask, "Mask", true, true);
@@ -835,10 +1084,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         int highestConnectedInputIndex = 1;
         bool hasBaseLink = false;
         bool hasMaskLink = false;
-        for (const Link& link : m_Links) {
-            if (link.toNodeId != node.id) {
-                continue;
-            }
+        ForEachIncomingLink(node.id, [&](const Link& link) {
             const int inputIndex = DataMathInputSocketIndex(link.toSocketId);
             if (inputIndex >= 0) {
                 highestConnectedInputIndex = std::max(highestConnectedInputIndex, inputIndex);
@@ -847,7 +1093,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             } else if (link.toSocketId == kMaskInputSocketId) {
                 hasMaskLink = true;
             }
-        }
+        });
 
         const bool averageMode = IsDataMathAverageMode(node.dataMathMode);
         const bool scalarAverageMode = node.dataMathMode == DataMathMode::Average;
@@ -888,7 +1134,7 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
             add(
                 kMaskInputSocketId,
                 SocketDirection::Input,
-                SocketType::ScalarField,
+                SocketType::Channel,
                 "Mask",
                 true,
                 revealMaskAwareSockets);
@@ -907,15 +1153,12 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         };
 
         int highestConnectedInputIndex = 0;
-        for (const Link& link : m_Links) {
-            if (link.toNodeId != node.id) {
-                continue;
-            }
+        ForEachIncomingLink(node.id, [&](const Link& link) {
             const int inputIndex = MfsrInputSocketIndex(link.toSocketId);
             if (inputIndex >= 0) {
                 highestConnectedInputIndex = std::max(highestConnectedInputIndex, inputIndex);
             }
-        }
+        });
 
         const int visibleInputCount = std::clamp(highestConnectedInputIndex + 2, 2, kMaxMfsrInputCount);
         for (int inputIndex = 0; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
@@ -953,7 +1196,59 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         return finalize(std::move(sockets));
     }
 
-    return finalize(EditorNodeGraphDefinitions::BuildRegisteredSockets(node, visibleOnly));
+    std::vector<SocketDefinition> sockets =
+        EditorNodeGraphDefinitions::BuildRegisteredSockets(node, visibleOnly);
+    const auto exposeScalar = [&](const std::string& parameterId, const std::string& label) {
+        if (std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), parameterId) ==
+            node.exposedParameterIds.end()) {
+            return;
+        }
+        sockets.push_back({
+            ParameterInputSocketId(parameterId),
+            node.id,
+            SocketDirection::Input,
+            SocketType::Scalar,
+            label,
+            true,
+            true
+        });
+    };
+    switch (node.kind) {
+        case NodeKind::FrequencyFilter:
+        case NodeKind::ApplyFrequencyResponse:
+            exposeScalar(kStrengthParameterId, "Strength");
+            break;
+        case NodeKind::FrequencyResponse:
+            exposeScalar(kLowCutoffParameterId, "Low Cutoff");
+            exposeScalar(kHighCutoffParameterId, "High Cutoff");
+            exposeScalar(kTransitionWidthParameterId, "Transition");
+            exposeScalar(kButterworthOrderParameterId, "Order");
+            for (std::size_t notchIndex = 0;
+                 notchIndex < node.frequencyResponseSettings.notches.size();
+                 ++notchIndex) {
+                const FrequencyNotch& notch =
+                    node.frequencyResponseSettings.notches[notchIndex];
+                const std::string prefix =
+                    "Notch " + std::to_string(notchIndex + 1) + " ";
+                exposeScalar(
+                    FrequencyNotchParameterId(notch.id, "frequency"),
+                    prefix + "Frequency");
+                exposeScalar(
+                    FrequencyNotchParameterId(notch.id, "direction"),
+                    prefix + "Direction");
+                exposeScalar(
+                    FrequencyNotchParameterId(notch.id, "width"),
+                    prefix + "Width");
+            }
+            break;
+        case NodeKind::SpectrumAnalyzer:
+            exposeScalar(kAnalyzerLowParameterId, "Band Low");
+            exposeScalar(kAnalyzerHighParameterId, "Band High");
+            break;
+        default:
+            break;
+    }
+    return finalize(std::move(sockets));
 }
 
 bool Graph::FindSocket(int nodeId, const std::string& socketId, SocketDefinition* outSocket) const {
@@ -967,7 +1262,7 @@ bool Graph::FindSocket(int nodeId, const std::string& socketId, SocketDefinition
                 socketId,
                 node->id,
                 SocketDirection::Input,
-                SocketType::ScalarField,
+                SocketType::Channel,
                 ChannelLabel(socketId),
                 true,
                 true
@@ -1007,177 +1302,6 @@ std::string Graph::DefaultOutputSocket(const Node& node) const {
     return EditorNodeGraphDefinitions::DefaultOutputSocket(node);
 }
 
-std::string Graph::ResolveSocketChannel(int nodeId, const std::string& socketId) const {
-    std::unordered_set<int> visited;
-    std::function<std::string(int, const std::string&)> resolve = [&](int currentNodeId, const std::string& currentSocketId) -> std::string {
-        if (IsChannelSocketId(currentSocketId)) {
-            return currentSocketId;
-        }
-        if (!visited.insert(currentNodeId).second) {
-            return {};
-        }
-
-        const Node* node = FindNode(currentNodeId);
-        if (!node) {
-            return {};
-        }
-
-        std::string upstreamSocketId;
-        if ((node->kind == NodeKind::Layer || node->kind == NodeKind::TechnicalImage) &&
-            currentSocketId == kImageOutputSocketId) {
-            upstreamSocketId = kImageInputSocketId;
-        } else if (node->kind == NodeKind::Lut && currentSocketId == kImageOutputSocketId) {
-            upstreamSocketId = kImageInputSocketId;
-        } else if (node->kind == NodeKind::RawDetailFusion &&
-                   (currentSocketId == kImageOutputSocketId || currentSocketId == kMaskOutputSocketId)) {
-            upstreamSocketId = kImageInputSocketId;
-        } else if (node->kind == NodeKind::HdrMerge && currentSocketId == kImageOutputSocketId) {
-            upstreamSocketId = kHdrMergeInput1SocketId;
-        } else if (node->kind == NodeKind::Mfsr && currentSocketId == kImageOutputSocketId) {
-            upstreamSocketId = kMfsrReferenceInputSocketId;
-        } else if (node->kind == NodeKind::RawDetailAutoMask && currentSocketId == kMaskOutputSocketId) {
-            upstreamSocketId = kImageInputSocketId;
-        } else if (node->kind == NodeKind::MaskUtility && currentSocketId == kMaskOutputSocketId) {
-            upstreamSocketId = kMaskUtilityInputSocketId;
-        } else if (node->kind == NodeKind::MaskCombine && currentSocketId == kMaskOutputSocketId) {
-            upstreamSocketId = kMaskCombineInputASocketId;
-        } else if (node->kind == NodeKind::ImageToMask && currentSocketId == kMaskOutputSocketId) {
-            upstreamSocketId = kImageToMaskInputSocketId;
-        } else if (node->kind == NodeKind::DataMath && currentSocketId == kImageOutputSocketId) {
-            if (node->dataMathMode == DataMathMode::Average) {
-                return {};
-            }
-            for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                const std::string socketId = DataMathInputSocketId(inputIndex);
-                if (FindAnyInputLink(currentNodeId, socketId)) {
-                    upstreamSocketId = socketId;
-                    break;
-                }
-            }
-        }
-
-        if (upstreamSocketId.empty()) {
-            return {};
-        }
-        const Link* upstream = FindAnyInputLink(currentNodeId, upstreamSocketId);
-        return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : std::string();
-    };
-    return resolve(nodeId, socketId);
-}
-
-bool Graph::IsScalarSocketStream(int nodeId, const std::string& socketId) const {
-    std::unordered_set<std::string> visiting;
-    std::function<bool(int, const std::string&)> resolve = [&](int currentNodeId, const std::string& currentSocketId) -> bool {
-        const std::string key = std::to_string(currentNodeId) + ":" + currentSocketId;
-        if (!visiting.insert(key).second) {
-            return false;
-        }
-
-        auto finish = [&](bool result) {
-            visiting.erase(key);
-            return result;
-        };
-
-        const Node* node = FindNode(currentNodeId);
-        if (!node) {
-            return finish(false);
-        }
-        SocketDefinition currentSocket;
-        if (node->kind == NodeKind::Compound &&
-            FindSocket(currentNodeId, currentSocketId, &currentSocket) &&
-            currentSocket.direction == SocketDirection::Output &&
-            (currentSocket.type == SocketType::Mask ||
-             currentSocket.type == SocketType::ScalarField)) {
-            return finish(true);
-        }
-        if (IsChannelSocketId(currentSocketId) || currentSocketId == kMaskOutputSocketId) {
-            return finish(true);
-        }
-
-        auto inputIsScalar = [&](const char* inputSocketId) {
-            const Link* upstream = FindAnyInputLink(currentNodeId, inputSocketId);
-            return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : false;
-        };
-
-        switch (node->kind) {
-            case NodeKind::Layer:
-            case NodeKind::Lut:
-            case NodeKind::TechnicalImage:
-                if (currentSocketId == kImageOutputSocketId) {
-                    return finish(inputIsScalar(kImageInputSocketId));
-                }
-                break;
-            case NodeKind::RawDetailFusion:
-                if (currentSocketId == kImageOutputSocketId) {
-                    return finish(inputIsScalar(kImageInputSocketId));
-                }
-                if (currentSocketId == kMaskOutputSocketId) {
-                    return finish(true);
-                }
-                break;
-            case NodeKind::RawDetailAutoMask:
-            case NodeKind::MaskGenerator:
-            case NodeKind::MaskCombine:
-            case NodeKind::MaskUtility:
-            case NodeKind::CustomMask:
-            case NodeKind::ImageToMask:
-                if (currentSocketId == kMaskOutputSocketId) {
-                    return finish(true);
-                }
-                break;
-            case NodeKind::Mix:
-            case NodeKind::DataMath:
-                if (currentSocketId == kImageOutputSocketId) {
-                    if (node->kind == NodeKind::DataMath) {
-                        if (node->dataMathMode == DataMathMode::Average) {
-                            bool hasAverageInput = false;
-                            for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                                if (FindAnyInputLink(currentNodeId, DataMathInputSocketId(inputIndex))) {
-                                    hasAverageInput = true;
-                                    break;
-                                }
-                            }
-                            return finish(hasAverageInput);
-                        }
-                        if (node->dataMathMode == DataMathMode::ImageAverage) {
-                            return finish(false);
-                        }
-                    }
-                    bool hasInput = false;
-                    bool allScalar = true;
-                    for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                        const Link* input = FindAnyInputLink(currentNodeId, DataMathInputSocketId(inputIndex));
-                        if (!input) {
-                            continue;
-                        }
-                        hasInput = true;
-                        allScalar = allScalar && resolve(input->fromNodeId, input->fromSocketId);
-                    }
-                    if (node->kind == NodeKind::DataMath) {
-                        if (const Link* baseInput = FindAnyInputLink(currentNodeId, kDataMathBaseInputSocketId)) {
-                            allScalar = allScalar && resolve(baseInput->fromNodeId, baseInput->fromSocketId);
-                        }
-                        if (const Link* maskInput = FindAnyInputLink(currentNodeId, kMaskInputSocketId)) {
-                            allScalar = allScalar && resolve(maskInput->fromNodeId, maskInput->fromSocketId);
-                        }
-                    }
-                    return finish(hasInput && allScalar);
-                }
-                break;
-            case NodeKind::ChannelSplit:
-                if (IsChannelSocketId(currentSocketId)) {
-                    return finish(true);
-                }
-                break;
-            default:
-                break;
-        }
-
-        return finish(false);
-    };
-    return resolve(nodeId, socketId);
-}
-
 bool Graph::TryResolveUniformScalarInput(
     int nodeId,
     const std::string& socketId,
@@ -1209,192 +1333,13 @@ bool Graph::TryResolveUniformScalarInput(
         return false;
     }
     const double* scalar = std::get_if<double>(&typedValue.payload);
-    if (!scalar) {
+    if (!scalar || !std::isfinite(*scalar)) {
         if (errorMessage) *errorMessage = "The connected Scalar payload is invalid.";
         return false;
     }
     value = *scalar;
     if (errorMessage) errorMessage->clear();
     return true;
-}
-
-int Graph::ResolveReferenceSourceNodeId(int nodeId, const std::string& socketId) const {
-    std::unordered_set<std::string> visited;
-    std::function<int(int, const std::string&)> resolve = [&](int currentNodeId, const std::string& currentSocketId) -> int {
-        const std::string visitKey =
-            std::to_string(currentNodeId) + "\x1f" + currentSocketId;
-        if (!visited.insert(visitKey).second) {
-            return -1;
-        }
-
-        const Node* node = FindNode(currentNodeId);
-        if (!node) {
-            return -1;
-        }
-
-        switch (node->kind) {
-            case NodeKind::Image:
-            case NodeKind::RawSource:
-            case NodeKind::RawDevelopment:
-            case NodeKind::ImageGenerator:
-            case NodeKind::MaskGenerator:
-            case NodeKind::CustomMask:
-                return currentNodeId;
-            case NodeKind::RawDecode:
-            case NodeKind::RawDevelop:
-                return currentNodeId;
-            case NodeKind::RawNeuralDenoise: {
-                const Link* upstream = FindInputLink(currentNodeId, kRawInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::Layer:
-            case NodeKind::TechnicalImage: {
-                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::Compound: {
-                std::vector<std::string> dependencies;
-                std::string dependencyError;
-                if (!ResolveCompoundOutputInputDependencies(
-                        currentNodeId, currentSocketId, dependencies, &dependencyError)) {
-                    return -1;
-                }
-                for (const std::string& inputSocketId : dependencies) {
-                    if (const Link* upstream = FindInputLink(currentNodeId, inputSocketId)) {
-                        const int sourceId = resolve(upstream->fromNodeId, upstream->fromSocketId);
-                        if (sourceId > 0) return sourceId;
-                    }
-                }
-                for (const SocketDefinition& inputSocket : GetSockets(*node, false)) {
-                    if (inputSocket.direction != SocketDirection::Input || !inputSocket.optional) {
-                        continue;
-                    }
-                    if (const Link* upstream = FindInputLink(currentNodeId, inputSocket.id)) {
-                        const int sourceId = resolve(upstream->fromNodeId, upstream->fromSocketId);
-                        if (sourceId > 0) return sourceId;
-                    }
-                }
-                return -1;
-            }
-            case NodeKind::Lut: {
-                if (const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId)) {
-                    return resolve(upstream->fromNodeId, upstream->fromSocketId);
-                }
-                for (const char* channelSocketId : { "r", "g", "b", "a" }) {
-                    if (const Link* channelInput = FindInputLink(currentNodeId, channelSocketId)) {
-                        const int sourceId = resolve(channelInput->fromNodeId, channelInput->fromSocketId);
-                        if (sourceId > 0) {
-                            return sourceId;
-                        }
-                    }
-                }
-                return -1;
-            }
-            case NodeKind::RawDetailFusion: {
-                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::HdrMerge: {
-                const char* preferredSocketId = kHdrMergeInput1SocketId;
-                if (currentSocketId == kHdrMergeInput2SocketId) {
-                    preferredSocketId = kHdrMergeInput2SocketId;
-                } else if (currentSocketId == kHdrMergeInput3SocketId) {
-                    preferredSocketId = kHdrMergeInput3SocketId;
-                }
-                const Link* upstream = FindInputLink(currentNodeId, preferredSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::Mfsr: {
-                std::string preferredSocketId = kMfsrReferenceInputSocketId;
-                if (IsMfsrInputSocketId(currentSocketId)) {
-                    preferredSocketId = currentSocketId;
-                }
-                const Link* upstream = FindInputLink(currentNodeId, preferredSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::RawDetailAutoMask: {
-                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::Mix: {
-                const Link* inputA = FindInputLink(currentNodeId, kMixInputASocketId);
-                const Link* inputB = FindInputLink(currentNodeId, kMixInputBSocketId);
-                const int sourceA = inputA ? resolve(inputA->fromNodeId, inputA->fromSocketId) : -1;
-                const int sourceB = inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
-                auto isGeneratedReference = [&](const int sourceId) {
-                    const Node* source = FindNode(sourceId);
-                    return source &&
-                        (source->kind == NodeKind::ImageGenerator ||
-                         source->kind == NodeKind::MaskGenerator ||
-                         source->kind == NodeKind::CustomMask);
-                };
-                if (sourceA > 0 && sourceB > 0 && isGeneratedReference(sourceA) && !isGeneratedReference(sourceB)) {
-                    return sourceB;
-                }
-                return sourceA > 0 ? sourceA : sourceB;
-            }
-            case NodeKind::DataMath: {
-                for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                    if (const Link* input = FindInputLink(currentNodeId, DataMathInputSocketId(inputIndex))) {
-                        const int sourceId = resolve(input->fromNodeId, input->fromSocketId);
-                        if (sourceId > 0) {
-                            return sourceId;
-                        }
-                    }
-                }
-                return -1;
-            }
-            case NodeKind::ChannelSplit: {
-                const Link* upstream = FindInputLink(currentNodeId, kImageInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::ChannelCombine:
-            case NodeKind::Output: {
-                if (currentSocketId == kImageInputSocketId) {
-                    if (const Link* input = FindInputLink(currentNodeId, kImageInputSocketId)) {
-                        return resolve(input->fromNodeId, input->fromSocketId);
-                    }
-                }
-                for (const char* channelSocketId : { "r", "g", "b", "a" }) {
-                    if (const Link* channelInput = FindInputLink(currentNodeId, channelSocketId)) {
-                        const int sourceId = resolve(channelInput->fromNodeId, channelInput->fromSocketId);
-                        if (sourceId > 0) return sourceId;
-                    }
-                }
-                return -1;
-            }
-            case NodeKind::MaskUtility: {
-                const Link* upstream = FindInputLink(currentNodeId, kMaskUtilityInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::MaskCombine: {
-                if (const Link* inputA = FindInputLink(currentNodeId, kMaskCombineInputASocketId)) {
-                    const int sourceId = resolve(inputA->fromNodeId, inputA->fromSocketId);
-                    if (sourceId > 0) return sourceId;
-                }
-                const Link* inputB = FindInputLink(currentNodeId, kMaskCombineInputBSocketId);
-                return inputB ? resolve(inputB->fromNodeId, inputB->fromSocketId) : -1;
-            }
-            case NodeKind::ImageToMask: {
-                const Link* upstream = FindInputLink(currentNodeId, kImageToMaskInputSocketId);
-                return upstream ? resolve(upstream->fromNodeId, upstream->fromSocketId) : -1;
-            }
-            case NodeKind::Composite:
-            case NodeKind::Scope:
-            case NodeKind::Preview:
-                return -1;
-        }
-        return -1;
-    };
-    return resolve(nodeId, socketId);
-}
-
-int Graph::ResolveReferenceSourceNodeIdForOutput(int outputNodeId) const {
-    const Node* output = FindNode(outputNodeId);
-    if (!output || output->kind != NodeKind::Output) {
-        return -1;
-    }
-    return ResolveReferenceSourceNodeId(outputNodeId, kImageInputSocketId);
 }
 
 void Graph::ConnectImageToOutput(int nodeId) {
@@ -1405,6 +1350,7 @@ void Graph::ConnectImageToOutput(int nodeId) {
                   node->kind != NodeKind::RawDevelop &&
                   node->kind != NodeKind::RawDetailFusion &&
                   node->kind != NodeKind::Mfsr &&
+                  node->kind != NodeKind::RawProjectSourceSet &&
                   node->kind != NodeKind::HdrMerge &&
                   node->kind != NodeKind::TechnicalImage &&
                   node->kind != NodeKind::Lut)) {
@@ -1520,149 +1466,6 @@ const NodeGroup* Graph::FindGroup(int groupId) const {
         return g.id == groupId;
     });
     return it != m_Groups.end() ? &(*it) : nullptr;
-}
-
-namespace {
-
-ScenePathInfo MergeScenePathInfo(ScenePathInfo a, const ScenePathInfo& b) {
-    a.sceneReferred = a.sceneReferred || b.sceneReferred;
-    a.hasViewTransform = a.hasViewTransform || b.hasViewTransform;
-    return a;
-}
-
-ScenePathInfo AnalyzeScenePathRecursive(
-    const Graph& graph,
-    int nodeId,
-    std::unordered_set<int>& visiting) {
-    if (!visiting.insert(nodeId).second) {
-        return {};
-    }
-
-    ScenePathInfo state;
-    const Node* node = graph.FindNode(nodeId);
-    if (!node) {
-        visiting.erase(nodeId);
-        return state;
-    }
-
-    auto mergeInput = [&](const std::string& socketId) {
-        if (const Link* input = graph.FindInputLink(nodeId, socketId)) {
-            state = MergeScenePathInfo(
-                state,
-                AnalyzeScenePathRecursive(graph, input->fromNodeId, visiting));
-        }
-    };
-
-    switch (node->kind) {
-        case NodeKind::RawDecode:
-        case NodeKind::RawDevelop:
-            state.sceneReferred = true;
-            mergeInput(kRawInputSocketId);
-            break;
-        case NodeKind::RawDetailFusion:
-            state.sceneReferred = true;
-            mergeInput(kImageInputSocketId);
-            break;
-        case NodeKind::HdrMerge:
-            state.sceneReferred = true;
-            mergeInput(kHdrMergeInput1SocketId);
-            mergeInput(kHdrMergeInput2SocketId);
-            mergeInput(kHdrMergeInput3SocketId);
-            break;
-        case NodeKind::Mfsr:
-            state.sceneReferred = true;
-            for (int inputIndex = 0; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
-                mergeInput(MfsrInputSocketId(inputIndex));
-            }
-            break;
-        case NodeKind::RawDetailAutoMask:
-            state.sceneReferred = true;
-            mergeInput(kImageInputSocketId);
-            break;
-        case NodeKind::RawNeuralDenoise:
-            mergeInput(kRawInputSocketId);
-            break;
-        case NodeKind::Layer:
-            if (node->layerType == LayerType::ViewTransform) {
-                state.hasViewTransform = true;
-            }
-            mergeInput(kImageInputSocketId);
-            break;
-        case NodeKind::Lut:
-        case NodeKind::Output:
-            if (graph.FindInputLink(node->id, kImageInputSocketId)) {
-                mergeInput(kImageInputSocketId);
-            } else {
-                mergeInput("r");
-                mergeInput("g");
-                mergeInput("b");
-                mergeInput("a");
-            }
-            break;
-        case NodeKind::Mix:
-            mergeInput(kMixInputASocketId);
-            mergeInput(kMixInputBSocketId);
-            break;
-        case NodeKind::DataMath:
-            for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                mergeInput(DataMathInputSocketId(inputIndex));
-            }
-            mergeInput(kDataMathBaseInputSocketId);
-            break;
-        case NodeKind::ChannelSplit:
-        case NodeKind::FrequencyFft:
-        case NodeKind::FrequencyIfft:
-        case NodeKind::SpectrumView:
-        case NodeKind::SpectrumAnalyzer:
-            mergeInput(kImageInputSocketId);
-            break;
-        case NodeKind::SpectrumMath:
-            mergeInput(kMixInputASocketId);
-            mergeInput(kMixInputBSocketId);
-            mergeInput(kMaskInputSocketId);
-            break;
-        case NodeKind::MagnitudePhase:
-            mergeInput(kImageInputSocketId);
-            mergeInput("magnitude");
-            mergeInput("phase");
-            break;
-        case NodeKind::ChannelCombine:
-            mergeInput("r");
-            mergeInput("g");
-            mergeInput("b");
-            mergeInput("a");
-            break;
-        case NodeKind::ImageToMask:
-            mergeInput(kImageToMaskInputSocketId);
-            break;
-        case NodeKind::MaskCombine:
-            mergeInput(kMaskCombineInputASocketId);
-            mergeInput(kMaskCombineInputBSocketId);
-            break;
-        case NodeKind::MaskUtility:
-            mergeInput(kMaskUtilityInputSocketId);
-            break;
-        case NodeKind::Image:
-        case NodeKind::RawSource:
-        case NodeKind::ImageGenerator:
-        case NodeKind::MaskGenerator:
-        case NodeKind::FrequencyMask:
-        case NodeKind::CustomMask:
-        case NodeKind::Composite:
-        case NodeKind::Scope:
-        case NodeKind::Preview:
-            break;
-    }
-
-    visiting.erase(nodeId);
-    return state;
-}
-
-} // namespace
-
-ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
-    std::unordered_set<int> visiting;
-    return AnalyzeScenePathRecursive(graph, nodeId, visiting);
 }
 
 } // namespace EditorNodeGraph

@@ -133,8 +133,17 @@ RenderPipeline::SharedRawBaseStageResult RenderPipeline::RenderSharedRawBaseStag
         const unsigned int ownedStageCopy =
             CloneTextureForGraphCache(stageCachedBase.texture, stage.width, stage.height);
         if (ownedStageCopy != 0) {
-            stage.texture = ownedStageCopy;
-            StoreGraphCacheEntry(m_GraphImageCache, rawBaseKey, ownedStageCopy, rawBaseFingerprint, true);
+            if (StoreGraphCacheEntry(
+                    m_GraphImageCache,
+                    rawBaseKey,
+                    ownedStageCopy,
+                    rawBaseFingerprint,
+                    true)) {
+                stage.texture = ownedStageCopy;
+            } else {
+                glDeleteTextures(1, &ownedStageCopy);
+                stage.texture = stageCachedBase.texture;
+            }
         } else {
             stage.texture = stageCachedBase.texture;
         }

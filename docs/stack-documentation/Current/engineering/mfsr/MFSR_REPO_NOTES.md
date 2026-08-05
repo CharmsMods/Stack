@@ -5,7 +5,9 @@
 - Phase 1 inert contracts live in `src/MFSR/MFSRTypes.h` and `src/MFSR/MFSRTypes.cpp`.
 - Phase 1 focused validation tests live in `tools/graph_behavior_tests.cpp`.
 - Phase 2 inert MFSR graph node shell exists.
-- No MFSR tab, decode, alignment, fusion, real render/cache, or GPU implementation exists yet.
+- The former top-level MFSR tab plan is superseded by RAW Lab's Multi-Frame
+  source-set organization surface. No MFSR decode, alignment, fusion, real
+  render/cache, or GPU implementation exists yet.
 
 ## Graph Model Map
 - Core graph API: `src/Editor/NodeGraph/EditorNodeGraph.h` and `src/Editor/NodeGraph/EditorNodeGraph.cpp`.

@@ -286,6 +286,14 @@ ValueDescriptor DescribeTechnicalImageOutput(
 DirectOutputPolicy EvaluateDirectPngOutputPolicy(const ValueDescriptor& descriptor) {
     DirectOutputPolicy result;
     const std::string fingerprint = DescriptorContentIdentity(descriptor);
+    if (descriptor.logicalType == LogicalValueType::Channel) {
+        result.executable = false;
+        result.diagnostics.push_back(MakeDiagnostic(
+            "nmr.output.channel-export-unsupported", DiagnosticSeverity::HardError, fingerprint,
+            "A Channel can be inspected in Output, but PNG export requires an Image.",
+            "Connect the Channel to Image Combine, then export the resulting Image."));
+        return result;
+    }
     if (descriptor.logicalType != LogicalValueType::ColorImage) {
         result.executable = false;
         result.diagnostics.push_back(MakeDiagnostic(
@@ -333,10 +341,35 @@ DirectOutputPolicy EvaluateDirectPngOutputPolicy(const ValueDescriptor& descript
 }
 
 std::string CompactDescriptorLabel(const ValueDescriptor& descriptor) {
+    std::string valueLabel;
+    if (descriptor.logicalType == LogicalValueType::ColorImage) {
+        valueLabel = "Image";
+        if (descriptor.presentImageComponents.state == KnowledgeState::Known) {
+            const std::vector<ImageComponent> components =
+                OrderedImageComponents(descriptor.presentImageComponents.value);
+            if (!components.empty()) {
+                valueLabel += " · ";
+                for (std::size_t index = 0; index < components.size(); ++index) {
+                    if (index != 0) {
+                        valueLabel += ", ";
+                    }
+                    valueLabel += ImageComponentToken(components[index]);
+                }
+            }
+        } else {
+            valueLabel += " · Unknown components";
+        }
+    } else if (descriptor.logicalType == LogicalValueType::Channel) {
+        valueLabel = "Channel";
+    }
     const std::string color = descriptor.color.state == KnowledgeState::Known
         ? descriptor.color.value.identity
         : (descriptor.color.state == KnowledgeState::Unknown ? "Unknown color" : "N/A color");
-    return color + " | " + TransferLabel(descriptor) + " | " + AlphaLabel(descriptor);
+    const std::string semanticLabel =
+        color + " | " + TransferLabel(descriptor) + " | " + AlphaLabel(descriptor);
+    return valueLabel.empty()
+        ? semanticLabel
+        : valueLabel + " | " + semanticLabel;
 }
 
 } // namespace Stack::NodeMath

@@ -11,7 +11,13 @@ namespace EditorNodeGraph::SocketPresentation {
 inline Stack::NodeMath::LogicalValueType LogicalTypeForSocketType(SocketType type) {
     using Logical = Stack::NodeMath::LogicalValueType;
     switch (type) {
+        case SocketType::ImageOrChannel: return Logical::Invalid;
         case SocketType::Mask: return Logical::Mask;
+        case SocketType::Channel: return Logical::Channel;
+        case SocketType::Spectrum: return Logical::ComplexSpectrum;
+        case SocketType::FrequencyResponse: return Logical::FrequencyResponse;
+        case SocketType::SpectrumMagnitude: return Logical::SpectrumMagnitude;
+        case SocketType::SpectrumPhase: return Logical::SpectrumPhase;
         case SocketType::ScalarField: return Logical::ScalarField;
         case SocketType::Boolean: return Logical::Boolean;
         case SocketType::Integer: return Logical::Integer;
@@ -36,9 +42,16 @@ inline Stack::NodeMath::LogicalValueType LogicalTypeForSocketType(SocketType typ
 }
 
 inline std::string RoleKeyFromSocket(const SocketDefinition& socket) {
+    if (socket.type == SocketType::ImageOrChannel) return "result";
     if (socket.id == kImageInputSocketId || socket.id == kImageOutputSocketId) return "image";
     if (socket.id == kRawInputSocketId || socket.id == kRawOutputSocketId) return "raw-image-data";
     if (socket.id == kMaskInputSocketId || socket.id == kMaskOutputSocketId) return "mask";
+    if (socket.id == kChannelInputSocketId || socket.id == kChannelOutputSocketId) return "channel";
+    if (socket.id == kSpectrumInputSocketId || socket.id == kSpectrumOutputSocketId ||
+        socket.id == kSpectrumInputASocketId || socket.id == kSpectrumInputBSocketId) return "complex-spectrum";
+    if (socket.id == kFrequencyResponseInputSocketId || socket.id == kFrequencyResponseOutputSocketId) return "frequency-response";
+    if (socket.id == kSpectrumMagnitudeInputSocketId || socket.id == kSpectrumMagnitudeOutputSocketId) return "magnitude";
+    if (socket.id == kSpectrumPhaseInputSocketId || socket.id == kSpectrumPhaseOutputSocketId) return "phase";
     if (socket.id == kExposureValueInputSocketId) return "exposure";
     if (socket.id == kReductionFieldInputSocketId) return "field";
     if (socket.id == kMixFactorSocketId) return "factor";
@@ -75,6 +88,7 @@ DeclaredChannelsFor(const SocketDefinition& socket) {
     if (socket.id == "b") return known(ChannelLayout::Gray, { "B" });
     if (socket.id == "a") return known(ChannelLayout::Gray, { "A" });
     switch (socket.logicalType) {
+        case LogicalValueType::Channel:
         case LogicalValueType::Mask:
         case LogicalValueType::ScalarField:
             return known(ChannelLayout::Gray, { "value" });
@@ -90,6 +104,10 @@ DeclaredChannelsFor(const SocketDefinition& socket) {
             return known(ChannelLayout::NamedData, { "X", "Y", "Z", "W" });
         case LogicalValueType::ComplexSpectrum:
             return known(ChannelLayout::ComplexPair, { "real", "imaginary" });
+        case LogicalValueType::SpectrumMagnitude:
+            return known(ChannelLayout::Gray, { "magnitude" });
+        case LogicalValueType::SpectrumPhase:
+            return known(ChannelLayout::Gray, { "phase" });
         case LogicalValueType::ColorImage:
         case LogicalValueType::DataImage:
             return SemanticField<ChannelDescriptor>::Unknown();
@@ -129,15 +147,7 @@ inline void NormalizeSocketDefinition(NodeKind nodeKind, SocketDefinition& socke
     if (socket.logicalType == Stack::NodeMath::LogicalValueType::Invalid) {
         socket.logicalType = LogicalTypeForSocketType(socket.type);
     }
-    if (nodeKind == NodeKind::FrequencyFft &&
-        socket.direction == SocketDirection::Output) {
-        socket.logicalType = Stack::NodeMath::LogicalValueType::ComplexSpectrum;
-    } else if ((nodeKind == NodeKind::FrequencyIfft || nodeKind == NodeKind::SpectrumView) &&
-               socket.direction == SocketDirection::Input) {
-        socket.logicalType = Stack::NodeMath::LogicalValueType::ComplexSpectrum;
-    } else if (nodeKind == NodeKind::SpectrumMath && socket.type == SocketType::Image) {
-        socket.logicalType = Stack::NodeMath::LogicalValueType::ComplexSpectrum;
-    } else if (nodeKind == NodeKind::MagnitudePhase) {
+    if (nodeKind == NodeKind::MagnitudePhase) {
         if (socket.id == kImageInputSocketId || socket.id == kImageOutputSocketId) {
             socket.logicalType = Stack::NodeMath::LogicalValueType::ComplexSpectrum;
         } else if (socket.id == "magnitude" || socket.id == "phase" ||
@@ -175,6 +185,7 @@ inline const char* LogicalTypeName(Stack::NodeMath::LogicalValueType type) {
         case Type::Coordinate2: return "2D coordinate";
         case Type::Curve1D: return "Curve";
         case Type::Lut: return "Lookup table";
+        case Type::Channel: return "Channel";
         case Type::ScalarField: return "Scalar field";
         case Type::Vector2Field: return "2-component field";
         case Type::Vector3Field: return "3-component field";
@@ -183,6 +194,9 @@ inline const char* LogicalTypeName(Stack::NodeMath::LogicalValueType type) {
         case Type::Mask: return "Mask";
         case Type::DataImage: return "Data image";
         case Type::ComplexSpectrum: return "Complex spectrum";
+        case Type::FrequencyResponse: return "Frequency response";
+        case Type::SpectrumMagnitude: return "Spectrum magnitude";
+        case Type::SpectrumPhase: return "Spectrum phase";
         case Type::Histogram: return "Histogram";
         case Type::Statistics: return "Statistics";
         case Type::Metadata: return "Metadata";
@@ -246,6 +260,7 @@ inline std::string UnitName(
 inline const char* StorageName(Stack::NodeMath::LogicalValueType type) {
     using Type = Stack::NodeMath::LogicalValueType;
     switch (type) {
+        case Type::Channel:
         case Type::ScalarField:
         case Type::Vector2Field:
         case Type::Vector3Field:
@@ -254,7 +269,11 @@ inline const char* StorageName(Stack::NodeMath::LogicalValueType type) {
         case Type::Mask:
         case Type::DataImage:
         case Type::ComplexSpectrum:
+        case Type::SpectrumMagnitude:
+        case Type::SpectrumPhase:
             return "Per-pixel field";
+        case Type::FrequencyResponse:
+            return "Resolution-independent response";
         case Type::Boolean:
         case Type::Integer:
         case Type::Scalar:
@@ -318,6 +337,9 @@ inline std::string ImageStateDescription(
 }
 
 inline std::string PrimaryDescription(const SocketDefinition& socket) {
+    if (socket.type == SocketType::ImageOrChannel) {
+        return "Image or Channel";
+    }
     std::string role;
     if (socket.semanticRoleKey == "red-channel") role = "Red channel";
     else if (socket.semanticRoleKey == "green-channel") role = "Green channel";

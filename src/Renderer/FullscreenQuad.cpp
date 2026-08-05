@@ -3,11 +3,15 @@
 FullscreenQuad::FullscreenQuad() : m_VAO(0), m_VBO(0) {}
 
 FullscreenQuad::~FullscreenQuad() {
-    if (m_VBO) glDeleteBuffers(1, &m_VBO);
-    if (m_VAO) glDeleteVertexArrays(1, &m_VAO);
+    Shutdown();
 }
 
 void FullscreenQuad::Initialize() {
+    if (m_VAO != 0 && m_VBO != 0) {
+        return;
+    }
+    Shutdown();
+
     // Two triangles covering the full NDC space (-1 to 1), with UV coords (0 to 1)
     float quadVertices[] = {
         // positions   // texCoords
@@ -36,6 +40,17 @@ void FullscreenQuad::Initialize() {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
 
     glBindVertexArray(0);
+}
+
+void FullscreenQuad::Shutdown() {
+    if (m_VBO) {
+        glDeleteBuffers(1, &m_VBO);
+        m_VBO = 0;
+    }
+    if (m_VAO) {
+        glDeleteVertexArrays(1, &m_VAO);
+        m_VAO = 0;
+    }
 }
 
 void FullscreenQuad::Draw() {

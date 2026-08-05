@@ -3,6 +3,7 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "NodeMath/TechnicalImageMath.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Renderer/ScopedGLObjects.h"
 
 #include <algorithm>
 #include <chrono>
@@ -287,39 +288,65 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
     } else {
         ++m_LastGraphExecutionStats.pointwiseProgramCacheMisses;
         std::string compileError;
-        program = GLHelpers::CreateShaderProgram(
-            vertexSource,
-            plan.shader.fragmentSource.c_str(),
-            &compileError);
-        if (program == 0) {
+        Stack::Renderer::ScopedGLProgram compiledProgram(
+            GLHelpers::CreateShaderProgram(
+                vertexSource,
+                plan.shader.fragmentSource.c_str(),
+                &compileError));
+        if (!compiledProgram) {
             m_LastGraphExecutionStats.lastPointwiseFailure =
                 compileError.empty() ? "Generated pointwise shader compilation failed." : compileError;
             m_LastGraphExecutionStats.lastPointwiseFailureNodeIds = plan.authoredNodeIds;
             return result;
         }
-        if (m_PointwiseProgramCache.size() >= kPointwiseProgramCacheMaximumEntries) {
-            const auto victim = std::min_element(
-                m_PointwiseProgramCache.begin(), m_PointwiseProgramCache.end(),
-                [](const auto& left, const auto& right) {
-                    return left.second.lastUseSerial < right.second.lastUseSerial;
-                });
+        if (cached != m_PointwiseProgramCache.end()) {
+            m_PointwiseProgramCache.erase(cached);
+        }
+        const std::uint64_t programUseSerial =
+            ++m_GraphResourceUseSerial;
+        const auto inserted = m_PointwiseProgramCache.try_emplace(
+            plan.shader.structureFingerprint,
+            CachedPointwiseProgram{
+                compiledProgram.Get(),
+                programUseSerial,
+                plan.shader.fragmentSource.size()
+            });
+        if (!inserted.second) {
+            m_LastGraphExecutionStats.lastPointwiseFailure =
+                "Generated pointwise program cache rejected a unique program identity.";
+            m_LastGraphExecutionStats.lastPointwiseFailureNodeIds =
+                plan.authoredNodeIds;
+            return result;
+        }
+        program = compiledProgram.Release();
+        if (m_PointwiseProgramCache.size() >
+            kPointwiseProgramCacheMaximumEntries) {
+            auto victim = m_PointwiseProgramCache.end();
+            for (auto candidate = m_PointwiseProgramCache.begin();
+                 candidate != m_PointwiseProgramCache.end();
+                 ++candidate) {
+                if (candidate == inserted.first) {
+                    continue;
+                }
+                if (victim == m_PointwiseProgramCache.end() ||
+                    candidate->second.lastUseSerial <
+                        victim->second.lastUseSerial) {
+                    victim = candidate;
+                }
+            }
             if (victim != m_PointwiseProgramCache.end()) {
                 if (victim->second.program != 0) glDeleteProgram(victim->second.program);
                 m_PointwiseProgramCache.erase(victim);
             }
         }
-        m_PointwiseProgramCache[plan.shader.structureFingerprint] = CachedPointwiseProgram{
-            program,
-            ++m_GraphResourceUseSerial,
-            plan.shader.fragmentSource.size()
-        };
     }
 
-    result.texture = CreateGraphRenderTargetTexture();
-    if (result.texture == 0) return result;
+    Stack::Renderer::ScopedGLTexture outputTexture(
+        CreateGraphRenderTargetTexture());
+    if (!outputTexture) return result;
     const auto begin = std::chrono::steady_clock::now();
     while (glGetError() != GL_NO_ERROR) {}
-    const bool rendered = RenderIntoGraphTargetTexture(result.texture, [&](unsigned int targetFbo) {
+    const bool rendered = RenderIntoGraphTargetTexture(outputTexture.Get(), [&](unsigned int targetFbo) {
         glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
         glUseProgram(program);
         glActiveTexture(GL_TEXTURE0);
@@ -340,8 +367,6 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
     const double submitMilliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - begin).count();
     if (!rendered || renderError != GL_NO_ERROR) {
-        glDeleteTextures(1, &result.texture);
-        result.texture = 0;
         std::ostringstream failure;
         failure << "Generated pointwise pass failed";
         if (renderError != GL_NO_ERROR) failure << " with GL error " << renderError;
@@ -351,7 +376,6 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
         return result;
     }
 
-    result.owned = true;
     ++m_LastGraphExecutionStats.fusedPointwiseGroups;
     m_LastGraphExecutionStats.fusedPointwiseNodes += static_cast<int>(plan.authoredNodeIds.size());
     m_LastGraphExecutionStats.avoidedPointwisePasses +=
@@ -366,6 +390,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderPointwiseFusionPlan(
     group.semanticFingerprint = plan.shader.semanticFingerprint;
     group.programFingerprint = plan.shader.structureFingerprint;
     m_LastGraphExecutionStats.pointwiseGroups.push_back(std::move(group));
+    result.texture = outputTexture.Release();
+    result.owned = true;
     return result;
 }
 

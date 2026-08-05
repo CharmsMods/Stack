@@ -5,6 +5,9 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 using namespace Stack::Renderer::GraphExecution;
 
@@ -12,29 +15,73 @@ int RenderPipeline::FindRawDetailAutoMaskSource(
     const GraphExecutionContext& executionContext,
     int nodeId,
     std::string_view socketId) {
-    const auto nodeIt = executionContext.nodes.find(nodeId);
-    if (nodeIt == executionContext.nodes.end() || !nodeIt->second) {
-        return -1;
-    }
+    struct PendingSocket {
+        int nodeId = -1;
+        std::string socketId;
+    };
+    std::vector<PendingSocket> pending{
+        PendingSocket{ nodeId, std::string(socketId) }
+    };
+    std::unordered_set<std::string> visited;
+    visited.reserve(executionContext.nodes.size());
 
-    const RenderGraphNode& node = *nodeIt->second;
-    if (node.kind == RenderGraphNodeKind::RawDetailAutoMask && socketId == "maskOut") {
-        return node.nodeId;
-    }
-    if (node.kind == RenderGraphNodeKind::MaskCombine && socketId == "maskOut") {
-        if (const RenderGraphLink* inputA = executionContext.FindInputLink(node.nodeId, "maskA")) {
-            const int source = FindRawDetailAutoMaskSource(executionContext, inputA->fromNodeId, inputA->fromSocketId);
-            if (source > 0) {
-                return source;
+    while (!pending.empty()) {
+        PendingSocket current = std::move(pending.back());
+        pending.pop_back();
+        if (!visited.insert(
+                MakeNodeSocketKey(
+                    current.nodeId,
+                    current.socketId)).second) {
+            continue;
+        }
+
+        const auto nodeIt = executionContext.nodes.find(current.nodeId);
+        if (nodeIt == executionContext.nodes.end() || !nodeIt->second) {
+            continue;
+        }
+
+        const RenderGraphNode& node = *nodeIt->second;
+        if (node.kind == RenderGraphNodeKind::RawDetailAutoMask &&
+            current.socketId == EditorNodeGraph::kMaskOutputSocketId) {
+            return node.nodeId;
+        }
+        if (node.kind == RenderGraphNodeKind::MaskUtility &&
+            current.socketId == EditorNodeGraph::kMaskOutputSocketId) {
+            if (const RenderGraphLink* input =
+                    executionContext.FindInputLink(
+                        node.nodeId,
+                        EditorNodeGraph::kMaskUtilityInputSocketId)) {
+                pending.push_back(
+                    PendingSocket{
+                        input->fromNodeId,
+                        input->fromSocketId
+                    });
+            }
+            continue;
+        }
+        if (node.kind == RenderGraphNodeKind::MaskCombine &&
+            current.socketId == EditorNodeGraph::kMaskOutputSocketId) {
+            if (const RenderGraphLink* inputB =
+                    executionContext.FindInputLink(
+                        node.nodeId,
+                        EditorNodeGraph::kMaskCombineInputBSocketId)) {
+                pending.push_back(
+                    PendingSocket{
+                        inputB->fromNodeId,
+                        inputB->fromSocketId
+                    });
+            }
+            if (const RenderGraphLink* inputA =
+                    executionContext.FindInputLink(
+                        node.nodeId,
+                        EditorNodeGraph::kMaskCombineInputASocketId)) {
+                pending.push_back(
+                    PendingSocket{
+                        inputA->fromNodeId,
+                        inputA->fromSocketId
+                    });
             }
         }
-        if (const RenderGraphLink* inputB = executionContext.FindInputLink(node.nodeId, "maskB")) {
-            return FindRawDetailAutoMaskSource(executionContext, inputB->fromNodeId, inputB->fromSocketId);
-        }
-    }
-    if (node.kind == RenderGraphNodeKind::MaskUtility && socketId == "maskOut") {
-        const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, "maskIn");
-        return input ? FindRawDetailAutoMaskSource(executionContext, input->fromNodeId, input->fromSocketId) : -1;
     }
     return -1;
 }
@@ -89,10 +136,14 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDetailGraphNode(
     if (!inputImage) {
         return result;
     }
+    const int inputWidth = m_Width;
+    const int inputHeight = m_Height;
 
     const RenderGraphLink* maskLink = executionContext.FindInputLink(node.nodeId, "maskIn");
     if (socketId == "maskOut") {
         const unsigned int manualMask = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
+        m_Width = inputWidth;
+        m_Height = inputHeight;
         const bool debugPreview = executionContext.graph.autoGainMaskPreview &&
             executionContext.graph.outputNodeId == node.nodeId &&
             executionContext.graph.outputSocketId == "maskOut";
@@ -102,6 +153,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDetailGraphNode(
     }
 
     const unsigned int generatedMask = evalMask(node.nodeId, "maskOut");
+    m_Width = inputWidth;
+    m_Height = inputHeight;
     const Raw::RawDetailFusionSettings applySettings = ResolveRawDetailFusionApplySettings(executionContext, node);
     m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
         inputImage,

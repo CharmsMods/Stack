@@ -2,6 +2,7 @@
 
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/GraphConnectionPresentation.h"
+#include "Editor/NodeGraph/GraphWireReadout.h"
 #include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
 #include "Editor/NodeGraph/SocketPresentation.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
@@ -135,53 +136,29 @@ bool RectOverlapsExpandedCanvas(
 struct LinkTextContent {
     std::string primary;
     std::string secondary;
+    EditorNodeGraph::WireReadout::Attention attention =
+        EditorNodeGraph::WireReadout::Attention::None;
 };
 
 LinkTextContent BuildLinkTextContent(
     EditorModule* editor,
     const EditorNodeGraph::Graph& graph,
     const EditorNodeGraph::Link& link) {
-    using namespace EditorNodeGraph::SocketPresentation;
-    EditorNodeGraph::SocketDefinition sourceSocket;
-    if (!graph.FindSocket(link.fromNodeId, link.fromSocketId, &sourceSocket)) {
-        sourceSocket.id = link.fromSocketId;
-        sourceSocket.nodeId = link.fromNodeId;
-        sourceSocket.direction = EditorNodeGraph::SocketDirection::Output;
-        sourceSocket.label = "Unknown";
-        NormalizeSocketDefinition(EditorNodeGraph::NodeKind::Output, sourceSocket);
-    }
-
-    Stack::NodeMath::ValueDescriptor descriptor;
-    const bool hasDescriptor = editor &&
-        editor->TryGetGraphLinkSemanticDescriptor(link, descriptor);
-    if (hasDescriptor) {
-        if (descriptor.logicalType != Stack::NodeMath::LogicalValueType::Invalid) {
-            sourceSocket.logicalType = descriptor.logicalType;
-        }
-        if (descriptor.channels.state != Stack::NodeMath::KnowledgeState::NotApplicable) {
-            sourceSocket.declaredChannels = descriptor.channels;
-        }
-        if (descriptor.units.state != Stack::NodeMath::KnowledgeState::NotApplicable) {
-            sourceSocket.declaredUnits = descriptor.units;
+    EditorNodeGraph::WireReadout::Input input;
+    if (!editor || !editor->TryGetGraphLinkWireReadoutInput(link, input)) {
+        if (!graph.FindSocket(link.fromNodeId, link.fromSocketId, &input.sourceSocket)) {
+            input.sourceSocket.id = link.fromSocketId;
+            input.sourceSocket.nodeId = link.fromNodeId;
+            input.sourceSocket.direction = EditorNodeGraph::SocketDirection::Output;
+            input.sourceSocket.label = "Unknown";
+            EditorNodeGraph::SocketPresentation::NormalizeSocketDefinition(
+                EditorNodeGraph::NodeKind::Output,
+                input.sourceSocket);
         }
     }
-
-    LinkTextContent content;
-    content.primary = PrimaryDescription(sourceSocket);
-    const bool imageLike = Stack::NodeMath::IsImageLike(sourceSocket.logicalType) ||
-        sourceSocket.logicalType == Stack::NodeMath::LogicalValueType::Mask ||
-        sourceSocket.logicalType == Stack::NodeMath::LogicalValueType::ComplexSpectrum;
-    if (hasDescriptor && imageLike) {
-        content.secondary = ImageStateDescription(descriptor);
-    } else {
-        const std::string units = UnitName(sourceSocket.declaredUnits);
-        content.secondary = units.empty()
-            ? StorageName(sourceSocket.logicalType)
-            : units + " · " + StorageName(sourceSocket.logicalType);
-    }
-    if (content.primary.empty()) content.primary = "Unknown";
-    if (content.secondary.empty()) content.secondary = "Unknown state";
-    return content;
+    const EditorNodeGraph::WireReadout::Readout readout =
+        EditorNodeGraph::WireReadout::Build(input);
+    return { readout.primary, readout.secondary, readout.attention };
 }
 
 float ApproximateLinkLength(
@@ -242,42 +219,52 @@ void DrawSemanticLinkInspection(
     const EditorNodeGraph::Link& link,
     const ImVec2& anchor) {
     if (!editor) return;
-    Stack::NodeMath::ValueDescriptor descriptor;
-    if (!editor->TryGetGraphLinkSemanticDescriptor(link, descriptor)) return;
+    EditorNodeGraph::WireReadout::Input input;
+    if (!editor->TryGetGraphLinkWireReadoutInput(link, input)) return;
+    const EditorNodeGraph::WireReadout::Readout readout =
+        EditorNodeGraph::WireReadout::Build(input);
     PrepareAnchoredDetailCard(anchor);
     ImGui::BeginTooltip();
     ImGui::TextUnformatted("Wire state");
     ImGui::Separator();
-    ImGui::TextWrapped("%s", Stack::NodeMath::CompactDescriptorLabel(descriptor).c_str());
-    if (descriptor.spatial.state == Stack::NodeMath::KnowledgeState::Known) {
-        const auto& rect = descriptor.spatial.value.dataWindow;
+    for (const EditorNodeGraph::WireReadout::DetailFact& fact : readout.detailFacts) {
+        ImGui::TextWrapped("%s: %s", fact.label.c_str(), fact.value.c_str());
+    }
+    if (input.hasDescriptor &&
+        input.descriptor.spatial.state == Stack::NodeMath::KnowledgeState::Known) {
+        const auto& rect = input.descriptor.spatial.value.dataWindow;
         ImGui::Text("Extent: %lld x %lld", static_cast<long long>(rect.width), static_cast<long long>(rect.height));
     } else {
         ImGui::TextDisabled("Extent: Unknown");
     }
-    if (descriptor.range.state == Stack::NodeMath::KnowledgeState::Known) {
+    if (input.hasDescriptor &&
+        input.descriptor.range.state == Stack::NodeMath::KnowledgeState::Known) {
         ImGui::Text(
             "Nominal range: %.4g to %.4g%s%s",
-            descriptor.range.value.nominalMinimum,
-            descriptor.range.value.nominalMaximum,
-            descriptor.range.value.allowsBelowNominal ? " | below allowed" : "",
-            descriptor.range.value.allowsAboveNominal ? " | above allowed" : "");
+            input.descriptor.range.value.nominalMinimum,
+            input.descriptor.range.value.nominalMaximum,
+            input.descriptor.range.value.allowsBelowNominal ? " | below allowed" : "",
+            input.descriptor.range.value.allowsAboveNominal ? " | above allowed" : "");
     } else {
         ImGui::TextDisabled("Range: Unknown");
     }
-    if (descriptor.precision.state == Stack::NodeMath::KnowledgeState::Known) {
+    if (input.hasDescriptor &&
+        input.descriptor.precision.state == Stack::NodeMath::KnowledgeState::Known) {
         ImGui::TextDisabled("Precision: %s",
             EditorNodeGraph::SocketPresentation::PrecisionName(
-                descriptor.precision.value));
+                input.descriptor.precision.value));
     } else {
         ImGui::TextDisabled("Precision: Unknown");
     }
-    if (descriptor.provenance.state == Stack::NodeMath::KnowledgeState::Known) {
-        const std::string provenance = descriptor.provenance.value.operationIdentity.empty()
-            ? descriptor.provenance.value.sourceIdentity
-            : descriptor.provenance.value.operationIdentity;
+    if (input.hasDescriptor &&
+        input.descriptor.provenance.state == Stack::NodeMath::KnowledgeState::Known) {
+        const std::string provenance = input.descriptor.provenance.value.operationIdentity.empty()
+            ? input.descriptor.provenance.value.sourceIdentity
+            : input.descriptor.provenance.value.operationIdentity;
         if (!provenance.empty()) ImGui::TextWrapped("From: %s", provenance.c_str());
     }
+    // Destination diagnostics remain inspectable here; they never feed the
+    // source-oriented wire readout.
     const std::string affected = "node-" + std::to_string(link.toNodeId);
     for (const Stack::NodeMath::Diagnostic& diagnostic : editor->GetGraphSemanticDiagnostics()) {
         if (diagnostic.affectedIdentity != affected) continue;
@@ -436,6 +423,19 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
     const float edgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const float thicknessScale = LinkThicknessScaleFromZoom(m_Zoom);
     const float deltaTime = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+    const bool labelRevealHeld =
+        m_ActiveEditor &&
+        m_ActiveEditor->CanConsumeEditorCommandKeys() &&
+        ImGui::IsKeyDown(ImGuiKey_F);
+    m_LinkLabelRevealAlpha = ImGuiExtras::AnimateTowards(
+        m_LinkLabelRevealAlpha,
+        labelRevealHeld ? 1.0f : 0.0f,
+        deltaTime,
+        labelRevealHeld ? 26.0f : 22.0f);
+    const bool labelsVisible =
+        EditorNodeGraph::ConnectionPresentation::ConnectionLabelsAreVisible(
+            labelRevealHeld,
+            m_LinkLabelRevealAlpha);
     const bool straightLinks = GraphStraightLinksEnabled(m_ActiveEditor);
     const float linkCullMargin = std::clamp(
         std::min(m_CanvasMax.x - m_CanvasMin.x, m_CanvasMax.y - m_CanvasMin.y) * 0.35f,
@@ -444,10 +444,11 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
     std::unordered_set<std::string> activeLinkKeys;
     activeLinkKeys.reserve(graph.GetLinks().size());
     std::vector<CachedRect> occupiedLabelRects;
-    const EditorNodeGraph::Link hoveredLink = (!m_MiddlePanCaptureActive && IsGraphCanvasHovered())
+    m_LinkLabelHitRects.clear();
+    m_LinkHitTestFrame = -1;
+    EditorNodeGraph::Link hoveredLink = (!m_MiddlePanCaptureActive && IsGraphCanvasHovered())
         ? FindLinkAt(graph, ToGraphVec2(ImGui::GetMousePos()))
         : EditorNodeGraph::Link{};
-    m_LinkLabelHitRects.clear();
     for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
         const EditorNodeGraph::Node* from = FindCachedNode(graph, link.fromNodeId);
         const EditorNodeGraph::Node* to = FindCachedNode(graph, link.toNodeId);
@@ -491,12 +492,6 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         const ImVec2 labelC2(p2.x - labelHandle, p2.y);
         const float screenLength = ApproximateLinkLength(
             p1, labelC1, labelC2, p2, straightLinks);
-        const bool endpointSelected = graph.IsNodeSelected(link.fromNodeId) ||
-            graph.IsNodeSelected(link.toNodeId);
-        const bool interactionReveal = selected || hovered || endpointSelected;
-        const StackAppearance::GraphConnectionLabelVisibility labelVisibility = appearance
-            ? appearance->GetGraphConnectionLabels()
-            : StackAppearance::GraphConnectionLabelVisibility::Adaptive;
         const StackAppearance::GraphConnectionTextLayout textLayout = appearance
             ? appearance->GetGraphConnectionTextLayout()
             : StackAppearance::GraphConnectionTextLayout::Floating;
@@ -507,8 +502,8 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             ? appearance->GetGraphConnectionTextSize()
             : StackAppearance::kGraphConnectionTextSizeDefault;
         const bool textOutline = appearance && appearance->GetGraphConnectionTextOutline();
-        int labelLineCount = EditorNodeGraph::ConnectionPresentation::VisibleLineCount(
-            labelVisibility, m_Zoom, screenLength, interactionReveal);
+        const bool interactionReveal = labelsVisible;
+        int labelLineCount = labelsVisible ? 2 : 0;
 
         LinkTextContent linkText;
         const float labelFontSize = EditorNodeGraph::ConnectionPresentation::ConnectionTextSize(
@@ -594,8 +589,9 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                 for (const CachedRect& occupied : occupiedLabelRects) {
                     if (overlaps(rect, occupied, 4.0f)) return true;
                 }
-                for (const auto& nodeLayout : m_NodeLayoutCache) {
-                    if (overlaps(rect, nodeLayout.second.frameRect, 3.0f)) return true;
+                for (const CachedRect& nodeRect :
+                     m_VisibleNodeFrameRects) {
+                    if (overlaps(rect, nodeRect, 3.0f)) return true;
                 }
                 return false;
             };
@@ -642,7 +638,10 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                 occupiedLabelRects.push_back(combinedLabelRect);
                 m_LinkLabelHitRects[animationKey] = combinedLabelRect;
                 const ImVec2 mouse = ImGui::GetMousePos();
-                hovered = hovered || combinedLabelRect.Contains(mouse);
+                if (combinedLabelRect.Contains(mouse)) {
+                    hovered = true;
+                    hoveredLink = link;
+                }
             }
         }
 
@@ -665,9 +664,25 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             18.0f,
             11.0f);
         auto drawConnectionLabels = [&](ImU32 color) {
-            if (!drawLabels) return;
-            const ImU32 shadow = IM_COL32(0, 0, 0, 185);
-            auto drawText = [&](const ImVec2& center, const ImVec2& size, const char* text) {
+            if (!drawLabels ||
+                m_LinkLabelRevealAlpha <=
+                    EditorNodeGraph::ConnectionPresentation::kConnectionLabelRevealMinimumAlpha) {
+                return;
+            }
+            const ImU32 shadow = ScaleColorAlpha(
+                IM_COL32(0, 0, 0, 185),
+                m_LinkLabelRevealAlpha);
+            const ImU32 textColor = ScaleColorAlpha(color, m_LinkLabelRevealAlpha);
+            const ImU32 warningColor = ScaleColorAlpha(
+                IM_COL32(238, 180, 78, 255),
+                m_LinkLabelRevealAlpha);
+            const ImU32 errorColor = ScaleColorAlpha(
+                IM_COL32(244, 102, 94, 255),
+                m_LinkLabelRevealAlpha);
+            auto drawText = [&](const ImVec2& center,
+                                const ImVec2& size,
+                                ImU32 drawColor,
+                                const char* text) {
                 if (textOutline) {
                     const ImVec2 offsets[] = {
                         ImVec2(labelTangent.x, labelTangent.y),
@@ -694,12 +709,22 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                     center,
                     size,
                     labelAngle,
-                    color,
+                    drawColor,
                     text);
             };
-            drawText(primaryCenter, primarySize, linkText.primary.c_str());
+            drawText(primaryCenter, primarySize, textColor, linkText.primary.c_str());
             if (labelLineCount > 1) {
-                drawText(secondaryCenter, secondarySize, linkText.secondary.c_str());
+                const ImU32 secondaryColor =
+                    linkText.attention == EditorNodeGraph::WireReadout::Attention::Error
+                        ? errorColor
+                        : linkText.attention == EditorNodeGraph::WireReadout::Attention::Warning
+                            ? warningColor
+                            : textColor;
+                drawText(
+                    secondaryCenter,
+                    secondarySize,
+                    secondaryColor,
+                    linkText.secondary.c_str());
             }
         };
         auto drawDelayedWireDetail = [&]() {
@@ -808,6 +833,12 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
         drawConnectionLabels(LinkColorClassic(visualStyle, selected));
         drawDelayedWireDetail();
     }
+    if (!m_MiddlePanCaptureActive && IsGraphCanvasHovered()) {
+        CacheLinkHitTest(
+            graph,
+            ToGraphVec2(ImGui::GetMousePos()),
+            hoveredLink);
+    }
     PruneAnimatedState(m_LinkEmphasisAnim, activeLinkKeys);
 }
 
@@ -854,7 +885,9 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
         ImVec2(p2.x - handle, p2.y),
         p2,
         dragColor,
-        std::max(0.35f, (hoveredInputConnectable ? (2.8f + dragPulse * 0.45f) : 2.5f) * NodeUiScaleFromZoom(m_Zoom)),
+        (hoveredInputConnectable
+            ? (2.8f + dragPulse * 0.45f)
+            : 2.5f) * NodeUiScaleFromZoom(m_Zoom),
         visualStyle.dotted,
         straightLinks,
         fadeMin,
@@ -862,7 +895,7 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
         edgeFadeDistance);
     drawList->AddCircleFilled(
         sourcePin,
-        std::max(2.0f, NodePinRadius() * (1.15f + dragPulse * 0.10f)),
+        NodePinRadius() * (1.15f + dragPulse * 0.10f),
         graphStyle.enabled
             ? ColorWithAlpha(graphStyle.selected, 0.32f + dragPulse * 0.12f)
             : ApplyStyleAlpha(IM_COL32(220, 232, 242, 165)),
@@ -874,12 +907,12 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
             : ImGui::GetMousePos();
         drawList->AddCircle(
             targetPin,
-            std::max(4.0f, NodePinRadius() * (1.55f + dragPulse * 0.24f)),
+            NodePinRadius() * (1.55f + dragPulse * 0.24f),
             graphStyle.enabled
                 ? ColorWithAlpha(graphStyle.selected, 0.46f + dragPulse * 0.18f)
                 : ApplyStyleAlpha(IM_COL32(220, 232, 242, 220)),
             22,
-            std::max(0.9f, 1.2f * NodeUiScaleFromZoom(m_Zoom)));
+            1.2f * NodeUiScaleFromZoom(m_Zoom));
     }
 }
 
@@ -926,7 +959,9 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
         ImVec2(p2.x - handle, p2.y),
         p2,
         dragColor,
-        std::max(0.35f, (hoveredOutputConnectable ? (2.8f + dragPulse * 0.45f) : 2.5f) * NodeUiScaleFromZoom(m_Zoom)),
+        (hoveredOutputConnectable
+            ? (2.8f + dragPulse * 0.45f)
+            : 2.5f) * NodeUiScaleFromZoom(m_Zoom),
         visualStyle.dotted,
         straightLinks,
         fadeMin,
@@ -934,7 +969,7 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
         edgeFadeDistance);
     drawList->AddCircleFilled(
         targetPin,
-        std::max(2.0f, NodePinRadius() * (1.15f + dragPulse * 0.10f)),
+        NodePinRadius() * (1.15f + dragPulse * 0.10f),
         graphStyle.enabled
             ? ColorWithAlpha(graphStyle.selected, 0.32f + dragPulse * 0.12f)
             : ApplyStyleAlpha(IM_COL32(220, 232, 242, 165)),
@@ -946,12 +981,12 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
             : ImGui::GetMousePos();
         drawList->AddCircle(
             sourcePin,
-            std::max(4.0f, NodePinRadius() * (1.55f + dragPulse * 0.24f)),
+            NodePinRadius() * (1.55f + dragPulse * 0.24f),
             graphStyle.enabled
                 ? ColorWithAlpha(graphStyle.selected, 0.46f + dragPulse * 0.18f)
                 : ApplyStyleAlpha(IM_COL32(220, 232, 242, 220)),
             22,
-            std::max(0.9f, 1.2f * NodeUiScaleFromZoom(m_Zoom)));
+            1.2f * NodeUiScaleFromZoom(m_Zoom));
     }
 }
 
@@ -1022,8 +1057,8 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
                 minPos,
                 maxPos,
                 ColorWithAlpha(isDragged || isResized ? graphStyle.selected : graphStyle.spotlightHalo, 0.08f + emphasis * 0.16f),
-                std::max(10.0f, 12.0f * m_Zoom + emphasis * 6.0f),
-                std::max(0.9f, (0.95f + emphasis * 0.70f) * m_Zoom),
+                (12.0f + emphasis * 6.0f) * m_Zoom,
+                (0.95f + emphasis * 0.70f) * m_Zoom,
                 2.8f);
         }
 
@@ -1033,7 +1068,13 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
         ImVec2 headerMax = ImVec2(maxPos.x, minPos.y + 28.0f * m_Zoom);
         drawList->AddRectFilled(headerMin, headerMax, headerColor, rounding, ImDrawFlags_RoundCornersTop);
 
-        drawList->AddRect(minPos, maxPos, borderColor, rounding, 0, std::max(1.0f, 2.0f * m_Zoom));
+        drawList->AddRect(
+            minPos,
+            maxPos,
+            borderColor,
+            rounding,
+            0,
+            2.0f * m_Zoom);
 
         if (isHovered || isResized || emphasis > 0.20f) {
             drawList->AddTriangleFilled(

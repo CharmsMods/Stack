@@ -29,37 +29,50 @@ void LibraryModule::RenderTagsDrawer(
     bool wallpaperSurfaces,
     const StackAppearance::RuntimeSurfacePalette& surfacePalette,
     float dt) {
-    ImVec2 gridPos = ImGui::GetWindowPos();
-    ImVec2 gridSize = ImGui::GetWindowSize();
-    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    (void)appearance;
+    const ImVec2 gridPos = ImGui::GetWindowPos();
+    const ImVec2 gridSize = ImGui::GetWindowSize();
+    const ImVec2 mousePos = ImGui::GetIO().MousePos;
     const float mainViewportLeft = ImGui::GetMainViewport()->Pos.x;
+    const auto allTags = TagManager::Get().GetAllKnownTags();
 
-    bool hoveringTagsPanel = false;
-    if (!m_FilterPanelExpanded) {
-        if (mousePos.x >= mainViewportLeft && mousePos.x <= gridPos.x + 15.0f &&
-            mousePos.y >= gridPos.y && mousePos.y <= gridPos.y + gridSize.y) {
-            hoveringTagsPanel = true;
-        }
-    } else {
-        if (mousePos.x >= mainViewportLeft && mousePos.x <= gridPos.x + m_FilterPanelWidthAnim + 15.0f &&
-            mousePos.y >= gridPos.y && mousePos.y <= gridPos.y + gridSize.y) {
-            hoveringTagsPanel = true;
-        }
-    }
+    constexpr float panelWidth = 242.0f;
+    const float desiredHeight = 142.0f +
+        static_cast<float>(std::min<std::size_t>(allTags.size(), 8u)) * 27.0f;
+    const float panelHeight = std::clamp(
+        desiredHeight,
+        176.0f,
+        std::max(176.0f, std::min(390.0f, gridSize.y - 32.0f)));
+    const ImVec2 panelOrigin(
+        gridPos.x + 10.0f,
+        gridPos.y + (gridSize.y - panelHeight) * 0.5f);
+
+    const bool pointerOnEdge =
+        mousePos.x >= mainViewportLeft && mousePos.x <= gridPos.x + 15.0f &&
+        mousePos.y >= gridPos.y && mousePos.y <= gridPos.y + gridSize.y;
+    const bool pointerOverPanel = m_FilterPanelExpanded &&
+        mousePos.x >= panelOrigin.x - 10.0f &&
+        mousePos.x <= panelOrigin.x + panelWidth + 12.0f &&
+        mousePos.y >= panelOrigin.y - 10.0f &&
+        mousePos.y <= panelOrigin.y + panelHeight + 10.0f;
+    bool hoveringTagsPanel = pointerOnEdge || pointerOverPanel;
 
     if (ImGui::IsDragDropActive()) {
         hoveringTagsPanel = true;
     }
 
-    m_FilterPanelExpanded = hoveringTagsPanel;
+    if (hoveringTagsPanel) {
+        m_FilterPanelHoverGrace = 0.28f;
+    } else {
+        m_FilterPanelHoverGrace = std::max(0.0f, m_FilterPanelHoverGrace - dt);
+    }
+    m_FilterPanelExpanded = hoveringTagsPanel || m_FilterPanelHoverGrace > 0.0f;
 
-    // Keep the entire control column inside the opaque part of the drawer.
-    // The old 220 px width included the 60 px fade, which made combos and
-    // inputs look truncated as the library grid showed through their right edge.
-    const float tagsPanelTargetWidth = m_FilterPanelExpanded ? 280.0f : 0.0f;
-    m_FilterPanelWidthAnim += (tagsPanelTargetWidth - m_FilterPanelWidthAnim) * dt * 10.0f;
-    if (std::abs(m_FilterPanelWidthAnim - tagsPanelTargetWidth) < 0.1f) {
-        m_FilterPanelWidthAnim = tagsPanelTargetWidth;
+    const float targetWidth = m_FilterPanelExpanded ? panelWidth : 0.0f;
+    m_FilterPanelWidthAnim += (targetWidth - m_FilterPanelWidthAnim) *
+        std::min(1.0f, dt * 13.0f);
+    if (std::abs(m_FilterPanelWidthAnim - targetWidth) < 0.1f) {
+        m_FilterPanelWidthAnim = targetWidth;
     }
 
     if (m_FilterPanelWidthAnim <= 0.1f) {
@@ -67,55 +80,49 @@ void LibraryModule::RenderTagsDrawer(
     }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const ImVec2 panelMin = gridPos;
-
-    const float gradientWidth = std::min(60.0f, m_FilterPanelWidthAnim);
-    const float solidWidth = m_FilterPanelWidthAnim - gradientWidth;
+    const ImVec2 panelMin = panelOrigin;
+    const ImVec2 panelMax(
+        panelOrigin.x + m_FilterPanelWidthAnim,
+        panelOrigin.y + panelHeight);
     ImVec4 colBgOpaqueVec = surfacePalette.drawerSurface;
-    ImU32 colBgOpaque = 0;
-    ImU32 colBgTrans = 0;
     if (wallpaperSurfaces) {
-        colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
-        colBgTrans = ImGui::ColorConvertFloat4ToU32(surfacePalette.drawerSurfaceTransparent);
+        colBgOpaqueVec.w = std::max(colBgOpaqueVec.w, 0.92f);
     } else {
-        ImVec4 workspaceColor = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
-        const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
-        const bool isLightBg = luminance >= 0.5f;
-        colBgOpaqueVec = workspaceColor;
-        colBgOpaqueVec.w = isLightBg ? 0.95f : 0.93f;
-        colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
-        ImVec4 colBgTransVec = workspaceColor;
-        colBgTransVec.w = 0.0f;
-        colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
+        colBgOpaqueVec = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+        colBgOpaqueVec.w = 0.96f;
     }
-    const ImU32 colTitleText = ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_Text));
-
-    if (solidWidth > 0.0f) {
-        drawList->AddRectFilled(panelMin, ImVec2(gridPos.x + solidWidth, gridPos.y + gridSize.y), colBgOpaque);
+    const float reveal = std::clamp(m_FilterPanelWidthAnim / panelWidth, 0.0f, 1.0f);
+    for (int layer = 3; layer >= 1; --layer) {
+        const float spread = static_cast<float>(layer) * 5.0f;
+        drawList->AddRectFilled(
+            ImVec2(panelMin.x - spread, panelMin.y - spread),
+            ImVec2(panelMax.x + spread, panelMax.y + spread),
+            IM_COL32(0, 0, 0, static_cast<int>(7.0f * reveal)),
+            14.0f + spread);
     }
-    drawList->AddRectFilledMultiColor(
-        ImVec2(gridPos.x + solidWidth, gridPos.y),
-        ImVec2(gridPos.x + m_FilterPanelWidthAnim, gridPos.y + gridSize.y),
-        colBgOpaque,
-        colBgTrans,
-        colBgTrans,
-        colBgOpaque);
+    colBgOpaqueVec.w *= reveal;
+    drawList->AddRectFilled(
+        panelMin,
+        panelMax,
+        ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec),
+        12.0f);
 
-    const float contentWidth = m_FilterPanelWidthAnim - 40.0f;
-    if (contentWidth <= 1.0f) {
+    const float contentWidth = m_FilterPanelWidthAnim - 28.0f;
+    if (contentWidth <= 120.0f) {
         return;
     }
 
-    ImGui::SetCursorScreenPos(ImVec2(gridPos.x + 16.0f, gridPos.y + 24.0f));
-    if (wallpaperSurfaces) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    }
-    ImGui::BeginChild("LibraryTagsDrawer", ImVec2(contentWidth, gridSize.y - 48.0f), false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorScreenPos(ImVec2(panelOrigin.x + 14.0f, panelOrigin.y + 13.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(7.0f, 5.0f));
+    ImGui::BeginChild(
+        "LibraryTagsDrawer",
+        ImVec2(contentWidth, panelHeight - 26.0f),
+        false,
+        ImGuiWindowFlags_None);
 
-    ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
-    ImGui::TextUnformatted("LIBRARY FILTERS");
-    ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    ImGui::TextUnformatted("Filters");
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
     auto& currentSelection = m_ShowAssets ? m_SelectedAssets : m_SelectedProjects;
     const bool hasSelectionForTagging = !currentSelection.empty();
@@ -139,8 +146,6 @@ void LibraryModule::RenderTagsDrawer(
         return true;
     };
 
-    auto allTags = TagManager::Get().GetAllKnownTags();
-
     bool noTagFilter = m_FilterNoTag;
     if (ImGui::Checkbox("Untagged only", &noTagFilter)) {
         m_FilterNoTag = noTagFilter;
@@ -163,13 +168,17 @@ void LibraryModule::RenderTagsDrawer(
     }
 
     if (!m_ActiveTagFilters.empty() || m_FilterNoTag) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         if (ImGui::SmallButton("Clear Filters")) {
             m_ActiveTagFilters.clear();
             m_FilterNoTag = false;
         }
+        ImGui::PopStyleColor(3);
     }
 
-    ImGui::Spacing();
+    ImGui::Dummy(ImVec2(0.0f, 5.0f));
     const bool tagReady = hasSelectionForTagging && (m_AddTagBuffer[0] != '\0');
     if (tagReady) {
         if (wallpaperSurfaces) {
@@ -183,13 +192,15 @@ void LibraryModule::RenderTagsDrawer(
             ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(82, 184, 102, 116));
         }
     }
-    ImGui::SetNextItemWidth(-14.0f);
+    ImGui::BeginDisabled(!hasSelectionForTagging);
+    ImGui::SetNextItemWidth(-1.0f);
     const bool submittedTag = ImGui::InputTextWithHint(
         "##addtag",
-        "New tag...",
+        hasSelectionForTagging ? "Tag selected..." : "Select items to tag",
         m_AddTagBuffer,
         sizeof(m_AddTagBuffer),
         ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::EndDisabled();
     if (tagReady) {
         ImGui::PopStyleColor(3);
     }
@@ -197,27 +208,7 @@ void LibraryModule::RenderTagsDrawer(
         applyTagToSelection();
     }
 
-    ImGui::Dummy(ImVec2(0.0f, 16.0f));
-    ImGui::SeparatorText("Theme");
-    if (appearance != nullptr) {
-        const std::string activePresetId = appearance->GetActivePresetId();
-        const StackAppearance::ThemeDefinition* activePreset = appearance->GetActivePreset();
-        const std::string currentPresetName = activePreset ? activePreset->displayName : "Custom";
-        ImGui::SetNextItemWidth(-14.0f);
-        if (ImGui::BeginCombo("##LibraryThemePresetCombo", currentPresetName.c_str())) {
-            for (const auto& preset : appearance->GetFactoryThemes()) {
-                const bool selected = activePresetId == preset.id;
-                if (ImGui::Selectable(preset.displayName.c_str(), selected)) {
-                    appearance->SelectPresetById(preset.id);
-                    appearance->ApplyCurrentTheme(ImGui::GetIO(), ImGui::GetStyle());
-                }
-            }
-            ImGui::EndCombo();
-        }
-    }
-
     ImGui::EndChild();
-    if (wallpaperSurfaces) {
-        ImGui::PopStyleColor();
-    }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
 }

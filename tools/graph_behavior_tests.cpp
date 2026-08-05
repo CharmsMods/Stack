@@ -3,29 +3,41 @@
 #include "Async/TaskSystem.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/GraphCapture.h"
+#include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Editor/NodeGraph/Serialization/EditorNodeGraphCustomMaskSerialization.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Editor/RawWorkspaceAutoBaseState.h"
+#include "Editor/RawLocalRangeTargetInteraction.h"
 #include "Editor/Timeline/TimelineAnimation.h"
 #include "Editor/Timeline/TimelineFrameProducer.h"
 #include "Editor/Timeline/TimelinePersistence.h"
 #include "Editor/Timeline/TimelinePlayback.h"
 #include "Library/LibraryManager.h"
 #include "MFSR/MFSRTypes.h"
+#include "NodeMath/ChannelImageSemantics.h"
+#include "NodeMath/DescriptorSerialization.h"
 #include "Raw/RawAutoBase.h"
 #include "Raw/RawAutoStartPoint.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawImageAnalysis.h"
 #include "Raw/RawLoader.h"
+#include "Raw/RawRestormerAdapter.h"
+#include "Raw/RawTechnicalEvidence.h"
 #include "Raw/RawWorkspace.h"
 #include "Raw/RawWorkspaceManagedGraph.h"
 #include "Renderer/RawPreviewProxy.h"
+#include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/RenderTiling.h"
+#include "Restormer/RestormerPackage.h"
+#include "Restormer/RestormerProtocol.h"
+#include "Restormer/RestormerTiling.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/PixelBufferUtils.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "ThirdParty/stb_image_write.h"
@@ -39,6 +51,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -73,6 +86,152 @@ void Require(bool condition, const char* message) {
     }
 }
 
+void TestEditorRenderWorkerGenerationScheduling() {
+    using namespace Stack::EditorRenderScheduling;
+
+    Require(
+        AcceptSubmission(12, false, 10, 12),
+        "render worker should accept a same-generation follow-up request");
+    Require(
+        !AcceptSubmission(11, false, 10, 12),
+        "render worker should reject an older request after a newer submission");
+    Require(
+        !AcceptSubmission(9, false, 10, 9),
+        "render worker should reject an explicitly invalidated request");
+    Require(
+        !AcceptSubmission(13, true, 10, 12),
+        "render worker should reject submissions after shutdown starts");
+
+    Require(
+        DiscardCompletedResult(11, false, 10, 12, false),
+        "render worker should discard a result superseded while it rendered");
+    Require(
+        !DiscardCompletedResult(11, false, 10, 12, true),
+        "render worker should preserve a stale RAW cancellation acknowledgment");
+    Require(
+        DiscardCompletedResult(12, true, 10, 12, true),
+        "render worker should discard all results once shutdown starts");
+    Require(
+        !DiscardCompletedResult(12, false, 10, 12, false),
+        "render worker should publish the latest completed generation");
+
+    std::uint64_t invalidBeforeGeneration = 12;
+    std::uint64_t latestSubmittedGeneration = 12;
+    for (std::uint64_t generation = 13; generation <= 2048; ++generation) {
+        Require(
+            AcceptSubmission(
+                generation,
+                false,
+                invalidBeforeGeneration,
+                latestSubmittedGeneration),
+            "render worker should accept every monotonically newer generation");
+        latestSubmittedGeneration = generation;
+        Require(
+            !AcceptSubmission(
+                generation - 1,
+                false,
+                invalidBeforeGeneration,
+                latestSubmittedGeneration),
+            "rapid render submission should never re-admit the previous generation");
+        Require(
+            DiscardCompletedResult(
+                generation - 1,
+                false,
+                invalidBeforeGeneration,
+                latestSubmittedGeneration,
+                false),
+            "rapid render completion should discard every superseded image result");
+        Require(
+            !DiscardCompletedResult(
+                generation,
+                false,
+                invalidBeforeGeneration,
+                latestSubmittedGeneration,
+                false),
+            "rapid render completion should retain only the latest image result");
+
+        if ((generation % 31u) == 0u) {
+            invalidBeforeGeneration = generation;
+            Require(
+                !AcceptSubmission(
+                    generation - 1,
+                    false,
+                    invalidBeforeGeneration,
+                    latestSubmittedGeneration),
+                "explicit invalidation should reject an in-flight pre-transition generation");
+        }
+    }
+}
+
+void TestPixelBufferLayoutGuards() {
+    std::size_t byteCount = 0;
+    Require(
+        Stack::PixelBuffer::TryComputePixelByteCount(8, 8, 4, byteCount) &&
+            byteCount == 256,
+        "pixel byte count should accept ordinary RGBA layouts");
+    Require(
+        !Stack::PixelBuffer::TryComputePixelByteCount(0, 8, 4, byteCount) &&
+            byteCount == 0,
+        "pixel byte count should reject zero dimensions");
+    Require(
+        !Stack::PixelBuffer::TryComputePixelByteCount(-1, 8, 4, byteCount) &&
+            byteCount == 0,
+        "pixel byte count should reject negative dimensions");
+    Require(
+        !Stack::PixelBuffer::HasCompletePixelBuffer(255, 8, 8, 4),
+        "pixel buffer validation should reject truncated RGBA payloads");
+    Require(
+        Stack::PixelBuffer::HasCompletePixelBuffer(256, 8, 8, 4),
+        "pixel buffer validation should accept complete RGBA payloads");
+    Require(
+        !Stack::PixelBuffer::HasCompletePixelBuffer(320, 8, 8, 5),
+        "pixel buffer validation should reject unsupported channel counts");
+
+    const std::vector<unsigned char> placeholder =
+        Stack::PixelBuffer::BuildTransparentRgbaPixels(8, 8);
+    Require(
+        placeholder.size() == 256 &&
+            std::all_of(
+                placeholder.begin(),
+                placeholder.end(),
+                [](unsigned char value) { return value == 0; }),
+        "transparent placeholder should contain a complete zeroed RGBA image");
+    Require(
+        Stack::PixelBuffer::BuildTransparentRgbaPixels(32768, 32768).empty(),
+        "oversized transparent placeholder should fail without allocating");
+
+    const std::vector<unsigned char> rotationSource { 0, 1, 2, 3, 4, 5 };
+    int rotatedWidth = 0;
+    int rotatedHeight = 0;
+    const std::vector<unsigned char> rotated =
+        Stack::PixelBuffer::RotateInterleavedQuarterTurnsClockwise(
+            rotationSource,
+            2,
+            3,
+            1,
+            1,
+            rotatedWidth,
+            rotatedHeight);
+    Require(
+        rotatedWidth == 3 && rotatedHeight == 2 &&
+            rotated == std::vector<unsigned char>({ 1, 3, 5, 0, 2, 4 }),
+        "checked pixel rotation should preserve the authored clockwise mapping");
+
+    const std::vector<unsigned char> rejectedRotation =
+        Stack::PixelBuffer::RotateInterleavedQuarterTurnsClockwise(
+            std::vector<unsigned char>({ 0, 1, 2 }),
+            2,
+            2,
+            1,
+            1,
+            rotatedWidth,
+            rotatedHeight);
+    Require(
+        rejectedRotation.empty() &&
+            rotatedWidth == 0 && rotatedHeight == 0,
+        "checked pixel rotation should reject truncated input");
+}
+
 class SerializedLayerFixture : public LayerBase {
 public:
     explicit SerializedLayerFixture(nlohmann::json value)
@@ -93,17 +252,21 @@ private:
 } // namespace
 
 void LibraryManager::FlipImageRowsInPlace(std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    if (width <= 0 || height <= 1 || channels <= 0) {
+    if (height <= 1 ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            pixels.size(), width, height, channels)) {
         return;
     }
-    const int rowBytes = width * channels;
-    if (static_cast<int>(pixels.size()) < rowBytes * height) {
+    std::size_t rowBytes = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            width, 1, channels, rowBytes)) {
         return;
     }
-    std::vector<unsigned char> scratch(static_cast<std::size_t>(rowBytes));
+    std::vector<unsigned char> scratch(rowBytes);
     for (int y = 0; y < height / 2; ++y) {
-        unsigned char* top = pixels.data() + static_cast<std::size_t>(y * rowBytes);
-        unsigned char* bottom = pixels.data() + static_cast<std::size_t>((height - 1 - y) * rowBytes);
+        unsigned char* top = pixels.data() + static_cast<std::size_t>(y) * rowBytes;
+        unsigned char* bottom =
+            pixels.data() + static_cast<std::size_t>(height - 1 - y) * rowBytes;
         std::copy(top, top + rowBytes, scratch.begin());
         std::copy(bottom, bottom + rowBytes, top);
         std::copy(scratch.begin(), scratch.end(), bottom);
@@ -184,6 +347,46 @@ void TestImagePayloadPreviewIsBounded() {
         "image preview should allocate exactly its bounded dimensions");
     Require(previewPixels[3] == 173, "image preview should preserve sampled alpha");
     Require(sourcePixels[0] == 19, "image preview generation must not mutate render-source pixels");
+
+    previewPixels.assign(1, 99);
+    previewWidth = 12;
+    previewHeight = 12;
+    previewChannels = 4;
+    EditorNodeGraph::BuildImagePayloadPreview(
+        std::vector<unsigned char>(15, 0),
+        4,
+        4,
+        4,
+        previewPixels,
+        previewWidth,
+        previewHeight,
+        previewChannels,
+        2);
+    Require(
+        previewPixels.empty() && previewWidth == 0 &&
+            previewHeight == 0 && previewChannels == 0,
+        "image preview should reject a truncated source payload");
+
+    EditorNodeGraph::BuildImagePayloadPreview(
+        std::vector<unsigned char>(20, 0),
+        2,
+        2,
+        5,
+        previewPixels,
+        previewWidth,
+        previewHeight,
+        previewChannels,
+        1);
+    Require(
+        previewPixels.empty() && previewChannels == 0,
+        "image preview should reject unsupported channel counts");
+    Require(
+        EditorNodeGraph::EncodeImagePayloadPngForStorage(
+            std::vector<unsigned char>(15, 0),
+            4,
+            1,
+            4).empty(),
+        "PNG serialization should reject a truncated source payload");
 }
 
 void TestInteractiveTaskPriorityRunsBeforeBlockedBackgroundWork() {
@@ -240,6 +443,74 @@ void TestInteractiveTaskPriorityRunsBeforeBlockedBackgroundWork() {
     Require(highPriorityRanBeforeRelease,
         "interactive task should run while ordinary background work occupies the normal worker pool");
     Require(backgroundReleasedCleanly, "blocked background tasks should drain after release");
+}
+
+void TestTaskSystemShutdownJoinsRunningWorkAndDiscardsCompletions() {
+    Async::TaskSystem& tasks = Async::TaskSystem::Get();
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool taskStarted = false;
+    bool releaseTask = false;
+    bool taskFinished = false;
+    bool mainCompletionRan = false;
+
+    Require(tasks.SubmitHighPriority([&]() {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            taskStarted = true;
+            condition.notify_all();
+            condition.wait(lock, [&]() { return releaseTask; });
+        }
+        taskFinished = true;
+        Async::TaskSystem::Get().PostToMain([&]() {
+            mainCompletionRan = true;
+        });
+    }), "task-system shutdown test task should be accepted");
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        Require(
+            condition.wait_for(lock, std::chrono::seconds(1), [&]() { return taskStarted; }),
+            "task-system shutdown test task should start");
+    }
+    Require(!tasks.IsDrainedForShutdown(),
+        "running task must be visible to the shutdown drain check");
+
+    std::thread releaser([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            releaseTask = true;
+        }
+        condition.notify_all();
+    });
+    tasks.RequestStopDiscardQueued();
+    Require(!tasks.Submit([]() {}),
+        "task submission should report rejection after shutdown begins");
+    Require(!tasks.SubmitHighPriority({}) && !tasks.PostToMain({}),
+        "empty task submissions should report rejection");
+    tasks.Shutdown();
+    releaser.join();
+
+    Require(taskFinished, "task-system shutdown must join already-running work");
+    tasks.PumpMainThreadTasks();
+    Require(!mainCompletionRan,
+        "task-system shutdown must discard completions from canceled module work");
+
+    std::atomic<bool> restartedTaskRan { false };
+    Require(tasks.SubmitHighPriority([&]() {
+        restartedTaskRan.store(true, std::memory_order_release);
+        condition.notify_all();
+    }), "task system should accept work after restart");
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        Require(
+            condition.wait_for(lock, std::chrono::seconds(1), [&]() {
+                return restartedTaskRan.load(std::memory_order_acquire);
+            }),
+            "task system should restart cleanly after shutdown");
+    }
+    tasks.Shutdown();
 }
 
 std::string WriteTempTextFile(const std::string& stem, const std::string& extension, const std::string& contents) {
@@ -396,6 +667,111 @@ void TestChannelAverageStaysScalarThroughContrastMaskWorkflow() {
         "Brightness mask should link directly from Contrast with no Luminance Mask node");
 }
 
+void TestChannelRoleConnectsDirectlyToMaskInputs() {
+    using namespace EditorNodeGraph;
+
+    Graph graph;
+    const int imageId = NodeId(
+        graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
+    const int splitId = NodeId(
+        graph.AddChannelSplitNode({ 200.0f, 120.0f }));
+    const int contrastId = NodeId(
+        graph.AddLayerNode(LayerType::Contrast, 0, { 400.0f, 0.0f }));
+    const int outputId = NodeId(
+        graph.AddOutputNode({ 620.0f, 0.0f }, true));
+
+    std::string error;
+    Require(
+        graph.TryConnectSockets(
+            imageId,
+            kImageOutputSocketId,
+            splitId,
+            kImageInputSocketId,
+            &error) &&
+        graph.TryConnectSockets(
+            imageId,
+            kImageOutputSocketId,
+            contrastId,
+            kImageInputSocketId,
+            &error),
+        "the Channel-to-Mask regression fixture should connect its image paths");
+    Require(
+        graph.CanConnectSockets(
+            splitId,
+            "r",
+            contrastId,
+            kMaskInputSocketId,
+            nullptr,
+            &error),
+        "a Channel Split red Channel should be accepted by Contrast's Mask input");
+    Require(
+        graph.TryConnectSockets(
+            splitId,
+            "r",
+            contrastId,
+            kMaskInputSocketId,
+            &error) &&
+        graph.TryConnectSockets(
+            contrastId,
+            kImageOutputSocketId,
+            outputId,
+            kImageInputSocketId,
+            &error),
+        error.empty()
+            ? "the red Channel should author as Contrast's Mask"
+            : error.c_str());
+
+    const Link* maskLink = graph.FindInputLink(
+        contrastId,
+        kMaskInputSocketId);
+    Require(
+        maskLink &&
+        maskLink->fromNodeId == splitId &&
+        maskLink->fromSocketId == "r" &&
+        graph.IsRenderLink(*maskLink),
+        "the accepted Channel-role link should participate in renderer scheduling");
+    Require(
+        graph.IsOutputConnected() && graph.Validate().valid,
+        "the authored Image -> Split R -> Contrast Mask graph should be valid and complete");
+
+    const nlohmann::json saved = SerializeGraphPayload(
+        nlohmann::json::array({
+            {
+                { "type", "Contrast" },
+                { "contrast", 0.0f }
+            }
+        }),
+        graph);
+    Graph restored;
+    DeserializeGraphPayload(saved, restored, 1, {}, 0, 0, 0);
+    const Link* restoredMaskLink = restored.FindInputLink(
+        contrastId,
+        kMaskInputSocketId);
+    Require(
+        restoredMaskLink &&
+        restoredMaskLink->fromNodeId == splitId &&
+        restoredMaskLink->fromSocketId == "r" &&
+        restored.IsRenderLink(*restoredMaskLink) &&
+        restored.IsOutputConnected() &&
+        restored.Validate().valid,
+        "the Channel-to-Mask link should remain valid and renderable after save/reload");
+
+    const int incompatibleSplitId = NodeId(
+        restored.AddChannelSplitNode({ 820.0f, 120.0f }));
+    error.clear();
+    Require(
+        !restored.CanConnectSockets(
+            splitId,
+            "r",
+            incompatibleSplitId,
+            kImageInputSocketId,
+            nullptr,
+            &error) &&
+        error.find("Channel") != std::string::npos &&
+        error.find("Frequency") == std::string::npos,
+        "an ordinary invalid Channel link should report Channel guidance, not a frequency error");
+}
+
 void TestToneCurveInheritsInputScenePath() {
     using namespace EditorNodeGraph;
 
@@ -437,6 +813,52 @@ void TestToneCurveInheritsInputScenePath() {
     const ScenePathInfo transformedRawPath = AnalyzeScenePath(rawGraph, viewTransformId);
     Require(transformedRawPath.sceneReferred && transformedRawPath.hasViewTransform,
         "View Transform should satisfy display mapping for a scene-referred Tone Curve path");
+
+    RawDevelopmentPayload rawDevelopmentPayload;
+    rawDevelopmentPayload.recipe =
+        Stack::RawRecipe::MakeDefaultRecipe("scene-path-test.dng");
+    Graph builtInViewGraph;
+    const int builtInRawId = NodeId(
+        builtInViewGraph.AddRawDevelopmentNode(
+            rawDevelopmentPayload,
+            { 0.0f, 0.0f }));
+    const int builtInFlipId = NodeId(
+        builtInViewGraph.AddLayerNode(
+            LayerType::Flip,
+            0,
+            { 220.0f, 0.0f }));
+    Require(builtInViewGraph.TryConnectSockets(
+                builtInRawId,
+                kImageOutputSocketId,
+                builtInFlipId,
+                kImageInputSocketId),
+        "RAW Development should feed Flip with its built-in View Transform enabled");
+    const ScenePathInfo builtInViewPath =
+        AnalyzeScenePath(builtInViewGraph, builtInFlipId);
+    Require(builtInViewPath.sceneReferred && builtInViewPath.hasViewTransform,
+        "RAW Development built-in View Transform should remain satisfied after Flip");
+
+    rawDevelopmentPayload.recipe.viewTransform.layerJson["enabled"] = false;
+    Graph externalViewGraph;
+    const int externalRawId = NodeId(
+        externalViewGraph.AddRawDevelopmentNode(
+            rawDevelopmentPayload,
+            { 0.0f, 0.0f }));
+    const int externalFlipId = NodeId(
+        externalViewGraph.AddLayerNode(
+            LayerType::Flip,
+            0,
+            { 220.0f, 0.0f }));
+    Require(externalViewGraph.TryConnectSockets(
+                externalRawId,
+                kImageOutputSocketId,
+                externalFlipId,
+                kImageInputSocketId),
+        "scene-linear RAW Development should feed Flip");
+    const ScenePathInfo externalViewPath =
+        AnalyzeScenePath(externalViewGraph, externalFlipId);
+    Require(externalViewPath.sceneReferred && !externalViewPath.hasViewTransform,
+        "disabling RAW Development View Transform should leave Flip scene-linear and require an external View Transform");
 }
 
 void TestFullImageStillCannotTargetScalarInput() {
@@ -473,19 +895,261 @@ void TestOutputChannelNormalization() {
     Graph graph;
     const int imageId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
     const int splitId = NodeId(graph.AddChannelSplitNode({ 220.0f, 0.0f }));
+    const int maskId = NodeId(graph.AddMaskGeneratorNode(
+        MaskGeneratorKind::Solid, { 220.0f, 160.0f }));
     const int outputId = NodeId(graph.AddOutputNode({ 440.0f, 0.0f }, true));
+    const int lutId = NodeId(graph.AddLutNode({}, { 440.0f, 160.0f }));
 
     Require(graph.TryConnectSockets(imageId, kImageOutputSocketId, splitId, kImageInputSocketId),
         "image should connect to channel split input");
+    Require(graph.TryConnectSockets(imageId, kImageOutputSocketId, outputId, kImageInputSocketId),
+        "test setup should connect a full image to output");
 
     std::string normalized;
     Require(graph.CanConnectSockets(splitId, "r", outputId, kImageInputSocketId, &normalized),
-        "channel output should be accepted when dropped on full output input");
-    Require(normalized == "r", "channel output dropped on output image input should normalize to matching RGBA socket");
+        "Channel should be accepted by the stable Output Result input");
+    Require(normalized == kImageInputSocketId,
+        "Output Channel connections must remain on the stable Result input");
     Require(graph.TryConnectSockets(splitId, "r", outputId, kImageInputSocketId),
-        "channel output should connect to normalized RGBA output input");
-    Require(graph.HasLink(splitId, "r", outputId, "r"),
-        "normalized output channel link should be stored on the R socket");
+        "Channel should replace the previous Image on Output Result");
+    Require(graph.HasLink(
+            splitId,
+            "r",
+            outputId,
+            kImageInputSocketId),
+        "Output Channel link should be stored directly on Result");
+    Require(graph.IsOutputChannelInspection(outputId),
+        "Output should classify the connected Result as Channel inspection");
+    Require(!graph.CanConnectSockets(
+            maskId,
+            kMaskOutputSocketId,
+            outputId,
+            kImageInputSocketId),
+        "Mask must not enter the exact Image-or-Channel Output union");
+    SocketDefinition outputSocket;
+    Require(graph.FindSocket(
+            outputId,
+            kImageInputSocketId,
+            &outputSocket) &&
+            outputSocket.type == SocketType::ImageOrChannel &&
+            outputSocket.label == "Result · Image or Channel",
+        "Output v2 exposes one stable, explicitly labelled union socket");
+
+    Require(graph.TryConnectSockets(imageId, kImageOutputSocketId, lutId, kImageInputSocketId),
+        "test setup should connect a full image to LUT");
+    Require(graph.TryConnectSockets(splitId, "g", lutId, kImageInputSocketId),
+        "channel output should connect to a normalized LUT channel input");
+    Require(graph.HasLink(splitId, "g", lutId, "g"),
+        "normalized LUT channel link should be stored on the G socket");
+    Require(graph.FindInputLink(lutId, kImageInputSocketId) == nullptr,
+        "connecting a LUT channel should remove the mutually exclusive full-image input");
+}
+
+void TestOutputV2PersistenceAndLegacyMigration() {
+    using namespace EditorNodeGraph;
+    using Stack::NodeMath::OutputChannelViewMode;
+
+    Graph graph;
+    const int imageId = NodeId(
+        graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
+    const int splitId = NodeId(
+        graph.AddChannelSplitNode({ 220.0f, 0.0f }));
+    const int outputId = NodeId(
+        graph.AddOutputNode({ 440.0f, 0.0f }, true));
+    Require(
+        graph.TryConnectSockets(
+            imageId,
+            kImageOutputSocketId,
+            splitId,
+            kImageInputSocketId) &&
+        graph.TryConnectSockets(
+            splitId,
+            "g",
+            outputId,
+            kImageInputSocketId),
+        "Output v2 persistence fixture should connect");
+    graph.FindNode(outputId)->outputSettings.channelViewMode =
+        OutputChannelViewMode::Blue;
+
+    nlohmann::json saved =
+        SerializeGraphPayload(nlohmann::json::array(), graph);
+    Require(
+        saved["nodeGraph"].value("version", 0) == 8,
+        "Output v2 persistence advances the graph schema to 8");
+    Graph loaded;
+    DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+    const Node* loadedOutput = loaded.FindNode(outputId);
+    Require(
+        loadedOutput &&
+            loadedOutput->definitionResolved &&
+            loadedOutput->definitionVersion == "2.0.0" &&
+            loadedOutput->outputSettings.channelViewMode ==
+                OutputChannelViewMode::Blue &&
+            loaded.HasLink(
+                splitId,
+                "g",
+                outputId,
+                kImageInputSocketId),
+        "Output v2 mode and stable Channel link survive save/load");
+
+    nlohmann::json legacySingle = saved;
+    legacySingle["nodeGraph"]["version"] = 7;
+    for (nlohmann::json& node : legacySingle["nodeGraph"]["nodes"]) {
+        if (node.value("id", -1) == outputId) {
+            node["definition"]["version"] = "1.0.0";
+            node["definition"]["contentHash"] = std::string(64, '1');
+            node.erase("outputSettings");
+        }
+    }
+    for (nlohmann::json& link : legacySingle["nodeGraph"]["links"]) {
+        if (link.value("toNodeId", -1) == outputId) {
+            link["toSocket"] = "g";
+        }
+    }
+    Graph migratedSingle;
+    DeserializeGraphPayload(
+        legacySingle,
+        migratedSingle,
+        0,
+        {},
+        0,
+        0,
+        0);
+    const Node* migratedOutput = migratedSingle.FindNode(outputId);
+    Require(
+        migratedOutput &&
+            migratedOutput->definitionResolved &&
+            migratedOutput->definitionVersion == "2.0.0" &&
+            migratedOutput->outputSettings.channelViewMode ==
+                OutputChannelViewMode::Neutral &&
+            migratedSingle.HasLink(
+                splitId,
+                "g",
+                outputId,
+                kImageInputSocketId),
+        "one legacy Output component migrates unambiguously to Result with Neutral default");
+
+    nlohmann::json legacyMulti = legacySingle;
+    legacyMulti["nodeGraph"]["links"].push_back({
+        { "fromNodeId", splitId },
+        { "fromSocket", "r" },
+        { "toNodeId", outputId },
+        { "toSocket", "r" }
+    });
+    Graph migratedMulti;
+    DeserializeGraphPayload(
+        legacyMulti,
+        migratedMulti,
+        0,
+        {},
+        0,
+        0,
+        0);
+    const Node* unresolvedOutput = migratedMulti.FindNode(outputId);
+    int preservedLegacyLinks = 0;
+    for (const Link& link : migratedMulti.GetLinks()) {
+        if (link.toNodeId == outputId &&
+            (link.toSocketId == "r" || link.toSocketId == "g")) {
+            ++preservedLegacyLinks;
+        }
+    }
+    const std::string legacyMultiFailure =
+        "multi-component legacy Output is preserved but unresolved until explicit Image Combine "
+        "(output=" + std::to_string(unresolvedOutput != nullptr) +
+        ", resolved=" +
+        std::to_string(unresolvedOutput &&
+            unresolvedOutput->definitionResolved) +
+        ", legacyLinks=" + std::to_string(preservedLegacyLinks) +
+        ", stableInput=" +
+        std::to_string(
+            migratedMulti.FindInputLink(
+                outputId,
+                kImageInputSocketId) != nullptr) +
+        ")";
+    Require(
+        unresolvedOutput &&
+            !unresolvedOutput->definitionResolved &&
+            preservedLegacyLinks == 2 &&
+            migratedMulti.FindInputLink(
+                outputId,
+                kImageInputSocketId) == nullptr,
+        legacyMultiFailure.c_str());
+}
+
+void TestPartialImageComponentPresenceSurvivesGraphRoundTrip() {
+    using namespace EditorNodeGraph;
+    using namespace Stack::NodeMath;
+
+    Graph graph;
+    const int imageId = NodeId(
+        graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
+    const int splitId = NodeId(
+        graph.AddChannelSplitNode({ 220.0f, 0.0f }));
+    const int combineId = NodeId(
+        graph.AddChannelCombineNode({ 440.0f, 0.0f }));
+    const int outputId = NodeId(
+        graph.AddOutputNode({ 660.0f, 0.0f }, true));
+
+    Require(
+        graph.TryConnectSockets(
+            imageId,
+            kImageOutputSocketId,
+            splitId,
+            kImageInputSocketId) &&
+        graph.TryConnectSockets(splitId, "r", combineId, "r") &&
+        graph.TryConnectSockets(splitId, "b", combineId, "b") &&
+        graph.TryConnectSockets(
+            combineId,
+            kImageOutputSocketId,
+            outputId,
+            kImageInputSocketId),
+        "partial R+B Image graph should connect exactly");
+
+    const ImageComponentSet expected = MakeImageComponentSet({
+        ImageComponent::Red,
+        ImageComponent::Blue
+    });
+    const std::string expectedIdentity = DescriptorContentIdentity(
+        MakePartialColorImageDescriptor(
+            expected,
+            "image.combine.v2"));
+
+    const nlohmann::json saved =
+        SerializeGraphPayload(nlohmann::json::array(), graph);
+    Graph loaded;
+    DeserializeGraphPayload(saved, loaded, 0, {}, 0, 0, 0);
+
+    Require(
+        loaded.HasLink(splitId, "r", combineId, "r") &&
+        loaded.HasLink(splitId, "b", combineId, "b") &&
+        loaded.FindInputLink(combineId, "g") == nullptr &&
+        loaded.FindInputLink(combineId, "a") == nullptr,
+        "graph round trip should preserve connected R+B and absent G+A");
+
+    ImageComponentSet loadedComponents;
+    for (const Link& link : loaded.GetLinks()) {
+        if (link.toNodeId != combineId) {
+            continue;
+        }
+        if (link.toSocketId == "r") {
+            AddImageComponent(loadedComponents, ImageComponent::Red);
+        } else if (link.toSocketId == "g") {
+            AddImageComponent(loadedComponents, ImageComponent::Green);
+        } else if (link.toSocketId == "b") {
+            AddImageComponent(loadedComponents, ImageComponent::Blue);
+        } else if (link.toSocketId == "a") {
+            AddImageComponent(loadedComponents, ImageComponent::Alpha);
+        }
+    }
+    const ValueDescriptor loadedDescriptor =
+        MakePartialColorImageDescriptor(
+            loadedComponents,
+            "image.combine.v2");
+    Require(
+        loadedComponents == expected &&
+        ValidateDescriptor(loadedDescriptor).empty() &&
+        DescriptorContentIdentity(loadedDescriptor) == expectedIdentity,
+        "loaded topology should reproduce the exact partial-Image descriptor identity");
 }
 
 void TestCompletedChainsSplitSharedUpstreamAcrossOutputs() {
@@ -2141,8 +2805,12 @@ void TestCustomMaskConnections() {
         "custom mask should connect to layer mask inputs");
     Require(graph.TryConnectSockets(maskId, kMaskOutputSocketId, mixId, kMixFactorSocketId),
         "custom mask should connect to mix factor inputs");
-    Require(graph.TryConnectSockets(maskId, kMaskOutputSocketId, outputId, "a"),
-        "custom mask should connect to output RGBA channel pins");
+    Require(!graph.CanConnectSockets(
+            maskId,
+            kMaskOutputSocketId,
+            outputId,
+            kImageInputSocketId),
+        "custom mask should not enter the exact Image-or-Channel Output union");
     Require(!graph.CanConnectSockets(maskId, kMaskOutputSocketId, maskId, kMaskOutputSocketId),
         "custom mask should reject self-connections");
 }
@@ -2169,6 +2837,58 @@ void TestCustomMaskThroughMaskCombineExclude() {
         "exclude mask combine should preserve scalar stream classification");
     Require(graph.TryConnectSockets(combineId, kMaskOutputSocketId, previewId, kPreviewInputSocketId),
         "exclude mask combine should preview as a scalar output");
+}
+
+void TestCustomMaskSparseRasterPersistence() {
+    using namespace EditorNodeGraph;
+
+    CustomMaskPayload sparse;
+    sparse.width = kMaximumCustomMaskDimension;
+    sparse.height = kMaximumCustomMaskDimension;
+    const nlohmann::json encodedSparse = SerializeCustomMaskPayload(sparse);
+    const CustomMaskPayload restoredSparse =
+        DeserializeCustomMaskPayload(encodedSparse);
+    Require(
+        restoredSparse.width == kMaximumCustomMaskDimension &&
+        restoredSparse.height == kMaximumCustomMaskDimension &&
+        restoredSparse.rasterLayer.empty(),
+        "an all-zero custom mask should remain a sparse zero raster instead of "
+        "allocating a full maximum-size float canvas");
+
+    Graph graph;
+    Node* sparseNode = graph.AddCustomMaskNode(restoredSparse, { 0.0f, 0.0f });
+    Require(
+        sparseNode != nullptr && sparseNode->customMask.rasterLayer.empty(),
+        "adding a sparse custom mask should preserve its lazy zero raster");
+
+    CustomMaskPayload painted;
+    painted.width = 2;
+    painted.height = 2;
+    painted.rasterLayer = { 0.0f, 0.25f, 0.5f, 1.0f };
+    const CustomMaskPayload restoredPainted =
+        DeserializeCustomMaskPayload(SerializeCustomMaskPayload(painted));
+    Require(
+        restoredPainted.rasterLayer.size() == painted.rasterLayer.size(),
+        "a painted custom mask should retain its exact raster extent");
+    for (std::size_t index = 0;
+         index < restoredPainted.rasterLayer.size();
+         ++index) {
+        Require(
+            std::abs(
+                restoredPainted.rasterLayer[index] -
+                painted.rasterLayer[index]) <=
+                (1.0f / 65535.0f + 1.0e-7f),
+            "custom mask U16 persistence should preserve painted values");
+    }
+
+    nlohmann::json truncated = encodedSparse;
+    truncated["width"] = 4;
+    truncated["height"] = 4;
+    truncated["rasterLayer"] =
+        nlohmann::json::binary(std::vector<unsigned char>{ 0, 0 });
+    Require(
+        DeserializeCustomMaskPayload(truncated).rasterLayer.empty(),
+        "a truncated custom-mask raster should fail closed to sparse zero");
 }
 
 void TestManualRawBaselineChainShape() {
@@ -2505,6 +3225,15 @@ void TestRawWorkspaceJsonReadersTolerateNullOptionalFields() {
     state["schemaVersion"] = 1;
     state["lastWorkspaceRoot"] = nullptr;
     state["lastSelectedSource"] = nullptr;
+    state["rawLabWorkbenchHeight"] = nullptr;
+    state["rawLabToolRailWidth"] = "not-a-number";
+    state["rawLabLowerShelfHeight"] = nullptr;
+    state["rawLabLowerShelfOpen"] = 1;
+    state["rawLabFilmstripHeight"] = "not-a-number";
+    state["rawLabActiveTool"] = nullptr;
+    state["rawLabActivePointCurve"] = "not-an-index";
+    state["rawLabLastGalleryHost"] = nullptr;
+    state["rawLabGalleryDisplayMode"] = nullptr;
     state["recentWorkspaces"] = nlohmann::json::array({
         nullptr,
         7,
@@ -2522,6 +3251,82 @@ void TestRawWorkspaceJsonReadersTolerateNullOptionalFields() {
         "null selected source should load as empty");
     Require(loaded.recentWorkspaceRoots.size() == 1,
         "recent workspace loader should ignore null and non-string entries");
+    Require(loaded.rawLabWorkbenchHeight == 0.0f &&
+            loaded.rawLabToolRailWidth == 0.0f &&
+            loaded.rawLabLowerShelfHeight == 0.0f &&
+            !loaded.rawLabLowerShelfOpen &&
+            loaded.rawLabFilmstripHeight == 0.0f &&
+            loaded.rawLabActiveTool == 0 &&
+            loaded.rawLabActivePointCurve == 0 &&
+            loaded.rawLabLastGalleryHost == 1 &&
+            loaded.rawLabGalleryDisplayMode == 0,
+        "RAW Lab optional layout fields should retain safe defaults when missing or malformed");
+
+    loaded.rawLabWorkbenchHeight = 356.0f;
+    loaded.rawLabToolRailWidth = 364.0f;
+    loaded.rawLabLowerShelfHeight = 176.0f;
+    loaded.rawLabLowerShelfOpen = true;
+    loaded.rawLabFilmstripHeight = 148.0f;
+    loaded.rawLabActiveTool = 7;
+    loaded.rawLabActivePointCurve = 3;
+    loaded.rawLabLastGalleryHost = 3;
+    loaded.rawLabGalleryDisplayMode = 1;
+    Require(RawWorkspace::SaveAppState(statePath, loaded, &error),
+        "RAW Workspace should persist optional RAW Lab layout fields");
+    RawWorkspace::AppState reloaded;
+    Require(RawWorkspace::LoadAppState(statePath, reloaded, &error),
+        "RAW Workspace should reload optional RAW Lab layout fields");
+    Require(std::abs(reloaded.rawLabWorkbenchHeight - 356.0f) < 0.001f &&
+            std::abs(reloaded.rawLabToolRailWidth - 364.0f) < 0.001f &&
+            std::abs(reloaded.rawLabLowerShelfHeight - 176.0f) < 0.001f &&
+            reloaded.rawLabLowerShelfOpen &&
+            std::abs(reloaded.rawLabFilmstripHeight - 148.0f) < 0.001f &&
+            reloaded.rawLabActiveTool == 7 &&
+            reloaded.rawLabActivePointCurve == 3 &&
+            reloaded.rawLabLastGalleryHost == 3 &&
+            reloaded.rawLabGalleryDisplayMode == 1,
+        "RAW Lab tool, Gallery, and remembered dimensions should round-trip through app state");
+
+    for (int pass = 0; pass < 16; ++pass) {
+        for (int tool = 0; tool <= 7; ++tool) {
+            loaded.rawLabActiveTool = tool;
+            loaded.rawLabLowerShelfOpen = ((pass + tool) % 2) != 0;
+            Require(RawWorkspace::SaveAppState(statePath, loaded, &error),
+                "rapid RAW Lab tool switching should persist app state");
+            RawWorkspace::AppState toolReloaded;
+            Require(RawWorkspace::LoadAppState(statePath, toolReloaded, &error),
+                "rapid RAW Lab tool switching should reload app state");
+            Require(toolReloaded.rawLabActiveTool == tool &&
+                    toolReloaded.rawLabLowerShelfOpen == loaded.rawLabLowerShelfOpen,
+                "every RAW Lab tool and adjacent layout state should survive repeated switching");
+        }
+    }
+
+    RawWorkspace::AppState latestState = loaded;
+    latestState.rawLabActiveTool = 3;
+    latestState.rawLabToolRailWidth = 397.0f;
+    Require(RawWorkspace::SaveAppState(statePath, latestState, &error),
+        "RAW Lab latest-wins app-state fixture should persist its accepted state");
+    RawWorkspace::AppState supersededState = latestState;
+    supersededState.rawLabActiveTool = 1;
+    supersededState.rawLabToolRailWidth = 281.0f;
+    bool staleCommitChecked = false;
+    Require(RawWorkspace::SaveAppStateIfCurrent(
+            statePath,
+            supersededState,
+            [&]() {
+                staleCommitChecked = true;
+                return false;
+            },
+            &error),
+        "a superseded RAW Lab app-state write should cancel without reporting file corruption");
+    RawWorkspace::AppState afterSupersededWrite;
+    Require(staleCommitChecked &&
+            RawWorkspace::LoadAppState(statePath, afterSupersededWrite, &error),
+        "a superseded RAW Lab app-state write should leave a readable accepted state");
+    Require(afterSupersededWrite.rawLabActiveTool == 3 &&
+            std::abs(afterSupersededWrite.rawLabToolRailWidth - 397.0f) < 0.001f,
+        "a stale RAW Lab app-state generation must not overwrite the latest accepted tool or layout");
 
     const std::filesystem::path malformedPath = root / "MalformedRawWorkspaceState.json";
     WriteRawWorkspaceTestFile(malformedPath);
@@ -2782,8 +3587,12 @@ void TestRawWorkspaceProjectLifecycleModel() {
         "Reloaded RAW project should preserve recipe-backed mode");
     Require(std::abs(loadedRecipe.preToneExposureEv - 1.5f) < 0.001f,
         "Reloaded RAW project should preserve recipe edits");
-    Require(loadedDocument.rawWorkspaceData.contains("downstreamGraph"),
-        "RAW project lifecycle should store downstream graph payload");
+    Require(loadedDocument.metadata.projectKind == StackBinaryFormat::kRawProjectKind,
+        "RAW project lifecycle should identify the document as a RAW project");
+    Require(loadedDocument.pipelineData == downstreamGraph,
+        "RAW project lifecycle should store the canonical graph in pipelineData");
+    Require(!loadedDocument.rawWorkspaceData.contains("downstreamGraph"),
+        "RAW project lifecycle should not duplicate the canonical graph in RAW metadata");
 
     StackBinaryFormat::ProjectDocument missingModeDocument = loadedDocument;
     missingModeDocument.rawWorkspaceData.erase("rawWorkspaceMode");
@@ -2875,6 +3684,211 @@ void TestRawWorkspaceProjectLifecycleModel() {
             embeddedInfo.embeddedRaw &&
             !embeddedInfo.linkedRaw,
         "Embedded RAW project should report embedded status");
+
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+}
+
+nlohmann::json RawLabUntouchedRecipeFields(
+    const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
+    nlohmann::json state = Stack::RawRecipe::SerializeRecipe(recipe);
+    state.erase("exposureEv");
+    state.erase("finishTone");
+    state.erase("viewTransform");
+    if (state.contains("localRange") && state["localRange"].is_object()) {
+        state["localRange"].erase("enabled");
+        state["localRange"].erase("points");
+        state["localRange"].erase("targetZones");
+    }
+    return state;
+}
+
+void TestRawLabToolSequencePreservesHiddenFieldsThroughProjectReload() {
+    namespace RawRecipe = Stack::RawRecipe;
+    namespace RawWorkspace = Stack::RawWorkspace;
+
+    const std::filesystem::path root =
+        MakeTempDirectory("stack_raw_lab_hidden_field_roundtrip_test");
+    const std::filesystem::path sourcePath = root / "Lab Sequence.DNG";
+    WriteRawWorkspaceTestFile(sourcePath);
+
+    RawWorkspace::SourceRecord source;
+    source.absolutePath = sourcePath;
+    source.relativePath = "Lab Sequence.DNG";
+    source.relativePathKey = "Lab Sequence.DNG";
+    source.fileName = "Lab Sequence.DNG";
+    source.stem = "Lab Sequence";
+    source.fingerprint = "raw-lab-sequence-fingerprint";
+    source.fileSizeBytes = static_cast<std::uintmax_t>(
+        std::filesystem::file_size(sourcePath));
+    source.modifiedTimeTicks = 8675309;
+
+    RawRecipe::RawDevelopmentRecipe recipe =
+        RawRecipe::MakeDefaultRecipe(sourcePath.string(), source.fileName);
+    recipe.source.relativePathKey = source.relativePathKey;
+    recipe.source.fingerprint = source.fingerprint;
+    recipe.source.fileSizeBytes =
+        static_cast<std::uint64_t>(source.fileSizeBytes);
+    recipe.source.modifiedTimeTicks = source.modifiedTimeTicks;
+    recipe.whiteBalance.mode = RawRecipe::WhiteBalanceMode::CustomMultipliers;
+    recipe.whiteBalance.hasMultipliers = true;
+    recipe.whiteBalance.multipliers = { 1.91f, 1.0f, 1.37f };
+    recipe.whiteBalance.hasSamplePoint = true;
+    recipe.whiteBalance.sampleX = 0.23f;
+    recipe.whiteBalance.sampleY = 0.71f;
+    recipe.technical.applyBaselineExposure = false;
+    recipe.technical.mosaicDenoise.enabled = true;
+    recipe.technical.mosaicDenoise.lumaStrength = 0.41f;
+    recipe.rgbDenoise.enabled = true;
+    recipe.rgbDenoise.colorNoise = 0.52f;
+    recipe.localExposure.enabled = true;
+    recipe.localExposure.shadowLiftEv = 0.37f;
+    recipe.toneCurve.mode = RawRecipe::ToneCurveMode::Custom;
+    recipe.toneCurve.points = {
+        { 0.0f, 0.0f },
+        { 0.4f, 0.46f },
+        { 1.0f, 1.0f }
+    };
+    recipe.cropRotation.cropEnabled = true;
+    recipe.cropRotation.cropX = 0.11f;
+    recipe.cropRotation.cropY = 0.07f;
+    recipe.cropRotation.cropWidth = 0.78f;
+    recipe.cropRotation.cropHeight = 0.84f;
+    recipe.cropRotation.rotationDegrees = 270;
+    recipe.previewOutput.previewIntent = "neutral-preview";
+    recipe.localRange.regionMaskEnabled = true;
+    recipe.localRange.regionMaskMode = "radial-gradient";
+    recipe.localRange.regionMaskCenterX = 0.34f;
+    recipe.localRange.regionMaskCenterY = 0.62f;
+    recipe.localRange.colorMaskEnabled = true;
+    recipe.localRange.colorMaskTargetR = 0.18f;
+    recipe.localRange.colorMaskTargetG = 0.63f;
+    recipe.localRange.colorMaskTargetB = 0.29f;
+    recipe.finishTone.layerJson["rawLabHiddenCurveSentinel"] = {
+        { "preserve", true },
+        { "value", 17 }
+    };
+    recipe.viewTransform.layerJson["rawLabHiddenViewSentinel"] =
+        "preserve-view-state";
+
+    const nlohmann::json untouchedBaseline =
+        RawLabUntouchedRecipeFields(recipe);
+
+    StackBinaryFormat::ProjectDocument document;
+    document.metadata.projectKind = StackBinaryFormat::kEditorProjectKind;
+    document.metadata.projectName = source.stem;
+    document.metadata.sourceWidth = 1;
+    document.metadata.sourceHeight = 1;
+    document.thumbnailBytes = { 1, 2, 3, 4 };
+    document.sourceImageBytes = { 5, 6, 7, 8 };
+    const nlohmann::json downstreamGraph = {
+        { "layers", nlohmann::json::array() }
+    };
+    document.pipelineData = downstreamGraph;
+    document.rawWorkspaceData = {
+        { "futureRawWorkspaceKey", {
+            { "preserve", true },
+            { "version", 99 }
+        } }
+    };
+    const std::filesystem::path projectPath = root / "Lab Sequence.stack";
+
+    for (int pass = 0; pass < 24; ++pass) {
+        // Exposure -> Zones -> Curve -> View mirrors the four Lab surfaces.
+        recipe.preToneExposureEv = -1.20f + 0.10f * static_cast<float>(pass);
+        recipe.localRange.enabled = true;
+        recipe.localRange.points = {
+            { -8.0f, 0.04f * static_cast<float>(pass) },
+            { 0.0f, -0.015f * static_cast<float>(pass) },
+            { 6.0f, -0.02f * static_cast<float>(pass) }
+        };
+        RawRecipe::RawLocalRangeTargetZone zone;
+        zone.id = "raw-lab-zone-1";
+        zone.name = "Repeated target";
+        zone.centerEv = -2.0f + 0.03f * static_cast<float>(pass);
+        zone.deltaEv = 0.25f + 0.02f * static_cast<float>(pass);
+        zone.seeds = { { 0.31f, 0.57f } };
+        recipe.localRange.targetZones = { zone };
+
+        recipe.finishTone.layerJson["points"] = nlohmann::json::array({
+            { { "x", 0.0f }, { "y", 0.0f } },
+            { { "x", 0.5f }, { "y", 0.42f + 0.01f * static_cast<float>(pass) } },
+            { { "x", 1.0f }, { "y", 1.0f } }
+        });
+        recipe.finishTone.layerJson["preparedPoints"] =
+            recipe.finishTone.layerJson["points"];
+        recipe.viewTransform.layerJson["contrast"] =
+            0.80f + 0.025f * static_cast<float>(pass);
+        recipe.viewTransform.layerJson["saturation"] =
+            1.15f - 0.01f * static_cast<float>(pass);
+
+        Require(RawLabUntouchedRecipeFields(recipe) == untouchedBaseline,
+            "RAW Lab tool changes must not mutate hidden recipe fields before save");
+        Require(RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
+                source,
+                recipe,
+                downstreamGraph,
+                document),
+            "RAW Lab tool sequence should update the shared project document");
+        Require(document.rawWorkspaceData["futureRawWorkspaceKey"].value(
+                "preserve", false),
+            "RAW Lab project updates should retain future workspace metadata");
+        Require(StackBinaryFormat::WriteProjectFile(projectPath, document),
+            "RAW Lab tool sequence should save after every repeated switch cycle");
+
+        StackBinaryFormat::ProjectDocument reloadedDocument;
+        Require(StackBinaryFormat::ReadProjectFile(projectPath, reloadedDocument),
+            "RAW Lab tool sequence should reload after every repeated switch cycle");
+        const nlohmann::json& reloadedRecipeFileSize =
+            reloadedDocument.rawWorkspaceData["rawRecipe"]["sourceRef"]["fileSizeBytes"];
+        Require(reloadedRecipeFileSize.is_number_unsigned() &&
+                reloadedRecipeFileSize.get<std::uint64_t>() ==
+                    static_cast<std::uint64_t>(source.fileSizeBytes),
+            "project binary JSON should preserve unsigned RAW source identity values without changing their type");
+        RawWorkspace::ProjectInfo projectInfo;
+        RawRecipe::RawDevelopmentRecipe reloadedRecipe;
+        Require(RawWorkspace::ReadProjectInfoFromDocument(
+                reloadedDocument,
+                projectInfo,
+                &reloadedRecipe),
+            "RAW Lab tool sequence should recover its recipe from the saved project");
+        const nlohmann::json reloadedUntouched =
+            RawLabUntouchedRecipeFields(reloadedRecipe);
+        if (reloadedUntouched != untouchedBaseline) {
+            std::cerr << "RAW Lab untouched baseline: "
+                      << untouchedBaseline.dump() << "\n";
+            std::cerr << "RAW Lab untouched reloaded: "
+                      << reloadedUntouched.dump() << "\n";
+        }
+        Require(reloadedUntouched == untouchedBaseline,
+            "RAW Lab save/reload must preserve technical, WB, denoise, crop, output, and legacy hidden fields");
+        Require(reloadedRecipe.finishTone.layerJson.value(
+                    "rawLabHiddenCurveSentinel",
+                    nlohmann::json::object()).value("preserve", false) &&
+                reloadedRecipe.viewTransform.layerJson.value(
+                    "rawLabHiddenViewSentinel",
+                    std::string()) == "preserve-view-state",
+            "RAW Lab Curve and View edits must preserve unexposed layer JSON fields");
+        Require(std::abs(reloadedRecipe.preToneExposureEv - recipe.preToneExposureEv) < 0.001f &&
+                reloadedRecipe.localRange.targetZones.size() == 1 &&
+                std::abs(reloadedRecipe.localRange.targetZones[0].deltaEv - zone.deltaEv) < 0.001f &&
+                std::abs(reloadedRecipe.finishTone.layerJson["points"][1].value(
+                    "y", 0.0f) - (0.42f + 0.01f * static_cast<float>(pass))) < 0.001f &&
+                std::abs(reloadedRecipe.viewTransform.layerJson.value(
+                    "contrast", 0.0f) - (0.80f + 0.025f * static_cast<float>(pass))) < 0.001f,
+            "RAW Lab visible Exposure, Zones, Curve, and View edits should survive save/reload together");
+        Require(reloadedDocument.rawWorkspaceData["futureRawWorkspaceKey"].value(
+                "version", 0) == 99,
+            "RAW Lab repeated saves must retain unknown project-level RAW metadata");
+
+        recipe = std::move(reloadedRecipe);
+        document = std::move(reloadedDocument);
+    }
+
+    std::filesystem::path replacementTemporaryPath = projectPath;
+    replacementTemporaryPath += ".tmp";
+    Require(!std::filesystem::exists(replacementTemporaryPath),
+        "repeated atomic project replacement should not leave its same-directory temporary file behind");
 
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
@@ -3211,8 +4225,12 @@ void TestScalarThroughDataMathToPreviewAndScalarTargets() {
         "scalar Data Math add output should feed Data Math average input B");
     Require(graph.TryConnectSockets(averageId, kImageOutputSocketId, mixId, kMixFactorSocketId),
         "scalar Data Math output should connect to mix factor");
-    Require(graph.TryConnectSockets(averageId, kImageOutputSocketId, outputId, "a"),
-        "scalar Data Math output should connect to output RGBA channel pins");
+    Require(!graph.CanConnectSockets(
+            averageId,
+            kImageOutputSocketId,
+            outputId,
+            kImageInputSocketId),
+        "generic scalar Data Math output should not masquerade as a Channel at Output");
 }
 
 void TestImageThroughDataMathToOutput() {
@@ -3241,72 +4259,359 @@ void TestFrequencyNodeShellSocketsAndConnections() {
 
     Graph graph;
     const int imageId = NodeId(graph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
-    const int fftId = NodeId(graph.AddFrequencyFftNode({ 220.0f, 0.0f }));
-    const int viewId = NodeId(graph.AddSpectrumViewNode({ 440.0f, 0.0f }));
-    const int ifftId = NodeId(graph.AddFrequencyIfftNode({ 440.0f, 160.0f }));
-    const int maskId = NodeId(graph.AddFrequencyMaskNode(FrequencyMaskShape::HighPass, { 220.0f, 320.0f }));
-    const int mathId = NodeId(graph.AddSpectrumMathNode(SpectrumMathMode::Multiply, { 660.0f, 160.0f }));
-    const int magnitudeId = NodeId(graph.AddMagnitudePhaseNode(MagnitudePhaseMode::Magnitude, { 660.0f, 320.0f }));
-    const int analyzerId = NodeId(graph.AddSpectrumAnalyzerNode(SpectrumAnalyzerMode::RadialEnergy, { 660.0f, 480.0f }));
-    const int outputId = NodeId(graph.AddOutputNode({ 880.0f, 0.0f }, true));
+    const int splitId = NodeId(graph.AddChannelSplitNode({ 180.0f, 0.0f }));
+    const int filterId = NodeId(graph.AddFrequencyFilterNode(
+        FrequencyFilterMode::LowPass, { 380.0f, 0.0f }));
+    const int responseId = NodeId(graph.AddFrequencyResponseNode({ 380.0f, 220.0f }));
+    const int fftId = NodeId(graph.AddFrequencyFftNode({ 600.0f, 0.0f }));
+    const int applyId = NodeId(graph.AddApplyFrequencyResponseNode({ 820.0f, 0.0f }));
+    const int combineId = NodeId(graph.AddCombineSpectraNode({ 1040.0f, 0.0f }));
+    const int separateId = NodeId(graph.AddSpectrumSeparateNode({ 1260.0f, 0.0f }));
+    const int recombineId = NodeId(graph.AddSpectrumRecombineNode({ 1480.0f, 0.0f }));
+    const int viewId = NodeId(graph.AddSpectrumViewNode({ 1480.0f, 220.0f }));
+    const int ifftId = NodeId(graph.AddFrequencyIfftNode({ 1700.0f, 0.0f }));
+    const int analyzerId = NodeId(graph.AddSpectrumAnalyzerNode(
+        SpectrumAnalyzerMode::RadialEnergy, { 1260.0f, 420.0f }));
+    const int outputId = NodeId(graph.AddOutputNode({ 1920.0f, 0.0f }, true));
 
     const Node* fftNode = graph.FindNode(fftId);
-    Require(fftNode && fftNode->kind == NodeKind::FrequencyFft && fftNode->title == "FFT",
-        "FFT graph creation should allocate a real frequency node");
+    Require(fftNode && fftNode->kind == NodeKind::FrequencyFft &&
+            fftNode->title == "Fourier Transform",
+        "Fourier Transform should use the approachable revised title");
     const Node* ifftNode = graph.FindNode(ifftId);
-    Require(ifftNode && ifftNode->kind == NodeKind::FrequencyIfft && ifftNode->title == "Inverse FFT",
-        "Inverse FFT graph creation should allocate a real frequency node");
-    const Node* maskNode = graph.FindNode(maskId);
-    Require(maskNode && maskNode->frequencyMaskShape == FrequencyMaskShape::HighPass &&
-            maskNode->frequencyMaskSettings.shape == FrequencyMaskShape::HighPass,
-        "Frequency Mask graph creation should preserve catalog shape defaults");
-    const Node* mathNode = graph.FindNode(mathId);
-    Require(mathNode && mathNode->spectrumMathMode == SpectrumMathMode::Multiply,
-        "Spectrum Math graph creation should preserve catalog mode defaults");
-    const Node* magnitudeNode = graph.FindNode(magnitudeId);
-    Require(magnitudeNode && magnitudeNode->magnitudePhaseMode == MagnitudePhaseMode::Magnitude,
-        "Magnitude/Phase graph creation should preserve catalog mode defaults");
-    const Node* analyzerNode = graph.FindNode(analyzerId);
-    Require(analyzerNode && analyzerNode->spectrumAnalyzerMode == SpectrumAnalyzerMode::RadialEnergy,
-        "Spectrum Analyzer graph creation should preserve catalog mode defaults");
+    Require(ifftNode && ifftNode->kind == NodeKind::FrequencyIfft &&
+            ifftNode->title == "Inverse Fourier Transform",
+        "Inverse Fourier Transform should use the revised title");
 
-    Require(graph.FindSocket(fftId, kImageInputSocketId) &&
-            graph.FindSocket(fftId, kImageOutputSocketId),
-        "FFT should expose image input and spectrum output sockets");
-    Require(graph.FindSocket(ifftId, kImageInputSocketId) &&
-            graph.FindSocket(ifftId, kImageOutputSocketId),
-        "Inverse FFT should expose spectrum input and image output sockets");
-    Require(graph.FindSocket(maskId, kMaskOutputSocketId),
-        "Frequency Mask should expose a filter mask output");
-    Require(graph.FindSocket(mathId, kMixInputASocketId) &&
-            graph.FindSocket(mathId, kMaskInputSocketId) &&
-            graph.FindSocket(mathId, kImageOutputSocketId),
-        "Spectrum Math should expose spectrum inputs, filter mask, and spectrum output sockets");
-    Require(graph.FindSocket(magnitudeId, kImageInputSocketId) &&
-            graph.FindSocket(magnitudeId, kMaskOutputSocketId) &&
-            graph.FindSocket(magnitudeId, kImageOutputSocketId),
-        "Magnitude/Phase should expose spectrum, component, and recombined spectrum sockets");
-    Require(graph.FindSocket(analyzerId, kImageInputSocketId) &&
-            graph.FindSocket(analyzerId, kScopeInputSocketId),
-        "Spectrum Analyzer should expose spectrum input and analysis output sockets");
+    SocketDefinition channelInput;
+    SocketDefinition responseInput;
+    SocketDefinition channelOutput;
+    SocketDefinition spectrumOutput;
+    SocketDefinition responseOutput;
+    SocketDefinition magnitudeOutput;
+    SocketDefinition phaseOutput;
+    SocketDefinition radialPowerOutput;
+    SocketDefinition bandPowerOutput;
+    Require(graph.FindSocket(filterId, kChannelInputSocketId, &channelInput) &&
+            channelInput.type == SocketType::Channel &&
+            graph.FindSocket(filterId, kFrequencyResponseInputSocketId, &responseInput) &&
+            responseInput.type == SocketType::FrequencyResponse &&
+            graph.FindSocket(filterId, kChannelOutputSocketId, &channelOutput) &&
+            channelOutput.type == SocketType::Channel,
+        "Frequency Filter should expose Channel, optional Response, and Channel sockets");
+    Require(graph.FindSocket(fftId, kChannelInputSocketId, &channelInput) &&
+            channelInput.type == SocketType::Channel &&
+            graph.FindSocket(fftId, kSpectrumOutputSocketId, &spectrumOutput) &&
+            spectrumOutput.type == SocketType::Spectrum,
+        "Fourier Transform should expose exact Channel-to-Spectrum sockets");
+    Require(graph.FindSocket(
+                responseId, kFrequencyResponseOutputSocketId, &responseOutput) &&
+            responseOutput.type == SocketType::FrequencyResponse,
+        "Frequency Response should expose a distinct Response socket");
+    Require(graph.FindSocket(
+                separateId, kSpectrumMagnitudeOutputSocketId, &magnitudeOutput) &&
+            magnitudeOutput.type == SocketType::SpectrumMagnitude &&
+            graph.FindSocket(
+                separateId, kSpectrumPhaseOutputSocketId, &phaseOutput) &&
+            phaseOutput.type == SocketType::SpectrumPhase,
+        "Separate Spectrum should expose raw Magnitude and Phase types");
+    Require(graph.FindSocket(
+                analyzerId, kRadialPowerOutputSocketId, &radialPowerOutput) &&
+            radialPowerOutput.type == SocketType::Analysis &&
+            graph.FindSocket(
+                analyzerId, kBandPowerOutputSocketId, &bandPowerOutput) &&
+            bandPowerOutput.type == SocketType::Scalar,
+        "Spectrum Analyzer should expose Data plus independent scalar measurements");
 
-    Require(graph.TryConnectSockets(imageId, kImageOutputSocketId, fftId, kImageInputSocketId),
-        "image output should connect to FFT input");
-    Require(graph.TryConnectSockets(fftId, kImageOutputSocketId, viewId, kImageInputSocketId),
-        "FFT spectrum should connect to Spectrum View input");
+    std::string error;
+    Require(!graph.TryConnectSockets(
+            imageId, kImageOutputSocketId,
+            fftId, kChannelInputSocketId, &error) &&
+            error.find("Channel") != std::string::npos,
+        "ordinary Image output must be rejected by an exact Channel input");
+    Require(graph.TryConnectSockets(
+            imageId, kImageOutputSocketId,
+            splitId, kImageInputSocketId),
+        "image should connect to Channel Split");
+    Require(graph.TryConnectSockets(
+            splitId, "r", filterId, kChannelInputSocketId),
+        "Channel should connect to the approachable Frequency Filter");
+    Require(graph.TryConnectSockets(
+            responseId, kFrequencyResponseOutputSocketId,
+            filterId, kFrequencyResponseInputSocketId),
+        "Response should connect only to the Frequency Filter Response input");
+    Require(graph.TryConnectSockets(
+            filterId, kChannelOutputSocketId,
+            fftId, kChannelInputSocketId),
+        "filtered Channel should connect to Fourier Transform");
+    Require(graph.TryConnectSockets(
+            fftId, kSpectrumOutputSocketId,
+            applyId, kSpectrumInputSocketId),
+        "Spectrum should connect to Apply Frequency Response");
+    Require(graph.TryConnectSockets(
+            responseId, kFrequencyResponseOutputSocketId,
+            applyId, kFrequencyResponseInputSocketId),
+        "Response should connect to Apply Frequency Response");
+    Require(graph.TryConnectSockets(
+            fftId, kSpectrumOutputSocketId,
+            combineId, kSpectrumInputASocketId) &&
+            graph.TryConnectSockets(
+                applyId, kSpectrumOutputSocketId,
+                combineId, kSpectrumInputBSocketId),
+        "Combine Spectra should accept two exact Spectrum inputs");
+    Require(graph.TryConnectSockets(
+            combineId, kSpectrumOutputSocketId,
+            separateId, kSpectrumInputSocketId),
+        "combined Spectrum should connect to Separate Spectrum");
+    Require(graph.TryConnectSockets(
+            separateId, kSpectrumMagnitudeOutputSocketId,
+            recombineId, kSpectrumMagnitudeInputSocketId) &&
+            graph.TryConnectSockets(
+                separateId, kSpectrumPhaseOutputSocketId,
+                recombineId, kSpectrumPhaseInputSocketId),
+        "raw Magnitude and Phase should reconnect only to matching typed inputs");
+    Require(!graph.TryConnectSockets(
+            separateId, kSpectrumMagnitudeOutputSocketId,
+            recombineId, kSpectrumPhaseInputSocketId),
+        "Magnitude must not accidentally connect to Phase");
+    Require(graph.TryConnectSockets(
+            recombineId, kSpectrumOutputSocketId,
+            viewId, kSpectrumInputSocketId),
+        "recombined Spectrum should connect to Spectrum View");
     Require(graph.TryConnectSockets(viewId, kImageOutputSocketId, outputId, kImageInputSocketId),
         "Spectrum View output should connect to graph output");
+    Require(
+        graph.IsOutputConnected(),
+        "the advanced typed frequency chain should qualify as a completed "
+        "viewport output chain");
+    Require(graph.TryConnectSockets(
+            recombineId, kSpectrumOutputSocketId,
+            ifftId, kSpectrumInputSocketId),
+        "Spectrum should connect to Inverse Fourier Transform");
+    Require(graph.TryConnectSockets(
+            recombineId, kSpectrumOutputSocketId,
+            analyzerId, kSpectrumInputSocketId),
+        "Spectrum Analyzer should accept exact Spectrum only");
+    const int analyzedExposureId = NodeId(
+        graph.AddTechnicalImageNode(
+            Stack::NodeMath::TechnicalImageOperation::Exposure,
+            { 1700.0f, 420.0f }));
+    Require(
+        !graph.TryConnectSockets(
+            analyzerId,
+            kRadialPowerOutputSocketId,
+            analyzedExposureId,
+            kExposureValueInputSocketId),
+        "Spectrum Analyzer radial Data must not masquerade as a scalar Value");
+    Require(
+        graph.TryConnectSockets(
+            viewId,
+            kImageOutputSocketId,
+            analyzedExposureId,
+            kImageInputSocketId) &&
+        graph.TryConnectSockets(
+            analyzerId,
+            kBandPowerOutputSocketId,
+            analyzedExposureId,
+            kExposureValueInputSocketId) &&
+        graph.TryConnectSockets(
+            analyzedExposureId,
+            kImageOutputSocketId,
+            outputId,
+            kImageInputSocketId),
+        "Spectrum Analyzer scalar measurements should drive implemented "
+        "runtime Value inputs");
+    const std::vector<CompletedChainInfo> analyzedChains =
+        graph.GetCompletedChains();
+    Require(
+        analyzedChains.size() == 1 &&
+        std::find(
+            analyzedChains.front().nodeIds.begin(),
+            analyzedChains.front().nodeIds.end(),
+            analyzerId) != analyzedChains.front().nodeIds.end() &&
+        std::find(
+            analyzedChains.front().nodeIds.begin(),
+            analyzedChains.front().nodeIds.end(),
+            analyzedExposureId) != analyzedChains.front().nodeIds.end(),
+        "completed-chain lowering should retain the analyzer reduction branch "
+        "that controls Exposure");
 
-    Require(graph.TryConnectSockets(fftId, kImageOutputSocketId, ifftId, kImageInputSocketId),
-        "FFT spectrum should connect to Inverse FFT input");
-    Require(graph.TryConnectSockets(fftId, kImageOutputSocketId, mathId, kMixInputASocketId),
-        "FFT spectrum should connect to Spectrum Math primary input");
-    Require(graph.TryConnectSockets(maskId, kMaskOutputSocketId, mathId, kMaskInputSocketId),
-        "Frequency Mask output should connect to Spectrum Math filter input");
-    Require(graph.TryConnectSockets(mathId, kImageOutputSocketId, magnitudeId, kImageInputSocketId),
-        "Spectrum Math output should connect to Magnitude/Phase spectrum input");
-    Require(graph.TryConnectSockets(mathId, kImageOutputSocketId, analyzerId, kImageInputSocketId),
-        "Spectrum Math output should connect to Spectrum Analyzer input");
+    Graph basicGraph;
+    const int basicImageId = NodeId(
+        basicGraph.AddImageNode(TestImagePayload(), { 0.0f, 0.0f }));
+    const int basicSplitId = NodeId(
+        basicGraph.AddChannelSplitNode({ 180.0f, 0.0f }));
+    const int basicFilterId = NodeId(
+        basicGraph.AddFrequencyFilterNode(
+            FrequencyFilterMode::LowPass,
+            { 380.0f, 0.0f }));
+    const int basicCombineId = NodeId(
+        basicGraph.AddChannelCombineNode({ 580.0f, 0.0f }));
+    const int basicOutputId = NodeId(
+        basicGraph.AddOutputNode({ 780.0f, 0.0f }, true));
+    Require(
+        basicGraph.TryConnectSockets(
+            basicImageId,
+            kImageOutputSocketId,
+            basicSplitId,
+            kImageInputSocketId) &&
+        basicGraph.TryConnectSockets(
+            basicSplitId,
+            "r",
+            basicFilterId,
+            kChannelInputSocketId) &&
+        basicGraph.TryConnectSockets(
+            basicFilterId,
+            kChannelOutputSocketId,
+            basicCombineId,
+            "r") &&
+        basicGraph.TryConnectSockets(
+            basicSplitId,
+            "g",
+            basicCombineId,
+            "g") &&
+        basicGraph.TryConnectSockets(
+            basicSplitId,
+            "b",
+            basicCombineId,
+            "b") &&
+        basicGraph.TryConnectSockets(
+            basicSplitId,
+            "a",
+            basicCombineId,
+            "a") &&
+        basicGraph.TryConnectSockets(
+            basicCombineId,
+            kImageOutputSocketId,
+            basicOutputId,
+            kImageInputSocketId),
+        "the basic low-pass regression graph should connect exactly");
+    const std::vector<CompletedChainInfo> basicChains =
+        basicGraph.GetCompletedChains();
+    Require(
+        basicGraph.IsOutputConnected() &&
+        basicChains.size() == 1 &&
+        basicChains.front().outputNodeId == basicOutputId &&
+        std::find(
+            basicChains.front().nodeIds.begin(),
+            basicChains.front().nodeIds.end(),
+            basicFilterId) != basicChains.front().nodeIds.end(),
+        "Image -> Split -> Frequency Filter -> Combine -> Output should "
+        "remain a completed viewport chain");
+
+    Require(graph.SetParameterExposed(
+            filterId, kStrengthParameterId, true) &&
+            graph.FindSocket(
+                filterId,
+                ParameterInputSocketId(kStrengthParameterId),
+                &bandPowerOutput) &&
+            bandPowerOutput.type == SocketType::Scalar,
+        "exposed Strength should gain a stable parameter-derived Value socket");
+
+    Node* responseNode = graph.FindNode(responseId);
+    responseNode->frequencyResponseSettings.mode =
+        FrequencyFilterMode::NotchReject;
+    responseNode->frequencyResponseSettings.profile =
+        FrequencyTransitionProfile::Butterworth;
+    responseNode->frequencyResponseSettings.notches = {
+        { "notch-a", 0.1875f, 31.0f, 0.018f },
+        { "notch-b", 0.3125f, -67.0f, 0.027f }
+    };
+    Require(graph.SetParameterExposed(
+            responseId,
+            FrequencyNotchParameterId("notch-b", "direction"),
+            true) &&
+            graph.FindSocket(
+                responseId,
+                ParameterInputSocketId(
+                    FrequencyNotchParameterId(
+                        "notch-b", "direction")),
+                &bandPowerOutput) &&
+            bandPowerOutput.type == SocketType::Scalar,
+        "notch parameters should support stable graph exposure");
+    const nlohmann::json serialized =
+        SerializeGraphPayload(nlohmann::json::array(), graph);
+    Require(serialized["nodeGraph"].value("version", 0) == 8,
+        "Output v2 advances the channel-first graph schema to 8");
+    Graph loaded;
+    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+    const Node* loadedResponse = loaded.FindNode(responseId);
+    Require(loadedResponse != nullptr &&
+            loadedResponse->frequencyResponseSettings.notches.size() == 2 &&
+            loadedResponse->frequencyResponseSettings.notches[1].id == "notch-b" &&
+            std::find(
+                loadedResponse->exposedParameterIds.begin(),
+                loadedResponse->exposedParameterIds.end(),
+                FrequencyNotchParameterId(
+                    "notch-b", "direction")) !=
+                loadedResponse->exposedParameterIds.end(),
+        "response notches and exposed parameter IDs should persist exactly");
+
+    nlohmann::json outOfDomainDocument = serialized;
+    for (nlohmann::json& item :
+         outOfDomainDocument["nodeGraph"]["nodes"]) {
+        if (item.value("id", -1) == responseId) {
+            item["frequencyResponseSettings"]["butterworthOrder"] = 99.0f;
+            item["frequencyResponseSettings"]["notches"][0]["width"] = 8.0f;
+        } else if (item.value("id", -1) == analyzerId) {
+            item["spectrumAnalyzerSettings"]["innerRadius"] = 9.0f;
+            item["spectrumAnalyzerSettings"]["outerRadius"] = 10.0f;
+        }
+    }
+    Graph bounded;
+    DeserializeGraphPayload(
+        outOfDomainDocument, bounded, 0, {}, 0, 0, 0);
+    const Node* boundedResponse = bounded.FindNode(responseId);
+    const Node* boundedAnalyzer = bounded.FindNode(analyzerId);
+    Require(
+        boundedResponse != nullptr &&
+        boundedResponse->frequencyResponseSettings.butterworthOrder == 12.0f &&
+        boundedResponse->frequencyResponseSettings.notches.size() == 2 &&
+        boundedResponse->frequencyResponseSettings.notches[0].width == 0.25f &&
+        boundedAnalyzer != nullptr &&
+        std::abs(
+            boundedAnalyzer->spectrumAnalyzerSettings.innerRadius -
+            0.70710678f) < 1.0e-7f &&
+        std::abs(
+            boundedAnalyzer->spectrumAnalyzerSettings.outerRadius -
+            0.70710678f) < 1.0e-7f,
+        "frequency response and analyzer persistence should canonicalize "
+        "out-of-domain values to the same limits as live execution");
+
+    const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> catalog =
+        EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
+    const int mainFrequencyCount = static_cast<int>(std::count_if(
+        catalog.begin(), catalog.end(), [](const auto& entry) {
+            return entry.category == "Frequency";
+        }));
+    const int advancedFrequencyCount = static_cast<int>(std::count_if(
+        catalog.begin(), catalog.end(), [](const auto& entry) {
+            return entry.category == "Advanced Frequency";
+        }));
+    Require(mainFrequencyCount == 6 && advancedFrequencyCount == 9,
+        "browser should expose six friendly presets and nine advanced frequency nodes");
+    Require(std::none_of(
+            catalog.begin(), catalog.end(), [](const auto& entry) {
+                return entry.kind == NodeKind::FrequencyMask ||
+                    entry.kind == NodeKind::SpectrumMath ||
+                    entry.kind == NodeKind::MagnitudePhase;
+            }),
+        "legacy frequency shells should not remain in the node browser");
+
+    Graph legacyGraph;
+    const int legacyFftId = NodeId(
+        legacyGraph.AddFrequencyFftNode({ 0.0f, 0.0f }));
+    nlohmann::json legacyDocument =
+        SerializeGraphPayload(nlohmann::json::array(), legacyGraph);
+    legacyDocument["nodeGraph"]["version"] = 6;
+    Graph loadedLegacy;
+    DeserializeGraphPayload(legacyDocument, loadedLegacy, 0, {}, 0, 0, 0);
+    const Node* loadedLegacyFft = loadedLegacy.FindNode(legacyFftId);
+    Require(loadedLegacyFft != nullptr &&
+            !loadedLegacyFft->definitionResolved &&
+            loadedLegacyFft->definitionResolutionError.find(
+                "intentionally not reinterpreted") != std::string::npos,
+        "schema-6 frequency nodes should remain unresolved with replacement guidance");
 }
 
 void TestAverageNodeInputRules() {
@@ -3350,6 +4655,224 @@ void TestAverageNodeInputRules() {
         "Average Images should output a full image stream");
     Require(graph.TryConnectSockets(imageAverageId, kImageOutputSocketId, outputId, kImageInputSocketId),
         "Average Images should feed image outputs");
+}
+
+void TestSemanticNodeMutationsInvalidateExecutionState() {
+    using namespace EditorNodeGraph;
+
+    Graph graph;
+    const int imageAId = NodeId(graph.AddImageGeneratorNode(
+        ImageGeneratorKind::SolidColor, { 0.0f, 0.0f }));
+    const int imageBId = NodeId(graph.AddImageGeneratorNode(
+        ImageGeneratorKind::SolidColor, { 0.0f, 160.0f }));
+    const int dataMathId = NodeId(graph.AddDataMathNode(
+        DataMathMode::Clamp, { 260.0f, 0.0f }));
+    const int outputId = NodeId(graph.AddOutputNode(
+        { 520.0f, 0.0f }, true));
+    Require(
+        graph.TryConnectSockets(
+            imageAId,
+            kImageOutputSocketId,
+            dataMathId,
+            DataMathInputSocketId(0)) &&
+        graph.TryConnectSockets(
+            dataMathId,
+            kImageOutputSocketId,
+            outputId,
+            kImageInputSocketId),
+        "semantic-mutation fixture should connect");
+
+    const Node* dataMath = graph.FindNode(dataMathId);
+    const std::string clampDefinitionId =
+        dataMath ? dataMath->definitionId : std::string();
+    Require(
+        graph.GetCompletedChains().size() == 1,
+        "Clamp with one image input should initially complete");
+
+    const std::uint64_t clampRevision = graph.GetStructureRevision();
+    Require(
+        graph.SetDataMathMode(dataMathId, DataMathMode::ImageAverage) &&
+        graph.GetStructureRevision() > clampRevision,
+        "changing a Data Math mode should advance semantic topology");
+    dataMath = graph.FindNode(dataMathId);
+    Require(
+        dataMath &&
+        dataMath->definitionResolved &&
+        dataMath->definitionId != clampDefinitionId,
+        "changing a Data Math variant should pin its new exact definition");
+    Require(
+        graph.GetCompletedChains().empty(),
+        "Average Images should invalidate the cached one-input completed chain");
+    Require(
+        graph.TryConnectSockets(
+            imageBId,
+            kImageOutputSocketId,
+            dataMathId,
+            DataMathInputSocketId(1)) &&
+        graph.GetCompletedChains().size() == 1,
+        "Average Images should complete again after receiving two images");
+
+    Require(
+        graph.SetDataMathMode(dataMathId, DataMathMode::Average),
+        "switching from image Average to scalar Average should succeed");
+    Require(
+        graph.FindInputLink(dataMathId, DataMathInputSocketId(0)) == nullptr &&
+        graph.FindInputLink(dataMathId, DataMathInputSocketId(1)) == nullptr,
+        "a semantic mode change should remove links that no longer match its socket contract");
+    Require(
+        graph.GetCompletedChains().empty(),
+        "scalar Average should not retain an image-mode completed chain");
+
+    Graph maskGraph;
+    const int combineId = NodeId(maskGraph.AddMaskCombineNode(
+        MaskCombineMode::Add, { 0.0f, 0.0f }));
+    const Node* combine = maskGraph.FindNode(combineId);
+    const std::string addDefinitionId =
+        combine ? combine->definitionId : std::string();
+    Require(
+        maskGraph.SetMaskCombineMode(
+            combineId, MaskCombineMode::Exclude),
+        "Mask Combine mode mutation should succeed");
+    combine = maskGraph.FindNode(combineId);
+    Require(
+        combine &&
+        combine->definitionResolved &&
+        combine->definitionId != addDefinitionId,
+        "Mask Combine mode mutation should update exact definition identity");
+
+    Graph layerGraph;
+    layerGraph.ResetFromLayers(1, true);
+    const Node* layer = layerGraph.FindNodeByLayerIndex(0);
+    Require(
+        layer &&
+        layer->definitionResolved &&
+        !layer->instanceUuid.empty() &&
+        layerGraph.IsOutputConnected(),
+        "legacy layer-list graph construction should create executable, identified layer nodes");
+    const int layerId = layer->id;
+    const std::string brightnessDefinitionId = layer->definitionId;
+    Require(
+        layerGraph.SetLayerNodeType(layerId, LayerType::Contrast),
+        "layer metadata synchronization should accept a concrete type");
+    layer = layerGraph.FindNode(layerId);
+    Require(
+        layer &&
+        layer->definitionResolved &&
+        layer->typeId == "Contrast" &&
+        layer->definitionId != brightnessDefinitionId &&
+        layerGraph.IsOutputConnected(),
+        "layer type changes should update identity without losing the completed chain");
+    layerGraph.EditNodes();
+    Node* unresolvedLayer = layerGraph.FindNode(layerId);
+    unresolvedLayer->definitionResolved = false;
+    unresolvedLayer->definitionResolutionError =
+        "Injected saved layer definition mismatch.";
+    const std::string unresolvedLayerDefinitionId =
+        unresolvedLayer->definitionId;
+    layerGraph.SetLayerNodeType(layerId, LayerType::Contrast);
+    layer = layerGraph.FindNode(layerId);
+    Require(
+        layer &&
+        !layer->definitionResolved &&
+        layer->definitionId == unresolvedLayerDefinitionId,
+        "layer metadata refresh must not silently replace an unresolved saved definition");
+
+    Graph unresolvedGraph;
+    const int unresolvedSourceId = NodeId(
+        unresolvedGraph.AddImageGeneratorNode(
+            ImageGeneratorKind::SolidColor, { 0.0f, 0.0f }));
+    const int unresolvedOutputId = NodeId(
+        unresolvedGraph.AddOutputNode({ 260.0f, 0.0f }, true));
+    Require(
+        unresolvedGraph.TryConnectSockets(
+            unresolvedSourceId,
+            kImageOutputSocketId,
+            unresolvedOutputId,
+            kImageInputSocketId) &&
+        unresolvedGraph.IsOutputConnected(),
+        "unresolved-definition fixture should initially execute");
+    unresolvedGraph.EditNodes();
+    Node* unresolvedSource =
+        unresolvedGraph.FindNode(unresolvedSourceId);
+    unresolvedSource->definitionResolved = false;
+    unresolvedSource->definitionResolutionError =
+        "Injected exact-definition mismatch.";
+    Require(
+        !unresolvedGraph.IsOutputConnected() &&
+        unresolvedGraph.GetOutputConnectionDiagnostic().find(
+            "Injected exact-definition mismatch") != std::string::npos,
+        "completed-chain analysis should fail closed on any unresolved exact definition");
+
+    Graph unresolvedOptionalGraph;
+    const int optionalImageAId = NodeId(
+        unresolvedOptionalGraph.AddImageNode(
+            TestImagePayload(), { 0.0f, 0.0f }));
+    const int optionalImageBId = NodeId(
+        unresolvedOptionalGraph.AddImageNode(
+            TestImagePayload(), { 0.0f, 160.0f }));
+    const int optionalMaskId = NodeId(
+        unresolvedOptionalGraph.AddMaskGeneratorNode(
+            MaskGeneratorKind::Solid, { 220.0f, 280.0f }));
+    const int optionalMixId = NodeId(
+        unresolvedOptionalGraph.AddMixNode(
+            { 220.0f, 80.0f }));
+    const int optionalOutputId = NodeId(
+        unresolvedOptionalGraph.AddOutputNode(
+            { 440.0f, 80.0f }, true));
+    Require(
+        unresolvedOptionalGraph.TryConnectSockets(
+            optionalImageAId,
+            kImageOutputSocketId,
+            optionalMixId,
+            kMixInputASocketId) &&
+            unresolvedOptionalGraph.TryConnectSockets(
+                optionalImageBId,
+                kImageOutputSocketId,
+                optionalMixId,
+                kMixInputBSocketId) &&
+            unresolvedOptionalGraph.TryConnectSockets(
+                optionalMaskId,
+                kMaskOutputSocketId,
+                optionalMixId,
+                kMixFactorSocketId) &&
+            unresolvedOptionalGraph.TryConnectSockets(
+                optionalMixId,
+                kImageOutputSocketId,
+                optionalOutputId,
+                kImageInputSocketId) &&
+            unresolvedOptionalGraph.IsOutputConnected(),
+        "optional render-dependency fixture should initially execute");
+    unresolvedOptionalGraph.EditNodes();
+    Node* unresolvedOptionalMask =
+        unresolvedOptionalGraph.FindNode(optionalMaskId);
+    unresolvedOptionalMask->definitionResolved = false;
+    unresolvedOptionalMask->definitionResolutionError =
+        "Injected optional-mask definition mismatch.";
+    Require(
+        !unresolvedOptionalGraph.IsOutputConnected() &&
+            unresolvedOptionalGraph.GetOutputConnectionDiagnostic().find(
+                "Injected optional-mask definition mismatch") !=
+                std::string::npos,
+        "an unresolved authored mask must fail closed instead of "
+        "disappearing into an unmasked render snapshot");
+
+    Graph legacyFrequencyGraph;
+    const int legacyMaskId = NodeId(
+        legacyFrequencyGraph.AddFrequencyMaskNode(
+            FrequencyMaskShape::LowPass, { 0.0f, 0.0f }));
+    const int legacyOutputId = NodeId(
+        legacyFrequencyGraph.AddOutputNode({ 260.0f, 0.0f }, true));
+    Require(
+        !legacyFrequencyGraph.TryConnectSockets(
+            legacyMaskId,
+            kMaskOutputSocketId,
+            legacyOutputId,
+            kImageInputSocketId),
+        "Output v2 should reject a legacy frequency Mask instead of "
+        "misrepresenting it as a Channel");
+    Require(
+        !legacyFrequencyGraph.IsOutputConnected(),
+        "a rejected legacy frequency Mask must never advertise a completed output");
 }
 
 void TestImageAndScalarThroughDataMathStaysImage() {
@@ -3706,6 +5229,79 @@ void TestLutImporterCubeVariants() {
         "0 0 0\n");
     const ColorLut::LutImportResult invalid = ColorLut::ImportLutFile(invalidPath);
     Require(!invalid.success, "malformed .cube LUT should fail import");
+
+    const std::string extraSamplePath = WriteTempTextFile(
+        "stack_lut_extra_sample",
+        ".cube",
+        "LUT_1D_SIZE 2\n"
+        "0 0 0\n"
+        "1 1 1\n"
+        "0.5 0.5 0.5\n");
+    Require(
+        !ColorLut::ImportLutFile(extraSamplePath).success,
+        ".cube import should reject samples beyond its declared dimensions");
+
+    const std::string invalidDomainPath = WriteTempTextFile(
+        "stack_lut_invalid_domain",
+        ".cube",
+        "LUT_1D_SIZE 2\n"
+        "DOMAIN_MIN 1 0 0\n"
+        "DOMAIN_MAX 0 1 1\n"
+        "0 0 0\n"
+        "1 1 1\n");
+    Require(
+        !ColorLut::ImportLutFile(invalidDomainPath).success,
+        "LUT import should reject reversed channel domains");
+
+    const std::string spi3dPath = WriteTempTextFile(
+        "stack_lut_spi3d",
+        ".spi3d",
+        "SPILUT 1.0\n"
+        "2 2 2\n"
+        "0 0 0 0 0 0\n"
+        "0 0 1 0 0 1\n"
+        "0 1 0 0 1 0\n"
+        "0 1 1 0 1 1\n"
+        "1 0 0 1 0 0\n"
+        "1 0 1 1 0 1\n"
+        "1 1 0 1 1 0\n"
+        "1 1 1 1 1 1\n");
+    Require(
+        ColorLut::ImportLutFile(spi3dPath).success,
+        "complete .spi3d grids should import successfully");
+
+    const std::string sparseSpi3dPath = WriteTempTextFile(
+        "stack_lut_sparse_spi3d",
+        ".spi3d",
+        "SPILUT 1.0\n"
+        "100000 100000 100000\n"
+        "0 0 0 0 0 0\n");
+    Require(
+        !ColorLut::ImportLutFile(sparseSpi3dPath).success,
+        "sparse huge .spi3d declarations should fail without allocating their declared cube");
+
+    const std::string duplicateSpi3dPath = WriteTempTextFile(
+        "stack_lut_duplicate_spi3d",
+        ".spi3d",
+        "SPILUT 1.0\n"
+        "2 2 2\n"
+        "0 0 0 0 0 0\n"
+        "0 0 0 0 0 1\n"
+        "0 1 0 0 1 0\n"
+        "0 1 1 0 1 1\n"
+        "1 0 0 1 0 0\n"
+        "1 0 1 1 0 1\n"
+        "1 1 0 1 1 0\n"
+        "1 1 1 1 1 1\n");
+    Require(
+        !ColorLut::ImportLutFile(duplicateSpi3dPath).success,
+        ".spi3d import should reject duplicate coordinates that hide a missing sample");
+
+    ColorLut::LutPayload overflowPayload;
+    overflowPayload.lut3D.size = std::numeric_limits<int>::max();
+    Require(
+        !ColorLut::HasLut3D(overflowPayload),
+        "LUT payload validation should reject overflowing 3D dimensions");
 }
 
 void TestLutCreatorRoundTripSidecar() {
@@ -3723,6 +5319,21 @@ void TestLutCreatorRoundTripSidecar() {
     target.originalChannels = 4;
     source.pixels.resize(4u * 4u * 4u, 255u);
     target.pixels.resize(4u * 4u * 4u, 255u);
+
+    ColorLut::LutCreatorImage truncated = source;
+    truncated.pixels.resize(3);
+    ColorLut::LutCreatorSettings invalidSettings;
+    Require(
+        !ColorLut::CreateLutFromImages(
+            truncated, target, invalidSettings).success,
+        "LUT creator should reject truncated source pixel buffers");
+    ColorLut::LutCreatorSettings overflowingSettings;
+    overflowingSettings.lutSize =
+        std::numeric_limits<int>::max();
+    Require(
+        !ColorLut::CreateLutFromImages(
+            source, target, overflowingSettings).success,
+        "LUT creator should reject overflowing cubic dimensions before allocation");
 
     for (int y = 0; y < 4; ++y) {
         for (int x = 0; x < 4; ++x) {
@@ -4051,6 +5662,54 @@ void TestMfsrNodeShellSerializesRoundTrip() {
     Require(loaded.IsOutputConnected(), "loaded MFSR graph should keep its completed output chain");
 }
 
+void TestRetiredNeuralDenoiseCompatibilityRoundTrip() {
+    using namespace EditorNodeGraph;
+
+    const std::vector<EditorNodeGraphDefinitions::NodeCatalogEntry> catalog =
+        EditorNodeGraphDefinitions::BuildNodeCatalogEntries();
+    Require(std::none_of(catalog.begin(), catalog.end(), [](const auto& entry) {
+        return entry.kind == NodeKind::RawNeuralDenoise;
+    }), "retired RAW neural denoise should not be offered for new graphs");
+    const EditorNodeGraphDefinitions::LiveNodeDefinition* legacyDefinition =
+        EditorNodeGraphDefinitions::FindLiveNodeDefinition(
+            NodeKind::RawNeuralDenoise, 0);
+    Require(legacyDefinition != nullptr && !legacyDefinition->visibleInBrowser,
+        "retired RAW neural denoise should retain a hidden compatibility definition");
+
+    Graph graph;
+    RawNeuralDenoisePayload payload;
+    payload.settings.enabled = true;
+    payload.settings.selectedModelId = "legacy-test-model";
+    payload.settings.strength = 0.42f;
+    payload.settings.runtimePreference = NeuralDenoise::RuntimePreference::Cuda;
+    payload.settings.runRequestRevision = 7;
+    payload.settings.tilePlan.tileSize = 768;
+    payload.settings.tilePlan.overlap = 96;
+    const int legacyNodeId = NodeId(
+        graph.AddRawNeuralDenoiseNode(std::move(payload), { 120.0f, 80.0f }));
+
+    const nlohmann::json serialized =
+        SerializeGraphPayload(nlohmann::json::array(), graph);
+    Graph loaded;
+    DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
+
+    const Node* legacyNode = loaded.FindNode(legacyNodeId);
+    Require(legacyNode != nullptr &&
+            legacyNode->kind == NodeKind::RawNeuralDenoise,
+        "legacy RAW neural denoise should remain loadable");
+    Require(legacyNode->rawNeuralDenoise.settings.enabled &&
+            legacyNode->rawNeuralDenoise.settings.selectedModelId ==
+                "legacy-test-model" &&
+            std::abs(legacyNode->rawNeuralDenoise.settings.strength - 0.42f) <
+                0.001f &&
+            legacyNode->rawNeuralDenoise.settings.runtimePreference ==
+                NeuralDenoise::RuntimePreference::Cuda &&
+            legacyNode->rawNeuralDenoise.settings.runRequestRevision == 7 &&
+            legacyNode->rawNeuralDenoise.settings.tilePlan.tileSize == 768 &&
+            legacyNode->rawNeuralDenoise.settings.tilePlan.overlap == 96,
+        "legacy neural denoise settings should survive save/load without an inference runtime");
+}
+
 void TestTechnicalImageAndSourceMetadataSerializeRoundTrip() {
     using namespace EditorNodeGraph;
 
@@ -4118,6 +5777,74 @@ void TestCompositeNodeSerializesRoundTrip() {
     Require(compositeNode->expanded, "Composite node expanded state should survive graph serialization");
 }
 
+void TestGraphInfoNoLayoutPayloadPreservesGraphOrderAndState() {
+    using namespace EditorNodeGraph;
+
+    Graph graph;
+    const int sourceAId = NodeId(graph.AddImageGeneratorNode(
+        ImageGeneratorKind::SolidColor, { 720.0f, 410.0f }));
+    const int sourceBId = NodeId(graph.AddImageGeneratorNode(
+        ImageGeneratorKind::ColorGradient, { -180.0f, 90.0f }));
+    const int mixId = NodeId(graph.AddMixNode({ 360.0f, -240.0f }));
+    const int outputId = NodeId(graph.AddOutputNode({ 1080.0f, 640.0f }, true));
+
+    Node* mix = graph.FindNode(mixId);
+    Require(mix != nullptr, "no-layout graph fixture should contain its Mix node");
+    mix->mixFactor = 0.37f;
+
+    Require(graph.TryConnectSockets(
+            sourceBId, kImageOutputSocketId, mixId, kMixInputBSocketId),
+        "no-layout graph fixture should connect its B branch");
+    Require(graph.TryConnectSockets(
+            sourceAId, kImageOutputSocketId, mixId, kMixInputASocketId),
+        "no-layout graph fixture should connect its A branch");
+    Require(graph.TryConnectSockets(
+            mixId, kImageOutputSocketId, outputId, kImageInputSocketId),
+        "no-layout graph fixture should connect to its output");
+    Require(graph.AddGroup(
+            "Canvas Organization", { 120.0f, -320.0f }, { 840.0f, 760.0f }) != nullptr,
+        "no-layout graph fixture should contain a canvas group");
+
+    nlohmann::json payload =
+        SerializeGraphPayload(nlohmann::json::array(), graph);
+    RemoveGraphLayoutFromPayload(payload);
+
+    const nlohmann::json& graphJson = payload["nodeGraph"];
+    Require(!graphJson.contains("groups") &&
+            !graphJson.contains("nextGroupId") &&
+            !graphJson.contains("selectedNodeId"),
+        "no-layout graph info should omit canvas groups and selection layout state");
+
+    const nlohmann::json& nodesJson = graphJson["nodes"];
+    const std::vector<int> expectedNodeOrder = {
+        sourceAId, sourceBId, mixId, outputId
+    };
+    Require(nodesJson.size() == expectedNodeOrder.size(),
+        "no-layout graph info should preserve every serialized node");
+    for (std::size_t index = 0; index < expectedNodeOrder.size(); ++index) {
+        Require(nodesJson[index].value("id", -1) == expectedNodeOrder[index],
+            "no-layout graph info should preserve node order");
+        Require(!nodesJson[index].contains("x") && !nodesJson[index].contains("y"),
+            "no-layout graph info should omit every node position");
+    }
+    Require(std::abs(nodesJson[2].value("mixFactor", 0.0f) - 0.37f) < 1.0e-6f,
+        "no-layout graph info should retain functional node state");
+
+    const nlohmann::json& linksJson = graphJson["links"];
+    Require(linksJson.size() == 3,
+        "no-layout graph info should preserve every connection");
+    Require(
+        linksJson[0].value("fromNodeId", -1) == sourceBId &&
+        linksJson[0].value("toNodeId", -1) == mixId &&
+        linksJson[0].value("toSocket", std::string()) == kMixInputBSocketId &&
+        linksJson[1].value("fromNodeId", -1) == sourceAId &&
+        linksJson[1].value("toNodeId", -1) == mixId &&
+        linksJson[1].value("toSocket", std::string()) == kMixInputASocketId &&
+        linksJson[2].value("fromNodeId", -1) == mixId &&
+        linksJson[2].value("toNodeId", -1) == outputId,
+        "no-layout graph info should preserve authored connection order");
+}
+
 void TestHdrMergeDeghostModeMediumRoundTrip() {
     using namespace EditorNodeGraph;
 
@@ -4141,11 +5868,41 @@ void TestHdrMergeDeghostModeMediumRoundTrip() {
 void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
     Stack::RawRecipe::RawDevelopmentRecipe recipe =
         Stack::RawRecipe::MakeDefaultRecipe("D:/shoot/card/IMG_0001.dng", "IMG_0001.dng");
+    Require(recipe.technical.processingVersion == Raw::RawProcessingVersion::TruthfulV1 &&
+            recipe.technical.demosaicMethod == Raw::DemosaicMethod::MalvarHeCutler &&
+            recipe.technical.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65 &&
+            recipe.technical.applyBaselineExposure &&
+            recipe.technical.encodeSrgbOutput &&
+            !recipe.rgbDenoise.enabled &&
+            recipe.rgbDenoise.method ==
+                Stack::RawRecipe::RawRgbDenoiseMethod::ClassicalMultiscaleV1 &&
+            recipe.rgbDenoise.mapping ==
+                Stack::RawRecipe::RawRgbDenoiseMapping::SceneLinearSafeV1 &&
+            std::abs(recipe.rgbDenoise.colorNoise - 0.35f) < 0.001f &&
+            std::abs(recipe.rgbDenoise.luminanceNoise - 0.20f) < 0.001f &&
+            std::abs(recipe.rgbDenoise.detailProtection - 0.75f) < 0.001f,
+        "new RAW recipes should opt into the explicit Truthful V1 processing contract");
     recipe.source.relativePathKey = "card/IMG_0001.dng";
     recipe.source.fingerprint = "sample-fingerprint";
     recipe.source.fileSizeBytes = 1234567;
     recipe.source.modifiedTimeTicks = 42;
     recipe.preToneExposureEv = 0.75f;
+    recipe.technical.mosaicDenoise.enabled = true;
+    recipe.technical.mosaicDenoise.mode =
+        Raw::RawMosaicDenoiseMode::DngNoiseProfile;
+    recipe.technical.mosaicDenoise.hotPixelSuppression = true;
+    recipe.technical.mosaicDenoise.hotPixelThreshold = 0.18f;
+    recipe.technical.mosaicDenoise.lumaStrength = 0.42f;
+    recipe.technical.mosaicDenoise.chromaStrength = 0.67f;
+    recipe.technical.mosaicDenoise.radius = 3;
+    recipe.technical.mosaicDenoise.edgeProtection = 0.71f;
+    recipe.technical.mosaicDenoise.iterations = 2;
+    recipe.rgbDenoise.enabled = true;
+    recipe.rgbDenoise.method =
+        Stack::RawRecipe::RawRgbDenoiseMethod::ClassicalMultiscaleV1;
+    recipe.rgbDenoise.colorNoise = 0.48f;
+    recipe.rgbDenoise.luminanceNoise = 0.27f;
+    recipe.rgbDenoise.detailProtection = 0.83f;
     recipe.whiteBalance.mode = Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers;
     recipe.whiteBalance.hasMultipliers = true;
     recipe.whiteBalance.multipliers = { 2.0f, 1.0f, 1.5f };
@@ -4166,6 +5923,7 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
     recipe.viewTransform.layerJson = Stack::RawRecipe::DefaultViewTransformJson();
     recipe.viewTransform.layerJson["contrast"] = 1.18f;
     recipe.viewTransform.layerJson["saturation"] = 0.92f;
+    recipe.viewTransform.layerJson["enabled"] = false;
     recipe.localExposure.enabled = true;
     recipe.localExposure.amount = 0.72f;
     recipe.localExposure.shadowLiftEv = 0.50f;
@@ -4208,7 +5966,31 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
     recipe.localRange.colorMaskHueWidth = 0.24f;
     recipe.localRange.colorMaskFeather = 0.31f;
     recipe.localRange.colorMaskMinChroma = 0.10f;
+    recipe.localRange.targetZoneCombineMode =
+        Stack::RawRecipe::RawLocalRangeZoneCombineMode::Blend;
+    Stack::RawRecipe::RawLocalRangeTargetZone targetZone;
+    targetZone.id = "zone-test-1";
+    targetZone.name = "Court";
+    targetZone.centerEv = -2.25f;
+    targetZone.coreHalfWidthEv = 0.40f;
+    targetZone.featherEv = 0.80f;
+    targetZone.deltaEv = 1.15f;
+    targetZone.scope = Stack::RawRecipe::RawLocalRangeTargetScope::SelectedAreas;
+    targetZone.colorEnabled = true;
+    const std::array<float, 3> targetUv =
+        Stack::RawRecipe::SceneLinearRgbToUvChroma(
+            0.12f,
+            0.74f,
+            0.18f,
+            Raw::RawWorkingSpace::LinearRec2020D65);
+    targetZone.targetUPrime = targetUv[0];
+    targetZone.targetVPrime = targetUv[1];
+    targetZone.targetChroma = targetUv[2];
+    targetZone.seeds = { { 0.25f, 0.60f }, { 0.72f, 0.44f } };
+    recipe.localRange.targetZones.push_back(targetZone);
     recipe.cropRotation.rotationDegrees = 90;
+    recipe.cropRotation.flipHorizontally = true;
+    recipe.cropRotation.flipVertically = true;
 
     const std::vector<std::string>& defaultOrder = Stack::RawRecipe::DefaultStageOrder();
     Require(defaultOrder.size() >= 7, "RAW recipe should define a stable default stage order");
@@ -4217,6 +5999,16 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
         "RAW recipe stage order should include white balance");
     Require(std::find(defaultOrder.begin(), defaultOrder.end(), "pre-tone-exposure") != defaultOrder.end(),
         "RAW recipe stage order should include pre-tone exposure");
+    const auto rgbDenoiseStage = std::find(defaultOrder.begin(), defaultOrder.end(), "rgb-denoise");
+    const auto exposureStage = std::find(defaultOrder.begin(), defaultOrder.end(), "pre-tone-exposure");
+    const auto whiteBalanceStage = std::find(defaultOrder.begin(), defaultOrder.end(), "white-balance");
+    Require(
+        whiteBalanceStage != defaultOrder.end() &&
+            rgbDenoiseStage != defaultOrder.end() &&
+            exposureStage != defaultOrder.end() &&
+            whiteBalanceStage < rgbDenoiseStage &&
+            rgbDenoiseStage < exposureStage,
+        "RAW recipe stage order should place RGB denoise after demosaic/WB and before authored exposure");
     const auto localExposureStage = std::find(defaultOrder.begin(), defaultOrder.end(), "local-exposure");
     const auto localRangeStage = std::find(defaultOrder.begin(), defaultOrder.end(), "local-range");
     const auto toneCurveStage = std::find(defaultOrder.begin(), defaultOrder.end(), "tone-curve");
@@ -4232,19 +6024,130 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
     const nlohmann::json serialized = Stack::RawRecipe::SerializeRecipe(recipe);
     Require(serialized.value("rawRecipeVersion", 0) == Stack::RawRecipe::kRawDevelopmentRecipeVersion,
         "RAW recipe should serialize the current compact recipe version");
+    Require(serialized["processing"].value("version", std::string()) == "truthful-v1" &&
+            serialized["processing"].value("demosaic", std::string()) == "malvar-he-cutler-5x5" &&
+            serialized["processing"].value("workingSpace", std::string()) == "linear-rec2020-d65" &&
+            serialized["processing"].value("outputTransfer", std::string()) == "srgb",
+        "RAW recipe should serialize the complete processing contract");
+    Require(
+        serialized["processing"]["mosaicDenoise"].value("enabled", false) &&
+            serialized["processing"]["mosaicDenoise"].value(
+                "mode",
+                std::string()) == "dng-noise-profile-v1" &&
+            std::abs(serialized["processing"]["mosaicDenoise"].value(
+                "greenPlaneStrength",
+                0.0f) - 0.42f) < 0.001f,
+        "RAW recipe should serialize the versioned pre-demosaic denoise contract");
+    Require(
+        serialized["rgbDenoise"].value("version", 0) == 2 &&
+            serialized["rgbDenoise"].value("enabled", false) &&
+            serialized["rgbDenoise"].value("method", std::string()) ==
+                "classical-multiscale-v1" &&
+            serialized["rgbDenoise"].value("mapping", std::string()) ==
+                "scene-linear-safe-v1" &&
+            serialized["rgbDenoise"].value("packageId", std::string()) ==
+                Stack::RawRecipe::kRestormerDenoisePackageId &&
+            serialized["rgbDenoise"].value("adapterVersion", std::string()) ==
+                Stack::RawRecipe::kRestormerDenoiseAdapterVersion &&
+            std::abs(serialized["rgbDenoise"].value("colorNoise", 0.0f) - 0.48f) <
+                0.001f,
+        "RAW recipe should serialize the versioned post-demosaic RGB denoise contract");
     Require(serialized.contains("sourceRef"), "RAW recipe should serialize sourceRef");
     Require(serialized.contains("exposureEv"), "RAW recipe should serialize exposureEv");
     Require(serialized.contains("localExposure"), "RAW recipe should serialize localExposure");
     Require(serialized.contains("localRange"), "RAW recipe should serialize localRange");
     Require(serialized.contains("cropRotate"), "RAW recipe should serialize cropRotate");
+    Require(
+        serialized["cropRotate"].value("flipHorizontally", false) &&
+            serialized["cropRotate"].value("flipVertically", false),
+        "RAW recipe should serialize horizontal and vertical orientation flips");
     Require(serialized.contains("finishTone"), "RAW recipe should serialize finish tone layer state");
-    Require(serialized.contains("viewTransform"), "RAW recipe should serialize view transform layer state");
+    Require(serialized.contains("viewTransform") &&
+            !serialized["viewTransform"].value("enabled", true),
+        "RAW recipe should serialize the built-in view transform enable state");
     Require(serialized["previewOutput"].value("intent", std::string()) == "developed-preview",
         "RAW recipe should serialize previewOutput intent");
     const Stack::RawRecipe::RawDevelopmentRecipe loaded =
         Stack::RawRecipe::DeserializeRecipe(serialized);
     Require(loaded.rawRecipeVersion == Stack::RawRecipe::kRawDevelopmentRecipeVersion,
         "RAW recipe version should survive serialization");
+    nlohmann::json legacySignedSourceIdentity = serialized;
+    legacySignedSourceIdentity["sourceRef"]["fileSizeBytes"] =
+        static_cast<std::int64_t>(1234567);
+    Require(Stack::RawRecipe::DeserializeRecipe(
+                legacySignedSourceIdentity).source.fileSizeBytes == 1234567u,
+        "RAW recipe loading should recover nonnegative source sizes written as signed integers by older project binaries");
+    Require(loaded.technical.processingVersion == Raw::RawProcessingVersion::TruthfulV1 &&
+            loaded.technical.demosaicMethod == Raw::DemosaicMethod::MalvarHeCutler &&
+            loaded.viewTransform.layerJson.value("encodeSrgbOutput", false) &&
+            !Stack::RawRecipe::IsViewTransformEnabled(loaded),
+        "Truthful V1 processing and output transfer should survive serialization");
+    nlohmann::json legacyViewState = serialized;
+    legacyViewState["viewTransform"].erase("enabled");
+    Require(Stack::RawRecipe::IsViewTransformEnabled(
+                Stack::RawRecipe::DeserializeRecipe(legacyViewState)),
+        "RAW recipes saved before the built-in view switch should remain display-mapped");
+    nlohmann::json legacyOrientationState = serialized;
+    legacyOrientationState["rawRecipeVersion"] = 13;
+    legacyOrientationState["cropRotate"].erase("flipHorizontally");
+    legacyOrientationState["cropRotate"].erase("flipVertically");
+    const Stack::RawRecipe::RawDevelopmentRecipe loadedLegacyOrientation =
+        Stack::RawRecipe::DeserializeRecipe(legacyOrientationState);
+    Require(
+        !loadedLegacyOrientation.cropRotation.flipHorizontally &&
+            !loadedLegacyOrientation.cropRotation.flipVertically,
+        "pre-schema-14 RAW recipes should preserve their unflipped presentation");
+    Require(
+        loaded.technical.mosaicDenoise.enabled &&
+            loaded.technical.mosaicDenoise.mode ==
+                Raw::RawMosaicDenoiseMode::DngNoiseProfile &&
+            loaded.technical.mosaicDenoise.hotPixelSuppression &&
+            std::abs(loaded.technical.mosaicDenoise.hotPixelThreshold - 0.18f) <
+                0.001f &&
+            std::abs(loaded.technical.mosaicDenoise.lumaStrength - 0.42f) <
+                0.001f &&
+            std::abs(loaded.technical.mosaicDenoise.chromaStrength - 0.67f) <
+                0.001f &&
+            loaded.technical.mosaicDenoise.radius == 3 &&
+            std::abs(loaded.technical.mosaicDenoise.edgeProtection - 0.71f) <
+                0.001f &&
+            loaded.technical.mosaicDenoise.iterations == 2,
+        "RAW recipe pre-demosaic denoise settings should survive serialization");
+    Require(
+        loaded.rgbDenoise.enabled &&
+            loaded.rgbDenoise.method ==
+                Stack::RawRecipe::RawRgbDenoiseMethod::ClassicalMultiscaleV1 &&
+            std::abs(loaded.rgbDenoise.colorNoise - 0.48f) < 0.001f &&
+            std::abs(loaded.rgbDenoise.luminanceNoise - 0.27f) < 0.001f &&
+            std::abs(loaded.rgbDenoise.detailProtection - 0.83f) < 0.001f,
+        "RAW recipe post-demosaic RGB denoise settings should survive serialization");
+
+    nlohmann::json restormerRecipe = serialized;
+    restormerRecipe["rgbDenoise"]["method"] = "restormer-real-v1";
+    restormerRecipe["rgbDenoise"]["mapping"] = "processed-rgb-match-v1";
+    restormerRecipe["rgbDenoise"]["packageVersion"] = "1.0.0-dev";
+    restormerRecipe["rgbDenoise"]["modelSha256"] =
+        std::string(64, 'a');
+    const Stack::RawRecipe::RawDevelopmentRecipe loadedRestormer =
+        Stack::RawRecipe::DeserializeRecipe(restormerRecipe);
+    Require(
+        loadedRestormer.rgbDenoise.method ==
+            Stack::RawRecipe::RawRgbDenoiseMethod::RestormerRealV1 &&
+            loadedRestormer.rgbDenoise.mapping ==
+                Stack::RawRecipe::RawRgbDenoiseMapping::ProcessedRgbMatchV1 &&
+            loadedRestormer.rgbDenoise.packageVersion == "1.0.0-dev" &&
+            loadedRestormer.rgbDenoise.modelSha256 == std::string(64, 'a'),
+        "RAW recipes should preserve the exact Restormer model and adapter contract");
+    const Raw::RawDevelopSettings truthfulSettings = Stack::RawRecipe::ToRawDevelopSettings(loaded);
+    Require(truthfulSettings.processingVersion == Raw::RawProcessingVersion::TruthfulV1 &&
+            truthfulSettings.demosaicMethod == Raw::DemosaicMethod::MalvarHeCutler &&
+            truthfulSettings.falseColorSuppression == 0.0f &&
+            truthfulSettings.defringeStrength == 0.0f &&
+            truthfulSettings.highlightEdgeCleanup == 0.0f &&
+            truthfulSettings.mosaicDenoise.enabled &&
+            truthfulSettings.mosaicDenoise.mode ==
+                Raw::RawMosaicDenoiseMode::DngNoiseProfile,
+        "Truthful V1 should map authored denoise while leaving reconstructive cleanup off");
     Require(loaded.source.sourcePath == recipe.source.sourcePath,
         "RAW recipe source path should survive serialization");
     Require(loaded.source.relativePathKey == recipe.source.relativePathKey,
@@ -4283,6 +6186,16 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
     Require(std::abs(loaded.localRange.strength - 0.80f) < 0.001f &&
             std::abs(loaded.localRange.middleGrey - 0.20f) < 0.001f,
         "RAW recipe local range scalar settings should survive serialization");
+    Require(
+        loaded.localRange.targetZoneCombineMode ==
+                Stack::RawRecipe::RawLocalRangeZoneCombineMode::Blend &&
+            loaded.localRange.targetZones.size() == 1 &&
+            loaded.localRange.targetZones[0].id == "zone-test-1" &&
+            loaded.localRange.targetZones[0].name == "Court" &&
+            loaded.localRange.targetZones[0].seeds.size() == 2 &&
+            std::abs(loaded.localRange.targetZones[0].centerEv - -2.25f) < 0.001f &&
+            std::abs(loaded.localRange.targetZones[0].deltaEv - 1.15f) < 0.001f,
+        "RAW recipe independent target zones should survive serialization");
     Require(loaded.localRange.points.size() == 3 &&
             std::abs(loaded.localRange.points[0].ev - -9.0f) < 0.001f &&
             std::abs(loaded.localRange.points[0].deltaEv - 1.25f) < 0.001f &&
@@ -4323,6 +6236,8 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
         "RAW recipe finish tone should be applied after RAW develop settings");
     Require(rawSettings.rotationDegrees == 90,
         "RAW recipe rotation placeholder should map to RAW develop settings");
+    Require(rawSettings.flipHorizontally && rawSettings.flipVertically,
+        "RAW recipe orientation flips should map to RAW develop settings");
     const Raw::RawDetailFusionSettings localExposureSettings =
         Stack::RawRecipe::ToRawDetailFusionSettings(loaded);
     Require(std::abs(localExposureSettings.strength - 0.72f) < 0.001f,
@@ -4353,12 +6268,55 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
         "RAW recipe local exposure should be disabled by default");
     Require(!Stack::RawRecipe::IsLocalRangeEnabled(defaultRecipe),
         "RAW recipe local range should be disabled by default");
+    Require(!defaultRecipe.rgbDenoise.enabled,
+        "RAW recipe post-demosaic RGB denoise should remain opt-in");
     Require(defaultRecipe.localRange.points.size() == 3 &&
             std::abs(defaultRecipe.localRange.points.front().ev - -8.0f) < 0.001f &&
             std::abs(defaultRecipe.localRange.points.back().ev - 6.0f) < 0.001f,
         "RAW recipe local range should use identity EV anchor points by default");
     Require(std::abs(Stack::RawRecipe::ToRawDetailFusionSettings(defaultRecipe).strength - 1.0f) < 0.001f,
         "RAW recipe local exposure should use full strength by default for direct EV budgets");
+
+    nlohmann::json legacyVersionNine = serialized;
+    legacyVersionNine["rawRecipeVersion"] = 9;
+    legacyVersionNine.erase("rgbDenoise");
+    legacyVersionNine["stageOrder"].erase(
+        std::remove(
+            legacyVersionNine["stageOrder"].begin(),
+            legacyVersionNine["stageOrder"].end(),
+            "rgb-denoise"),
+        legacyVersionNine["stageOrder"].end());
+    const Stack::RawRecipe::RawDevelopmentRecipe migratedVersionNine =
+        Stack::RawRecipe::DeserializeRecipe(legacyVersionNine);
+    Require(
+        !migratedVersionNine.rgbDenoise.enabled &&
+            std::abs(migratedVersionNine.rgbDenoise.colorNoise - 0.35f) < 0.001f,
+        "version-nine RAW recipes should migrate with RGB denoise disabled and safe defaults");
+    const auto migratedRgbStage = std::find(
+        migratedVersionNine.stageOrder.begin(),
+        migratedVersionNine.stageOrder.end(),
+        "rgb-denoise");
+    const auto migratedExposureStage = std::find(
+        migratedVersionNine.stageOrder.begin(),
+        migratedVersionNine.stageOrder.end(),
+        "pre-tone-exposure");
+    Require(
+        migratedRgbStage != migratedVersionNine.stageOrder.end() &&
+            migratedExposureStage != migratedVersionNine.stageOrder.end() &&
+            migratedRgbStage < migratedExposureStage,
+        "version-nine stage orders should gain RGB denoise immediately before exposure");
+
+    nlohmann::json clampedRgbDenoiseRecipe = serialized;
+    clampedRgbDenoiseRecipe["rgbDenoise"]["colorNoise"] = 4.0f;
+    clampedRgbDenoiseRecipe["rgbDenoise"]["luminanceNoise"] = -2.0f;
+    clampedRgbDenoiseRecipe["rgbDenoise"]["detailProtection"] = 7.0f;
+    const Stack::RawRecipe::RawDevelopmentRecipe clampedRgbDenoise =
+        Stack::RawRecipe::DeserializeRecipe(clampedRgbDenoiseRecipe);
+    Require(
+        std::abs(clampedRgbDenoise.rgbDenoise.colorNoise - 1.0f) < 0.001f &&
+            std::abs(clampedRgbDenoise.rgbDenoise.luminanceNoise) < 0.001f &&
+            std::abs(clampedRgbDenoise.rgbDenoise.detailProtection - 1.0f) < 0.001f,
+        "RAW RGB denoise strengths should sanitize to the supported unit interval");
     defaultRecipe.localExposure.enabled = true;
     Require(!Stack::RawRecipe::IsLocalExposureEnabled(defaultRecipe),
         "RAW recipe local exposure should stay neutral when enabled with no direct EV budget");
@@ -4371,6 +6329,157 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
     defaultRecipe.localRange.points[1].deltaEv = 1.0f;
     Require(Stack::RawRecipe::IsLocalRangeEnabled(defaultRecipe),
         "RAW recipe local range should enable when an EV point delta is present");
+    Stack::RawRecipe::RawLocalRangeTargetZone directZone;
+    directZone.id = "direct-zone";
+    directZone.centerEv = -2.0f;
+    directZone.coreHalfWidthEv = 0.40f;
+    directZone.featherEv = 0.60f;
+    directZone.deltaEv = 1.50f;
+    directZone.scope = Stack::RawRecipe::RawLocalRangeTargetScope::AllMatches;
+    Require(
+        Stack::RawRecipe::EvaluateLocalRangeTargetZoneTonalWeight(directZone, -2.0f) > 0.999f &&
+            Stack::RawRecipe::EvaluateLocalRangeTargetZoneTonalWeight(directZone, -0.8f) < 0.01f,
+        "target-zone tonal qualification should use a full core and smooth EV feather");
+    const float directDelta =
+        Stack::RawRecipe::EvaluateLocalRangeTargetZoneDeltaEv(
+            directZone,
+            -2.0f,
+            0.12f,
+            0.74f,
+            0.18f,
+            Raw::RawWorkingSpace::LinearRec2020D65);
+    Require(
+        std::abs(directDelta - 1.50f) < 0.001f,
+        "brightness-first target zones should apply their direct EV correction at full qualification");
+    directZone.colorEnabled = true;
+    directZone.targetUPrime = targetUv[0];
+    directZone.targetVPrime = targetUv[1];
+    directZone.targetChroma = targetUv[2];
+    Require(
+        Stack::RawRecipe::EvaluateLocalRangeTargetZoneColorWeight(
+            directZone,
+            0.12f,
+            0.74f,
+            0.18f,
+            Raw::RawWorkingSpace::LinearRec2020D65) > 0.99f &&
+        Stack::RawRecipe::EvaluateLocalRangeTargetZoneColorWeight(
+            directZone,
+            0.70f,
+            0.10f,
+            0.12f,
+            Raw::RawWorkingSpace::LinearRec2020D65) < 0.10f,
+        "target-zone u-prime/v-prime color qualification should accept the sample and reject a distant hue");
+    const std::vector<float> overlapDeltas = { 1.0f, -0.50f };
+    const std::vector<float> overlapWeights = { 1.0f, 1.0f };
+    Require(
+        std::abs(Stack::RawRecipe::CombineLocalRangeTargetZoneDeltaEv(
+                     Stack::RawRecipe::RawLocalRangeZoneCombineMode::Add,
+                     overlapDeltas,
+                     overlapWeights) -
+                 0.50f) <
+                0.001f &&
+            std::abs(Stack::RawRecipe::CombineLocalRangeTargetZoneDeltaEv(
+                         Stack::RawRecipe::RawLocalRangeZoneCombineMode::Strongest,
+                         overlapDeltas,
+                         overlapWeights) -
+                     1.0f) <
+                0.001f &&
+            std::abs(Stack::RawRecipe::CombineLocalRangeTargetZoneDeltaEv(
+                         Stack::RawRecipe::RawLocalRangeZoneCombineMode::Blend,
+                         overlapDeltas,
+                         overlapWeights) -
+                     0.25f) <
+                0.001f,
+        "target-zone overlap modes should implement additive, strongest, and weighted blend semantics");
+    Require(
+        std::abs(Stack::RawLocalRangeTargetInteraction::DragOffsetEv(
+                     100.0f,
+                     92.0f)) <
+                0.0001f &&
+            std::abs(Stack::RawLocalRangeTargetInteraction::DragOffsetEv(
+                         100.0f,
+                         -28.0f) -
+                     1.0f) <
+                0.0001f &&
+            std::abs(Stack::RawLocalRangeTargetInteraction::DragOffsetEv(
+                         100.0f,
+                         228.0f) +
+                     1.0f) <
+                0.0001f,
+        "target drag mapping should preserve an eight-pixel dead zone and use 120 pixels per EV");
+    Require(
+        Stack::RawLocalRangeTargetInteraction::ShouldCreateZone(false, false) &&
+            !Stack::RawLocalRangeTargetInteraction::ShouldCreateZone(true, false) &&
+            Stack::RawLocalRangeTargetInteraction::ShouldCreateZone(true, true),
+        "target creation should be implicit only for the first zone and require Ctrl afterward");
+    Require(
+        Stack::RawLocalRangeTargetInteraction::ShouldPreserveBasePresentation(
+            true,
+            true,
+            true,
+            false) &&
+            Stack::RawLocalRangeTargetInteraction::
+                ShouldPreserveBasePresentation(
+                    false,
+                    true,
+                    true,
+                    false) &&
+            !Stack::RawLocalRangeTargetInteraction::
+                ShouldPreserveBasePresentation(
+                    false,
+                    true,
+                    true,
+                    true),
+        "target hover work should preserve the photograph, while an active recipe edit must publish its adjusted photograph");
+    const std::vector<Stack::RawLocalRangeTargetInteraction::Candidate>
+        targetCandidates = {
+            { "active", 0, 0.51f, true },
+            { "strongest", 1, 0.55f, false }
+        };
+    Require(
+        Stack::RawLocalRangeTargetInteraction::ChooseCandidate(targetCandidates) == 0,
+        "target candidate selection should retain the active zone within the hysteresis band");
+    const std::vector<Stack::RawLocalRangeTargetInteraction::Candidate>
+        strongerTargetCandidates = {
+            { "active", 0, 0.30f, true },
+            { "strongest", 1, 0.80f, false }
+        };
+    Require(
+        Stack::RawLocalRangeTargetInteraction::ChooseCandidate(
+            strongerTargetCandidates) == 1,
+        "target candidate selection should switch when another authored mask is clearly stronger");
+    Require(
+        Stack::RawLocalRangeTargetInteraction::OverlayMatchesPresentation(
+            true,
+            12,
+            10,
+            44,
+            44) &&
+            !Stack::RawLocalRangeTargetInteraction::OverlayMatchesPresentation(
+                true,
+                12,
+                10,
+                45,
+                44) &&
+            Stack::RawLocalRangeTargetInteraction::OverlayMatchesPresentation(
+                true,
+                11,
+                10,
+                43,
+                44) &&
+            Stack::RawLocalRangeTargetInteraction::OverlayMatchesPresentation(
+                false,
+                10,
+                10,
+                0,
+                0) &&
+            !Stack::RawLocalRangeTargetInteraction::OverlayMatchesPresentation(
+                false,
+                12,
+                10,
+                0,
+                0),
+        "target outlines should retain the last accepted transient generation while newer hover work is pending, whereas ordinary overlays follow the base viewport generation");
     const Stack::RawRecipe::RawLocalRangeRecipe openShadowsPreset =
         Stack::RawRecipe::ApplyLocalRangePreset(
             Stack::RawRecipe::DefaultLocalRangeRecipe(),
@@ -4441,6 +6550,32 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
         "RAW recipe local range should keep identity midtones near identity when the curve says zero");
     Require(std::abs(Stack::RawRecipe::LocalRangeExposureScaleForLuma(gradientLocalRange, highlightLuma) - 0.5f) < 0.02f,
         "RAW recipe local range should compress a matching highlight zone by roughly one stop");
+    gradientLocalRange.strength = 0.40f;
+    Require(
+        std::abs(
+            Stack::RawRecipe::EvaluateLocalRangeControlDeltaEv(
+                gradientLocalRange,
+                -3.0f) -
+            1.0f) <
+            0.001f &&
+            std::abs(
+                Stack::RawRecipe::EvaluateLocalRangeDeltaEv(
+                    gradientLocalRange,
+                    -3.0f) -
+                0.40f) <
+                0.001f,
+        "RAW recipe local range control evaluation should preserve the graph value independently of Strength");
+    const float resumedTargetDeltaEv = std::clamp(
+        Stack::RawRecipe::EvaluateLocalRangeControlDeltaEv(
+            gradientLocalRange,
+            -3.0f) +
+            0.50f,
+        -4.0f,
+        4.0f);
+    Require(
+        std::abs(resumedTargetDeltaEv - 1.50f) < 0.001f,
+        "RAW recipe target dragging should be able to continue from the existing graph adjustment");
+    gradientLocalRange.strength = 1.0f;
     gradientLocalRange.enabled = false;
     Require(std::abs(Stack::RawRecipe::LocalRangeExposureScaleForLuma(gradientLocalRange, shadowLuma) - 1.0f) < 0.001f,
         "RAW recipe disabled local range should be indistinguishable from no local range");
@@ -4668,6 +6803,66 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
         "RAW recipe local-range hash should detect color qualification changes");
     Require(Stack::RawRecipe::SerializeRecipe(loaded).dump() != Stack::RawRecipe::SerializeRecipe(localRangeColorChanged).dump(),
         "RAW Development render identity should change when local range color qualification changes");
+    Stack::RawRecipe::RawDevelopmentRecipe localRangeTargetZoneChanged = loaded;
+    localRangeTargetZoneChanged.localRange.targetZones[0].deltaEv += 0.25f;
+    Require(
+        !Stack::RawRecipe::LocalRangeStateEquals(loaded, localRangeTargetZoneChanged) &&
+            Stack::RawRecipe::LocalRangeStateHash(loaded) !=
+                Stack::RawRecipe::LocalRangeStateHash(localRangeTargetZoneChanged),
+        "RAW recipe local-range identity should include independent target-zone edits");
+
+    nlohmann::json versionEightRecipe = serialized;
+    versionEightRecipe["rawRecipeVersion"] = 8;
+    versionEightRecipe["processing"].erase("mosaicDenoise");
+    const Stack::RawRecipe::RawDevelopmentRecipe versionEightLoaded =
+        Stack::RawRecipe::DeserializeRecipe(versionEightRecipe);
+    Require(
+        !versionEightLoaded.technical.mosaicDenoise.enabled &&
+            versionEightLoaded.technical.mosaicDenoise.mode ==
+                Raw::RawMosaicDenoiseMode::DngNoiseProfile,
+        "version-8 RAW recipes should migrate with denoise disabled and no pixel change");
+
+    nlohmann::json clampedDenoiseRecipe = serialized;
+    clampedDenoiseRecipe["processing"]["mosaicDenoise"]["hotPixelThreshold"] =
+        4.0f;
+    clampedDenoiseRecipe["processing"]["mosaicDenoise"]["greenPlaneStrength"] =
+        -2.0f;
+    clampedDenoiseRecipe["processing"]["mosaicDenoise"]["redBluePlaneStrength"] =
+        8.0f;
+    clampedDenoiseRecipe["processing"]["mosaicDenoise"]["radius"] = 99;
+    clampedDenoiseRecipe["processing"]["mosaicDenoise"]["edgeProtection"] =
+        -3.0f;
+    clampedDenoiseRecipe["processing"]["mosaicDenoise"]["iterations"] = 8;
+    const Stack::RawRecipe::RawDevelopmentRecipe clampedDenoiseLoaded =
+        Stack::RawRecipe::DeserializeRecipe(clampedDenoiseRecipe);
+    Require(
+        std::abs(
+            clampedDenoiseLoaded.technical.mosaicDenoise.hotPixelThreshold -
+            1.0f) < 0.001f &&
+            std::abs(
+                clampedDenoiseLoaded.technical.mosaicDenoise.lumaStrength) <
+                0.001f &&
+            std::abs(
+                clampedDenoiseLoaded.technical.mosaicDenoise.chromaStrength -
+                1.0f) < 0.001f &&
+            clampedDenoiseLoaded.technical.mosaicDenoise.radius == 4 &&
+            std::abs(
+                clampedDenoiseLoaded.technical.mosaicDenoise.edgeProtection) <
+                0.001f &&
+            clampedDenoiseLoaded.technical.mosaicDenoise.iterations == 2,
+        "RAW recipe denoise values should clamp to the supported processing range");
+
+    nlohmann::json versionSevenRecipe = serialized;
+    versionSevenRecipe["rawRecipeVersion"] = 7;
+    versionSevenRecipe["localRange"].erase("targetZoneCombineMode");
+    versionSevenRecipe["localRange"].erase("targetZones");
+    const Stack::RawRecipe::RawDevelopmentRecipe versionSevenLoaded =
+        Stack::RawRecipe::DeserializeRecipe(versionSevenRecipe);
+    Require(
+        versionSevenLoaded.localRange.targetZones.empty() &&
+            versionSevenLoaded.localRange.targetZoneCombineMode ==
+                Stack::RawRecipe::RawLocalRangeZoneCombineMode::Add,
+        "version-7 RAW recipes should migrate with no hidden target zones and additive defaults");
 
     nlohmann::json legacyRecipe = serialized;
     legacyRecipe["rawRecipeVersion"] = 2;
@@ -4678,6 +6873,12 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
         Stack::RawRecipe::DeserializeRecipe(legacyRecipe);
     Require(migrated.rawRecipeVersion == Stack::RawRecipe::kRawDevelopmentRecipeVersion,
         "legacy RAW recipes should migrate to the current compact recipe version");
+    Require(migrated.technical.processingVersion == Raw::RawProcessingVersion::LegacyV1 &&
+            migrated.technical.demosaicMethod == Raw::DemosaicMethod::Bilinear &&
+            migrated.technical.workingSpace == Raw::RawWorkingSpace::LinearSrgbD65 &&
+            !migrated.technical.applyBaselineExposure &&
+            !migrated.viewTransform.layerJson.value("encodeSrgbOutput", true),
+        "legacy RAW recipes should remain on the legacy processing and linear-output path");
     Require(migrated.finishTone.layerJson.value("type", std::string()) == "ToneCurve" &&
             migrated.finishTone.layerJson.value("domain", -1) == 0,
         "legacy non-identity RAW tone curves should migrate into scene-linear finish tone state");
@@ -4723,6 +6924,919 @@ void TestRawDevelopmentRecipeDefaultsAndRoundTrip() {
             legacyLocalExposureStage < legacyLocalRangeStage &&
             legacyLocalRangeStage < legacyToneCurveStage,
         "RAW recipe should normalize legacy stage order with local exposure and local range before tone curve");
+}
+
+void TestRawFinishTonePointCurveSetContract() {
+    namespace RawRecipe = Stack::RawRecipe;
+
+    const nlohmann::json defaults = RawRecipe::DefaultFinishToneJson();
+    Require(defaults.value("pointCurveSetVersion", 0) == 1 &&
+            defaults.contains("pointCurves") &&
+            defaults["pointCurves"].is_object(),
+        "schema-13 finish tone defaults should own a versioned point-curve set");
+    for (const char* key : { "composite", "red", "green", "blue" }) {
+        Require(defaults["pointCurves"][key].value(
+                    "interpolation", std::string()) == "monotone-cubic-v1" &&
+                defaults["pointCurves"][key]["points"].empty(),
+            "canonical schema-13 identity curves should serialize with no authored points");
+    }
+    const RawRecipe::RawPointCurveSet defaultSet =
+        RawRecipe::PointCurveSetFromFinishToneJson(defaults);
+    for (const RawRecipe::RawPointCurveComponent& component : defaultSet.curves) {
+        Require(component.points.size() == 2 &&
+                RawRecipe::IsIdentityRawPointCurveComponent(component),
+            "all four schema-13 point curves should default to two-point identity");
+    }
+
+    nlohmann::json malformed = defaults;
+    malformed["unknownFinishField"] = nlohmann::json{{ "keep", 73 }};
+    malformed["pointCurves"]["red"] = {
+        { "interpolation", "not-supported" },
+        { "points", nlohmann::json::array() }
+    };
+    for (int index = 0; index < 20; ++index) {
+        malformed["pointCurves"]["red"]["points"].push_back({
+            { "x", index == 4 ? nlohmann::json(nullptr) : nlohmann::json(0.05f * index) },
+            { "y", index == 7 ? nlohmann::json("bad") : nlohmann::json(1.0f - 0.03f * index) },
+            { "shape", index == 8 ? 99 : 1 }
+        });
+    }
+    malformed["pointCurves"]["red"]["points"].push_back({
+        { "x", 0.25f }, { "y", 0.75f }, { "shape", 1 }
+    });
+    malformed["pointCurves"].erase("green");
+    malformed["pointCurves"]["blue"] = "not-a-component";
+    const nlohmann::json sanitized =
+        RawRecipe::SanitizeFinishTonePointCurveJson(malformed, 13);
+    const RawRecipe::RawPointCurveSet sanitizedSet =
+        RawRecipe::PointCurveSetFromFinishToneJson(sanitized);
+    const RawRecipe::RawPointCurveComponent& sanitizedRed =
+        sanitizedSet.curves[static_cast<std::size_t>(RawRecipe::RawPointCurveChannel::Red)];
+    Require(sanitized["unknownFinishField"]["keep"].get<int>() == 73,
+        "point-curve sanitation should preserve unknown finish-tone fields");
+    Require(sanitizedRed.interpolation == "monotone-cubic-v1" &&
+            sanitizedRed.points.size() <= RawRecipe::kMaxRawPointCurvePoints &&
+            std::abs(sanitizedRed.points.front().x) < 0.0001f &&
+            std::abs(sanitizedRed.points.back().x - 1.0f) < 0.0001f,
+        "malformed curves should repair interpolation, endpoints, and point limits");
+    for (std::size_t index = 1; index < sanitizedRed.points.size(); ++index) {
+        Require(sanitizedRed.points[index].x > sanitizedRed.points[index - 1u].x,
+            "duplicate point inputs should sanitize to a strictly ordered curve");
+    }
+    Require(RawRecipe::IsIdentityRawPointCurveComponent(
+                sanitizedSet.curves[static_cast<std::size_t>(
+                    RawRecipe::RawPointCurveChannel::Green)]) &&
+            RawRecipe::IsIdentityRawPointCurveComponent(
+                sanitizedSet.curves[static_cast<std::size_t>(
+                    RawRecipe::RawPointCurveChannel::Blue)]),
+        "missing or malformed curve components should sanitize to identity");
+
+    RawRecipe::RawPointCurveComponent alternating;
+    alternating.points = {
+        { 0.0f, 0.0f, 1 },
+        { 0.25f, 0.82f, 1 },
+        { 0.55f, 0.18f, 1 },
+        { 0.78f, 0.72f, 1 },
+        { 1.0f, 1.0f, 1 }
+    };
+    for (std::size_t segment = 0; segment + 1u < alternating.points.size(); ++segment) {
+        const auto& a = alternating.points[segment];
+        const auto& b = alternating.points[segment + 1u];
+        const float minimum = std::min(a.y, b.y) - 0.00001f;
+        const float maximum = std::max(a.y, b.y) + 0.00001f;
+        for (int step = 0; step <= 64; ++step) {
+            const float x = a.x + (b.x - a.x) *
+                (static_cast<float>(step) / 64.0f);
+            const float value = RawRecipe::EvaluateRawPointCurveComponent(alternating, x);
+            Require(std::isfinite(value) && value >= minimum && value <= maximum,
+                "monotone cubic segments should remain finite and never overshoot their endpoints");
+        }
+    }
+    RawRecipe::RawPointCurveComponent inverted;
+    inverted.points = { { 0.0f, 1.0f, 1 }, { 1.0f, 0.0f, 1 } };
+    Require(std::abs(RawRecipe::EvaluateRawPointCurveComponent(inverted, 0.2f) - 0.8f) < 0.0001f &&
+            std::abs(RawRecipe::EvaluateRawPointCurveComponent(inverted, 0.8f) - 0.2f) < 0.0001f,
+        "point curves should allow finite descending and inverted responses");
+
+    std::uint32_t randomState = 0x6d2b79f5u;
+    auto nextUnit = [&]() {
+        randomState = randomState * 1664525u + 1013904223u;
+        return static_cast<float>((randomState >> 8u) & 0x00ffffffu) /
+            static_cast<float>(0x00ffffffu);
+    };
+    for (int curveIndex = 0; curveIndex < 24; ++curveIndex) {
+        RawRecipe::RawPointCurveComponent randomCurve;
+        randomCurve.points.push_back({ 0.0f, nextUnit(), 1 });
+        for (int pointIndex = 1; pointIndex < 7; ++pointIndex) {
+            randomCurve.points.push_back({
+                static_cast<float>(pointIndex) / 7.0f,
+                nextUnit(),
+                1
+            });
+        }
+        randomCurve.points.push_back({ 1.0f, nextUnit(), 1 });
+        std::array<float, 4096> lut {};
+        for (std::size_t sample = 0; sample < lut.size(); ++sample) {
+            lut[sample] = RawRecipe::EvaluateRawPointCurveComponent(
+                randomCurve,
+                static_cast<float>(sample) / static_cast<float>(lut.size() - 1u));
+        }
+        for (int sample = 0; sample < 512; ++sample) {
+            const float x = nextUnit();
+            const float lutPosition = x * static_cast<float>(lut.size() - 1u);
+            const std::size_t left = static_cast<std::size_t>(std::floor(lutPosition));
+            const std::size_t right = std::min(left + 1u, lut.size() - 1u);
+            const float fraction = lutPosition - static_cast<float>(left);
+            const float sampled = lut[left] + (lut[right] - lut[left]) * fraction;
+            const float reference =
+                RawRecipe::EvaluateRawPointCurveComponent(randomCurve, x);
+            Require(std::abs(sampled - reference) <= 2.0e-4f,
+                "4096-sample GL-linear LUT interpolation should match the CPU curve reference");
+        }
+    }
+
+    nlohmann::json sceneCurves = defaults;
+    sceneCurves["domain"] = 0;
+    RawRecipe::RawPointCurveComponent red;
+    red.points = { { 0.0f, 0.0f, 1 }, { 0.5f, 0.75f, 1 }, { 1.0f, 1.0f, 1 } };
+    RawRecipe::StorePointCurveComponentInFinishToneJson(
+        sceneCurves, RawRecipe::RawPointCurveChannel::Red, red);
+    const std::array<float, 3> redOnly =
+        RawRecipe::EvaluateFinishTonePointCurveRgb(sceneCurves, { 0.5f, 0.4f, 0.3f });
+    Require(std::abs(redOnly[0] - 0.75f) < 0.0001f &&
+            std::abs(redOnly[1] - 0.4f) < 0.0001f &&
+            std::abs(redOnly[2] - 0.3f) < 0.0001f,
+        "an R-only curve should leave green and blue unchanged");
+
+    RawRecipe::RawPointCurveComponent composite;
+    composite.points = { { 0.0f, 0.0f, 1 }, { 0.5f, 0.6f, 1 }, { 1.0f, 1.0f, 1 } };
+    red.points = { { 0.0f, 0.0f, 1 }, { 0.6f, 0.8f, 1 }, { 1.0f, 1.0f, 1 } };
+    RawRecipe::StorePointCurveComponentInFinishToneJson(
+        sceneCurves, RawRecipe::RawPointCurveChannel::Composite, composite);
+    RawRecipe::StorePointCurveComponentInFinishToneJson(
+        sceneCurves, RawRecipe::RawPointCurveChannel::Red, red);
+    const std::array<float, 3> ordered =
+        RawRecipe::EvaluateFinishTonePointCurveRgb(sceneCurves, { 0.5f, 0.5f, 0.5f });
+    Require(std::abs(ordered[0] - 0.8f) < 0.0001f &&
+            std::abs(ordered[1] - 0.6f) < 0.0001f &&
+            std::abs(ordered[2] - 0.6f) < 0.0001f,
+        "finish tone should apply composite first and the matching channel curve second");
+
+    nlohmann::json logCurves = defaults;
+    RawRecipe::RawPointCurveComponent logComposite;
+    logComposite.points = {
+        { 0.0f, 0.0f, 1 },
+        { 0.625f, 0.75f, 1 },
+        { 1.0f, 1.0f, 1 }
+    };
+    RawRecipe::StorePointCurveComponentInFinishToneJson(
+        logCurves, RawRecipe::RawPointCurveChannel::Composite, logComposite);
+    const std::array<float, 3> logMapped =
+        RawRecipe::EvaluateFinishTonePointCurveRgb(logCurves, { 0.18f, 0.18f, 0.18f });
+    Require(std::abs(logMapped[0] - 0.72f) < 0.0002f &&
+            std::abs(logMapped[1] - 0.72f) < 0.0002f &&
+            std::abs(logMapped[2] - 0.72f) < 0.0002f,
+        "Log-domain point coordinates should round-trip through shared scene EV bounds");
+
+    const nlohmann::json preparedPoints = nlohmann::json::array({
+        { { "x", 0.0f }, { "y", 0.04f }, { "shape", 1 } },
+        { { "x", 0.45f }, { "y", 0.58f }, { "shape", 1 } },
+        { { "x", 1.0f }, { "y", 0.96f }, { "shape", 1 } }
+    });
+    const nlohmann::json editablePoints = nlohmann::json::array({
+        { { "x", 0.0f }, { "y", 0.02f }, { "shape", 1 } },
+        { { "x", 0.62f }, { "y", 0.48f }, { "shape", 1 } },
+        { { "x", 1.0f }, { "y", 0.98f }, { "shape", 1 } }
+    });
+    auto legacyEvaluate = [](const nlohmann::json& points, float x) {
+        if (x <= points.front().value("x", 0.0f)) {
+            return points.front().value("y", 0.0f);
+        }
+        for (std::size_t index = 1; index < points.size(); ++index) {
+            const float ax = points[index - 1u].value("x", 0.0f);
+            const float ay = points[index - 1u].value("y", 0.0f);
+            const float bx = points[index].value("x", 1.0f);
+            const float by = points[index].value("y", 1.0f);
+            if (x <= bx) {
+                const float t = (x - ax) / std::max(0.0001f, bx - ax);
+                return ay + (by - ay) * t;
+            }
+        }
+        return points.back().value("y", 1.0f);
+    };
+    auto oldCombined = [&](float value) {
+        return legacyEvaluate(editablePoints, legacyEvaluate(preparedPoints, value));
+    };
+    const std::array<float, 3> inputRgb { 0.22f, 0.51f, 0.83f };
+    for (int legacyMode = 0; legacyMode < 5; ++legacyMode) {
+        RawRecipe::RawDevelopmentRecipe legacyRecipe =
+            RawRecipe::MakeDefaultRecipe("legacy.dng", "legacy.dng");
+        nlohmann::json serializedRecipe = RawRecipe::SerializeRecipe(legacyRecipe);
+        serializedRecipe["rawRecipeVersion"] = 12;
+        nlohmann::json legacyFinish = RawRecipe::DefaultFinishToneJson();
+        legacyFinish.erase("pointCurveSetVersion");
+        legacyFinish.erase("pointCurves");
+        legacyFinish["mode"] = legacyMode;
+        legacyFinish["domain"] = 0;
+        legacyFinish["preparedPoints"] = preparedPoints;
+        legacyFinish["points"] = editablePoints;
+        legacyFinish["archivedAutomaticBackend"] = nlohmann::json{{ "token", 91 }};
+        serializedRecipe["finishTone"] = legacyFinish;
+        const RawRecipe::RawDevelopmentRecipe migrated =
+            RawRecipe::DeserializeRecipe(serializedRecipe);
+        const std::array<float, 3> actual =
+            RawRecipe::EvaluateFinishTonePointCurveRgb(
+                migrated.finishTone.layerJson,
+                inputRgb);
+        std::array<float, 3> expected = inputRgb;
+        if (legacyMode == 0) {
+            const float oldLuma =
+                0.2126f * expected[0] + 0.7152f * expected[1] + 0.0722f * expected[2];
+            const float gain = oldCombined(oldLuma) / std::max(oldLuma, 0.000001f);
+            for (float& value : expected) value *= gain;
+        } else if (legacyMode == 1) {
+            for (float& value : expected) value = oldCombined(value);
+        } else {
+            expected[static_cast<std::size_t>(legacyMode - 2)] =
+                oldCombined(expected[static_cast<std::size_t>(legacyMode - 2)]);
+        }
+        Require(migrated.finishTone.layerJson.value("pointCurveSetVersion", 0) == 1 &&
+                migrated.finishTone.layerJson["archivedAutomaticBackend"]["token"].get<int>() == 91,
+            "schema-12 migration should create the curve set without dropping archived finish-tone data");
+        for (int channel = 0; channel < 3; ++channel) {
+            Require(std::abs(actual[static_cast<std::size_t>(channel)] -
+                    expected[static_cast<std::size_t>(channel)]) < 0.0002f,
+                "schema-12 Y/RGB/channel migration should preserve legacy CPU pixels");
+        }
+        const RawRecipe::RawPointCurveSet migratedSet =
+            RawRecipe::PointCurveSetFromFinishToneJson(migrated.finishTone.layerJson);
+        if (legacyMode == 0) {
+            Require(migratedSet.legacyLumaEnabled,
+                "legacy Y mode should migrate to the compatibility-only luminance stage");
+        } else {
+            const std::size_t componentIndex = static_cast<std::size_t>(legacyMode - 1);
+            Require(!migratedSet.curves[componentIndex].basePoints.empty(),
+                "legacy prepared points should migrate as component basePoints");
+        }
+    }
+}
+
+void TestRawDevelopmentStageCachePolicy() {
+    namespace Cache = Stack::Renderer::RawDevelopmentCache;
+    namespace RawRecipe = Stack::RawRecipe;
+
+    RawRecipe::RawDevelopmentRecipe recipe =
+        RawRecipe::MakeDefaultRecipe(
+            "D:/shoot/card/IMG_0100.dng",
+            "IMG_0100.dng");
+    recipe.source.relativePathKey = "card/IMG_0100.dng";
+    recipe.source.fingerprint = "content-identity-a";
+    recipe.source.fileSizeBytes = 42'000'000;
+    recipe.source.modifiedTimeTicks = 1234;
+    recipe.whiteBalance.mode = RawRecipe::WhiteBalanceMode::CustomMultipliers;
+    recipe.whiteBalance.hasMultipliers = true;
+    recipe.whiteBalance.multipliers = { 2.0f, 1.0f, 1.4f };
+    recipe.preToneExposureEv = 0.65f;
+    recipe.localExposure.enabled = true;
+    recipe.localExposure.amount = 0.8f;
+    recipe.localExposure.shadowLiftEv = 0.6f;
+    recipe.localRange.enabled = true;
+    recipe.localRange.strength = 1.0f;
+    recipe.localRange.points = {
+        { -8.0f, 0.0f },
+        { -3.0f, 0.8f },
+        { 0.0f, 0.0f },
+        { 6.0f, 0.0f }
+    };
+    RawRecipe::RawLocalRangeTargetZone zone;
+    zone.id = "zone-cache-contract";
+    zone.centerEv = -2.5f;
+    zone.deltaEv = 0.7f;
+    zone.scope = RawRecipe::RawLocalRangeTargetScope::SelectedAreas;
+    zone.seeds = { { 0.35f, 0.55f } };
+    recipe.localRange.targetZones = { zone };
+    recipe.finishTone.layerJson = RawRecipe::DefaultFinishToneJson();
+    recipe.finishTone.layerJson["points"] = nlohmann::json::array({
+        { { "x", 0.0f }, { "y", 0.0f } },
+        { { "x", 0.5f }, { "y", 0.54f } },
+        { { "x", 1.0f }, { "y", 1.0f } }
+    });
+    recipe.viewTransform.layerJson = RawRecipe::DefaultViewTransformJson();
+    recipe.viewTransform.layerJson["contrast"] = 1.1f;
+
+    const auto fingerprint = [&](const RawRecipe::RawDevelopmentRecipe& value,
+                                 Cache::Stage stage,
+                                 int preview = 1280) {
+        return Cache::BuildStageFingerprint(value, preview, stage);
+    };
+    const std::array<Cache::Stage, 6> stages = {
+        Cache::Stage::RawBase,
+        Cache::Stage::NeutralPlacement,
+        Cache::Stage::RawPlacement,
+        Cache::Stage::PostLocalExposure,
+        Cache::Stage::PostLocalRange,
+        Cache::Stage::PostFinishTone
+    };
+
+    RawRecipe::RawDevelopmentRecipe presentationOnly = recipe;
+    presentationOnly.source.relativePathKey = "renamed/IMG_0100.dng";
+    presentationOnly.source.displayName = "Renamed source";
+    presentationOnly.previewOutput.previewIntent = "renamed-preview";
+    for (Cache::Stage stage : stages) {
+        Require(
+            fingerprint(presentationOnly, stage) == fingerprint(recipe, stage),
+            "RAW stage caches should ignore source/UI labels that do not change pixels");
+    }
+
+    RawRecipe::RawDevelopmentRecipe changedView = recipe;
+    changedView.viewTransform.layerJson["contrast"] = 1.35f;
+    for (Cache::Stage stage : stages) {
+        Require(
+            fingerprint(changedView, stage) == fingerprint(recipe, stage),
+            "a View edit should reuse every upstream RAW Lab stage");
+    }
+
+    RawRecipe::RawDevelopmentRecipe changedFinish = recipe;
+    RawRecipe::RawPointCurveComponent cacheCurve;
+    cacheCurve.points = {
+        { 0.0f, 0.0f, 1 },
+        { 0.5f, 0.62f, 1 },
+        { 1.0f, 1.0f, 1 }
+    };
+    RawRecipe::StorePointCurveComponentInFinishToneJson(
+        changedFinish.finishTone.layerJson,
+        RawRecipe::RawPointCurveChannel::Composite,
+        cacheCurve);
+    Require(
+        fingerprint(changedFinish, Cache::Stage::PostLocalRange) ==
+            fingerprint(recipe, Cache::Stage::PostLocalRange) &&
+        fingerprint(changedFinish, Cache::Stage::PostFinishTone) !=
+            fingerprint(recipe, Cache::Stage::PostFinishTone),
+        "a Curve edit should invalidate Finish Tone without replaying Local Range");
+
+    RawRecipe::RawDevelopmentRecipe changedZone = recipe;
+    changedZone.localRange.targetZones.front().deltaEv = 1.1f;
+    Require(
+        fingerprint(changedZone, Cache::Stage::PostLocalExposure) ==
+            fingerprint(recipe, Cache::Stage::PostLocalExposure) &&
+        fingerprint(changedZone, Cache::Stage::PostLocalRange) !=
+            fingerprint(recipe, Cache::Stage::PostLocalRange) &&
+        fingerprint(changedZone, Cache::Stage::PostFinishTone) !=
+            fingerprint(recipe, Cache::Stage::PostFinishTone),
+        "a Zones edit should reuse pre-Local pixels and invalidate downstream stages");
+
+    RawRecipe::RawDevelopmentRecipe changedLocalExposure = recipe;
+    changedLocalExposure.localExposure.shadowLiftEv = 0.95f;
+    Require(
+        fingerprint(changedLocalExposure, Cache::Stage::RawPlacement) ==
+            fingerprint(recipe, Cache::Stage::RawPlacement) &&
+        fingerprint(changedLocalExposure, Cache::Stage::PostLocalExposure) !=
+            fingerprint(recipe, Cache::Stage::PostLocalExposure),
+        "Local Exposure should invalidate its output without repeating RAW placement");
+
+    RawRecipe::RawDevelopmentRecipe changedExposure = recipe;
+    changedExposure.preToneExposureEv += 0.5f;
+    Require(
+        fingerprint(changedExposure, Cache::Stage::RawBase) ==
+            fingerprint(recipe, Cache::Stage::RawBase) &&
+        fingerprint(changedExposure, Cache::Stage::NeutralPlacement) ==
+            fingerprint(recipe, Cache::Stage::NeutralPlacement) &&
+        fingerprint(changedExposure, Cache::Stage::RawPlacement) !=
+            fingerprint(recipe, Cache::Stage::RawPlacement) &&
+        fingerprint(changedExposure, Cache::Stage::PostLocalRange) !=
+            fingerprint(recipe, Cache::Stage::PostLocalRange),
+        "RAW Exposure should reuse the neutral base and invalidate every exposed stage");
+
+    RawRecipe::RawDevelopmentRecipe changedWhiteBalance = recipe;
+    changedWhiteBalance.whiteBalance.multipliers[0] += 0.2f;
+    for (Cache::Stage stage : stages) {
+        Require(
+            fingerprint(changedWhiteBalance, stage) != fingerprint(recipe, stage),
+            "White Balance should invalidate every cached RAW pixel stage");
+    }
+
+    RawRecipe::RawDevelopmentRecipe changedOrientation = recipe;
+    changedOrientation.cropRotation.flipHorizontally = true;
+    for (Cache::Stage stage : stages) {
+        Require(
+            fingerprint(changedOrientation, stage) != fingerprint(recipe, stage),
+            "an orientation edit should invalidate every cached RAW pixel stage");
+    }
+    for (Cache::Stage stage : stages) {
+        Require(
+            fingerprint(recipe, stage, 1024) != fingerprint(recipe, stage, 1280),
+            "proxy dimensions should participate in every RAW stage cache key");
+    }
+
+    RawRecipe::RawDevelopmentRecipe changedSourceTime = recipe;
+    ++changedSourceTime.source.modifiedTimeTicks;
+    Require(
+        Cache::BuildSourceDataIdentity(changedSourceTime.source) !=
+            Cache::BuildSourceDataIdentity(recipe.source),
+        "decoded RAW caches should reload when the source modification identity changes");
+    for (Cache::Stage stage : stages) {
+        Require(
+            fingerprint(changedSourceTime, stage) != fingerprint(recipe, stage),
+            "source modification identity should invalidate every RAW pixel stage");
+    }
+
+    const std::size_t preLocalFingerprint =
+        fingerprint(recipe, Cache::Stage::PostLocalExposure);
+    const std::size_t selectionFingerprint =
+        Cache::BuildLocalRangeSelectionFingerprint(
+            recipe.localRange,
+            recipe.technical.workingSpace,
+            preLocalFingerprint,
+            1536);
+    Require(
+        Cache::BuildLocalRangeSelectionFingerprint(
+            changedZone.localRange,
+            changedZone.technical.workingSpace,
+            preLocalFingerprint,
+            1536) == selectionFingerprint,
+        "delta-only target edits should reuse the exact connected-area mask");
+
+    RawRecipe::RawDevelopmentRecipe changedReach = recipe;
+    changedReach.localRange.targetZones.front().coreHalfWidthEv += 0.2f;
+    Require(
+        Cache::BuildLocalRangeSelectionFingerprint(
+            changedReach.localRange,
+            changedReach.technical.workingSpace,
+            preLocalFingerprint,
+            1536) != selectionFingerprint,
+        "target reach edits should rebuild connected-area membership");
+    Require(
+        Cache::BuildLocalRangeSelectionFingerprint(
+            recipe.localRange,
+            recipe.technical.workingSpace,
+            preLocalFingerprint + 1,
+            1536) != selectionFingerprint,
+        "connected-area membership must invalidate when upstream pixels change even if a GL texture name is reused");
+    Require(
+        Cache::BuildLocalRangeSelectionFingerprint(
+            recipe.localRange,
+            recipe.technical.workingSpace,
+            preLocalFingerprint,
+            768) != selectionFingerprint,
+        "connected-area membership cache keys should include their bounded resolution");
+}
+
+void TestRestormerRgbAdapterContract() {
+    constexpr int width = 4;
+    constexpr int height = 4;
+    std::vector<float> source(
+        static_cast<std::size_t>(width * height * 4),
+        0.0f);
+    for (int pixel = 0; pixel < width * height; ++pixel) {
+        source[static_cast<std::size_t>(pixel) * 4U + 0U] =
+            pixel == 0 ? -0.08f : 0.12f + 0.01f * static_cast<float>(pixel);
+        source[static_cast<std::size_t>(pixel) * 4U + 1U] =
+            pixel == 1 ? 3.5f : 0.18f + 0.005f * static_cast<float>(pixel);
+        source[static_cast<std::size_t>(pixel) * 4U + 2U] = 0.09f;
+        source[static_cast<std::size_t>(pixel) * 4U + 3U] =
+            0.25f + 0.01f * static_cast<float>(pixel);
+    }
+
+    std::vector<float> proxy;
+    const Stack::RawRestormer::AdapterResult proxyResult =
+        Stack::RawRestormer::BuildInputProxy(
+            source,
+            width,
+            height,
+            Raw::RawWorkingSpace::LinearRec2020D65,
+            proxy);
+    Require(
+        proxyResult.ok && proxy.size() ==
+            static_cast<std::size_t>(width * height * 3) &&
+            std::all_of(proxy.begin(), proxy.end(), [](float value) {
+                return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+            }),
+        "Restormer input mapping should produce a finite bounded sRGB proxy");
+
+    Stack::RawRecipe::RawRgbDenoiseRecipe settings;
+    settings.enabled = true;
+    settings.method =
+        Stack::RawRecipe::RawRgbDenoiseMethod::RestormerRealV1;
+    settings.mapping =
+        Stack::RawRecipe::RawRgbDenoiseMapping::SceneLinearSafeV1;
+    settings.colorNoise = 1.0f;
+    settings.luminanceNoise = 1.0f;
+    settings.detailProtection = 0.0f;
+    std::vector<float> identity;
+    const Stack::RawRestormer::AdapterResult identityResult =
+        Stack::RawRestormer::ApplyOutput(
+            source,
+            proxy,
+            proxy,
+            width,
+            height,
+            Raw::RawWorkingSpace::LinearRec2020D65,
+            settings,
+            identity);
+    Require(
+        identityResult.ok && identity == source,
+        "Restormer mapping should be exact identity for a neutral model residual");
+
+    std::vector<float> darkSource = source;
+    for (int pixel = 0; pixel < width * height; ++pixel) {
+        for (int channel = 0; channel < 3; ++channel) {
+            darkSource[static_cast<std::size_t>(pixel) * 4U + channel] *=
+                0.01f;
+        }
+    }
+    std::vector<float> darkProxy;
+    const Stack::RawRestormer::AdapterResult darkProxyResult =
+        Stack::RawRestormer::BuildInputProxy(
+            darkSource,
+            width,
+            height,
+            Raw::RawWorkingSpace::LinearRec2020D65,
+            darkProxy);
+    Require(
+        darkProxyResult.ok && darkProxyResult.inputExposureGain > 5.0f,
+        "Restormer V2 should expose a dark scene only inside the model proxy");
+    std::vector<float> darkIdentity;
+    const Stack::RawRestormer::AdapterResult darkIdentityResult =
+        Stack::RawRestormer::ApplyOutput(
+            darkSource,
+            darkProxy,
+            darkProxy,
+            width,
+            height,
+            Raw::RawWorkingSpace::LinearRec2020D65,
+            settings,
+            darkIdentity);
+    Require(
+        darkIdentityResult.ok && darkIdentity == darkSource,
+        "Restormer V2 proxy exposure must divide out to exact scene identity");
+
+    std::vector<float> modelOutput = proxy;
+    for (std::size_t index = 0; index < modelOutput.size(); index += 3U) {
+        modelOutput[index + 0U] =
+            std::clamp(modelOutput[index + 0U] + 0.01f, 0.0f, 1.0f);
+        modelOutput[index + 2U] =
+            std::clamp(modelOutput[index + 2U] - 0.01f, 0.0f, 1.0f);
+    }
+    std::vector<float> adjusted;
+    const Stack::RawRestormer::AdapterResult adjustedResult =
+        Stack::RawRestormer::ApplyOutput(
+            source,
+            proxy,
+            modelOutput,
+            width,
+            height,
+            Raw::RawWorkingSpace::LinearRec2020D65,
+            settings,
+            adjusted);
+    Require(
+        adjustedResult.ok &&
+            std::all_of(adjusted.begin(), adjusted.end(), [](float value) {
+                return std::isfinite(value);
+            }),
+        "Restormer scene-linear mapping should remain finite");
+    for (int pixel = 0; pixel < width * height; ++pixel) {
+        Require(
+            adjusted[static_cast<std::size_t>(pixel) * 4U + 3U] ==
+                source[static_cast<std::size_t>(pixel) * 4U + 3U],
+            "Restormer mapping must preserve alpha exactly");
+    }
+
+    settings.colorNoise = 0.0f;
+    settings.luminanceNoise = 0.0f;
+    std::vector<float> zeroStrength;
+    const Stack::RawRestormer::AdapterResult zeroResult =
+        Stack::RawRestormer::ApplyOutput(
+            source,
+            proxy,
+            modelOutput,
+            width,
+            height,
+            Raw::RawWorkingSpace::LinearRec2020D65,
+            settings,
+            zeroStrength);
+    Require(
+        zeroResult.ok && zeroStrength == source,
+        "Restormer mapping should preserve exact identity at zero strength");
+}
+
+void TestRestormerProtocolAndTilingContract() {
+    Stack::Restormer::ProtocolRequest request;
+    request.requestId = "request-1";
+    request.operation = Stack::Restormer::Operation::Denoise;
+    request.generation = 42;
+    request.modelKind = "real-photo";
+    request.quality = Stack::Restormer::Quality::InteractivePreview;
+    request.width = 17;
+    request.height = 19;
+    request.channels = 3;
+    request.byteSize =
+        static_cast<std::size_t>(request.width * request.height * 3) *
+        sizeof(float);
+    request.inputMappingName = "Local\\StackRestormer-test-input";
+    request.outputMappingName = "Local\\StackRestormer-test-output";
+    Stack::Restormer::ProtocolRequest parsed;
+    std::string protocolError;
+    Require(
+        Stack::Restormer::ParseProtocolRequest(
+            Stack::Restormer::SerializeProtocolRequest(request),
+            parsed,
+            protocolError) &&
+            parsed.generation == request.generation &&
+            parsed.byteSize == request.byteSize,
+        "Restormer control protocol should round-trip validated shared-memory metadata");
+
+    nlohmann::json unsafe =
+        Stack::Restormer::SerializeProtocolRequest(request);
+    unsafe["inputMappingName"] = "Global\\unowned";
+    Require(
+        !Stack::Restormer::ParseProtocolRequest(
+            unsafe, parsed, protocolError),
+        "Restormer control protocol should reject unowned shared-memory names");
+    nlohmann::json unknownField =
+        Stack::Restormer::SerializeProtocolRequest(request);
+    unknownField["arbitraryPluginPath"] = "not-allowed";
+    Require(
+        !Stack::Restormer::ParseProtocolRequest(
+            unknownField, parsed, protocolError),
+        "Restormer control protocol should reject unknown request fields");
+    nlohmann::json wrongType =
+        Stack::Restormer::SerializeProtocolRequest(request);
+    wrongType["width"] = "not-a-number";
+    Require(
+        !Stack::Restormer::ParseProtocolRequest(
+            wrongType, parsed, protocolError),
+        "Restormer control protocol should reject invalid JSON field types");
+
+    const Stack::Restormer::TilePolicy policy { 16, 4 };
+    const std::vector<Stack::Restormer::Tile> tiles =
+        Stack::Restormer::BuildTiles(31, 23, policy);
+    Require(
+        tiles.size() > 1 &&
+            tiles.front().x == 0 &&
+            tiles.front().y == 0 &&
+            tiles.back().x + tiles.back().width == 31 &&
+            tiles.back().y + tiles.back().height == 23,
+        "Restormer odd-sized tile planning should cover every image edge");
+    Require(
+        Stack::Restormer::ReflectIndex(-1, 5) == 1 &&
+            Stack::Restormer::ReflectIndex(5, 5) == 3,
+        "Restormer tile padding should use reflection");
+
+    std::vector<float> input(31U * 23U * 3U);
+    for (std::size_t index = 0; index < input.size(); ++index) {
+        input[index] =
+            static_cast<float>((index * 17U) % 101U) / 100.0f;
+    }
+    std::vector<float> output;
+    const Stack::Restormer::TiledInferenceResult tiled =
+        Stack::Restormer::RunTiledInference(
+            input,
+            31,
+            23,
+            policy,
+            [](const float* tileInput,
+               int tileWidth,
+               int tileHeight,
+               float* tileOutput,
+               std::string&) {
+                const std::size_t count =
+                    static_cast<std::size_t>(tileWidth) *
+                    static_cast<std::size_t>(tileHeight) * 3U;
+                std::copy(tileInput, tileInput + count, tileOutput);
+                return true;
+            },
+            []() { return false; },
+            output);
+    Require(
+        tiled.ok && output.size() == input.size(),
+        "Restormer tiled identity inference should complete");
+    for (std::size_t index = 0; index < input.size(); ++index) {
+        Require(
+            std::abs(input[index] - output[index]) < 1.0e-5f,
+            "Restormer raised-cosine overlap should not introduce identity seams");
+    }
+}
+
+void TestRestormerDevelopmentPackageTrustContract() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        "stack-restormer-package-contract-test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root / "models", ec);
+    std::filesystem::create_directories(root / "licenses", ec);
+    {
+        std::ofstream(root / "StackModelService.exe", std::ios::binary)
+            << "service";
+        std::ofstream(root / "runtime.dll", std::ios::binary)
+            << "runtime";
+        std::ofstream(root / "models" / "real.onnx", std::ios::binary)
+            << "model";
+        std::ofstream(root / "models" / "gaussian.onnx", std::ios::binary)
+            << "gaussian-model";
+        std::ofstream(root / "licenses" / "notice.txt", std::ios::binary)
+            << "notice";
+    }
+    auto hash = [](const std::filesystem::path& path) {
+        return Stack::RawEvidence::ComputeSourceIdentity(path).sha256;
+    };
+    const nlohmann::json manifest = {
+        { "schemaVersion", 1 },
+        { "packageId", "stack-restormer-denoise-v1" },
+        { "packageVersion", "1.0.0-dev" },
+        { "protocolVersion", 1 },
+        { "adapterVersion", Stack::RawRecipe::kRestormerDenoiseAdapterVersion },
+        { "developmentPackage", true },
+        { "authorizationStatus", "development-only" },
+        { "service", {
+            { "path", "StackModelService.exe" },
+            { "sha256", hash(root / "StackModelService.exe") }
+        } },
+        { "runtimeArtifacts", nlohmann::json::array({
+            {
+                { "path", "runtime.dll" },
+                { "sha256", hash(root / "runtime.dll") }
+            }
+        }) },
+        { "legalArtifacts", nlohmann::json::array({
+            {
+                { "path", "licenses/notice.txt" },
+                { "sha256", hash(root / "licenses" / "notice.txt") }
+            }
+        }) },
+        { "models", nlohmann::json::array({
+            {
+                { "kind", "real-photo" },
+                { "path", "models/real.onnx" },
+                { "sha256", hash(root / "models" / "real.onnx") },
+                { "inputName", "input" },
+                { "outputName", "output" }
+            },
+            {
+                { "kind", "gaussian-blind" },
+                { "path", "models/gaussian.onnx" },
+                { "sha256", hash(root / "models" / "gaussian.onnx") },
+                { "inputName", "input" },
+                { "outputName", "output" }
+            }
+        }) }
+    };
+    {
+        std::ofstream output(root / "manifest.json", std::ios::binary);
+        output << manifest.dump(2);
+    }
+
+    Stack::Restormer::ValidationRequest validationRequest;
+    validationRequest.method =
+        Stack::RawRecipe::RawRgbDenoiseMethod::RestormerRealV1;
+    Stack::Restormer::TrustPolicy releasePolicy;
+    Require(
+        !Stack::Restormer::ValidatePackage(
+            root, validationRequest, releasePolicy).ok,
+        "Release trust should reject a local Restormer development package");
+    Stack::Restormer::TrustPolicy developmentPolicy;
+    developmentPolicy.allowDevelopmentPackage = true;
+    const Stack::Restormer::ValidationResult accepted =
+        Stack::Restormer::ValidatePackage(
+            root, validationRequest, developmentPolicy);
+    Require(
+        accepted.ok &&
+            accepted.selectedModel.kind ==
+                Stack::Restormer::ModelKind::RealPhoto,
+        "Explicit development trust should accept a complete hashed local package");
+    validationRequest.method =
+        Stack::RawRecipe::RawRgbDenoiseMethod::RestormerGaussianBlindV1;
+    const Stack::Restormer::ValidationResult acceptedGaussian =
+        Stack::Restormer::ValidatePackage(
+            root, validationRequest, developmentPolicy);
+    Require(
+        acceptedGaussian.ok &&
+            acceptedGaussian.selectedModel.kind ==
+                Stack::Restormer::ModelKind::GaussianBlind,
+        "One approved package should expose the frozen Gaussian Blind model");
+    validationRequest.method =
+        Stack::RawRecipe::RawRgbDenoiseMethod::RestormerRealV1;
+    {
+        std::ofstream(root / "models" / "gaussian.onnx", std::ios::binary)
+            << "tampered-model";
+    }
+    Require(
+        !Stack::Restormer::ValidatePackage(
+            root, validationRequest, developmentPolicy).ok,
+        "Restormer package validation should reject a tampered secondary model");
+    {
+        std::ofstream(root / "models" / "gaussian.onnx", std::ios::binary)
+            << "gaussian-model";
+    }
+
+    nlohmann::json unsafeManifest = manifest;
+    unsafeManifest["models"][0]["path"] = "../outside.onnx";
+    {
+        std::ofstream output(root / "manifest.json", std::ios::binary);
+        output << unsafeManifest.dump(2);
+    }
+    Require(
+        !Stack::Restormer::ValidatePackage(
+            root, validationRequest, developmentPolicy).ok,
+        "Restormer package validation should reject path traversal");
+    std::filesystem::remove_all(root, ec);
+
+    const char* externalPackage =
+        std::getenv("STACK_TEST_RESTORMER_PACKAGE");
+    if (externalPackage != nullptr && externalPackage[0] != '\0') {
+        const std::filesystem::path packageRoot(externalPackage);
+        validationRequest = {};
+        validationRequest.method =
+            Stack::RawRecipe::RawRgbDenoiseMethod::RestormerRealV1;
+        const Stack::Restormer::ValidationResult real =
+            Stack::Restormer::ValidatePackage(
+                packageRoot, validationRequest, developmentPolicy);
+        Require(
+            real.ok &&
+                real.selectedModel.kind ==
+                    Stack::Restormer::ModelKind::RealPhoto,
+            "The external Restormer development package should validate its Real Photo model");
+        validationRequest.method =
+            Stack::RawRecipe::RawRgbDenoiseMethod::RestormerGaussianBlindV1;
+        const Stack::Restormer::ValidationResult gaussian =
+            Stack::Restormer::ValidatePackage(
+                packageRoot, validationRequest, developmentPolicy);
+        Require(
+            gaussian.ok &&
+                gaussian.selectedModel.kind ==
+                    Stack::Restormer::ModelKind::GaussianBlind,
+            "The external Restormer development package should validate its Gaussian Blind model");
+    }
+}
+
+void TestRawLabViewTransformReferenceMatchesShaderFormula() {
+    auto shaderFormula = [](
+                             double input,
+                             double exposure,
+                             double blackEv,
+                             double whiteEv,
+                             double middleGrey,
+                             double shoulder,
+                             double toe,
+                             double contrast) {
+        const double black = middleGrey * std::exp2(blackEv);
+        const double white = middleGrey * std::exp2(whiteEv);
+        double x = std::max(0.0, input * std::exp2(exposure) - black);
+        double normalized = x / std::max(0.000001, white - black);
+        normalized = std::pow(std::max(0.0, normalized), std::max(0.05, contrast));
+        const double clampedToe = std::clamp(toe, 0.0, 1.0);
+        normalized =
+            normalized * (1.0 - clampedToe) +
+            ((normalized + clampedToe * normalized / (normalized + 0.18)) /
+             (1.0 + clampedToe)) *
+                clampedToe;
+        const double safeShoulder = std::max(0.001, shoulder);
+        const double mapped = normalized / (normalized + safeShoulder);
+        const double whiteMapped = 1.0 / (1.0 + safeShoulder);
+        return std::clamp(mapped / std::max(0.0001, whiteMapped), 0.0, 1.0);
+    };
+
+    struct Sample {
+        float input;
+        float exposure;
+        float blackEv;
+        float whiteEv;
+        float middleGrey;
+        float shoulder;
+        float toe;
+        float contrast;
+    };
+    const Sample samples[] = {
+        { 0.0f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f, 1.0f },
+        { 0.18f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f, 1.0f },
+        { 2.88f, 0.0f, -8.0f, 4.0f, 0.18f, 0.45f, 0.18f, 1.0f },
+        { 0.04f, 1.25f, -10.0f, 6.0f, 0.20f, 0.72f, 0.35f, 1.4f },
+        { 8.0f, -0.75f, -6.0f, 3.0f, 0.16f, 0.12f, 0.0f, 0.72f }
+    };
+    constexpr double tolerance = 2.0e-6;
+    for (const Sample& sample : samples) {
+        const float actual = Stack::RawRecipe::EvaluateViewTransformDisplayLuma(
+            sample.input,
+            sample.exposure,
+            sample.blackEv,
+            sample.whiteEv,
+            sample.middleGrey,
+            sample.shoulder,
+            sample.toe,
+            sample.contrast);
+        const double expected = shaderFormula(
+            sample.input,
+            sample.exposure,
+            sample.blackEv,
+            sample.whiteEv,
+            sample.middleGrey,
+            sample.shoulder,
+            sample.toe,
+            sample.contrast);
+        Require(
+            std::abs(static_cast<double>(actual) - expected) <= tolerance,
+            "RAW Lab View graph CPU evaluator should match the current shader formula within 2e-6");
+    }
 }
 
 void TestRawImageAnalysisPercentilesAndFallbackGuards() {
@@ -8755,6 +11869,53 @@ void TestRawPreviewProxyUsesCappedRawData() {
     Require(mosaicSummary.rawSampleCount < mosaic.rawBuffer.size(),
         "mosaic proxy should use fewer RAW samples than the source");
 
+    Raw::RawImageData cfaAverageFixture = BuildMosaicRawProxyFixture(8, 8);
+    cfaAverageFixture.metadata.hasDngNoiseProfile = true;
+    cfaAverageFixture.metadata.dngNoiseProfile = {
+        Raw::DngNoiseProfilePlane { 0.016, 0.008 }
+    };
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            cfaAverageFixture.rawBuffer[static_cast<std::size_t>(y * 8 + x)] =
+                static_cast<std::uint16_t>(y * 10 + x);
+        }
+    }
+    Raw::RawImageData cfaAveragePreview;
+    Require(Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(cfaAverageFixture, 2, cfaAveragePreview) &&
+            cfaAveragePreview.rawBuffer == std::vector<std::uint16_t>({ 33, 34, 43, 44 }),
+        "mosaic proxy should area-average each CFA sublattice instead of selecting one nearest sensor sample");
+    Require(
+        cfaAveragePreview.metadata.dngNoiseProfile.size() == 1 &&
+            std::abs(
+                cfaAveragePreview.metadata.dngNoiseProfile[0].shotScale -
+                0.001) <
+                1.0e-9 &&
+            std::abs(
+                cfaAveragePreview.metadata.dngNoiseProfile[0].readNoiseVariance -
+                0.0005) <
+                1.0e-9,
+        "mosaic proxy should scale DNG variance coefficients for its same-CFA area averaging");
+
+    Raw::RawImageData activeAreaFixture = BuildMosaicRawProxyFixture(10, 8);
+    std::fill(activeAreaFixture.rawBuffer.begin(), activeAreaFixture.rawBuffer.end(), 999);
+    activeAreaFixture.metadata.hasDngActiveArea = true;
+    activeAreaFixture.metadata.dngActiveArea = { 1, 2, 7, 8 };
+    for (int y = 1; y < 7; ++y) {
+        for (int x = 2; x < 8; ++x) {
+            activeAreaFixture.rawBuffer[static_cast<std::size_t>(y * 10 + x)] = 100;
+        }
+    }
+    Raw::RawImageData activeAreaPreview;
+    Require(
+        Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(
+            activeAreaFixture,
+            2,
+            activeAreaPreview) &&
+        activeAreaPreview.metadata.rawWidth == 2 &&
+        activeAreaPreview.metadata.rawHeight == 2 &&
+        activeAreaPreview.rawBuffer == std::vector<std::uint16_t>({ 100, 100, 100, 100 }),
+        "mosaic proxy should crop and scale the declared DNG ActiveArea without averaging optical-black borders");
+
     Raw::RawImageData uncappedPreview;
     Require(!Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(mosaic, 0, uncappedPreview),
         "uncapped RAW preview should not build or reuse a capped proxy");
@@ -8783,6 +11944,20 @@ void TestRawPreviewProxyUsesCappedRawData() {
     Raw::RawImageData gainMapPreview;
     Require(!Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(gainMapMosaic, 200, gainMapPreview),
         "DNG gain-map RAW preview should not build a proxy that strips gain-map correction");
+    Raw::RawImageData nonlinearMosaic = mosaic;
+    nonlinearMosaic.metadata.dngLinearizationTable = { 0, 1, 4, 9 };
+    Raw::RawImageData nonlinearPreview;
+    Require(!Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(nonlinearMosaic, 200, nonlinearPreview),
+        "mosaic proxy should decline nonlinear stored samples rather than average them in the wrong domain");
+    Raw::RawImageData repeatedBlackMosaic = mosaic;
+    repeatedBlackMosaic.metadata.dngBlackLevelRepeatDim = { 4, 4 };
+    Raw::RawImageData repeatedBlackPreview;
+    Require(
+        !Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(
+            repeatedBlackMosaic,
+            200,
+            repeatedBlackPreview),
+        "mosaic proxy should decline black-level patterns larger than the preserved 2x2 CFA sublattices");
 
     const Raw::RawImageData linear = BuildLinearRawProxyFixture(800, 600, 3);
     Raw::RawImageData linearPreview;
@@ -8855,6 +12030,9 @@ void TestLegacyRawDevelopNodeStillSerializesRoundTrip() {
     RawDevelopPayload payload;
     payload.settings.exposureStops = 1.25f;
     payload.settings.whiteBalanceMode = Raw::WhiteBalanceMode::Auto;
+    payload.settings.mosaicDenoise.enabled = true;
+    payload.settings.mosaicDenoise.mode =
+        Raw::RawMosaicDenoiseMode::DngNoiseProfile;
     payload.scenePrepEnabled = true;
     payload.integratedToneEnabled = true;
     const int rawDevelopId = NodeId(graph.AddRawDevelopNode(payload, { 180.0f, 120.0f }));
@@ -8871,6 +12049,34 @@ void TestLegacyRawDevelopNodeStillSerializesRoundTrip() {
         "Legacy RawDevelop exposure should survive graph serialization");
     Require(rawDevelopNode->rawDevelop.settings.whiteBalanceMode == Raw::WhiteBalanceMode::Auto,
         "Legacy RawDevelop white balance should survive graph serialization");
+    Require(
+        rawDevelopNode->rawDevelop.settings.mosaicDenoise.enabled &&
+            rawDevelopNode->rawDevelop.settings.mosaicDenoise.mode ==
+                Raw::RawMosaicDenoiseMode::DngNoiseProfile,
+        "RAW mosaic denoise mode should survive graph serialization");
+
+    nlohmann::json legacySerialized = serialized;
+    for (nlohmann::json& node : legacySerialized["nodeGraph"]["nodes"]) {
+        if (node.value("id", 0) == rawDevelopId &&
+            node.contains("rawSettings")) {
+            node["rawSettings"].erase("mosaicDenoiseMode");
+        }
+    }
+    Graph legacyLoaded;
+    DeserializeGraphPayload(
+        legacySerialized,
+        legacyLoaded,
+        0,
+        {},
+        0,
+        0,
+        0);
+    const Node* legacyRawDevelopNode = legacyLoaded.FindNode(rawDevelopId);
+    Require(
+        legacyRawDevelopNode != nullptr &&
+            legacyRawDevelopNode->rawDevelop.settings.mosaicDenoise.mode ==
+                Raw::RawMosaicDenoiseMode::LegacyFixedThreshold,
+        "RAW graphs saved before the mode field existed should retain fixed-threshold denoise math");
 }
 
 void TestManagedRawSectionValidationAndSync() {
@@ -8888,6 +12094,13 @@ void TestManagedRawSectionValidationAndSync() {
     decodePayload.settings.whiteBalanceMode = Raw::WhiteBalanceMode::Manual;
     decodePayload.settings.manualWhiteBalance = { 2.0f, 1.0f, 1.5f };
     decodePayload.settings.rotationDegrees = 90;
+    decodePayload.settings.flipHorizontally = true;
+    decodePayload.settings.flipVertically = true;
+    decodePayload.settings.mosaicDenoise.enabled = true;
+    decodePayload.settings.mosaicDenoise.mode =
+        Raw::RawMosaicDenoiseMode::DngNoiseProfile;
+    decodePayload.settings.mosaicDenoise.lumaStrength = 0.44f;
+    decodePayload.settings.mosaicDenoise.chromaStrength = 0.66f;
     const int rawDecodeId = NodeId(graph.AddRawDecodeNode(decodePayload, { 260.0f, 0.0f }));
     const int toneCurveId = NodeId(graph.AddLayerNode(LayerType::ToneCurve, 0, { 520.0f, 0.0f }));
     const int viewTransformId = NodeId(graph.AddLayerNode(LayerType::ViewTransform, 1, { 780.0f, 0.0f }));
@@ -8929,6 +12142,21 @@ void TestManagedRawSectionValidationAndSync() {
         "manual RAW Decode white balance should preserve multipliers in recipe");
     Require(validation.recipe.cropRotation.rotationDegrees == 90,
         "managed RAW Decode rotation should sync back to recipe");
+    Require(
+        validation.recipe.cropRotation.flipHorizontally &&
+            validation.recipe.cropRotation.flipVertically,
+        "managed RAW Decode orientation flips should sync back to recipe");
+    Require(
+        validation.recipe.technical.mosaicDenoise.enabled &&
+            validation.recipe.technical.mosaicDenoise.mode ==
+                Raw::RawMosaicDenoiseMode::DngNoiseProfile &&
+            std::abs(
+                validation.recipe.technical.mosaicDenoise.lumaStrength -
+                0.44f) < 0.001f &&
+            std::abs(
+                validation.recipe.technical.mosaicDenoise.chromaStrength -
+                0.66f) < 0.001f,
+        "managed RAW Decode denoise should sync back to the shared RAW recipe");
 
     const Stack::RawWorkspace::ManagedRawSection loadedSection =
         Stack::RawWorkspace::DeserializeManagedRawSection(
@@ -9266,6 +12494,24 @@ void TestManagedRawSectionBlocksUnsupportedRecipeAndDecodeFields() {
     Require(Stack::RawWorkspace::IsRecipeRepresentableAsManagedGraph(customTone, &reason),
         "custom finish tone and view transform should decompose into managed graph layers");
 
+    Stack::RawRecipe::RawDevelopmentRecipe denoised = recipe;
+    denoised.technical.mosaicDenoise.enabled = true;
+    denoised.technical.mosaicDenoise.mode =
+        Raw::RawMosaicDenoiseMode::DngNoiseProfile;
+    Require(
+        Stack::RawWorkspace::IsRecipeRepresentableAsManagedGraph(
+            denoised,
+            &reason),
+        "authored pre-demosaic denoise should remain representable in the managed RAW graph");
+
+    Stack::RawRecipe::RawDevelopmentRecipe rgbDenoised = recipe;
+    rgbDenoised.rgbDenoise.enabled = true;
+    Require(
+        !Stack::RawWorkspace::IsRecipeRepresentableAsManagedGraph(
+            rgbDenoised,
+            &reason),
+        "post-demosaic RGB denoise should block managed decomposition until a dedicated graph stage exists");
+
     Stack::RawRecipe::RawDevelopmentRecipe cropped = recipe;
     cropped.cropRotation.cropEnabled = true;
     Require(!Stack::RawWorkspace::IsRecipeRepresentableAsManagedGraph(cropped, &reason),
@@ -9408,12 +12654,16 @@ void TestGraphCaptureBoundsFittingAndPadding() {
 void TestGraphCaptureNodeStatePresetDoesNotMutateSource() {
     namespace Capture = Stack::EditorGraphCapture;
     EditorNodeGraph::Graph source;
-    EditorNodeGraph::Node* first = source.AddOutputNode({ 0.0f, 0.0f }, true);
-    EditorNodeGraph::Node* second = source.AddPreviewNode({ 240.0f, 0.0f });
-    Require(first != nullptr && second != nullptr,
+    const EditorNodeGraph::Node* first =
+        source.AddOutputNode({ 0.0f, 0.0f }, true);
+    const int firstId = first ? first->id : -1;
+    const EditorNodeGraph::Node* second =
+        source.AddPreviewNode({ 240.0f, 0.0f });
+    const int secondId = second ? second->id : -1;
+    Require(firstId > 0 && secondId > 0,
         "graph capture node-state test should create fixture nodes");
-    first->expanded = true;
-    second->expanded = false;
+    source.FindNode(firstId)->expanded = true;
+    source.FindNode(secondId)->expanded = false;
 
     EditorNodeGraph::Graph asShown = source;
     Capture::ApplyNodeStatePreset(asShown, Capture::NodeState::AsShown);
@@ -9486,8 +12736,8 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
     const auto red = std::find_if(splitSockets.begin(), splitSockets.end(), [](const auto& socket) {
         return socket.id == "r";
     });
-    Require(red != splitSockets.end() && red->type == EditorNodeGraph::SocketType::ScalarField,
-        "Channel Split should expose per-pixel scalar fields rather than masks");
+    Require(red != splitSockets.end() && red->type == EditorNodeGraph::SocketType::Channel,
+        "Channel Split should expose exact Channel sockets rather than masks");
 
     EditorNodeGraph::Graph graph;
     const int scalarId = graph.AddValueNode(Stack::NodeMath::MakeUniformScalar(2.0), { 0.0f, 0.0f })->id;
@@ -9527,9 +12777,59 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
         exposureId, EditorNodeGraph::kExposureValueInputSocketId),
         "typed value sockets should reject implicit vector-to-scalar conversion");
 
+    EditorNodeGraph::Graph nonFiniteGraph;
+    const int nonFiniteSourceId = nonFiniteGraph.AddImageGeneratorNode(
+        EditorNodeGraph::ImageGeneratorKind::SolidColor,
+        { 0.0f, 0.0f })->id;
+    const int nonFiniteValueId = nonFiniteGraph.AddValueNode(
+        Stack::NodeMath::MakeUniformScalar(
+            std::numeric_limits<double>::infinity()),
+        { 0.0f, 120.0f })->id;
+    const int nonFiniteExposureId =
+        nonFiniteGraph.AddTechnicalImageNode(
+            Stack::NodeMath::TechnicalImageOperation::Exposure,
+            { 260.0f, 0.0f })->id;
+    const int nonFiniteOutputId =
+        nonFiniteGraph.AddOutputNode({ 520.0f, 0.0f }, true)->id;
+    std::string nonFiniteError;
+    Require(!nonFiniteGraph.TryConnectSockets(
+            nonFiniteValueId,
+            EditorNodeGraph::kValueOutputSocketId,
+            nonFiniteExposureId,
+            EditorNodeGraph::kExposureValueInputSocketId,
+            &nonFiniteError) &&
+            nonFiniteError.find("finite") != std::string::npos,
+        "authoring should reject a non-finite uniform parameter before it enters the render graph");
+    nonFiniteGraph.EditLinks().push_back({
+        nonFiniteSourceId,
+        EditorNodeGraph::kImageOutputSocketId,
+        nonFiniteExposureId,
+        EditorNodeGraph::kImageInputSocketId
+    });
+    nonFiniteGraph.EditLinks().push_back({
+        nonFiniteValueId,
+        EditorNodeGraph::kValueOutputSocketId,
+        nonFiniteExposureId,
+        EditorNodeGraph::kExposureValueInputSocketId
+    });
+    nonFiniteGraph.EditLinks().push_back({
+        nonFiniteExposureId,
+        EditorNodeGraph::kImageOutputSocketId,
+        nonFiniteOutputId,
+        EditorNodeGraph::kImageInputSocketId
+    });
+    double nonFiniteResolved = 0.0;
+    Require(!nonFiniteGraph.TryResolveUniformScalarInput(
+                nonFiniteExposureId,
+                EditorNodeGraph::kExposureValueInputSocketId,
+                nonFiniteResolved) &&
+            !nonFiniteGraph.IsOutputConnected() &&
+            !nonFiniteGraph.Validate().valid,
+        "loaded or programmatically injected non-finite Values should fail closed in lookup, completion, and validation");
+
     const nlohmann::json serialized = EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), graph);
-    Require(serialized["nodeGraph"].value("version", 0) == 6,
-        "graphs should use the Phase 5 exact compound-definition schema version");
+    Require(serialized["nodeGraph"].value("version", 0) == 8,
+        "graphs should use the channel-first Output inspection schema version");
     EditorNodeGraph::Graph loaded;
     EditorNodeGraph::DeserializeGraphPayload(serialized, loaded, 0, {}, 0, 0, 0);
     const EditorNodeGraph::Node* loadedScalar = loaded.FindNode(scalarId);
@@ -9569,6 +12869,202 @@ void TestPhase3TypedValuesAndUnifiedDefinitions() {
         "an unresolved exact definition should make graph validation fail explicitly");
 }
 
+void TestConstantChannelFoundation() {
+    using namespace EditorNodeGraph;
+
+    const auto* constantDefinition =
+        EditorNodeGraphDefinitions::FindLiveNodeDefinition(
+            NodeKind::ConstantChannel,
+            0);
+    const auto* combineDefinition =
+        EditorNodeGraphDefinitions::FindLiveNodeDefinition(
+            NodeKind::ChannelCombine,
+            0);
+    Require(
+        constantDefinition &&
+            constantDefinition->identity.version ==
+                Stack::NodeMath::SemanticVersion{ 1, 0, 0 } &&
+            combineDefinition &&
+            combineDefinition->identity.version ==
+                Stack::NodeMath::SemanticVersion{ 2, 0, 0 },
+        "Constant Channel v1 and Image Combine v2 should have exact registered identities");
+
+    Node prototype;
+    prototype.kind = NodeKind::ConstantChannel;
+    const std::vector<SocketDefinition> sockets =
+        EditorNodeGraphDefinitions::BuildSockets(
+            prototype,
+            false);
+    const auto extentSocket = std::find_if(
+        sockets.begin(),
+        sockets.end(),
+        [](const SocketDefinition& socket) {
+            return socket.id == kMatchExtentInputSocketId;
+        });
+    const auto outputSocket = std::find_if(
+        sockets.begin(),
+        sockets.end(),
+        [](const SocketDefinition& socket) {
+            return socket.id == kChannelOutputSocketId;
+        });
+    Require(
+        extentSocket != sockets.end() &&
+            extentSocket->direction == SocketDirection::Input &&
+            extentSocket->type == SocketType::Channel &&
+            !extentSocket->optional &&
+            extentSocket->visibilityTier ==
+                SocketVisibilityTier::Advanced &&
+            outputSocket != sockets.end() &&
+            outputSocket->direction == SocketDirection::Output &&
+            outputSocket->type == SocketType::Channel,
+        "Constant Channel should expose required advanced Match Extent and branchable Channel pins");
+
+    Graph graph;
+    graph.Clear();
+    const int sourceId = graph.AddImageGeneratorNode(
+        ImageGeneratorKind::SolidColor,
+        { 0.0f, 0.0f })->id;
+    const int splitId =
+        graph.AddChannelSplitNode({ 220.0f, 0.0f })->id;
+    const int constantId =
+        graph.AddConstantChannelNode({ 440.0f, 160.0f })->id;
+    const int combineId =
+        graph.AddChannelCombineNode({ 660.0f, 0.0f })->id;
+    const int outputId =
+        graph.AddOutputNode({ 880.0f, 0.0f }, true)->id;
+    Node* constant = graph.FindNode(constantId);
+    Node* combine = graph.FindNode(combineId);
+    Require(
+        constant && combine,
+        "Constant Channel persistence fixture should create its nodes");
+    constant->constantChannelSettings.value = 0.375f;
+    constant->constantChannelSettings.generatedOpaqueAlpha = true;
+    combine->imageCombineSettings.autoAlphaSuppressed = true;
+
+    Require(
+        graph.TryConnectSockets(
+            sourceId,
+            kImageOutputSocketId,
+            splitId,
+            kImageInputSocketId) &&
+            graph.TryConnectSockets(
+                splitId,
+                "r",
+                constantId,
+                kMatchExtentInputSocketId) &&
+            graph.TryConnectSockets(
+                splitId,
+                "r",
+                combineId,
+                "r") &&
+            graph.TryConnectSockets(
+                splitId,
+                "g",
+                combineId,
+                "g") &&
+            graph.TryConnectSockets(
+                splitId,
+                "b",
+                combineId,
+                "b") &&
+            graph.TryConnectSockets(
+                constantId,
+                kChannelOutputSocketId,
+                combineId,
+                "a") &&
+            graph.TryConnectSockets(
+                combineId,
+                kImageOutputSocketId,
+                outputId,
+                kImageInputSocketId),
+        "Constant Channel should author through exact Channel connections");
+    Require(
+        graph.IsScalarSocketStream(
+            constantId,
+            kChannelOutputSocketId) &&
+            graph.ResolveSocketChannel(
+                constantId,
+                kChannelOutputSocketId) == "a" &&
+            graph.IsOutputConnected() &&
+            graph.Validate().valid,
+        "generated opaque Constant Channel should retain Channel/Alpha identity in a valid output chain");
+
+    const nlohmann::json saved =
+        SerializeGraphPayload(nlohmann::json::array(), graph);
+    Graph restored;
+    DeserializeGraphPayload(saved, restored, 0, {}, 0, 0, 0);
+    const Node* restoredConstant =
+        restored.FindNode(constantId);
+    const Node* restoredCombine =
+        restored.FindNode(combineId);
+    Require(
+        restoredConstant &&
+            restoredConstant->kind == NodeKind::ConstantChannel &&
+            restoredConstant->constantChannelSettings.value ==
+                0.375f &&
+            restoredConstant->constantChannelSettings
+                .generatedOpaqueAlpha &&
+            restoredConstant->definitionResolved &&
+            restoredCombine &&
+            restoredCombine->imageCombineSettings
+                .autoAlphaSuppressed &&
+            restoredCombine->definitionResolved &&
+            restored.IsOutputConnected(),
+        "Constant value/purpose, Image Combine suppression, exact identities, and links should survive graph round-trip");
+
+    nlohmann::json malformed = saved;
+    for (auto& item : malformed["nodeGraph"]["nodes"]) {
+        if (item.value("id", 0) == constantId) {
+            item["constantChannelSettings"]["value"] =
+                nullptr;
+        }
+    }
+    Graph repaired;
+    DeserializeGraphPayload(
+        malformed,
+        repaired,
+        0,
+        {},
+        0,
+        0,
+        0);
+    const Node* repairedConstant =
+        repaired.FindNode(constantId);
+    Require(
+        repairedConstant &&
+            repairedConstant->constantChannelSettings.value ==
+                1.0f,
+        "invalid saved Constant Channel values should repair to the finite opaque default");
+
+    nlohmann::json combineV1 = saved;
+    for (auto& item : combineV1["nodeGraph"]["nodes"]) {
+        if (item.value("id", 0) == combineId) {
+            item["definition"]["version"] = "1.0.0";
+            item["definition"]["contentHash"] =
+                std::string(64, '0');
+            item.erase("imageCombineSettings");
+        }
+    }
+    Graph migrated;
+    DeserializeGraphPayload(
+        combineV1,
+        migrated,
+        0,
+        {},
+        0,
+        0,
+        0);
+    const Node* migratedCombine =
+        migrated.FindNode(combineId);
+    Require(
+        migratedCombine &&
+            migratedCombine->definitionResolved &&
+            migratedCombine->definitionVersion == "2.0.0" &&
+            !migratedCombine->imageCombineSettings
+                 .autoAlphaSuppressed,
+        "saved Image Combine v1 should migrate unambiguously to the v2 unsuppressed default");
+}
+
 void TestPhase6BFieldMeanGraphContract() {
     const auto* definition = EditorNodeGraphDefinitions::FindLiveNodeDefinition(
         EditorNodeGraph::NodeKind::FieldMean, 0);
@@ -9581,6 +13077,9 @@ void TestPhase6BFieldMeanGraphContract() {
         EditorNodeGraph::ImageGeneratorKind::SolidColor, { 0.0f, 0.0f })->id;
     const int splitId = graph.AddChannelSplitNode({ 260.0f, 0.0f })->id;
     const int meanId = graph.AddFieldMeanNode({ 520.0f, 120.0f })->id;
+    const int scalarAverageId = graph.AddDataMathNode(
+        EditorNodeGraph::DataMathMode::Average, { 520.0f, 260.0f })->id;
+    const int scalarReformatId = graph.AddReformatNode({ 700.0f, 260.0f })->id;
     const int exposureId = graph.AddTechnicalImageNode(
         Stack::NodeMath::TechnicalImageOperation::Exposure, { 780.0f, 0.0f })->id;
     const int outputId = graph.AddOutputNode({ 1040.0f, 0.0f }, true)->id;
@@ -9632,6 +13131,37 @@ void TestPhase6BFieldMeanGraphContract() {
             : error.c_str());
     Require(graph.IsOutputConnected() && graph.Validate().valid,
         "the authored Field Mean side dependency should leave a valid connected output");
+    const std::vector<EditorNodeGraph::CompletedChainInfo>&
+        fieldMeanChains = graph.GetCompletedChains();
+    Require(
+        !fieldMeanChains.empty() &&
+            std::find(
+                fieldMeanChains.front().nodeIds.begin(),
+                fieldMeanChains.front().nodeIds.end(),
+                meanId) != fieldMeanChains.front().nodeIds.end(),
+        "completed-chain scheduling must retain a connected Field Mean "
+        "side dependency");
+    Require(graph.TryConnectSockets(
+                splitId, "g",
+                scalarAverageId, EditorNodeGraph::kMixInputASocketId, &error) &&
+            graph.TryConnectSockets(
+                scalarAverageId, EditorNodeGraph::kImageOutputSocketId,
+                scalarReformatId, EditorNodeGraph::kImageInputSocketId, &error) &&
+            graph.TryConnectSockets(
+                scalarReformatId, EditorNodeGraph::kImageOutputSocketId,
+                meanId, EditorNodeGraph::kReductionFieldInputSocketId, &error),
+        "an Image-typed scalar stream should pass through explicit Reformat into a ScalarField input");
+    Require(graph.IsScalarSocketStream(
+                scalarReformatId, EditorNodeGraph::kImageOutputSocketId),
+        "Reformat should preserve scalar lineage for masks, channels, and scalar fields");
+    const EditorNodeGraph::Link* averagedFieldInput = graph.FindInputLink(
+        meanId, EditorNodeGraph::kReductionFieldInputSocketId);
+    Require(averagedFieldInput &&
+            averagedFieldInput->fromNodeId == scalarReformatId &&
+            graph.IsRenderLink(*averagedFieldInput),
+        "accepted scalar-image-to-ScalarField links must participate in render scheduling");
+    Require(graph.Validate().valid,
+        "the accepted scalar Average -> Field Mean -> Exposure graph should validate");
 
     const nlohmann::json saved = EditorNodeGraph::SerializeGraphPayload(
         nlohmann::json::array(), graph);
@@ -9896,6 +13426,157 @@ void TestPhase5ExecutableCompoundLifecycle() {
 
     EditorNodeGraph::Graph graph;
     std::string error;
+
+    {
+        CompoundDefinition duplicateInputBinding = templates[0];
+        const auto publicInput = std::find_if(
+            duplicateInputBinding.ports.begin(),
+            duplicateInputBinding.ports.end(),
+            [](const auto& port) {
+                return port.direction == Stack::NodeMath::PortDirection::Input;
+            });
+        Require(publicInput != duplicateInputBinding.ports.end(),
+            "compound contract fixture should expose a public input");
+        auto aliasInput = *publicInput;
+        aliasInput.id += "-alias";
+        duplicateInputBinding.ports.push_back(std::move(aliasInput));
+        Stack::NodeMath::RefreshCompoundDefinitionContentHash(duplicateInputBinding);
+        EditorNodeGraph::Graph contractGraph;
+        error.clear();
+        Require(!contractGraph.AddCompoundDefinition(duplicateInputBinding, &error) &&
+                error.find("same canonical input socket") != std::string::npos,
+            "compound definitions should reject ambiguous duplicate public-input bindings");
+
+        CompoundDefinition connectedInputBinding = templates[0];
+        EditorNodeGraph::Graph canonical;
+        EditorNodeGraph::DeserializeGraphPayload(
+            connectedInputBinding.canonicalGraph, canonical, 0, {}, 0, 0, 0);
+        Require(!canonical.GetLinks().empty(),
+            "compound contract fixture should contain an internal connection");
+        const EditorNodeGraph::Link& internalLink = canonical.GetLinks().front();
+        const EditorNodeGraph::Node* internalTarget =
+            canonical.FindNode(internalLink.toNodeId);
+        Require(internalTarget != nullptr,
+            "compound contract fixture internal connection should have a target");
+        auto connectedPublicInput = std::find_if(
+            connectedInputBinding.ports.begin(),
+            connectedInputBinding.ports.end(),
+            [](const auto& port) {
+                return port.direction == Stack::NodeMath::PortDirection::Input;
+            });
+        connectedPublicInput->internalInstanceUuid = internalTarget->instanceUuid;
+        connectedPublicInput->internalSocketId = internalLink.toSocketId;
+        Stack::NodeMath::RefreshCompoundDefinitionContentHash(connectedInputBinding);
+        error.clear();
+        Require(!contractGraph.AddCompoundDefinition(connectedInputBinding, &error) &&
+                error.find("unconnected canonical input socket") != std::string::npos,
+            "compound definitions should not expose an input that silently replaces canonical wiring");
+
+        CompoundDefinition duplicateParameterBinding = templates[0];
+        Require(!duplicateParameterBinding.parameters.empty(),
+            "compound contract fixture should expose a promoted parameter");
+        auto aliasParameter = duplicateParameterBinding.parameters.front();
+        aliasParameter.id += "-alias";
+        duplicateParameterBinding.parameters.push_back(std::move(aliasParameter));
+        Stack::NodeMath::RefreshCompoundDefinitionContentHash(duplicateParameterBinding);
+        error.clear();
+        Require(!contractGraph.AddCompoundDefinition(duplicateParameterBinding, &error) &&
+                error.find("same canonical parameter") != std::string::npos,
+            "compound definitions should reject ambiguous duplicate promoted-parameter bindings");
+
+        CompoundDefinition duplicateCanonicalUuid = templates[0];
+        EditorNodeGraph::Graph duplicateUuidCanonical;
+        EditorNodeGraph::DeserializeGraphPayload(
+            duplicateCanonicalUuid.canonicalGraph,
+            duplicateUuidCanonical,
+            0,
+            {},
+            0,
+            0,
+            0);
+        Require(duplicateUuidCanonical.GetNodes().size() >= 2,
+            "compound contract fixture should contain multiple internal nodes");
+        auto& duplicateUuidNodes = duplicateUuidCanonical.EditNodes();
+        duplicateUuidNodes[1].instanceUuid = duplicateUuidNodes[0].instanceUuid;
+        duplicateCanonicalUuid.canonicalGraph =
+            EditorNodeGraph::SerializeGraphPayload(
+                nlohmann::json::array(),
+                duplicateUuidCanonical);
+        Stack::NodeMath::RefreshCompoundDefinitionContentHash(
+            duplicateCanonicalUuid);
+        error.clear();
+        Require(!contractGraph.AddCompoundDefinition(duplicateCanonicalUuid, &error) &&
+                error.find("Duplicate or invalid node instance UUID") !=
+                    std::string::npos,
+            "compound definitions should reject ambiguous canonical node identities");
+
+        EditorNodeGraph::Graph authoringRollbackGraph;
+        const int rollbackAuthoringSource =
+            authoringRollbackGraph.AddImageGeneratorNode(
+                EditorNodeGraph::ImageGeneratorKind::SolidColor,
+                { 0.0f, 0.0f })->id;
+        const int rollbackAuthoringMath =
+            authoringRollbackGraph.AddDataMathNode(
+                EditorNodeGraph::DataMathMode::Add,
+                { 300.0f, 0.0f })->id;
+        const int rollbackAuthoringTarget =
+            authoringRollbackGraph.AddOutputNode(
+                { 600.0f, 0.0f },
+                true)->id;
+        Require(authoringRollbackGraph.TryConnectSockets(
+                    rollbackAuthoringSource,
+                    EditorNodeGraph::kImageOutputSocketId,
+                    rollbackAuthoringMath,
+                    EditorNodeGraph::DataMathInputSocketId(0),
+                    &error) &&
+                authoringRollbackGraph.TryConnectSockets(
+                    rollbackAuthoringMath,
+                    EditorNodeGraph::kImageOutputSocketId,
+                    rollbackAuthoringTarget,
+                    EditorNodeGraph::kImageInputSocketId,
+                    &error),
+            "compound authoring rollback fixture should start connected");
+        auto& rollbackAuthoringNodes =
+            authoringRollbackGraph.EditNodes();
+        const auto invalidAuthoringTarget = std::find_if(
+            rollbackAuthoringNodes.begin(),
+            rollbackAuthoringNodes.end(),
+            [rollbackAuthoringTarget](const auto& node) {
+                return node.id == rollbackAuthoringTarget;
+            });
+        Require(invalidAuthoringTarget != rollbackAuthoringNodes.end(),
+            "compound authoring rollback fixture should retain its target");
+        invalidAuthoringTarget->kind =
+            EditorNodeGraph::NodeKind::Value;
+        const std::size_t authoringNodeCountBefore =
+            authoringRollbackGraph.GetNodes().size();
+        const std::size_t authoringLinkCountBefore =
+            authoringRollbackGraph.GetLinks().size();
+        const std::size_t authoringDefinitionCountBefore =
+            authoringRollbackGraph.GetCompoundDefinitions().size();
+        const int authoringNextIdBefore =
+            authoringRollbackGraph.GetNextNodeId();
+        int failedCompoundId = -77;
+        error.clear();
+        Require(!authoringRollbackGraph.CreateCompoundFromSelection(
+                    { rollbackAuthoringMath },
+                    "Must Roll Back",
+                    &failedCompoundId,
+                    &error) &&
+                authoringRollbackGraph.GetNodes().size() ==
+                    authoringNodeCountBefore &&
+                authoringRollbackGraph.GetLinks().size() ==
+                    authoringLinkCountBefore &&
+                authoringRollbackGraph.GetCompoundDefinitions().size() ==
+                    authoringDefinitionCountBefore &&
+                authoringRollbackGraph.GetNextNodeId() ==
+                    authoringNextIdBefore &&
+                authoringRollbackGraph.FindNode(
+                    rollbackAuthoringMath) != nullptr &&
+                failedCompoundId == -77,
+            "failed compound boundary validation should preserve authored topology, catalog, IDs, and caller output");
+    }
+
     Require(graph.AddCompoundDefinition(templates[0], &error),
         "graph should embed the exact shipped transparent definition");
     const int sourceId = graph.AddImageGeneratorNode(
@@ -10034,6 +13715,65 @@ void TestPhase5ExecutableCompoundLifecycle() {
     Require(nestedLoaded.IsOutputConnected(),
         "a deliberately updated compound definition should remain executable before Unpack");
 
+    {
+        EditorNodeGraph::Graph rollbackGraph;
+        Require(rollbackGraph.AddCompoundDefinition(templates[0], &error),
+            "Unpack rollback fixture should embed its compound definition");
+        const int rollbackSource = rollbackGraph.AddImageGeneratorNode(
+            EditorNodeGraph::ImageGeneratorKind::SolidColor,
+            { 0.0f, 0.0f })->id;
+        const int rollbackCompound = rollbackGraph.AddCompoundNode(
+            templates[0].identity,
+            { 300.0f, 0.0f })->id;
+        const int rollbackTarget = rollbackGraph.AddOutputNode(
+            { 600.0f, 0.0f },
+            true)->id;
+        Require(rollbackGraph.TryConnectSockets(
+                    rollbackSource,
+                    EditorNodeGraph::kImageOutputSocketId,
+                    rollbackCompound,
+                    "image-in",
+                    &error) &&
+                rollbackGraph.TryConnectSockets(
+                    rollbackCompound,
+                    "image-out",
+                    rollbackTarget,
+                    EditorNodeGraph::kImageInputSocketId,
+                    &error),
+            "Unpack rollback fixture should start with valid external wiring");
+        auto& rollbackNodes = rollbackGraph.EditNodes();
+        const auto rollbackTargetNode = std::find_if(
+            rollbackNodes.begin(),
+            rollbackNodes.end(),
+            [rollbackTarget](const auto& node) {
+                return node.id == rollbackTarget;
+            });
+        Require(rollbackTargetNode != rollbackNodes.end(),
+            "Unpack rollback fixture should retain its target node");
+        rollbackTargetNode->kind = EditorNodeGraph::NodeKind::Value;
+        const std::size_t nodeCountBeforeFailedUnpack =
+            rollbackGraph.GetNodes().size();
+        const std::size_t linkCountBeforeFailedUnpack =
+            rollbackGraph.GetLinks().size();
+        const int nextNodeIdBeforeFailedUnpack =
+            rollbackGraph.GetNextNodeId();
+        std::vector<int> failedUnpackIds{ -77 };
+        error.clear();
+        Require(!rollbackGraph.UnpackCompoundNode(
+                    rollbackCompound,
+                    &failedUnpackIds,
+                    &error) &&
+                rollbackGraph.GetNodes().size() ==
+                    nodeCountBeforeFailedUnpack &&
+                rollbackGraph.GetLinks().size() ==
+                    linkCountBeforeFailedUnpack &&
+                rollbackGraph.GetNextNodeId() ==
+                    nextNodeIdBeforeFailedUnpack &&
+                rollbackGraph.FindNode(rollbackCompound) != nullptr &&
+                failedUnpackIds == std::vector<int>{ -77 },
+            "failed Unpack validation should roll back transient nodes, links, IDs, and caller output");
+    }
+
     std::vector<int> unpackedIds;
     Require(nestedLoaded.UnpackCompoundNode(nestedId, &unpackedIds, &error) &&
             !unpackedIds.empty() && nestedLoaded.FindGroup(groupId),
@@ -10124,8 +13864,8 @@ void TestPhase5ExecutableCompoundLifecycle() {
         "typed compound fixture should connect before authoring");
     int typedCompoundId = -1;
     Require(typedGraph.CreateCompoundFromSelection(
-            { typedExposureId }, "Typed Exposure", &typedCompoundId, &error),
-        "compound authoring should preserve image and uniform Scalar boundary ports");
+            { typedExposureId, typedExposureId }, "Typed Exposure", &typedCompoundId, &error),
+        "compound authoring should de-duplicate repeated selection IDs while preserving typed boundary ports");
     const EditorNodeGraph::Node* typedCompound = typedGraph.FindNode(typedCompoundId);
     const CompoundDefinition* typedDefinition = typedCompound
         ? typedGraph.FindCompoundDefinition(typedCompound->compound.instance.definition) : nullptr;
@@ -10271,8 +14011,16 @@ bool ValidateRegistry(std::vector<std::string>* errors) {
 
 } // namespace LayerRegistry
 
+void RunGraphScaleTests();
+void RunNodeLayoutTests();
+
 int main() {
+    RunGraphScaleTests();
+    RunNodeLayoutTests();
+    TestEditorRenderWorkerGenerationScheduling();
+    TestPixelBufferLayoutGuards();
     TestPhase3TypedValuesAndUnifiedDefinitions();
+    TestConstantChannelFoundation();
     TestPhase6BFieldMeanGraphContract();
     TestPhase6GeometryAndSpecializedGraphContract();
     TestPhase5ExecutableCompoundLifecycle();
@@ -10284,11 +14032,15 @@ int main() {
     TestGraphCaptureReadbackAndEncoding();
     TestImagePayloadPreviewIsBounded();
     TestInteractiveTaskPriorityRunsBeforeBlockedBackgroundWork();
+    TestTaskSystemShutdownJoinsRunningWorkAndDiscardsCompletions();
     TestScalarMaskCanUseLayerMath();
     TestChannelAverageStaysScalarThroughContrastMaskWorkflow();
+    TestChannelRoleConnectsDirectlyToMaskInputs();
     TestToneCurveInheritsInputScenePath();
     TestFullImageStillCannotTargetScalarInput();
     TestOutputChannelNormalization();
+    TestOutputV2PersistenceAndLegacyMigration();
+    TestPartialImageComponentPresenceSurvivesGraphRoundTrip();
     TestCompletedChainsSplitSharedUpstreamAcrossOutputs();
     TestSplitAdjustmentAnimatableRegistryCoverage();
     TestBlurFamilyAnimatableRegistryCoverage();
@@ -10310,6 +14062,7 @@ int main() {
     TestScalarCyclesAreRejected();
     TestCustomMaskConnections();
     TestCustomMaskThroughMaskCombineExclude();
+    TestCustomMaskSparseRasterPersistence();
     TestManualRawBaselineChainShape();
     TestRawWorkspaceFolderCatalogFoundation();
     TestRawWorkspaceThumbnailPipelineFoundation();
@@ -10318,8 +14071,15 @@ int main() {
     TestRawWorkspaceGalleryPresentation();
     TestRawWorkspacePanelStateModel();
     TestRawWorkspaceProjectLifecycleModel();
+    TestRawLabToolSequencePreservesHiddenFieldsThroughProjectReload();
     TestRawWorkspaceProjectReloadPreservesOwnershipModes();
     TestRawDevelopmentRecipeDefaultsAndRoundTrip();
+    TestRawFinishTonePointCurveSetContract();
+    TestRawDevelopmentStageCachePolicy();
+    TestRestormerRgbAdapterContract();
+    TestRestormerProtocolAndTilingContract();
+    TestRestormerDevelopmentPackageTrustContract();
+    TestRawLabViewTransformReferenceMatchesShaderFormula();
     TestRawImageAnalysisPercentilesAndFallbackGuards();
     TestRawAutoBaseViewTransformFit();
     TestRawAutoBaseRecommendations();
@@ -10340,6 +14100,7 @@ int main() {
     TestScalarThroughDataMathToPreviewAndScalarTargets();
     TestImageThroughDataMathToOutput();
     TestFrequencyNodeShellSocketsAndConnections();
+    TestSemanticNodeMutationsInvalidateExecutionState();
     TestAverageNodeInputRules();
     TestImageAndScalarThroughDataMathStaysImage();
     TestFullImageDataMathRejectedByScalarOnlyInputs();
@@ -10358,8 +14119,10 @@ int main() {
     TestMfsrNodeShellSocketsAndConnections();
     TestMfsrNodeShellRejectsScalarAndMixedFamilies();
     TestMfsrNodeShellSerializesRoundTrip();
+    TestRetiredNeuralDenoiseCompatibilityRoundTrip();
     TestTechnicalImageAndSourceMetadataSerializeRoundTrip();
     TestCompositeNodeSerializesRoundTrip();
+    TestGraphInfoNoLayoutPayloadPreservesGraphOrderAndState();
     TestHdrMergeDeghostModeMediumRoundTrip();
 
     std::cout << "Stack graph behavior tests passed.\n";

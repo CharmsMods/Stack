@@ -1,14 +1,16 @@
 #include "Renderer/RenderPipeline.h"
 
 #include "Composite/EmbeddedCompositeFont.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <iterator>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -17,7 +19,9 @@
 namespace {
 
 float Clamp01(float value) {
-    return std::clamp(value, 0.0f, 1.0f);
+    return std::isfinite(value)
+        ? std::clamp(value, 0.0f, 1.0f)
+        : 0.0f;
 }
 
 std::vector<int> Utf8ToCodepoints(const std::string& text) {
@@ -182,8 +186,22 @@ bool BuildTextRgba(
         const float fallbackHeight = std::max(1.0f, penY + lineAdvance - baseline);
         const float contentWidth = hasVisibleBounds ? (maxX - minX) : fallbackWidth;
         const float contentHeight = hasVisibleBounds ? (maxY - minY) : fallbackHeight;
-        const int candidateWidth = std::max(1, static_cast<int>(std::ceil(contentWidth + padding * 2.0f)));
-        const int candidateHeight = std::max(1, static_cast<int>(std::ceil(contentHeight + padding * 2.0f)));
+        const float candidateWidthFloat =
+            std::ceil(contentWidth + padding * 2.0f);
+        const float candidateHeightFloat =
+            std::ceil(contentHeight + padding * 2.0f);
+        if (!std::isfinite(candidateWidthFloat) ||
+            !std::isfinite(candidateHeightFloat)) {
+            return false;
+        }
+        const int candidateWidth =
+            candidateWidthFloat > static_cast<float>(textureLimit)
+            ? textureLimit + 1
+            : std::max(1, static_cast<int>(candidateWidthFloat));
+        const int candidateHeight =
+            candidateHeightFloat > static_cast<float>(textureLimit)
+            ? textureLimit + 1
+            : std::max(1, static_cast<int>(candidateHeightFloat));
 
         if ((candidateWidth > textureLimit || candidateHeight > textureLimit) && pixelSize > 1.0f) {
             const float fit = std::min(
@@ -286,7 +304,9 @@ std::vector<float> BuildBlurKernel(const int radius) {
     const float twoSigmaSq = 2.0f * sigma * sigma;
     float sum = 0.0f;
     for (int tap = -radius; tap <= radius; ++tap) {
-        const float value = std::exp(-(static_cast<float>(tap * tap)) / twoSigmaSq);
+        const float tapValue = static_cast<float>(tap);
+        const float value =
+            std::exp(-(tapValue * tapValue) / twoSigmaSq);
         kernel[static_cast<std::size_t>(tap + radius)] = value;
         sum += value;
     }
@@ -338,6 +358,91 @@ void BlurAlphaMask(
     }
 }
 
+void DilateAlphaMaskDisk(
+    const std::vector<float>& input,
+    int width,
+    int height,
+    int radius,
+    std::vector<float>& output) {
+    output = input;
+    if (radius <= 0 || width <= 0 || height <= 0 || input.empty()) {
+        return;
+    }
+
+    output.assign(input.size(), 0.0f);
+    std::vector<float> rowMaximum(
+        static_cast<std::size_t>(width), 0.0f);
+    std::vector<int> window(static_cast<std::size_t>(width), 0);
+    const long long radiusSquared =
+        static_cast<long long>(radius) *
+        static_cast<long long>(radius);
+
+    for (int dy = -radius; dy <= radius; ++dy) {
+        const long long dySquared =
+            static_cast<long long>(dy) *
+            static_cast<long long>(dy);
+        const int horizontalRadius = static_cast<int>(std::floor(
+            std::sqrt(static_cast<double>(
+                std::max<long long>(
+                    0, radiusSquared - dySquared)))));
+        for (int targetY = 0; targetY < height; ++targetY) {
+            const int sourceY =
+                std::clamp(targetY + dy, 0, height - 1);
+            const std::size_t sourceRow =
+                static_cast<std::size_t>(sourceY) *
+                static_cast<std::size_t>(width);
+            int head = 0;
+            int tail = 0;
+            int nextAdd = 0;
+            for (int x = 0; x < width; ++x) {
+                const int targetAdd =
+                    std::min(width - 1, x + horizontalRadius);
+                while (nextAdd <= targetAdd) {
+                    while (
+                        head < tail &&
+                        input[
+                            sourceRow +
+                            static_cast<std::size_t>(
+                                window[static_cast<std::size_t>(
+                                    tail - 1)])] <=
+                            input[
+                                sourceRow +
+                                static_cast<std::size_t>(nextAdd)]) {
+                        --tail;
+                    }
+                    window[static_cast<std::size_t>(tail++)] =
+                        nextAdd;
+                    ++nextAdd;
+                }
+                while (
+                    head < tail &&
+                    window[static_cast<std::size_t>(head)] <
+                        x - horizontalRadius) {
+                    ++head;
+                }
+                rowMaximum[static_cast<std::size_t>(x)] =
+                    input[
+                        sourceRow +
+                        static_cast<std::size_t>(
+                            window[static_cast<std::size_t>(head)])];
+            }
+
+            const std::size_t targetRow =
+                static_cast<std::size_t>(targetY) *
+                static_cast<std::size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                float& destination =
+                    output[
+                        targetRow +
+                        static_cast<std::size_t>(x)];
+                destination = std::max(
+                    destination,
+                    rowMaximum[static_cast<std::size_t>(x)]);
+            }
+        }
+    }
+}
+
 void CompositeTextBackdrop(
     const RenderImageGeneratorSettings& settings,
     std::vector<unsigned char>& pixels,
@@ -348,8 +453,21 @@ void CompositeTextBackdrop(
     }
 
     const float backdropOpacity = Clamp01(settings.textBackdropOpacity);
-    const float backdropBlur = std::max(0.0f, settings.textBackdropBlur);
-    const float paddingPx = std::max(0.0f, settings.textBackdropPadding);
+    const int maximumRadius = std::max(width, height);
+    const float backdropBlur =
+        std::isfinite(settings.textBackdropBlur)
+        ? std::clamp(
+            settings.textBackdropBlur,
+            0.0f,
+            static_cast<float>(maximumRadius))
+        : 0.0f;
+    const float paddingPx =
+        std::isfinite(settings.textBackdropPadding)
+        ? std::clamp(
+            settings.textBackdropPadding,
+            0.0f,
+            static_cast<float>(maximumRadius))
+        : 0.0f;
     if (backdropOpacity <= 0.0f || (backdropBlur <= 0.0f && paddingPx <= 0.0f)) {
         return;
     }
@@ -366,30 +484,23 @@ void CompositeTextBackdrop(
 
     const int dilationRadius = static_cast<int>(std::round(paddingPx));
     if (dilationRadius > 0) {
-        std::vector<float> dilated = alphaMask;
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                float maxAlpha = alphaMask[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)];
-                for (int dy = -dilationRadius; dy <= dilationRadius; ++dy) {
-                    const int sampleY = std::clamp(y + dy, 0, height - 1);
-                    for (int dx = -dilationRadius; dx <= dilationRadius; ++dx) {
-                        if (dx * dx + dy * dy > dilationRadius * dilationRadius) {
-                            continue;
-                        }
-                        const int sampleX = std::clamp(x + dx, 0, width - 1);
-                        maxAlpha = std::max(
-                            maxAlpha,
-                            alphaMask[static_cast<std::size_t>(sampleY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(sampleX)]);
-                    }
-                }
-                dilated[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] = maxAlpha;
-            }
-        }
+        std::vector<float> dilated;
+        DilateAlphaMaskDisk(
+            alphaMask,
+            width,
+            height,
+            dilationRadius,
+            dilated);
         alphaMask.swap(dilated);
     }
 
     std::vector<float> blurredMask;
-    BlurAlphaMask(alphaMask, width, height, static_cast<int>(std::round(backdropBlur)), blurredMask);
+    BlurAlphaMask(
+        alphaMask,
+        width,
+        height,
+        static_cast<int>(std::round(backdropBlur)),
+        blurredMask);
 
     const float tintR = Clamp01(settings.colorB[0]);
     const float tintG = Clamp01(settings.colorB[1]);
@@ -469,7 +580,93 @@ bool BuildTextGeneratorCanvas(const RenderGraphNode& node, int canvasWidth, int 
         effectiveFontSize = std::max(6.0f, effectiveFontSize * std::clamp(fit * 0.97f, 0.1f, 0.97f));
     }
 
-    outPixels.assign(static_cast<std::size_t>(canvasWidth) * static_cast<std::size_t>(canvasHeight) * 4, 0);
+    const float backdropOpacity =
+        Clamp01(node.imageGeneratorSettings.textBackdropOpacity);
+    const int backdropBlurRadius =
+        std::isfinite(node.imageGeneratorSettings.textBackdropBlur)
+        ? static_cast<int>(std::round(std::clamp(
+            node.imageGeneratorSettings.textBackdropBlur,
+            0.0f,
+            static_cast<float>(
+                std::max(canvasWidth, canvasHeight)))))
+        : 0;
+    const int backdropPaddingRadius =
+        std::isfinite(node.imageGeneratorSettings.textBackdropPadding)
+        ? static_cast<int>(std::round(std::clamp(
+            node.imageGeneratorSettings.textBackdropPadding,
+            0.0f,
+            static_cast<float>(
+                std::max(canvasWidth, canvasHeight)))))
+        : 0;
+    const int effectMargin =
+        backdropOpacity > 0.0f
+        ? std::min(
+            std::max(canvasWidth, canvasHeight),
+            backdropBlurRadius + backdropPaddingRadius + 1)
+        : 0;
+    if (effectMargin > 0) {
+        const int effectWidth = static_cast<int>(std::min<long long>(
+            canvasWidth,
+            static_cast<long long>(textWidth) +
+                static_cast<long long>(effectMargin) * 2ll));
+        const int effectHeight = static_cast<int>(std::min<long long>(
+            canvasHeight,
+            static_cast<long long>(textHeight) +
+                static_cast<long long>(effectMargin) * 2ll));
+        std::size_t effectByteCount = 0;
+        if (!Stack::PixelBuffer::TryComputePixelByteCount(
+                effectWidth, effectHeight, 4, effectByteCount)) {
+            return false;
+        }
+        std::vector<unsigned char> effectPixels(
+            effectByteCount, 0u);
+        const int effectOffsetX =
+            std::max(0, (effectWidth - textWidth) / 2);
+        const int effectOffsetY =
+            std::max(0, (effectHeight - textHeight) / 2);
+        for (int y = 0; y < textHeight; ++y) {
+            const int destinationY = effectOffsetY + y;
+            if (destinationY < 0 || destinationY >= effectHeight) {
+                continue;
+            }
+            for (int x = 0; x < textWidth; ++x) {
+                const int destinationX = effectOffsetX + x;
+                if (destinationX < 0 ||
+                    destinationX >= effectWidth) {
+                    continue;
+                }
+                const std::size_t source =
+                    (static_cast<std::size_t>(y) *
+                         static_cast<std::size_t>(textWidth) +
+                     static_cast<std::size_t>(x)) *
+                    4u;
+                const std::size_t destination =
+                    (static_cast<std::size_t>(destinationY) *
+                         static_cast<std::size_t>(effectWidth) +
+                     static_cast<std::size_t>(destinationX)) *
+                    4u;
+                std::copy_n(
+                    textPixels.data() + source,
+                    4,
+                    effectPixels.data() + destination);
+            }
+        }
+        CompositeTextBackdrop(
+            node.imageGeneratorSettings,
+            effectPixels,
+            effectWidth,
+            effectHeight);
+        textPixels = std::move(effectPixels);
+        textWidth = effectWidth;
+        textHeight = effectHeight;
+    }
+
+    std::size_t canvasByteCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            canvasWidth, canvasHeight, 4, canvasByteCount)) {
+        return false;
+    }
+    outPixels.assign(canvasByteCount, 0u);
     const int offsetX = std::max(0, (canvasWidth - textWidth) / 2);
     const int offsetY = std::max(0, (canvasHeight - textHeight) / 2);
     for (int y = 0; y < textHeight; ++y) {
@@ -493,7 +690,6 @@ bool BuildTextGeneratorCanvas(const RenderGraphNode& node, int canvasWidth, int 
         }
     }
 
-    CompositeTextBackdrop(node.imageGeneratorSettings, outPixels, canvasWidth, canvasHeight);
     return true;
 }
 
@@ -505,48 +701,51 @@ unsigned int RenderPipeline::GenerateImageTexture(const RenderGraphNode& node) {
         return 0;
     }
     if (node.imageGeneratorKind == RenderImageGeneratorKind::Text) {
-        std::vector<unsigned char> pixels;
-        if (!BuildTextGeneratorCanvas(node, m_Width, m_Height, pixels) || pixels.empty()) {
+        try {
+            std::vector<unsigned char> pixels;
+            if (!BuildTextGeneratorCanvas(
+                    node, m_Width, m_Height, pixels) ||
+                pixels.empty() ||
+                !Stack::PixelBuffer::FlipInterleavedRowsInPlace(
+                    pixels, m_Width, m_Height, 4)) {
+                return 0;
+            }
+            return GLHelpers::CreateTextureFromPixels(
+                pixels.data(), m_Width, m_Height, 4);
+        } catch (const std::bad_alloc&) {
+            return 0;
+        } catch (const std::length_error&) {
             return 0;
         }
-        // Flip vertically to align with OpenGL's bottom-left standard
-        int rowSize = m_Width * 4;
-        std::vector<unsigned char> tempRow(rowSize);
-        for (int y = 0; y < m_Height / 2; y++) {
-            unsigned char* row1 = &pixels[y * rowSize];
-            unsigned char* row2 = &pixels[(m_Height - 1 - y) * rowSize];
-            std::memcpy(tempRow.data(), row1, rowSize);
-            std::memcpy(row1, row2, rowSize);
-            std::memcpy(row2, tempRow.data(), rowSize);
-        }
-        return GLHelpers::CreateTextureFromPixels(pixels.data(), m_Width, m_Height, 4);
     }
     if (!m_ImageGeneratorProgram) {
         return 0;
     }
     unsigned int texture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
-    unsigned int fbo = GLHelpers::CreateFBO(texture);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glViewport(0, 0, m_Width, m_Height);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(m_ImageGeneratorProgram);
-    glUniform1i(glGetUniformLocation(m_ImageGeneratorProgram, "uKind"), static_cast<int>(node.imageGeneratorKind));
-    glUniform4f(
-        glGetUniformLocation(m_ImageGeneratorProgram, "uColorA"),
-        node.imageGeneratorSettings.colorA[0],
-        node.imageGeneratorSettings.colorA[1],
-        node.imageGeneratorSettings.colorA[2],
-        node.imageGeneratorSettings.colorA[3]);
-    glUniform4f(
-        glGetUniformLocation(m_ImageGeneratorProgram, "uColorB"),
-        node.imageGeneratorSettings.colorB[0],
-        node.imageGeneratorSettings.colorB[1],
-        node.imageGeneratorSettings.colorB[2],
-        node.imageGeneratorSettings.colorB[3]);
-    glUniform1f(glGetUniformLocation(m_ImageGeneratorProgram, "uAngle"), node.imageGeneratorSettings.angle);
-    glUniform1f(glGetUniformLocation(m_ImageGeneratorProgram, "uOffset"), node.imageGeneratorSettings.offset);
-    m_Quad.Draw();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDeleteFramebuffers(1, &fbo);
+    if (texture == 0) {
+        return 0;
+    }
+    if (!RenderIntoGraphTargetTexture(texture, [&](unsigned int) {
+        glUseProgram(m_ImageGeneratorProgram);
+        glUniform1i(glGetUniformLocation(m_ImageGeneratorProgram, "uKind"), static_cast<int>(node.imageGeneratorKind));
+        glUniform4f(
+            glGetUniformLocation(m_ImageGeneratorProgram, "uColorA"),
+            node.imageGeneratorSettings.colorA[0],
+            node.imageGeneratorSettings.colorA[1],
+            node.imageGeneratorSettings.colorA[2],
+            node.imageGeneratorSettings.colorA[3]);
+        glUniform4f(
+            glGetUniformLocation(m_ImageGeneratorProgram, "uColorB"),
+            node.imageGeneratorSettings.colorB[0],
+            node.imageGeneratorSettings.colorB[1],
+            node.imageGeneratorSettings.colorB[2],
+            node.imageGeneratorSettings.colorB[3]);
+        glUniform1f(glGetUniformLocation(m_ImageGeneratorProgram, "uAngle"), node.imageGeneratorSettings.angle);
+        glUniform1f(glGetUniformLocation(m_ImageGeneratorProgram, "uOffset"), node.imageGeneratorSettings.offset);
+        m_Quad.Draw();
+    })) {
+        glDeleteTextures(1, &texture);
+        return 0;
+    }
     return texture;
 }

@@ -23,11 +23,11 @@ public:
     void RequestStopDiscardQueued();
     bool IsDrainedForShutdown() const;
 
-    void Submit(Task task);
+    bool Submit(Task task);
     // Use sparingly for work directly initiated by the user. Background
     // maintenance remains FIFO so it cannot delay an interactive import.
-    void SubmitHighPriority(Task task);
-    void PostToMain(Task task);
+    bool SubmitHighPriority(Task task);
+    bool PostToMain(Task task);
     void PumpMainThreadTasks(std::size_t maxTasks = 0);
 
 private:

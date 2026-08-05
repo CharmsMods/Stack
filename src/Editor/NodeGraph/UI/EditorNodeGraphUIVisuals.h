@@ -4,12 +4,14 @@
 #include "Editor/EditorModule.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Editor/NodeGraph/UI/EditorNodeGraphUILayout.h"
 #include "Utils/ImGuiExtras.h"
 
 #include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include <imgui.h>
 
@@ -181,6 +183,15 @@ const NodeFamilyStyle& StyleForFamily(NodeFamily family);
 NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node);
 void ApplyModernCompactMetrics(const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics);
 void ApplyLayerSurfaceMetrics(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node, NodeLayoutMetrics& metrics);
+Stack::Editor::NodeGraphUILayout::NodeWidthClass ResolveNodeWidthClass(
+    const EditorNodeGraphUI* ui,
+    const EditorModule* editor,
+    const EditorNodeGraph::Node& node);
+void ApplyCanonicalNodeMetrics(
+    const EditorNodeGraphUI* ui,
+    const EditorModule* editor,
+    const EditorNodeGraph::Node& node,
+    NodeLayoutMetrics& metrics);
 ImU32 ColorWithAlpha(const ImVec4& color, float alpha);
 bool HasDedicatedComplexEditor(const EditorNodeGraphUI* ui, const EditorModule* editor, const EditorNodeGraph::Node& node);
 std::string CompactAdvancedLayerLabel(const EditorNodeGraph::Node& node);
@@ -277,10 +288,14 @@ void DrawSocketPin(
 void DrawPreviewFrame(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const GraphStyleTokens& tokens, float uiScale);
 float ChannelLaneOffset(const std::string& channel, float zoom);
 float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayoutMetrics& metrics, float measuredLayerHeight = 0.0f);
-bool UsesMeasuredNodeHeight(const EditorNodeGraph::Node& node);
 bool ShouldShowKindLabel(const EditorNodeGraph::Node& node);
 std::string EllipsizeLabel(const std::string& value, float maxWidth);
 const char* NodeKindLabel(EditorNodeGraph::NodeKind kind);
+std::string PrimaryNodeTitle(const EditorNodeGraph::Node& node);
+std::string CompactNodeTitle(const EditorNodeGraph::Node& node);
+std::vector<std::string> WrapNodeTitle(
+    const std::string& title,
+    float maxLogicalWidth);
 const char* ExportAspectPresetLabel(EditorModule::CompositeExportAspectPreset preset);
 const char* CompositeSnapPresetLabel(EditorModule::CompositeSnapModePreset preset);
 const char* ScopeLabel(EditorNodeGraph::ScopeKind kind);

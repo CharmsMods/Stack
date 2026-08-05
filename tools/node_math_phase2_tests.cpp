@@ -239,8 +239,8 @@ void SemanticTests(Tests& tests) {
     }, { { "unknown-edge", "unknown-source", "unknown-output", "image" } });
     tests.Check(unknownResult.executable &&
         HasRule(unknownResult.diagnostics, "nmr.semantic.source-color-unknown") &&
-        HasRule(unknownResult.diagnostics, "nmr.output.color-unknown"),
-        "Unknown source and direct output are visible but permitted");
+        !HasRule(unknownResult.diagnostics, "nmr.output.color-unknown"),
+        "Unknown source is visible while viewport Output remains independent of file-export policy");
 
     const ValueDescriptor straight = Tagged("srgb-d65", TransferKind::Linear, AlphaMode::Straight);
     const ValueDescriptor premult = Tagged("srgb-d65", TransferKind::Linear, AlphaMode::Premultiplied);
@@ -255,6 +255,34 @@ void SemanticTests(Tests& tests) {
     tests.Check(mismatch.executable &&
         HasRule(mismatch.diagnostics, "nmr.semantic.alpha-formula-mismatch"),
         "explicit alpha formula mismatch warns while remaining executable");
+
+    SemanticImageNode viewTransform;
+    viewTransform.identity = "view-transform";
+    viewTransform.kind = SemanticImageNodeKind::DeclaredColorOutput;
+    viewTransform.declaredColor = { "srgb-d65", {}, ColorRelation::Standard };
+    viewTransform.declaredTransfer = { TransferKind::Srgb, 0.0, {} };
+    viewTransform.declaredReference = ReferenceState::Display;
+    viewTransform.declaredOperationIdentity = "view-transform.display-output.v1";
+    const SemanticAnalysisResult viewResult = AnalyzeSemanticImageGraph({
+        { "view-source", SemanticImageNodeKind::Source, straight },
+        viewTransform,
+        { "view-output", SemanticImageNodeKind::DirectOutput }
+    }, {
+        { "view-input", "view-source", "view-transform", "image" },
+        { "view-export", "view-transform", "view-output", "image" }
+    });
+    const SemanticNodeOutput* viewOutput =
+        FindSemanticNodeOutput(viewResult, "view-transform");
+    tests.Check(
+        viewResult.executable && viewOutput != nullptr &&
+        viewOutput->descriptor.color.state == KnowledgeState::Known &&
+        viewOutput->descriptor.color.value.identity == "srgb-d65" &&
+        viewOutput->descriptor.transfer.state == KnowledgeState::Known &&
+        viewOutput->descriptor.transfer.value.kind == TransferKind::Srgb &&
+        viewOutput->descriptor.reference.state == KnowledgeState::Known &&
+        viewOutput->descriptor.reference.value == ReferenceState::Display &&
+        !HasRule(viewResult.diagnostics, "nmr.output.color-unknown"),
+        "declared View Transform output propagates explicit display color and transfer");
 
     const DirectOutputPolicy p3Policy = EvaluateDirectPngOutputPolicy(
         Tagged("display-p3-d65", TransferKind::Srgb));

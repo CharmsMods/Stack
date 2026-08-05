@@ -1,11 +1,297 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GLStateGuards.h"
+#include "Renderer/RawDevelopmentStageCachePolicy.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <vector>
+
+#ifndef GL_R32UI
+#define GL_R32UI 0x8236
+#endif
+#ifndef GL_PIXEL_PACK_BUFFER
+#define GL_PIXEL_PACK_BUFFER 0x88EB
+#endif
+#ifndef GL_PIXEL_PACK_BUFFER_BINDING
+#define GL_PIXEL_PACK_BUFFER_BINDING 0x88ED
+#endif
+#ifndef GL_STREAM_READ
+#define GL_STREAM_READ 0x88E1
+#endif
 
 namespace {
+
+unsigned int CreateRawLocalRangeSelectionTexture(
+    int width,
+    int height,
+    const std::vector<std::uint32_t>& selectedBits) {
+    std::size_t requiredElements = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            width, height, 1, requiredElements) ||
+        selectedBits.size() != requiredElements) {
+        return 0;
+    }
+
+    const Stack::Renderer::GLState::TextureBinding savedTexture(
+        GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
+    const Stack::Renderer::GLState::PixelUnpackState savedUnpackState;
+    unsigned int texture = 0;
+    glGenTextures(1, &texture);
+    if (texture == 0) {
+        return 0;
+    }
+    glBindTexture(GL_TEXTURE_2D, texture);
+    savedUnpackState.ConfigureTightCpuUpload();
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_R32UI,
+        width,
+        height,
+        0,
+        GL_RED_INTEGER,
+        GL_UNSIGNED_INT,
+        selectedBits.data());
+    const GLenum uploadError = glGetError();
+    savedUnpackState.Restore();
+    savedTexture.Restore();
+    if (uploadError != GL_NO_ERROR) {
+        glDeleteTextures(1, &texture);
+        return 0;
+    }
+    return texture;
+}
+
+RawLocalRangeTargetPreviewCpuResult BuildRawLocalRangeTargetPreviewConnectedArea(
+    std::vector<unsigned char> qualifier,
+    int width,
+    int height,
+    float seedU,
+    float seedV,
+    std::uint64_t generation) {
+    using PreviewClock = std::chrono::steady_clock;
+    const auto floodFillStart = PreviewClock::now();
+    RawLocalRangeTargetPreviewCpuResult result;
+    result.generation = generation;
+    result.width = width;
+    result.height = height;
+    if (width <= 0 || height <= 0 ||
+        qualifier.size() !=
+            static_cast<std::size_t>(width) *
+                static_cast<std::size_t>(height)) {
+        return result;
+    }
+
+    const std::size_t pixelCount = qualifier.size();
+    // The qualifier is intentionally rendered at a small proxy resolution,
+    // but high-ISO RAW noise can still leave a salt-and-pepper boundary.
+    // Smooth only this transient visualization mask before connectivity. The
+    // authored zone and final Local Range math remain untouched.
+    std::vector<unsigned char> smoothedQualifier(pixelCount, 0u);
+    std::vector<std::uint32_t> integral(
+        static_cast<std::size_t>(width + 1) *
+            static_cast<std::size_t>(height + 1),
+        0u);
+    for (int y = 0; y < height; ++y) {
+        std::uint32_t rowSum = 0u;
+        for (int x = 0; x < width; ++x) {
+            rowSum +=
+                qualifier[static_cast<std::size_t>(y * width + x)];
+            integral[
+                static_cast<std::size_t>(y + 1) *
+                    static_cast<std::size_t>(width + 1) +
+                static_cast<std::size_t>(x + 1)] =
+                integral[
+                    static_cast<std::size_t>(y) *
+                        static_cast<std::size_t>(width + 1) +
+                    static_cast<std::size_t>(x + 1)] +
+                rowSum;
+        }
+    }
+    constexpr int kQualifierSmoothingRadius = 2;
+    const std::size_t integralStride =
+        static_cast<std::size_t>(width + 1);
+    for (int y = 0; y < height; ++y) {
+        const int y0 = std::max(0, y - kQualifierSmoothingRadius);
+        const int y1 = std::min(height - 1, y + kQualifierSmoothingRadius);
+        for (int x = 0; x < width; ++x) {
+            const int x0 = std::max(0, x - kQualifierSmoothingRadius);
+            const int x1 = std::min(width - 1, x + kQualifierSmoothingRadius);
+            const std::uint32_t sum =
+                integral[static_cast<std::size_t>(y1 + 1) *
+                        integralStride +
+                    static_cast<std::size_t>(x1 + 1)] -
+                integral[static_cast<std::size_t>(y0) * integralStride +
+                    static_cast<std::size_t>(x1 + 1)] -
+                integral[static_cast<std::size_t>(y1 + 1) *
+                        integralStride +
+                    static_cast<std::size_t>(x0)] +
+                integral[static_cast<std::size_t>(y0) * integralStride +
+                    static_cast<std::size_t>(x0)];
+            const std::uint32_t sampleCount =
+                static_cast<std::uint32_t>(
+                    (x1 - x0 + 1) * (y1 - y0 + 1));
+            smoothedQualifier[
+                static_cast<std::size_t>(y * width + x)] =
+                static_cast<unsigned char>(
+                    (sum + sampleCount / 2u) / sampleCount);
+        }
+    }
+
+    std::vector<unsigned char> visited(pixelCount, 0u);
+    result.selectedBits.assign(pixelCount, 0u);
+    std::vector<int> queue;
+    queue.reserve(std::min<std::size_t>(pixelCount, 512u * 512u));
+    constexpr unsigned char kGrowthThreshold = 38u;
+    constexpr unsigned char kStrongThreshold = 128u;
+    const int searchRadius = std::max(4, std::min(width, height) / 100);
+    const int seedX = std::clamp(
+        static_cast<int>(std::lround(
+            seedU * static_cast<float>(width - 1))),
+        0,
+        width - 1);
+    const int seedY = std::clamp(
+        static_cast<int>(std::lround(
+            (1.0f - seedV) * static_cast<float>(height - 1))),
+        0,
+        height - 1);
+    int startIndex = seedY * width + seedX;
+    if (smoothedQualifier[static_cast<std::size_t>(startIndex)] <
+        kStrongThreshold) {
+        int bestIndex = -1;
+        int bestDistanceSquared = searchRadius * searchRadius + 1;
+        for (int dy = -searchRadius; dy <= searchRadius; ++dy) {
+            const int y = seedY + dy;
+            if (y < 0 || y >= height) {
+                continue;
+            }
+            for (int dx = -searchRadius; dx <= searchRadius; ++dx) {
+                const int distanceSquared = dx * dx + dy * dy;
+                if (distanceSquared >= bestDistanceSquared) {
+                    continue;
+                }
+                const int x = seedX + dx;
+                if (x < 0 || x >= width) {
+                    continue;
+                }
+                const int candidateIndex = y * width + x;
+                if (smoothedQualifier[
+                        static_cast<std::size_t>(candidateIndex)] >=
+                    kStrongThreshold) {
+                    bestIndex = candidateIndex;
+                    bestDistanceSquared = distanceSquared;
+                }
+            }
+        }
+        startIndex = bestIndex;
+    }
+
+    if (startIndex >= 0) {
+        queue.push_back(startIndex);
+        visited[static_cast<std::size_t>(startIndex)] = 1u;
+        for (std::size_t queueIndex = 0;
+             queueIndex < queue.size();
+             ++queueIndex) {
+            const int index = queue[queueIndex];
+            result.selectedBits[static_cast<std::size_t>(index)] = 1u;
+            const int x = index % width;
+            const int y = index / width;
+            for (int dy = -1; dy <= 1; ++dy) {
+                const int neighborY = y + dy;
+                if (neighborY < 0 || neighborY >= height) {
+                    continue;
+                }
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) {
+                        continue;
+                    }
+                    const int neighborX = x + dx;
+                    if (neighborX < 0 || neighborX >= width) {
+                        continue;
+                    }
+                    const int neighborIndex = neighborY * width + neighborX;
+                    const std::size_t neighborOffset =
+                        static_cast<std::size_t>(neighborIndex);
+                    if (visited[neighborOffset] != 0u ||
+                        smoothedQualifier[neighborOffset] <
+                            kGrowthThreshold) {
+                        continue;
+                    }
+                    visited[neighborOffset] = 1u;
+                    queue.push_back(neighborIndex);
+                }
+            }
+        }
+    }
+    // One majority pass removes proxy-sized holes and protrusions that would
+    // otherwise turn a one-pixel contour into visible stippling. Keep the
+    // original result if cleanup would erase a small legitimate component.
+    const std::vector<std::uint32_t> connectedBits = result.selectedBits;
+    std::size_t connectedCount = 0;
+    for (std::uint32_t bit : connectedBits) {
+        connectedCount += bit != 0u ? 1u : 0u;
+    }
+    if (connectedCount >= 16u) {
+        std::size_t cleanedCount = 0;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int selectedNeighbors = 0;
+                int neighborCount = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int neighborY = y + dy;
+                    if (neighborY < 0 || neighborY >= height) {
+                        continue;
+                    }
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int neighborX = x + dx;
+                        if (neighborX < 0 || neighborX >= width) {
+                            continue;
+                        }
+                        ++neighborCount;
+                        selectedNeighbors +=
+                            connectedBits[
+                                static_cast<std::size_t>(
+                                    neighborY * width + neighborX)] != 0u
+                            ? 1
+                            : 0;
+                    }
+                }
+                const bool selected =
+                    selectedNeighbors * 2 >= neighborCount;
+                result.selectedBits[
+                    static_cast<std::size_t>(y * width + x)] =
+                    selected ? 1u : 0u;
+                cleanedCount += selected ? 1u : 0u;
+            }
+        }
+        if (cleanedCount == 0u) {
+            result.selectedBits = connectedBits;
+        }
+    }
+
+    result.floodFillMs =
+        std::chrono::duration<float, std::milli>(
+            PreviewClock::now() - floodFillStart)
+            .count();
+    return result;
+}
 
 int RawLocalRangeRegionMaskModeToShader(const std::string& mode) {
     if (mode == "linear-gradient") {
@@ -57,6 +343,53 @@ void UploadRawLocalRangeRegionMaskUniforms(
     glUniform1f(glGetUniformLocation(program, "uColorMaskHueWidth"), localRange.colorMaskHueWidth);
     glUniform1f(glGetUniformLocation(program, "uColorMaskFeather"), localRange.colorMaskFeather);
     glUniform1f(glGetUniformLocation(program, "uColorMaskMinChroma"), localRange.colorMaskMinChroma);
+}
+
+void UploadRawLocalRangeTargetZoneUniforms(
+    unsigned int program,
+    const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
+    Raw::RawWorkingSpace workingSpace) {
+    const int count = std::min<int>(
+        static_cast<int>(localRange.targetZones.size()),
+        static_cast<int>(Stack::RawRecipe::kMaxRawLocalRangeTargetZones));
+    glUniform1i(glGetUniformLocation(program, "uTargetZoneCount"), count);
+    glUniform1i(
+        glGetUniformLocation(program, "uTargetZoneCombineMode"),
+        localRange.targetZoneCombineMode == Stack::RawRecipe::RawLocalRangeZoneCombineMode::Strongest
+            ? 1
+            : (localRange.targetZoneCombineMode == Stack::RawRecipe::RawLocalRangeZoneCombineMode::Blend
+                    ? 2
+                    : 0));
+    glUniform1i(
+        glGetUniformLocation(program, "uTargetZoneWorkingSpace"),
+        workingSpace == Raw::RawWorkingSpace::LinearRec2020D65 ? 1 : 0);
+    glUniform1f(glGetUniformLocation(program, "uLocalRangeMaxEv"), localRange.maxEv);
+    for (int i = 0; i < count; ++i) {
+        const Stack::RawRecipe::RawLocalRangeTargetZone& zone =
+            localRange.targetZones[static_cast<std::size_t>(i)];
+        char uniformName[64];
+        std::snprintf(uniformName, sizeof(uniformName), "uTargetZoneTone[%d]", i);
+        glUniform4f(
+            glGetUniformLocation(program, uniformName),
+            zone.centerEv,
+            zone.coreHalfWidthEv,
+            zone.featherEv,
+            zone.deltaEv);
+        std::snprintf(uniformName, sizeof(uniformName), "uTargetZoneColor[%d]", i);
+        glUniform4f(
+            glGetUniformLocation(program, uniformName),
+            zone.targetUPrime,
+            zone.targetVPrime,
+            zone.colorRadius,
+            zone.colorFeather);
+        std::snprintf(uniformName, sizeof(uniformName), "uTargetZoneMeta[%d]", i);
+        glUniform4f(
+            glGetUniformLocation(program, uniformName),
+            zone.targetChroma,
+            zone.enabled ? 1.0f : 0.0f,
+            zone.colorEnabled ? 1.0f : 0.0f,
+            zone.scope == Stack::RawRecipe::RawLocalRangeTargetScope::AllMatches ? 1.0f : 0.0f);
+    }
 }
 
 } // namespace
@@ -464,7 +797,12 @@ void RenderPipeline::EnsureLutProgram() {
         }
 
         void main() {
-            vec4 source = texture(uImage, vTexCoord);
+            ivec2 imageSize = textureSize(uImage, 0);
+            ivec2 imagePixel = clamp(
+                ivec2(gl_FragCoord.xy),
+                ivec2(0),
+                max(imageSize - ivec2(1), ivec2(0)));
+            vec4 source = texelFetch(uImage, imagePixel, 0);
             vec3 color = applyTransfer(source.rgb, uInputTransform);
 
             if (uHasLut1D != 0) {
@@ -1647,6 +1985,16 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         uniform float uColorMaskHueWidth;
         uniform float uColorMaskFeather;
         uniform float uColorMaskMinChroma;
+        uniform int uTargetZoneCount;
+        uniform int uTargetZoneCombineMode;
+        uniform int uTargetZoneWorkingSpace;
+        uniform float uLocalRangeMaxEv;
+        uniform vec4 uTargetZoneTone[32];
+        uniform vec4 uTargetZoneColor[32];
+        uniform vec4 uTargetZoneMeta[32];
+        uniform usampler2D uTargetZoneSelectionBits;
+        uniform int uHasTargetZoneSelectionBits;
+        uniform int uScopeOutput;
 
         float evaluateLocalRangeDelta(float sceneEv) {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
@@ -1815,6 +2163,102 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
             }
             return clamp(hueMask * chromaMask, 0.0, 1.0);
         }
+    )"
+    R"(
+        vec3 sceneRgbToUvChroma(vec3 rgb) {
+            vec3 positive = max(rgb, vec3(0.0));
+            vec3 xyz;
+            if (uTargetZoneWorkingSpace == 1) {
+                xyz = vec3(
+                    dot(positive, vec3(0.63695805, 0.14461690, 0.16888098)),
+                    dot(positive, vec3(0.26270021, 0.67799807, 0.05930172)),
+                    dot(positive, vec3(0.00000000, 0.02807269, 1.06098506)));
+            } else {
+                xyz = vec3(
+                    dot(positive, vec3(0.41245640, 0.35757610, 0.18043750)),
+                    dot(positive, vec3(0.21267290, 0.71515220, 0.07217500)),
+                    dot(positive, vec3(0.01933390, 0.11919200, 0.95030410)));
+            }
+            float denominator = xyz.x + 15.0 * xyz.y + 3.0 * xyz.z;
+            vec2 whiteUv = vec2(0.19783001, 0.46831999);
+            vec2 uv = denominator > 0.0000001
+                ? vec2(4.0 * xyz.x / denominator, 9.0 * xyz.y / denominator)
+                : whiteUv;
+            return vec3(uv, length(uv - whiteUv));
+        }
+
+        float targetZoneWeight(int index, float mapSceneEv, vec3 rgb) {
+            vec4 tone = uTargetZoneTone[index];
+            vec4 colorTarget = uTargetZoneColor[index];
+            vec4 meta = uTargetZoneMeta[index];
+            if (meta.y < 0.5) {
+                return 0.0;
+            }
+            if (meta.w < 0.5) {
+                if (uHasTargetZoneSelectionBits == 0) {
+                    return 0.0;
+                }
+                uint selectedBits = texture(uTargetZoneSelectionBits, vTexCoord).r;
+                uint zoneBit = 1u << uint(index);
+                if ((selectedBits & zoneBit) == 0u) {
+                    return 0.0;
+                }
+            }
+            float distanceEv = abs(mapSceneEv - tone.x);
+            float tonalWeight =
+                1.0 - smoothstep(max(tone.y, 0.05), max(tone.y, 0.05) + max(tone.z, 0.02), distanceEv);
+            float colorWeight = 1.0;
+            if (meta.z > 0.5) {
+                vec3 sample = sceneRgbToUvChroma(rgb);
+                float colorDistance = distance(sample.xy, colorTarget.xy);
+                colorWeight =
+                    1.0 - smoothstep(max(colorTarget.z, 0.002), max(colorTarget.z, 0.002) + max(colorTarget.w, 0.002), colorDistance);
+                if (meta.x < 0.018) {
+                    colorWeight *=
+                        1.0 - smoothstep(max(0.018, colorTarget.z), max(0.018, colorTarget.z) + max(colorTarget.w, 0.002), sample.z);
+                } else {
+                    colorWeight *= smoothstep(0.006, 0.020, sample.z);
+                }
+            }
+            return clamp(tonalWeight * colorWeight, 0.0, 1.0);
+        }
+
+        float protectedTargetZoneDelta(float deltaEv, float mapSceneEv) {
+            if (deltaEv > 0.0) {
+                float highlightZone = smoothstep(1.5, max(uLocalRangeMaxEv, 1.5001), mapSceneEv);
+                deltaEv *= 1.0 - clamp(uHighlightProtection, 0.0, 1.0) * highlightZone * 0.85;
+            }
+            return deltaEv;
+        }
+
+        float combinedTargetZoneDelta(float targetSceneEv, float protectedSceneEv, vec3 rgb) {
+            float sum = 0.0;
+            float weightSum = 0.0;
+            float strongest = 0.0;
+            for (int i = 0; i < 32; ++i) {
+                if (i >= uTargetZoneCount) {
+                    break;
+                }
+                float weight = targetZoneWeight(i, targetSceneEv, rgb);
+                float weightedDelta =
+                    protectedTargetZoneDelta(uTargetZoneTone[i].w * weight * uStrength, protectedSceneEv);
+                if (uTargetZoneCombineMode == 1) {
+                    if (abs(weightedDelta) > abs(strongest)) {
+                        strongest = weightedDelta;
+                    }
+                } else {
+                    sum += weightedDelta;
+                    weightSum += weight;
+                }
+            }
+            if (uTargetZoneCombineMode == 1) {
+                return strongest;
+            }
+            if (uTargetZoneCombineMode == 2) {
+                sum /= max(1.0, weightSum);
+            }
+            return clamp(sum, -4.0, 4.0);
+        }
 
         void main() {
             vec4 color = texture(uInputImage, vTexCoord);
@@ -1822,7 +2266,21 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
             float luma = lumaOf(rgb);
             float sceneEv = log2(luma / max(uMiddleGrey, 0.000001));
             float mapSceneEv = edgeAwareSceneEv(sceneEv);
-            float deltaEv = protectedLocalDeltaEv(mapSceneEv) * regionMaskValue(mapSceneEv) * colorMaskValue(rgb);
+            if (uScopeOutput != 0) {
+                // Keep the scene RGB available for the optional channel
+                // histogram and carry the exact edge-aware EV control signal
+                // in alpha for the primary Zones distribution.
+                FragColor = vec4(color.rgb, mapSceneEv);
+                return;
+            }
+            float baseDeltaEv =
+                protectedLocalDeltaEv(mapSceneEv) *
+                regionMaskValue(mapSceneEv) *
+                colorMaskValue(rgb);
+            float deltaEv = clamp(
+                baseDeltaEv + combinedTargetZoneDelta(sceneEv, mapSceneEv, rgb),
+                -4.0,
+                4.0);
             float scale = exp2(deltaEv);
             FragColor = vec4(color.rgb * scale, color.a);
         }
@@ -1874,6 +2332,17 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         uniform float uColorMaskHueWidth;
         uniform float uColorMaskFeather;
         uniform float uColorMaskMinChroma;
+        uniform int uTargetZoneCount;
+        uniform int uTargetZoneCombineMode;
+        uniform int uTargetZoneWorkingSpace;
+        uniform float uLocalRangeMaxEv;
+        uniform vec4 uTargetZoneTone[32];
+        uniform vec4 uTargetZoneColor[32];
+        uniform vec4 uTargetZoneMeta[32];
+        uniform usampler2D uTargetZoneSelectionBits;
+        uniform int uHasTargetZoneSelectionBits;
+        uniform vec2 uTargetZoneSelectionTexelSize;
+        uniform int uTargetOutlineProvisional;
 
         float evaluateLocalRangeDelta(float sceneEv) {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
@@ -2043,6 +2512,156 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
             return clamp(hueMask * chromaMask, 0.0, 1.0);
         }
 
+        vec3 sceneRgbToUvChroma(vec3 rgb) {
+            vec3 positive = max(rgb, vec3(0.0));
+            vec3 xyz;
+            if (uTargetZoneWorkingSpace == 1) {
+                xyz = vec3(
+                    dot(positive, vec3(0.63695805, 0.14461690, 0.16888098)),
+                    dot(positive, vec3(0.26270021, 0.67799807, 0.05930172)),
+                    dot(positive, vec3(0.00000000, 0.02807269, 1.06098506)));
+            } else {
+                xyz = vec3(
+                    dot(positive, vec3(0.41245640, 0.35757610, 0.18043750)),
+                    dot(positive, vec3(0.21267290, 0.71515220, 0.07217500)),
+                    dot(positive, vec3(0.01933390, 0.11919200, 0.95030410)));
+            }
+            float denominator = xyz.x + 15.0 * xyz.y + 3.0 * xyz.z;
+            vec2 whiteUv = vec2(0.19783001, 0.46831999);
+            vec2 uv = denominator > 0.0000001
+                ? vec2(4.0 * xyz.x / denominator, 9.0 * xyz.y / denominator)
+                : whiteUv;
+            return vec3(uv, length(uv - whiteUv));
+        }
+    )"
+    R"(
+        float targetZoneWeight(int index, float targetSceneEv, vec3 rgb) {
+            vec4 tone = uTargetZoneTone[index];
+            vec4 colorTarget = uTargetZoneColor[index];
+            vec4 meta = uTargetZoneMeta[index];
+            if (meta.y < 0.5) {
+                return 0.0;
+            }
+            if (meta.w < 0.5) {
+                if (uHasTargetZoneSelectionBits == 0) {
+                    return 0.0;
+                }
+                uint selectedBits = texture(uTargetZoneSelectionBits, vTexCoord).r;
+                uint zoneBit = 1u << uint(index);
+                if ((selectedBits & zoneBit) == 0u) {
+                    return 0.0;
+                }
+            }
+            float distanceEv = abs(targetSceneEv - tone.x);
+            float tonalWeight =
+                1.0 - smoothstep(max(tone.y, 0.05), max(tone.y, 0.05) + max(tone.z, 0.02), distanceEv);
+            float colorWeight = 1.0;
+            if (meta.z > 0.5) {
+                vec3 sample = sceneRgbToUvChroma(rgb);
+                float colorDistance = distance(sample.xy, colorTarget.xy);
+                colorWeight =
+                    1.0 - smoothstep(max(colorTarget.z, 0.002), max(colorTarget.z, 0.002) + max(colorTarget.w, 0.002), colorDistance);
+                if (meta.x < 0.018) {
+                    colorWeight *=
+                        1.0 - smoothstep(max(0.018, colorTarget.z), max(0.018, colorTarget.z) + max(colorTarget.w, 0.002), sample.z);
+                } else {
+                    colorWeight *= smoothstep(0.006, 0.020, sample.z);
+                }
+            }
+            return clamp(tonalWeight * colorWeight, 0.0, 1.0);
+        }
+
+        float protectedTargetZoneDelta(float deltaEv, float mapSceneEv) {
+            if (deltaEv > 0.0) {
+                float highlightZone = smoothstep(1.5, max(uLocalRangeMaxEv, 1.5001), mapSceneEv);
+                deltaEv *= 1.0 - clamp(uHighlightProtection, 0.0, 1.0) * highlightZone * 0.85;
+            }
+            return deltaEv;
+        }
+
+        float combinedTargetZoneDelta(
+            float targetSceneEv,
+            float mapSceneEv,
+            vec3 rgb,
+            out float targetMask) {
+            float sum = 0.0;
+            float weightSum = 0.0;
+            float strongest = 0.0;
+            targetMask = 0.0;
+            for (int i = 0; i < 32; ++i) {
+                if (i >= uTargetZoneCount) {
+                    break;
+                }
+                float weight = targetZoneWeight(i, targetSceneEv, rgb);
+                targetMask = max(targetMask, weight);
+                float weightedDelta =
+                    protectedTargetZoneDelta(uTargetZoneTone[i].w * weight * uStrength, mapSceneEv);
+                if (uTargetZoneCombineMode == 1) {
+                    if (abs(weightedDelta) > abs(strongest)) {
+                        strongest = weightedDelta;
+                    }
+                } else {
+                    sum += weightedDelta;
+                    weightSum += weight;
+                }
+            }
+            if (uTargetZoneCombineMode == 1) {
+                return strongest;
+            }
+            if (uTargetZoneCombineMode == 2) {
+                sum /= max(1.0, weightSum);
+            }
+            return clamp(sum, -4.0, 4.0);
+        }
+
+        float targetSelectionMembership(vec2 uv) {
+            if (uHasTargetZoneSelectionBits == 0) {
+                return 0.0;
+            }
+            uint selectedBits =
+                texture(uTargetZoneSelectionBits, clamp(uv, vec2(0.0), vec2(1.0))).r;
+            return (selectedBits & 1u) != 0u ? 1.0 : 0.0;
+        }
+
+        float targetSelectionBoundary(float radius) {
+            vec2 stepUv = uTargetZoneSelectionTexelSize * radius;
+            float center = targetSelectionMembership(vTexCoord);
+            float boundary = 0.0;
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord + vec2(stepUv.x, 0.0))));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord - vec2(stepUv.x, 0.0))));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord + vec2(0.0, stepUv.y))));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord - vec2(0.0, stepUv.y))));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord + stepUv)));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord - stepUv)));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord + vec2(stepUv.x, -stepUv.y))));
+            boundary = max(
+                boundary,
+                abs(center - targetSelectionMembership(
+                    vTexCoord + vec2(-stepUv.x, stepUv.y))));
+            return boundary;
+        }
+
         void main() {
             vec4 color = texture(uInputImage, vTexCoord);
             vec3 rgb = max(color.rgb, vec3(0.0));
@@ -2053,10 +2672,44 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
             float colorMask = colorMaskValue(rgb);
             float qualificationMask = regionMask * colorMask;
 
-            if (uOverlayMode == 3) {
-                if ((uRegionMaskEnabled == 0 || uRegionMaskMode == 0) && uColorMaskEnabled == 0) {
+            if (uOverlayMode == 4) {
+                if (uTargetOutlineProvisional != 0 ||
+                    uHasTargetZoneSelectionBits == 0) {
                     FragColor = vec4(0.0);
                     return;
+                }
+                float coreBoundary = targetSelectionBoundary(1.0);
+                float softBoundary = targetSelectionBoundary(2.25);
+                float alpha =
+                    max(coreBoundary * 0.88, softBoundary * 0.24);
+                if (alpha <= 0.001) {
+                    FragColor = vec4(0.0);
+                    return;
+                }
+                FragColor = vec4(vec3(0.04, 0.86, 0.72), alpha);
+                return;
+            }
+
+            float targetMask = 0.0;
+            float targetDeltaEv =
+                combinedTargetZoneDelta(
+                    sceneEv,
+                    mapSceneEv,
+                    rgb,
+                    targetMask);
+
+            if (uOverlayMode == 3) {
+                if ((uRegionMaskEnabled == 0 || uRegionMaskMode == 0) &&
+                    uColorMaskEnabled == 0 &&
+                    uTargetZoneCount == 0) {
+                    FragColor = vec4(0.0);
+                    return;
+                }
+                if ((uRegionMaskEnabled == 0 || uRegionMaskMode == 0) &&
+                    uColorMaskEnabled == 0) {
+                    qualificationMask = targetMask;
+                } else {
+                    qualificationMask = max(qualificationMask, targetMask);
                 }
                 vec3 offColor = vec3(0.02, 0.08, 0.10);
                 vec3 onColor = vec3(0.04, 0.86, 0.72);
@@ -2065,7 +2718,10 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
                 return;
             }
 
-            float deltaEv = protectedLocalDeltaEv(mapSceneEv) * qualificationMask;
+            float deltaEv = clamp(
+                protectedLocalDeltaEv(mapSceneEv) * qualificationMask + targetDeltaEv,
+                -4.0,
+                4.0);
             float magnitude = clamp(abs(deltaEv) / 2.0, 0.0, 1.0);
 
             if (magnitude <= 0.0001) {
@@ -2096,9 +2752,859 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
     }
 }
 
+void RenderPipeline::EnsureRawDevelopmentLocalRangeQualifierProgram() {
+    static const char* vertexSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTex;
+        out vec2 vTexCoord;
+        void main() {
+            vTexCoord = aTex;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }
+    )";
+    static const char* fragmentSrc = R"(
+        #version 330 core
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uInputImage;
+        uniform float uMiddleGrey;
+        uniform int uWorkingSpace;
+        uniform vec4 uTone;
+        uniform vec4 uColor;
+        uniform vec2 uMeta;
+
+        float lumaOf(vec3 rgb) {
+            return max(dot(max(rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.000001);
+        }
+
+        vec3 sceneRgbToUvChroma(vec3 rgb) {
+            vec3 positive = max(rgb, vec3(0.0));
+            vec3 xyz;
+            if (uWorkingSpace == 1) {
+                xyz = vec3(
+                    dot(positive, vec3(0.63695805, 0.14461690, 0.16888098)),
+                    dot(positive, vec3(0.26270021, 0.67799807, 0.05930172)),
+                    dot(positive, vec3(0.00000000, 0.02807269, 1.06098506)));
+            } else {
+                xyz = vec3(
+                    dot(positive, vec3(0.41245640, 0.35757610, 0.18043750)),
+                    dot(positive, vec3(0.21267290, 0.71515220, 0.07217500)),
+                    dot(positive, vec3(0.01933390, 0.11919200, 0.95030410)));
+            }
+            float denominator = xyz.x + 15.0 * xyz.y + 3.0 * xyz.z;
+            vec2 whiteUv = vec2(0.19783001, 0.46831999);
+            vec2 uv = denominator > 0.0000001
+                ? vec2(4.0 * xyz.x / denominator, 9.0 * xyz.y / denominator)
+                : whiteUv;
+            return vec3(uv, length(uv - whiteUv));
+        }
+
+        void main() {
+            vec3 rgb = max(texture(uInputImage, vTexCoord).rgb, vec3(0.0));
+            float sceneEv = log2(lumaOf(rgb) / max(uMiddleGrey, 0.000001));
+            float distanceEv = abs(sceneEv - uTone.x);
+            float weight =
+                1.0 - smoothstep(max(uTone.y, 0.05), max(uTone.y, 0.05) + max(uTone.z, 0.02), distanceEv);
+            if (uMeta.y > 0.5) {
+                vec3 sample = sceneRgbToUvChroma(rgb);
+                float colorDistance = distance(sample.xy, uColor.xy);
+                float colorWeight =
+                    1.0 - smoothstep(max(uColor.z, 0.002), max(uColor.z, 0.002) + max(uColor.w, 0.002), colorDistance);
+                if (uMeta.x < 0.018) {
+                    colorWeight *=
+                        1.0 - smoothstep(max(0.018, uColor.z), max(0.018, uColor.z) + max(uColor.w, 0.002), sample.z);
+                } else {
+                    colorWeight *= smoothstep(0.006, 0.020, sample.z);
+                }
+                weight *= colorWeight;
+            }
+            weight = clamp(weight, 0.0, 1.0);
+            FragColor = vec4(weight, weight, weight, 1.0);
+        }
+    )";
+    if (!m_RawDevelopmentLocalRangeQualifierProgram) {
+        m_RawDevelopmentLocalRangeQualifierProgram =
+            GLHelpers::CreateShaderProgram(vertexSrc, fragmentSrc);
+    }
+}
+
+unsigned int RenderPipeline::BuildRawDevelopmentLocalRangeSelectionBits(
+    unsigned int inputTexture,
+    const Stack::RawRecipe::RawLocalRangeRecipe& localRangeInput,
+    Raw::RawWorkingSpace workingSpace,
+    std::size_t inputStageFingerprint,
+    int maxSelectionDimension) {
+    const Stack::RawRecipe::RawLocalRangeRecipe localRange =
+        Stack::RawRecipe::SanitizeLocalRangeRecipe(localRangeInput);
+    const bool hasSelectedZones = std::any_of(
+        localRange.targetZones.begin(),
+        localRange.targetZones.end(),
+        [](const Stack::RawRecipe::RawLocalRangeTargetZone& zone) {
+            return zone.enabled &&
+                zone.scope == Stack::RawRecipe::RawLocalRangeTargetScope::SelectedAreas &&
+                !zone.seeds.empty();
+        });
+    if (!inputTexture || !hasSelectedZones || m_Width <= 0 || m_Height <= 0) {
+        ClearRawDevelopmentLocalRangeSelectionBits();
+        return 0;
+    }
+
+    const int boundedMaximumDimension =
+        std::clamp(maxSelectionDimension, 64, 1536);
+    const std::size_t fingerprint =
+        Stack::Renderer::RawDevelopmentCache::
+            BuildLocalRangeSelectionFingerprint(
+                localRange,
+                workingSpace,
+                inputStageFingerprint,
+                boundedMaximumDimension);
+    const bool inputMatches = inputStageFingerprint != 0
+        ? m_RawDevelopmentLocalRangeSelectionBitsInputFingerprint ==
+            inputStageFingerprint
+        : m_RawDevelopmentLocalRangeSelectionBitsInputTexture == inputTexture;
+    if (m_RawDevelopmentLocalRangeSelectionBitsTexture != 0 &&
+        inputMatches &&
+        m_RawDevelopmentLocalRangeSelectionBitsWidth == m_Width &&
+        m_RawDevelopmentLocalRangeSelectionBitsHeight == m_Height &&
+        m_RawDevelopmentLocalRangeSelectionBitsFingerprint == fingerprint) {
+        return m_RawDevelopmentLocalRangeSelectionBitsTexture;
+    }
+
+    EnsureRawDevelopmentLocalRangeQualifierProgram();
+    if (!m_RawDevelopmentLocalRangeQualifierProgram) {
+        return 0;
+    }
+
+    // Connected-component growth is a topology operation, not a final-image
+    // detail pass. Keep it bounded on full-resolution settles; the resulting
+    // integer mask is sampled with normalized coordinates by the full-size
+    // Local Range shader.
+    const float selectionScale = std::min(
+        1.0f,
+        static_cast<float>(boundedMaximumDimension) /
+            static_cast<float>(std::max(m_Width, m_Height)));
+    const int selectionWidth = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<float>(m_Width) * selectionScale)));
+    const int selectionHeight = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<float>(m_Height) * selectionScale)));
+    std::size_t pixelCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            selectionWidth, selectionHeight, 1, pixelCount)) {
+        return 0;
+    }
+    std::vector<std::uint32_t> selectedBits;
+    std::vector<unsigned char> qualifier;
+    std::vector<unsigned char> visited;
+    std::vector<int> queue;
+    try {
+        selectedBits.assign(pixelCount, 0u);
+        qualifier.assign(pixelCount, 0u);
+        visited.assign(pixelCount, 0u);
+        queue.reserve(
+            std::min<std::size_t>(
+                pixelCount, 1024u * 1024u));
+    } catch (const std::bad_alloc&) {
+        return 0;
+    } catch (const std::length_error&) {
+        return 0;
+    }
+
+    const int zoneCount = std::min<int>(
+        static_cast<int>(localRange.targetZones.size()),
+        static_cast<int>(Stack::RawRecipe::kMaxRawLocalRangeTargetZones));
+    for (int zoneIndex = 0; zoneIndex < zoneCount; ++zoneIndex) {
+        const Stack::RawRecipe::RawLocalRangeTargetZone& zone =
+            localRange.targetZones[static_cast<std::size_t>(zoneIndex)];
+        if (!zone.enabled ||
+            zone.scope != Stack::RawRecipe::RawLocalRangeTargetScope::SelectedAreas ||
+            zone.seeds.empty()) {
+            continue;
+        }
+
+        const unsigned int qualifierTexture =
+            GLHelpers::CreateEmptyTexture(selectionWidth, selectionHeight);
+        if (!qualifierTexture) {
+            continue;
+        }
+        const Stack::Renderer::GLState::FramebufferState
+            savedFramebufferState(true);
+        const unsigned int qualifierFramebuffer =
+            GLHelpers::CreateFBO(qualifierTexture);
+        bool rendered = qualifierFramebuffer != 0;
+        if (rendered) {
+            while (glGetError() != GL_NO_ERROR) {}
+            glBindFramebuffer(GL_FRAMEBUFFER, qualifierFramebuffer);
+            glViewport(0, 0, selectionWidth, selectionHeight);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glUseProgram(m_RawDevelopmentLocalRangeQualifierProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, inputTexture);
+            glUniform1i(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeQualifierProgram, "uInputImage"),
+                0);
+            glUniform1f(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeQualifierProgram, "uMiddleGrey"),
+                localRange.middleGrey);
+            glUniform1i(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeQualifierProgram, "uWorkingSpace"),
+                workingSpace == Raw::RawWorkingSpace::LinearRec2020D65 ? 1 : 0);
+            glUniform4f(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeQualifierProgram, "uTone"),
+                zone.centerEv,
+                zone.coreHalfWidthEv,
+                zone.featherEv,
+                zone.deltaEv);
+            glUniform4f(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeQualifierProgram, "uColor"),
+                zone.targetUPrime,
+                zone.targetVPrime,
+                zone.colorRadius,
+                zone.colorFeather);
+            glUniform2f(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeQualifierProgram, "uMeta"),
+                zone.targetChroma,
+                zone.colorEnabled ? 1.0f : 0.0f);
+            m_Quad.Draw();
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+            rendered = glGetError() == GL_NO_ERROR;
+        }
+        if (!rendered) {
+            savedFramebufferState.Restore(true);
+            if (qualifierFramebuffer != 0) {
+                glDeleteFramebuffers(1, &qualifierFramebuffer);
+            }
+            glDeleteTextures(1, &qualifierTexture);
+            continue;
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER, qualifierFramebuffer);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        const Stack::Renderer::GLState::PixelPackState savedPackState;
+        savedPackState.ConfigureTightCpuReadback();
+        while (glGetError() != GL_NO_ERROR) {}
+        bool readbackOk =
+            glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+            GL_FRAMEBUFFER_COMPLETE;
+        if (readbackOk) {
+            glReadPixels(
+                0,
+                0,
+                selectionWidth,
+                selectionHeight,
+                GL_RED,
+                GL_UNSIGNED_BYTE,
+                qualifier.data());
+            readbackOk = glGetError() == GL_NO_ERROR;
+        }
+        savedPackState.Restore();
+        savedFramebufferState.Restore(true);
+        glDeleteFramebuffers(1, &qualifierFramebuffer);
+        glDeleteTextures(1, &qualifierTexture);
+        if (!readbackOk) {
+            continue;
+        }
+
+        std::fill(visited.begin(), visited.end(), 0u);
+        constexpr unsigned char kGrowthThreshold = 38u;
+        constexpr unsigned char kStrongThreshold = 128u;
+        const int searchRadius =
+            std::max(4, std::min(selectionWidth, selectionHeight) / 100);
+        const std::uint32_t zoneBit = std::uint32_t(1u) << zoneIndex;
+
+        for (const Stack::RawRecipe::RawLocalRangeTargetSeed& seed : zone.seeds) {
+            int seedX = std::clamp(
+                static_cast<int>(std::lround(
+                    seed.sourceU * static_cast<float>(selectionWidth - 1))),
+                0,
+                selectionWidth - 1);
+            int seedY = std::clamp(
+                static_cast<int>(std::lround(
+                    (1.0f - seed.sourceV) *
+                    static_cast<float>(selectionHeight - 1))),
+                0,
+                selectionHeight - 1);
+            int startIndex = seedY * selectionWidth + seedX;
+            if (qualifier[static_cast<std::size_t>(startIndex)] < kStrongThreshold) {
+                int bestIndex = -1;
+                int bestDistanceSquared = searchRadius * searchRadius + 1;
+                for (int dy = -searchRadius; dy <= searchRadius; ++dy) {
+                    const int y = seedY + dy;
+                    if (y < 0 || y >= selectionHeight) {
+                        continue;
+                    }
+                    for (int dx = -searchRadius; dx <= searchRadius; ++dx) {
+                        const int distanceSquared = dx * dx + dy * dy;
+                        if (distanceSquared >= bestDistanceSquared) {
+                            continue;
+                        }
+                        const int x = seedX + dx;
+                        if (x < 0 || x >= selectionWidth) {
+                            continue;
+                        }
+                        const int candidateIndex = y * selectionWidth + x;
+                        if (qualifier[static_cast<std::size_t>(candidateIndex)] >= kStrongThreshold) {
+                            bestIndex = candidateIndex;
+                            bestDistanceSquared = distanceSquared;
+                        }
+                    }
+                }
+                if (bestIndex < 0) {
+                    continue;
+                }
+                startIndex = bestIndex;
+            }
+            if (visited[static_cast<std::size_t>(startIndex)] != 0u) {
+                continue;
+            }
+
+            queue.clear();
+            queue.push_back(startIndex);
+            visited[static_cast<std::size_t>(startIndex)] = 1u;
+            for (std::size_t queueIndex = 0; queueIndex < queue.size(); ++queueIndex) {
+                const int index = queue[queueIndex];
+                selectedBits[static_cast<std::size_t>(index)] |= zoneBit;
+                const int x = index % selectionWidth;
+                const int y = index / selectionWidth;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int neighborY = y + dy;
+                    if (neighborY < 0 || neighborY >= selectionHeight) {
+                        continue;
+                    }
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        const int neighborX = x + dx;
+                        if (neighborX < 0 || neighborX >= selectionWidth) {
+                            continue;
+                        }
+                        const int neighborIndex =
+                            neighborY * selectionWidth + neighborX;
+                        const std::size_t neighborOffset =
+                            static_cast<std::size_t>(neighborIndex);
+                        if (visited[neighborOffset] != 0u ||
+                            qualifier[neighborOffset] < kGrowthThreshold) {
+                            continue;
+                        }
+                        visited[neighborOffset] = 1u;
+                        queue.push_back(neighborIndex);
+                    }
+                }
+            }
+        }
+    }
+
+    const unsigned int replacement =
+        CreateRawLocalRangeSelectionTexture(
+            selectionWidth, selectionHeight, selectedBits);
+    if (replacement == 0) {
+        return 0;
+    }
+    const unsigned int previous =
+        m_RawDevelopmentLocalRangeSelectionBitsTexture;
+    m_RawDevelopmentLocalRangeSelectionBitsTexture = replacement;
+    m_RawDevelopmentLocalRangeSelectionBitsInputTexture = inputTexture;
+    m_RawDevelopmentLocalRangeSelectionBitsWidth = m_Width;
+    m_RawDevelopmentLocalRangeSelectionBitsHeight = m_Height;
+    m_RawDevelopmentLocalRangeSelectionBitsTextureWidth = selectionWidth;
+    m_RawDevelopmentLocalRangeSelectionBitsTextureHeight = selectionHeight;
+    m_RawDevelopmentLocalRangeSelectionBitsInputFingerprint =
+        inputStageFingerprint;
+    m_RawDevelopmentLocalRangeSelectionBitsFingerprint = fingerprint;
+    if (previous != 0) {
+        glDeleteTextures(1, &previous);
+    }
+    return m_RawDevelopmentLocalRangeSelectionBitsTexture;
+}
+
+unsigned int RenderPipeline::BuildRawDevelopmentLocalRangeTargetPreviewSelectionBits(
+    unsigned int inputTexture,
+    const Stack::RawRecipe::RawLocalRangeRecipe& localRangeInput,
+    Raw::RawWorkingSpace workingSpace,
+    const RawLocalRangeTargetPreviewRequest& request) {
+    const Stack::RawRecipe::RawLocalRangeRecipe localRange =
+        Stack::RawRecipe::SanitizeLocalRangeRecipe(localRangeInput);
+    if (!inputTexture ||
+        !request.enabled ||
+        !request.requestConnectedRefinement ||
+        request.generation == 0 ||
+        localRange.targetZones.empty() ||
+        m_Width <= 0 ||
+        m_Height <= 0) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = false;
+        return 0;
+    }
+
+    if (m_RawDevelopmentLocalRangeTargetPreviewCpuPending &&
+        !m_RawDevelopmentLocalRangeTargetPreviewCpuFuture.valid()) {
+        m_RawDevelopmentLocalRangeTargetPreviewCpuPending = false;
+        m_RawDevelopmentLocalRangeTargetPreviewCpuGeneration = 0;
+    }
+    if (m_RawDevelopmentLocalRangeTargetPreviewCpuPending &&
+        m_RawDevelopmentLocalRangeTargetPreviewCpuFuture.valid() &&
+        m_RawDevelopmentLocalRangeTargetPreviewCpuFuture.wait_for(
+            std::chrono::milliseconds(0)) == std::future_status::ready) {
+        RawLocalRangeTargetPreviewCpuResult cpuResult;
+        bool cpuResultReady = false;
+        try {
+            cpuResult =
+                m_RawDevelopmentLocalRangeTargetPreviewCpuFuture.get();
+            cpuResultReady = true;
+        } catch (...) {
+            // A failed optional contour calculation must not leave targeting
+            // permanently pending. The next request may retry from the GPU
+            // qualifier without changing authored Local Range math.
+        }
+        m_RawDevelopmentLocalRangeTargetPreviewCpuPending = false;
+        m_RawDevelopmentLocalRangeTargetPreviewCpuGeneration = 0;
+        std::size_t requiredElements = 0;
+        if (cpuResultReady &&
+            cpuResult.generation == request.generation &&
+            cpuResult.width > 0 &&
+            cpuResult.height > 0 &&
+            Stack::PixelBuffer::TryComputePixelElementCount(
+                cpuResult.width,
+                cpuResult.height,
+                1,
+                requiredElements) &&
+            cpuResult.selectedBits.size() ==
+                requiredElements) {
+            using PreviewClock = std::chrono::steady_clock;
+            const auto uploadStart = PreviewClock::now();
+            const unsigned int replacement =
+                CreateRawLocalRangeSelectionTexture(
+                    cpuResult.width,
+                    cpuResult.height,
+                    cpuResult.selectedBits);
+            if (replacement != 0) {
+                const unsigned int previous =
+                    m_RawDevelopmentLocalRangeTargetPreviewSelectionTexture;
+                m_RawDevelopmentLocalRangeTargetPreviewSelectionTexture =
+                    replacement;
+                m_RawDevelopmentLocalRangeTargetPreviewSelectionWidth =
+                    cpuResult.width;
+                m_RawDevelopmentLocalRangeTargetPreviewSelectionHeight =
+                    cpuResult.height;
+                m_RawDevelopmentLocalRangeTargetPreviewSelectionReadyGeneration =
+                    cpuResult.generation;
+                m_RawDevelopmentLocalRangeTargetPreviewMetrics.floodFillMs =
+                    cpuResult.floodFillMs;
+                m_RawDevelopmentLocalRangeTargetPreviewMetrics.uploadMs =
+                    std::chrono::duration<float, std::milli>(
+                        PreviewClock::now() - uploadStart)
+                        .count();
+                m_RawDevelopmentLocalRangeTargetPreviewMetrics.maximumDimension =
+                    std::max(cpuResult.width, cpuResult.height);
+                m_RawDevelopmentLocalRangeTargetPreviewMetrics.cacheHit = false;
+                if (previous != 0) {
+                    glDeleteTextures(1, &previous);
+                }
+            }
+        }
+    }
+    if (m_RawDevelopmentLocalRangeTargetPreviewCpuPending) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = true;
+        return 0;
+    }
+
+    for (RawLocalRangeTargetPreviewReadbackSlot& slot :
+         m_RawDevelopmentLocalRangeTargetPreviewReadbackSlots) {
+        if (!slot.occupied || slot.fence == nullptr) {
+            continue;
+        }
+        const GLenum waitResult = glClientWaitSync(slot.fence, 0, 0);
+        if (waitResult == GL_WAIT_FAILED) {
+            glDeleteSync(slot.fence);
+            slot.fence = nullptr;
+            slot.occupied = false;
+            slot.generation = 0;
+            slot.width = 0;
+            slot.height = 0;
+            continue;
+        }
+        if (waitResult != GL_ALREADY_SIGNALED &&
+            waitResult != GL_CONDITION_SATISFIED) {
+            continue;
+        }
+
+        glDeleteSync(slot.fence);
+        slot.fence = nullptr;
+        const bool currentGeneration = slot.generation == request.generation;
+        if (currentGeneration &&
+            slot.pbo != 0 &&
+            slot.width > 0 &&
+            slot.height > 0) {
+            using PreviewClock = std::chrono::steady_clock;
+            std::size_t pixelCount = 0;
+            std::vector<unsigned char> qualifier;
+            if (Stack::PixelBuffer::TryComputePixelElementCount(
+                    slot.width, slot.height, 1, pixelCount)) {
+                try {
+                    qualifier.assign(pixelCount, 0u);
+                } catch (const std::bad_alloc&) {
+                    qualifier.clear();
+                } catch (const std::length_error&) {
+                    qualifier.clear();
+                }
+            }
+            bool copyOk = !qualifier.empty();
+            if (copyOk) {
+                GLint previousPackBuffer = 0;
+                const auto readbackCopyStart = PreviewClock::now();
+                glGetIntegerv(
+                    GL_PIXEL_PACK_BUFFER_BINDING, &previousPackBuffer);
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.pbo);
+                while (glGetError() != GL_NO_ERROR) {}
+                glGetBufferSubData(
+                    GL_PIXEL_PACK_BUFFER,
+                    0,
+                    static_cast<GLsizeiptr>(qualifier.size()),
+                    qualifier.data());
+                copyOk = glGetError() == GL_NO_ERROR;
+                m_RawDevelopmentLocalRangeTargetPreviewMetrics.readbackCopyMs =
+                    std::chrono::duration<float, std::milli>(
+                        PreviewClock::now() - readbackCopyStart)
+                        .count();
+                glBindBuffer(
+                    GL_PIXEL_PACK_BUFFER,
+                    static_cast<unsigned int>(previousPackBuffer));
+            }
+
+            if (copyOk) {
+                const int jobWidth = slot.width;
+                const int jobHeight = slot.height;
+                const float jobSeedU = slot.seedU;
+                const float jobSeedV = slot.seedV;
+                const std::uint64_t jobGeneration = slot.generation;
+                try {
+                    m_RawDevelopmentLocalRangeTargetPreviewCpuFuture =
+                        std::async(
+                            std::launch::async,
+                            BuildRawLocalRangeTargetPreviewConnectedArea,
+                            std::move(qualifier),
+                            jobWidth,
+                            jobHeight,
+                            jobSeedU,
+                            jobSeedV,
+                            jobGeneration);
+                    m_RawDevelopmentLocalRangeTargetPreviewCpuPending = true;
+                    m_RawDevelopmentLocalRangeTargetPreviewCpuGeneration =
+                        jobGeneration;
+                } catch (...) {
+                    m_RawDevelopmentLocalRangeTargetPreviewCpuPending = false;
+                    m_RawDevelopmentLocalRangeTargetPreviewCpuGeneration = 0;
+                }
+            }
+        }
+        slot.occupied = false;
+        slot.generation = 0;
+        slot.width = 0;
+        slot.height = 0;
+    }
+
+    if (m_RawDevelopmentLocalRangeTargetPreviewCpuPending) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = true;
+        return 0;
+    }
+
+    if (m_RawDevelopmentLocalRangeTargetPreviewSelectionTexture != 0 &&
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionReadyGeneration ==
+            request.generation) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = false;
+        m_RawDevelopmentLocalRangeTargetPreviewMetrics.cacheHit = true;
+        return m_RawDevelopmentLocalRangeTargetPreviewSelectionTexture;
+    }
+
+    const bool matchingReadbackPending = std::any_of(
+        m_RawDevelopmentLocalRangeTargetPreviewReadbackSlots.begin(),
+        m_RawDevelopmentLocalRangeTargetPreviewReadbackSlots.end(),
+        [&](const RawLocalRangeTargetPreviewReadbackSlot& slot) {
+            return slot.occupied && slot.generation == request.generation;
+        });
+    if (matchingReadbackPending) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = true;
+        return 0;
+    }
+
+    RawLocalRangeTargetPreviewReadbackSlot* targetSlot = nullptr;
+    for (int offset = 0; offset < 2; ++offset) {
+        const int index =
+            (m_RawDevelopmentLocalRangeTargetPreviewNextReadbackSlot + offset) %
+            2;
+        RawLocalRangeTargetPreviewReadbackSlot& slot =
+            m_RawDevelopmentLocalRangeTargetPreviewReadbackSlots[
+                static_cast<std::size_t>(index)];
+        if (!slot.occupied) {
+            targetSlot = &slot;
+            m_RawDevelopmentLocalRangeTargetPreviewNextReadbackSlot =
+                (index + 1) % 2;
+            break;
+        }
+    }
+    if (targetSlot == nullptr) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = true;
+        return 0;
+    }
+
+    const auto qualifierIssueStart = std::chrono::steady_clock::now();
+    EnsureRawDevelopmentLocalRangeQualifierProgram();
+    if (!m_RawDevelopmentLocalRangeQualifierProgram) {
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = false;
+        return 0;
+    }
+    const float selectionScale = std::min(
+        1.0f,
+        768.0f / static_cast<float>(std::max(m_Width, m_Height)));
+    const int selectionWidth = std::max(
+        1,
+        static_cast<int>(std::lround(
+            static_cast<float>(m_Width) * selectionScale)));
+    const int selectionHeight = std::max(
+        1,
+        static_cast<int>(std::lround(
+            static_cast<float>(m_Height) * selectionScale)));
+    const Stack::RawRecipe::RawLocalRangeTargetZone& zone =
+        localRange.targetZones.front();
+    const unsigned int qualifierTexture =
+        GLHelpers::CreateEmptyTexture(selectionWidth, selectionHeight);
+    const unsigned int qualifierFramebuffer =
+        qualifierTexture != 0 ? GLHelpers::CreateFBO(qualifierTexture) : 0;
+    if (qualifierFramebuffer == 0) {
+        if (qualifierTexture != 0) {
+            glDeleteTextures(1, &qualifierTexture);
+        }
+        m_RawDevelopmentLocalRangeTargetPreviewSelectionPending = false;
+        return 0;
+    }
+
+    const Stack::Renderer::GLState::FramebufferState
+        savedFramebufferState(true);
+    const Stack::Renderer::GLState::PixelPackState savedPackState;
+    glBindFramebuffer(GL_FRAMEBUFFER, qualifierFramebuffer);
+    glViewport(0, 0, selectionWidth, selectionHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_RawDevelopmentLocalRangeQualifierProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, inputTexture);
+    glUniform1i(
+        glGetUniformLocation(
+            m_RawDevelopmentLocalRangeQualifierProgram,
+            "uInputImage"),
+        0);
+    glUniform1f(
+        glGetUniformLocation(
+            m_RawDevelopmentLocalRangeQualifierProgram,
+            "uMiddleGrey"),
+        localRange.middleGrey);
+    glUniform1i(
+        glGetUniformLocation(
+            m_RawDevelopmentLocalRangeQualifierProgram,
+            "uWorkingSpace"),
+        workingSpace == Raw::RawWorkingSpace::LinearRec2020D65 ? 1 : 0);
+    glUniform4f(
+        glGetUniformLocation(
+            m_RawDevelopmentLocalRangeQualifierProgram,
+            "uTone"),
+        zone.centerEv,
+        zone.coreHalfWidthEv,
+        zone.featherEv,
+        zone.deltaEv);
+    glUniform4f(
+        glGetUniformLocation(
+            m_RawDevelopmentLocalRangeQualifierProgram,
+            "uColor"),
+        zone.targetUPrime,
+        zone.targetVPrime,
+        zone.colorRadius,
+        zone.colorFeather);
+    glUniform2f(
+        glGetUniformLocation(
+            m_RawDevelopmentLocalRangeQualifierProgram,
+            "uMeta"),
+        zone.targetChroma,
+        zone.colorEnabled ? 1.0f : 0.0f);
+    m_Quad.Draw();
+
+    if (targetSlot->pbo == 0) {
+        glGenBuffers(1, &targetSlot->pbo);
+    }
+    std::size_t readbackBytes = 0;
+    const bool readbackSizeValid =
+        Stack::PixelBuffer::TryComputePixelByteCount(
+            selectionWidth, selectionHeight, 1, readbackBytes) &&
+        readbackBytes <=
+            static_cast<std::size_t>(
+                std::numeric_limits<GLsizeiptr>::max());
+    savedPackState.ConfigureTightCpuReadback();
+    bool issued = targetSlot->pbo != 0 && readbackSizeValid;
+    if (issued) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, targetSlot->pbo);
+        while (glGetError() != GL_NO_ERROR) {}
+        glBufferData(
+            GL_PIXEL_PACK_BUFFER,
+            static_cast<GLsizeiptr>(readbackBytes),
+            nullptr,
+            GL_STREAM_READ);
+        issued = glGetError() == GL_NO_ERROR;
+    }
+    if (issued) {
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(
+            0,
+            0,
+            selectionWidth,
+            selectionHeight,
+            GL_RED,
+            GL_UNSIGNED_BYTE,
+            nullptr);
+        issued = glGetError() == GL_NO_ERROR;
+    }
+    if (issued) {
+        targetSlot->fence =
+            glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        targetSlot->generation = request.generation;
+        targetSlot->width = selectionWidth;
+        targetSlot->height = selectionHeight;
+        targetSlot->seedU = request.sourceU;
+        targetSlot->seedV = request.sourceV;
+        targetSlot->occupied = targetSlot->fence != nullptr;
+        glFlush();
+    }
+    savedPackState.Restore();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    savedFramebufferState.Restore(true);
+    glDeleteFramebuffers(1, &qualifierFramebuffer);
+    glDeleteTextures(1, &qualifierTexture);
+
+    m_RawDevelopmentLocalRangeTargetPreviewSelectionPending =
+        targetSlot->occupied;
+    m_RawDevelopmentLocalRangeTargetPreviewMetrics.qualifierIssueMs =
+        std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - qualifierIssueStart)
+            .count();
+    m_RawDevelopmentLocalRangeTargetPreviewMetrics.maximumDimension =
+        std::max(selectionWidth, selectionHeight);
+    m_RawDevelopmentLocalRangeTargetPreviewMetrics.cacheHit = false;
+    return 0;
+}
+
+void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
+    unsigned int inputTexture,
+    const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
+    int sourceWidth,
+    int sourceHeight) {
+    if (m_RawDevelopmentGraphScopeStage !=
+            RawDevelopmentGraphScopeStage::LocalRangeInput ||
+        m_RawDevelopmentGraphScopeReadbackMaxDimension <= 0 ||
+        inputTexture == 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+        return;
+    }
+
+    EnsureRawDevelopmentLocalRangeProgram();
+    if (m_RawDevelopmentLocalRangeProgram == 0) {
+        return;
+    }
+
+    const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
+        Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
+    const float scale = std::min(
+        1.0f,
+        static_cast<float>(m_RawDevelopmentGraphScopeReadbackMaxDimension) /
+            static_cast<float>(std::max(sourceWidth, sourceHeight)));
+    const int scopeWidth = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<float>(sourceWidth) * scale)));
+    const int scopeHeight = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<float>(sourceHeight) * scale)));
+    const unsigned int scopeTexture =
+        GLHelpers::CreateEmptyTexture(scopeWidth, scopeHeight);
+    if (scopeTexture == 0) {
+        return;
+    }
+
+    // Render only the bounded sample grid, but keep neighbor offsets in the
+    // full-resolution input domain. The same shader function therefore
+    // computes the same edge-aware EV signal that drives Overall Tones at
+    // each sampled image coordinate without another full-frame pass.
+    const int savedWidth = m_Width;
+    const int savedHeight = m_Height;
+    m_Width = scopeWidth;
+    m_Height = scopeHeight;
+    const bool rendered = RenderIntoGraphTargetTexture(
+        scopeTexture,
+        [&](unsigned int) {
+            glUseProgram(m_RawDevelopmentLocalRangeProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, inputTexture);
+            glUniform1i(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uInputImage"),
+                0);
+            glUniform1f(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uMiddleGrey"),
+                sanitized.middleGrey);
+            glUniform1f(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uSmoothness"),
+                sanitized.smoothness);
+            glUniform1f(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uEdgeProtection"),
+                sanitized.edgeProtection);
+            glUniform1f(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uDetailProtection"),
+                sanitized.detailProtection);
+            glUniform2f(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uTexelSize"),
+                1.0f / static_cast<float>(sourceWidth),
+                1.0f / static_cast<float>(sourceHeight));
+            glUniform1i(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeProgram,
+                    "uScopeOutput"),
+                1);
+            m_Quad.Draw();
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+        });
+    m_Width = savedWidth;
+    m_Height = savedHeight;
+
+    if (rendered) {
+        CaptureRawDevelopmentGraphScopeReadback(
+            RawDevelopmentGraphScopeStage::LocalRangeInput,
+            scopeTexture,
+            scopeWidth,
+            scopeHeight,
+            "scene-linear-pre-local-range-rgb",
+            true,
+            "edge-aware-scene-ev");
+        m_RawDevelopmentGraphScopeReadback.sourceWidth = sourceWidth;
+        m_RawDevelopmentGraphScopeReadback.sourceHeight = sourceHeight;
+    }
+    glDeleteTextures(1, &scopeTexture);
+}
+
 unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
     unsigned int inputTexture,
-    const Stack::RawRecipe::RawLocalRangeRecipe& localRange) {
+    const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
+    Raw::RawWorkingSpace workingSpace,
+    std::size_t inputStageFingerprint) {
     const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
         Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
     if (!inputTexture || !Stack::RawRecipe::IsLocalRangeEnabled(sanitized) || sanitized.points.size() < 2) {
@@ -2109,6 +3615,12 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
     if (!m_RawDevelopmentLocalRangeProgram) {
         return 0;
     }
+    const unsigned int selectionBitsTexture =
+        BuildRawDevelopmentLocalRangeSelectionBits(
+            inputTexture,
+            sanitized,
+            workingSpace,
+            inputStageFingerprint);
 
     unsigned int outputTexture = CreateGraphRenderTargetTexture();
     if (!outputTexture) {
@@ -2120,6 +3632,17 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uInputImage"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, selectionBitsTexture);
+        glUniform1i(
+            glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uTargetZoneSelectionBits"),
+            1);
+        glUniform1i(
+            glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uHasTargetZoneSelectionBits"),
+            selectionBitsTexture != 0 ? 1 : 0);
+        glUniform1i(
+            glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uScopeOutput"),
+            0);
         glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uStrength"), sanitized.strength);
         glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uMiddleGrey"), sanitized.middleGrey);
         glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uSmoothness"), sanitized.smoothness);
@@ -2135,6 +3658,10 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             sanitized,
             m_Width,
             m_Height);
+        UploadRawLocalRangeTargetZoneUniforms(
+            m_RawDevelopmentLocalRangeProgram,
+            sanitized,
+            workingSpace);
 
         const int count = std::min<int>(static_cast<int>(sanitized.points.size()), 12);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uLocalRangePointCount"), count);
@@ -2149,6 +3676,9 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
         }
 
         m_Quad.Draw();
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgram(0);
     });
@@ -2164,18 +3694,69 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
 unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
-    const std::string& overlayMode) {
+    Raw::RawWorkingSpace workingSpace,
+    const std::string& overlayMode,
+    std::size_t inputStageFingerprint) {
     const int mode = overlayMode == "affected-tones"
         ? 1
-        : (overlayMode == "delta-map" ? 2 : (overlayMode == "region-mask" ? 3 : 0));
+        : (overlayMode == "delta-map"
+                ? 2
+                : (overlayMode == "region-mask"
+                        ? 3
+                        : (overlayMode == "target-outline" ? 4 : 0)));
     const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
         Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
+    Stack::RawRecipe::RawLocalRangeRecipe overlayRange = sanitized;
+    const bool targetOutlineActive =
+        mode == 4 && m_RawDevelopmentLocalRangeTargetPreviewRequest.enabled;
+    if (targetOutlineActive &&
+        m_RawDevelopmentLocalRangeTargetPreviewRequest.provisional) {
+        // Pointer motion is represented by the cursor/readout. Rendering the
+        // raw qualifier at every move produces a noisy field of disconnected
+        // pixels that reads like a flashing mask, not a useful outline.
+        return 0;
+    }
+    const bool asynchronousTargetOutline =
+        targetOutlineActive &&
+        !m_RawDevelopmentLocalRangeTargetPreviewRequest.provisional &&
+        m_RawDevelopmentLocalRangeTargetPreviewRequest
+            .requestConnectedRefinement;
+    const bool detachSelectionCache = targetOutlineActive;
+    if (targetOutlineActive) {
+        overlayRange.regionMaskEnabled = false;
+        overlayRange.colorMaskEnabled = false;
+        overlayRange.targetZones.clear();
+        const int existingZoneIndex =
+            m_RawDevelopmentLocalRangeTargetPreviewRequest.existingZoneIndex;
+        if (existingZoneIndex >= 0 &&
+            existingZoneIndex < static_cast<int>(sanitized.targetZones.size())) {
+            overlayRange.targetZones.push_back(
+                sanitized.targetZones[static_cast<std::size_t>(existingZoneIndex)]);
+        } else {
+            Stack::RawRecipe::RawLocalRangeTargetZone prospectiveZone =
+                m_RawDevelopmentLocalRangeTargetPreviewRequest.prospectiveZone;
+            prospectiveZone.id = "__target-outline-preview__";
+            if (!m_RawDevelopmentLocalRangeTargetPreviewRequest
+                     .requestConnectedRefinement) {
+                prospectiveZone.scope =
+                    Stack::RawRecipe::RawLocalRangeTargetScope::AllMatches;
+                prospectiveZone.seeds.clear();
+            }
+            overlayRange.targetZones.push_back(std::move(prospectiveZone));
+        }
+        overlayRange = Stack::RawRecipe::SanitizeLocalRangeRecipe(
+            std::move(overlayRange));
+    }
     const bool localRangeActive =
         Stack::RawRecipe::IsLocalRangeEnabled(sanitized) && sanitized.points.size() >= 2;
-    const bool maskOverlayActive = mode == 3 && (sanitized.regionMaskEnabled || sanitized.colorMaskEnabled);
+    const bool maskOverlayActive = mode == 3 &&
+        (sanitized.regionMaskEnabled ||
+            sanitized.colorMaskEnabled ||
+            !sanitized.targetZones.empty());
     if (!inputTexture ||
         mode == 0 ||
-        (!localRangeActive && !maskOverlayActive)) {
+        (mode == 4 && !targetOutlineActive) ||
+        (!localRangeActive && !maskOverlayActive && !targetOutlineActive)) {
         return 0;
     }
 
@@ -2183,9 +3764,86 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
     if (!m_RawDevelopmentLocalRangeOverlayProgram) {
         return 0;
     }
-
     unsigned int outputTexture = CreateGraphRenderTargetTexture();
     if (!outputTexture) {
+        return 0;
+    }
+
+    const unsigned int savedSelectionBitsTexture =
+        m_RawDevelopmentLocalRangeSelectionBitsTexture;
+    const unsigned int savedSelectionBitsInputTexture =
+        m_RawDevelopmentLocalRangeSelectionBitsInputTexture;
+    const int savedSelectionBitsWidth =
+        m_RawDevelopmentLocalRangeSelectionBitsWidth;
+    const int savedSelectionBitsHeight =
+        m_RawDevelopmentLocalRangeSelectionBitsHeight;
+    const int savedSelectionBitsTextureWidth =
+        m_RawDevelopmentLocalRangeSelectionBitsTextureWidth;
+    const int savedSelectionBitsTextureHeight =
+        m_RawDevelopmentLocalRangeSelectionBitsTextureHeight;
+    const std::size_t savedSelectionBitsInputFingerprint =
+        m_RawDevelopmentLocalRangeSelectionBitsInputFingerprint;
+    const std::size_t savedSelectionBitsFingerprint =
+        m_RawDevelopmentLocalRangeSelectionBitsFingerprint;
+    if (targetOutlineActive) {
+        m_RawDevelopmentLocalRangeSelectionBitsTexture = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsInputTexture = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsWidth = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsHeight = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsTextureWidth = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsTextureHeight = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsInputFingerprint = 0;
+        m_RawDevelopmentLocalRangeSelectionBitsFingerprint = 0;
+    }
+    unsigned int selectionBitsTexture = asynchronousTargetOutline
+        ? BuildRawDevelopmentLocalRangeTargetPreviewSelectionBits(
+              inputTexture,
+              overlayRange,
+              workingSpace,
+              m_RawDevelopmentLocalRangeTargetPreviewRequest)
+        : BuildRawDevelopmentLocalRangeSelectionBits(
+              inputTexture,
+              overlayRange,
+              workingSpace,
+              inputStageFingerprint,
+              targetOutlineActive ? 768 : 1536);
+    const bool awaitingTargetRefinement =
+        asynchronousTargetOutline && selectionBitsTexture == 0;
+    const int targetSelectionWidth = asynchronousTargetOutline
+        ? m_RawDevelopmentLocalRangeTargetPreviewSelectionWidth
+        : m_RawDevelopmentLocalRangeSelectionBitsTextureWidth;
+    const int targetSelectionHeight = asynchronousTargetOutline
+        ? m_RawDevelopmentLocalRangeTargetPreviewSelectionHeight
+        : m_RawDevelopmentLocalRangeSelectionBitsTextureHeight;
+    auto restoreSelectionCache = [&]() {
+        if (!detachSelectionCache) {
+            return;
+        }
+        if (m_RawDevelopmentLocalRangeSelectionBitsTexture != 0) {
+            glDeleteTextures(
+                1,
+                &m_RawDevelopmentLocalRangeSelectionBitsTexture);
+        }
+        m_RawDevelopmentLocalRangeSelectionBitsTexture =
+            savedSelectionBitsTexture;
+        m_RawDevelopmentLocalRangeSelectionBitsInputTexture =
+            savedSelectionBitsInputTexture;
+        m_RawDevelopmentLocalRangeSelectionBitsWidth =
+            savedSelectionBitsWidth;
+        m_RawDevelopmentLocalRangeSelectionBitsHeight =
+            savedSelectionBitsHeight;
+        m_RawDevelopmentLocalRangeSelectionBitsTextureWidth =
+            savedSelectionBitsTextureWidth;
+        m_RawDevelopmentLocalRangeSelectionBitsTextureHeight =
+            savedSelectionBitsTextureHeight;
+        m_RawDevelopmentLocalRangeSelectionBitsInputFingerprint =
+            savedSelectionBitsInputFingerprint;
+        m_RawDevelopmentLocalRangeSelectionBitsFingerprint =
+            savedSelectionBitsFingerprint;
+    };
+    if (awaitingTargetRefinement) {
+        restoreSelectionCache();
+        glDeleteTextures(1, &outputTexture);
         return 0;
     }
 
@@ -2194,29 +3852,63 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uInputImage"), 0);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uStrength"), sanitized.strength);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uMiddleGrey"), sanitized.middleGrey);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, selectionBitsTexture);
+        glUniform1i(
+            glGetUniformLocation(
+                m_RawDevelopmentLocalRangeOverlayProgram,
+                "uTargetZoneSelectionBits"),
+            1);
+        glUniform1i(
+            glGetUniformLocation(
+                m_RawDevelopmentLocalRangeOverlayProgram,
+                "uHasTargetZoneSelectionBits"),
+            selectionBitsTexture != 0 ? 1 : 0);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uStrength"), overlayRange.strength);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uMiddleGrey"), overlayRange.middleGrey);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uOverlayMode"), mode);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uSmoothness"), sanitized.smoothness);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uEdgeProtection"), sanitized.edgeProtection);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uDetailProtection"), sanitized.detailProtection);
-        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uHighlightProtection"), sanitized.highlightProtection);
+        glUniform1i(
+            glGetUniformLocation(
+                m_RawDevelopmentLocalRangeOverlayProgram,
+                "uTargetOutlineProvisional"),
+            (m_RawDevelopmentLocalRangeTargetPreviewRequest.provisional ||
+                awaitingTargetRefinement)
+                ? 1
+                : 0);
+        glUniform2f(
+            glGetUniformLocation(
+                m_RawDevelopmentLocalRangeOverlayProgram,
+                "uTargetZoneSelectionTexelSize"),
+            targetSelectionWidth > 0
+                ? 1.0f / static_cast<float>(targetSelectionWidth)
+                : 0.0f,
+            targetSelectionHeight > 0
+                ? 1.0f / static_cast<float>(targetSelectionHeight)
+                : 0.0f);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uSmoothness"), overlayRange.smoothness);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uEdgeProtection"), overlayRange.edgeProtection);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uDetailProtection"), overlayRange.detailProtection);
+        glUniform1f(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uHighlightProtection"), overlayRange.highlightProtection);
         glUniform2f(
             glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uTexelSize"),
             m_Width > 0 ? 1.0f / static_cast<float>(m_Width) : 0.0f,
             m_Height > 0 ? 1.0f / static_cast<float>(m_Height) : 0.0f);
         UploadRawLocalRangeRegionMaskUniforms(
             m_RawDevelopmentLocalRangeOverlayProgram,
-            sanitized,
+            overlayRange,
             m_Width,
             m_Height);
+        UploadRawLocalRangeTargetZoneUniforms(
+            m_RawDevelopmentLocalRangeOverlayProgram,
+            overlayRange,
+            workingSpace);
 
-        const int count = std::min<int>(static_cast<int>(sanitized.points.size()), 12);
+        const int count = std::min<int>(static_cast<int>(overlayRange.points.size()), 12);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uLocalRangePointCount"), count);
         for (int i = 0; i < count; ++i) {
             char uniformName[64];
             std::snprintf(uniformName, sizeof(uniformName), "uLocalRangePoints[%d]", i);
-            const Stack::RawRecipe::RawLocalRangePoint& point = sanitized.points[static_cast<std::size_t>(i)];
+            const Stack::RawRecipe::RawLocalRangePoint& point = overlayRange.points[static_cast<std::size_t>(i)];
             glUniform2f(
                 glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, uniformName),
                 point.ev,
@@ -2224,11 +3916,15 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
         }
 
         m_Quad.Draw();
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgram(0);
     });
 
     glActiveTexture(GL_TEXTURE0);
+    restoreSelectionCache();
     if (!rendered) {
         glDeleteTextures(1, &outputTexture);
         return 0;

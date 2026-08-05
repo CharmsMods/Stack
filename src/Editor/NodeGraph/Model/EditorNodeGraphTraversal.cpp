@@ -1,7 +1,6 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <unordered_set>
 
@@ -16,386 +15,6 @@ std::vector<int> Graph::GetOutputNodeIds() const {
         }
     }
     return ids;
-}
-
-std::vector<CompletedChainInfo> Graph::GetCompletedChains() const {
-    if (m_CompletedChainsCacheRevision == m_StructureRevision) {
-        return m_CompletedChainsCache;
-    }
-
-    std::vector<CompletedChainInfo> chains;
-    std::string outputConnectionDiagnostic;
-
-    auto collectChain = [&](int outputNodeId, auto&& collectChainRef) -> CompletedChainInfo {
-        CompletedChainInfo chain;
-        chain.outputNodeId = outputNodeId;
-
-        const Link* outputInput = FindInputLink(outputNodeId, kImageInputSocketId);
-        const Link* linkR = FindInputLink(outputNodeId, "r");
-        const Link* linkG = FindInputLink(outputNodeId, "g");
-        const Link* linkB = FindInputLink(outputNodeId, "b");
-        const Link* linkA = FindInputLink(outputNodeId, "a");
-
-        if (!outputInput && !linkR && !linkG && !linkB && !linkA) {
-            return chain;
-        }
-
-        std::unordered_set<std::string> visiting;
-        std::unordered_set<int> added;
-        std::function<bool(int, const std::string&)> visit =
-            [&](int nodeId, const std::string& outputSocketId) -> bool {
-            const std::string visitKey =
-                std::to_string(nodeId) + "\x1f" + outputSocketId;
-            if (!visiting.insert(visitKey).second) {
-                return false;
-            }
-            const Node* node = FindNode(nodeId);
-            if (!node) {
-                visiting.erase(visitKey);
-                return false;
-            }
-            if (added.insert(nodeId).second) {
-                chain.nodeIds.push_back(nodeId);
-            }
-
-            bool valid = false;
-            switch (node->kind) {
-                case NodeKind::Image:
-                case NodeKind::RawDevelopment:
-                case NodeKind::RawSource:
-                case NodeKind::ImageGenerator:
-                case NodeKind::MaskGenerator:
-                case NodeKind::CustomMask:
-                case NodeKind::FrequencyMask:
-                    if (chain.sourceNodeId <= 0) {
-                        chain.sourceNodeId = nodeId;
-                    }
-                    valid = true;
-                    break;
-                case NodeKind::RawDecode:
-                case NodeKind::RawDevelop: {
-                    const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::RawNeuralDenoise: {
-                    const Link* upstream = FindInputLink(nodeId, kRawInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::Layer:
-                case NodeKind::TechnicalImage:
-                case NodeKind::Reformat: {
-                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::Compound: {
-                    std::vector<std::string> dependencies;
-                    std::string dependencyError;
-                    valid = ResolveCompoundOutputInputDependencies(
-                        nodeId, outputSocketId, dependencies, &dependencyError);
-                    if (!valid && !dependencyError.empty() && outputConnectionDiagnostic.empty()) {
-                        outputConnectionDiagnostic = "Compound node " + std::to_string(nodeId) +
-                            " cannot render: " + dependencyError;
-                    }
-                    std::unordered_set<std::string> validatedInputs;
-                    if (valid) {
-                        for (const std::string& inputSocketId : dependencies) {
-                            SocketDefinition inputSocket;
-                            if (!FindSocket(nodeId, inputSocketId, &inputSocket) ||
-                                inputSocket.direction != SocketDirection::Input) {
-                                valid = false;
-                                break;
-                            }
-                            const Link* upstream = FindInputLink(nodeId, inputSocketId);
-                            if (!upstream) {
-                                if (!inputSocket.optional) valid = false;
-                            } else if (!visit(upstream->fromNodeId, upstream->fromSocketId)) {
-                                valid = false;
-                            }
-                            validatedInputs.insert(inputSocketId);
-                            if (!valid) break;
-                        }
-                    }
-                    if (valid) {
-                        for (const SocketDefinition& inputSocket : GetSockets(*node, false)) {
-                            if (inputSocket.direction != SocketDirection::Input ||
-                                !inputSocket.optional ||
-                                validatedInputs.count(inputSocket.id) != 0) {
-                                continue;
-                            }
-                            if (const Link* upstream = FindInputLink(nodeId, inputSocket.id)) {
-                                if (!visit(upstream->fromNodeId, upstream->fromSocketId)) {
-                                    valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-                case NodeKind::Lut: {
-                    if (const Link* upstream = FindInputLink(nodeId, kImageInputSocketId)) {
-                        valid = visit(upstream->fromNodeId, upstream->fromSocketId);
-                        break;
-                    }
-
-                    const Link* upstreamR = FindInputLink(nodeId, "r");
-                    const Link* upstreamG = FindInputLink(nodeId, "g");
-                    const Link* upstreamB = FindInputLink(nodeId, "b");
-                    const Link* upstreamA = FindInputLink(nodeId, "a");
-                    bool hasConnection = false;
-                    bool allValid = true;
-                    if (upstreamR) {
-                        hasConnection = true;
-                        if (!visit(upstreamR->fromNodeId, upstreamR->fromSocketId)) allValid = false;
-                    }
-                    if (upstreamG) {
-                        hasConnection = true;
-                        if (!visit(upstreamG->fromNodeId, upstreamG->fromSocketId)) allValid = false;
-                    }
-                    if (upstreamB) {
-                        hasConnection = true;
-                        if (!visit(upstreamB->fromNodeId, upstreamB->fromSocketId)) allValid = false;
-                    }
-                    if (upstreamA) {
-                        hasConnection = true;
-                        if (!visit(upstreamA->fromNodeId, upstreamA->fromSocketId)) allValid = false;
-                    }
-                    valid = hasConnection && allValid;
-                    break;
-                }
-                case NodeKind::RawDetailFusion: {
-                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::HdrMerge: {
-                    const Link* input1 = FindInputLink(nodeId, kHdrMergeInput1SocketId);
-                    const Link* input2 = FindInputLink(nodeId, kHdrMergeInput2SocketId);
-                    const Link* input3 = FindInputLink(nodeId, kHdrMergeInput3SocketId);
-                    valid = input1 && input2 && visit(input1->fromNodeId, input1->fromSocketId);
-                    if (valid && input2) {
-                        valid = visit(input2->fromNodeId, input2->fromSocketId);
-                    }
-                    if (valid && input3) {
-                        valid = visit(input3->fromNodeId, input3->fromSocketId);
-                    }
-                    break;
-                }
-                case NodeKind::Mfsr: {
-                    const Link* reference = FindInputLink(nodeId, kMfsrReferenceInputSocketId);
-                    const Link* support = FindInputLink(nodeId, MfsrInputSocketId(1));
-                    valid = reference && support &&
-                        visit(reference->fromNodeId, reference->fromSocketId) &&
-                        visit(support->fromNodeId, support->fromSocketId);
-                    if (valid) {
-                        for (int inputIndex = 2; inputIndex < kMaxMfsrInputCount; ++inputIndex) {
-                            const Link* input = FindInputLink(nodeId, MfsrInputSocketId(inputIndex));
-                            if (input && !visit(input->fromNodeId, input->fromSocketId)) {
-                                valid = false;
-                                break;
-                            }
-                        }
-                    }
-                    break;
-                }
-                case NodeKind::RawDetailAutoMask: {
-                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::Mix: {
-                    const Link* inputA = FindInputLink(nodeId, kMixInputASocketId);
-                    const Link* inputB = FindInputLink(nodeId, kMixInputBSocketId);
-                    valid = inputA && inputB &&
-                        visit(inputA->fromNodeId, inputA->fromSocketId) &&
-                        visit(inputB->fromNodeId, inputB->fromSocketId);
-                    break;
-                }
-                case NodeKind::DataMath: {
-                    bool hasInput = false;
-                    int inputCount = 0;
-                    valid = true;
-                    for (int inputIndex = 0; inputIndex < kMaxDataMathInputCount; ++inputIndex) {
-                        if (const Link* input = FindInputLink(nodeId, DataMathInputSocketId(inputIndex))) {
-                            hasInput = true;
-                            ++inputCount;
-                            valid = valid && visit(input->fromNodeId, input->fromSocketId);
-                            if (!valid) {
-                                break;
-                            }
-                        }
-                    }
-                    if (node->dataMathMode == DataMathMode::ImageAverage) {
-                        valid = valid && inputCount >= 2;
-                    } else {
-                        valid = valid && hasInput;
-                    }
-                    break;
-                }
-                case NodeKind::ChannelSplit: {
-                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::FrequencyFft:
-                case NodeKind::FrequencyIfft:
-                case NodeKind::SpectrumView:
-                case NodeKind::SpectrumAnalyzer: {
-                    const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::SpectrumMath: {
-                    const Link* inputA = FindInputLink(nodeId, kMixInputASocketId);
-                    valid = inputA ? visit(inputA->fromNodeId, inputA->fromSocketId) : false;
-                    if (valid) {
-                        if (const Link* inputB = FindInputLink(nodeId, kMixInputBSocketId)) {
-                            valid = visit(inputB->fromNodeId, inputB->fromSocketId);
-                        }
-                    }
-                    if (valid) {
-                        if (const Link* filter = FindInputLink(nodeId, kMaskInputSocketId)) {
-                            valid = visit(filter->fromNodeId, filter->fromSocketId);
-                        }
-                    }
-                    break;
-                }
-                case NodeKind::MagnitudePhase: {
-                    if (node->magnitudePhaseMode == MagnitudePhaseMode::Recombine) {
-                        const Link* magnitude = FindInputLink(nodeId, "magnitude");
-                        const Link* phase = FindInputLink(nodeId, "phase");
-                        valid = magnitude && phase &&
-                            visit(magnitude->fromNodeId, magnitude->fromSocketId) &&
-                            visit(phase->fromNodeId, phase->fromSocketId);
-                    } else {
-                        const Link* upstream = FindInputLink(nodeId, kImageInputSocketId);
-                        valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    }
-                    break;
-                }
-                case NodeKind::ChannelCombine: {
-                    const Link* upstreamR = FindInputLink(nodeId, "r");
-                    const Link* upstreamG = FindInputLink(nodeId, "g");
-                    const Link* upstreamB = FindInputLink(nodeId, "b");
-                    const Link* upstreamA = FindInputLink(nodeId, "a");
-
-                    bool hasConnection = false;
-                    bool allValid = true;
-
-                    if (upstreamR) {
-                        hasConnection = true;
-                        if (!visit(upstreamR->fromNodeId, upstreamR->fromSocketId)) allValid = false;
-                    }
-                    if (upstreamG) {
-                        hasConnection = true;
-                        if (!visit(upstreamG->fromNodeId, upstreamG->fromSocketId)) allValid = false;
-                    }
-                    if (upstreamB) {
-                        hasConnection = true;
-                        if (!visit(upstreamB->fromNodeId, upstreamB->fromSocketId)) allValid = false;
-                    }
-                    if (upstreamA) {
-                        hasConnection = true;
-                        if (!visit(upstreamA->fromNodeId, upstreamA->fromSocketId)) allValid = false;
-                    }
-
-                    valid = hasConnection && allValid;
-                    break;
-                }
-                case NodeKind::ImageToMask: {
-                    const Link* upstream = FindInputLink(nodeId, kImageToMaskInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::MaskCombine: {
-                    const Link* inputA = FindInputLink(nodeId, kMaskCombineInputASocketId);
-                    const Link* inputB = FindInputLink(nodeId, kMaskCombineInputBSocketId);
-                    valid = inputA && inputB &&
-                        visit(inputA->fromNodeId, inputA->fromSocketId) &&
-                        visit(inputB->fromNodeId, inputB->fromSocketId);
-                    break;
-                }
-                case NodeKind::MaskUtility: {
-                    const Link* upstream = FindInputLink(nodeId, kMaskUtilityInputSocketId);
-                    valid = upstream ? visit(upstream->fromNodeId, upstream->fromSocketId) : false;
-                    break;
-                }
-                case NodeKind::Output:
-                case NodeKind::Composite:
-                case NodeKind::Scope:
-                case NodeKind::Preview:
-                    valid = false;
-                    break;
-            }
-
-            visiting.erase(visitKey);
-            return valid;
-        };
-
-        if (outputInput) {
-            chain.terminalNodeId = outputInput->fromNodeId;
-            if (!visit(chain.terminalNodeId, outputInput->fromSocketId)) {
-                chain.terminalNodeId = -1;
-                chain.sourceNodeId = -1;
-                chain.nodeIds.clear();
-            }
-        } else {
-            bool allChannelsValid = true;
-            int firstTerminalNodeId = -1;
-
-            if (linkR) {
-                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkR->fromNodeId;
-                if (!visit(linkR->fromNodeId, linkR->fromSocketId)) allChannelsValid = false;
-            }
-            if (linkG) {
-                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkG->fromNodeId;
-                if (!visit(linkG->fromNodeId, linkG->fromSocketId)) allChannelsValid = false;
-            }
-            if (linkB) {
-                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkB->fromNodeId;
-                if (!visit(linkB->fromNodeId, linkB->fromSocketId)) allChannelsValid = false;
-            }
-            if (linkA) {
-                if (firstTerminalNodeId == -1) firstTerminalNodeId = linkA->fromNodeId;
-                if (!visit(linkA->fromNodeId, linkA->fromSocketId)) allChannelsValid = false;
-            }
-
-            if (allChannelsValid && firstTerminalNodeId != -1) {
-                chain.terminalNodeId = firstTerminalNodeId;
-            } else {
-                chain.terminalNodeId = -1;
-                chain.sourceNodeId = -1;
-                chain.nodeIds.clear();
-            }
-        }
-
-        if (chain.terminalNodeId > 0) {
-            const int referenceSourceNodeId = ResolveReferenceSourceNodeIdForOutput(outputNodeId);
-            if (referenceSourceNodeId > 0) {
-                chain.sourceNodeId = referenceSourceNodeId;
-            }
-        }
-
-        return chain;
-    };
-
-    for (int outputNodeId : GetOutputNodeIds()) {
-        const Node* outputNode = FindNode(outputNodeId);
-        if (!outputNode || !outputNode->outputEnabled) {
-            continue;
-        }
-        CompletedChainInfo chain = collectChain(outputNodeId, collectChain);
-        if (chain.outputNodeId > 0 && chain.terminalNodeId > 0 && !chain.nodeIds.empty()) {
-            chains.push_back(std::move(chain));
-        }
-    }
-    m_CompletedChainsCache = chains;
-    m_OutputConnectionDiagnosticCache = std::move(outputConnectionDiagnostic);
-    m_CompletedChainsCacheRevision = m_StructureRevision;
-    return m_CompletedChainsCache;
 }
 
 std::string Graph::GetOutputConnectionDiagnostic() const {
@@ -427,12 +46,9 @@ std::vector<int> Graph::GetDownstreamRenderNodeIds(int nodeId) const {
         }
         ordered.push_back(current);
 
-        for (const Link& link : m_Links) {
-            if (!IsRenderLink(link) || link.fromNodeId != current) {
-                continue;
-            }
+        ForEachOutgoingRenderLink(current, [&](const Link& link) {
             stack.push_back(link.toNodeId);
-        }
+        });
     }
     return ordered;
 }
@@ -469,6 +85,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
         switch (kind) {
             case NodeKind::Image:
             case NodeKind::RawSource:
+            case NodeKind::RawDevelopment:
             case NodeKind::RawDecode:
             case NodeKind::RawDevelop:
             case NodeKind::RawNeuralDenoise:
@@ -476,6 +93,8 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::RawDetailFusion:
             case NodeKind::HdrMerge:
             case NodeKind::Mfsr:
+            case NodeKind::MultiFrameDenoise:
+            case NodeKind::RawProjectSourceSet:
             case NodeKind::Lut:
             case NodeKind::Layer:
             case NodeKind::TechnicalImage:
@@ -587,19 +206,227 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
     }
 
     std::vector<int> candidates;
-    for (const Link& link : m_Links) {
-        if (!IsRenderLink(link) || link.fromNodeId != nodeId) {
-            continue;
-        }
+    ForEachOutgoingRenderLink(nodeId, [&](const Link& link) {
         const Node* downstream = FindNode(link.toNodeId);
         if (!downstream || !isMainChainNodeKind(downstream->kind)) {
-            continue;
+            return;
         }
         if (std::find(candidates.begin(), candidates.end(), link.toNodeId) == candidates.end()) {
             candidates.push_back(link.toNodeId);
         }
-    }
+    });
     return chooseClosestCandidate(candidates, false);
+}
+
+ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
+    ScenePathInfo state;
+    std::unordered_set<int> visited;
+    visited.reserve(graph.GetNodes().size());
+    std::vector<int> pending{ nodeId };
+    while (!pending.empty()) {
+        const int currentNodeId = pending.back();
+        pending.pop_back();
+        if (!visited.insert(currentNodeId).second) {
+            continue;
+        }
+        const Node* current = graph.FindNode(currentNodeId);
+        if (!current) {
+            continue;
+        }
+        const Node& node = *current;
+
+        const auto addInput = [&](const std::string& socketId) {
+            bool found = false;
+            graph.ForEachIncomingLink(
+                currentNodeId,
+                [&](const Link& input) {
+                    if (!found &&
+                        input.toSocketId == socketId &&
+                        graph.GetLinkRole(input) != LinkRole::Scope) {
+                        pending.push_back(input.fromNodeId);
+                        found = true;
+                    }
+                });
+            return found;
+        };
+
+        switch (node.kind) {
+            case NodeKind::RawSource:
+            case NodeKind::RawProjectFrame:
+            case NodeKind::RawProjectSourceSet:
+                state.sceneReferred = true;
+                break;
+            case NodeKind::MultiFrameDenoise:
+                state.sceneReferred =
+                    !node.multiFrameDenoise.internalViewTransformEnabled;
+                state.hasViewTransform =
+                    node.multiFrameDenoise.internalViewTransformEnabled;
+                break;
+            case NodeKind::RawDevelopment:
+                state.sceneReferred = true;
+                if (Stack::RawRecipe::IsViewTransformEnabled(
+                        node.rawDevelopment.recipe)) {
+                    state.hasViewTransform = true;
+                }
+                break;
+            case NodeKind::RawDecode:
+            case NodeKind::RawDevelop:
+                state.sceneReferred = true;
+                addInput(kRawInputSocketId);
+                break;
+            case NodeKind::RawDetailFusion:
+                state.sceneReferred = true;
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::HdrMerge:
+                state.sceneReferred = true;
+                addInput(kHdrMergeInput1SocketId);
+                addInput(kHdrMergeInput2SocketId);
+                addInput(kHdrMergeInput3SocketId);
+                break;
+            case NodeKind::Mfsr:
+                state.sceneReferred = true;
+                for (int inputIndex = 0;
+                     inputIndex < kMaxMfsrInputCount;
+                     ++inputIndex) {
+                    addInput(MfsrInputSocketId(inputIndex));
+                }
+                break;
+            case NodeKind::RawDetailAutoMask:
+                state.sceneReferred = true;
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::RawNeuralDenoise:
+                addInput(kRawInputSocketId);
+                break;
+            case NodeKind::Layer:
+                if (node.layerType == LayerType::ViewTransform) {
+                    state.hasViewTransform = true;
+                }
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::TechnicalImage:
+            case NodeKind::Reformat:
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::Compound: {
+                std::vector<std::string> dependencies;
+                std::string error;
+                if (graph.ResolveCompoundOutputInputDependencies(
+                        node.id,
+                        graph.DefaultOutputSocket(node),
+                        dependencies,
+                        &error)) {
+                    for (const std::string& dependency : dependencies) {
+                        addInput(dependency);
+                    }
+                } else {
+                    for (const SocketDefinition& socket :
+                         graph.GetSockets(node, false)) {
+                        if (socket.direction == SocketDirection::Input) {
+                            addInput(socket.id);
+                        }
+                    }
+                }
+                break;
+            }
+            case NodeKind::Lut:
+            case NodeKind::Output:
+                if (!addInput(kImageInputSocketId)) {
+                    addInput("r");
+                    addInput("g");
+                    addInput("b");
+                    addInput("a");
+                }
+                break;
+            case NodeKind::Mix:
+                addInput(kMixInputASocketId);
+                addInput(kMixInputBSocketId);
+                break;
+            case NodeKind::DataMath:
+                for (int inputIndex = 0;
+                     inputIndex < kMaxDataMathInputCount;
+                     ++inputIndex) {
+                    addInput(DataMathInputSocketId(inputIndex));
+                }
+                addInput(kDataMathBaseInputSocketId);
+                break;
+            case NodeKind::ChannelSplit:
+                addInput(kImageInputSocketId);
+                break;
+            case NodeKind::ChannelCombine:
+                addInput("r");
+                addInput("g");
+                addInput("b");
+                addInput("a");
+                break;
+            case NodeKind::ConstantChannel:
+                addInput(kMatchExtentInputSocketId);
+                break;
+            case NodeKind::FrequencyFilter:
+            case NodeKind::FrequencyFft:
+                addInput(kChannelInputSocketId);
+                break;
+            case NodeKind::FrequencyIfft:
+            case NodeKind::SpectrumView:
+            case NodeKind::SpectrumSeparate:
+            case NodeKind::SpectrumAnalyzer:
+                addInput(kSpectrumInputSocketId);
+                break;
+            case NodeKind::ApplyFrequencyResponse:
+                addInput(kSpectrumInputSocketId);
+                break;
+            case NodeKind::CombineSpectra:
+                addInput(kSpectrumInputASocketId);
+                addInput(kSpectrumInputBSocketId);
+                break;
+            case NodeKind::SpectrumRecombine:
+                addInput(kSpectrumMagnitudeInputSocketId);
+                addInput(kSpectrumPhaseInputSocketId);
+                break;
+            case NodeKind::SpectrumMath:
+                addInput(kMixInputASocketId);
+                addInput(kMixInputBSocketId);
+                break;
+            case NodeKind::MagnitudePhase:
+                if (node.magnitudePhaseMode == MagnitudePhaseMode::Recombine) {
+                    addInput("magnitude");
+                    addInput("phase");
+                } else {
+                    addInput(kImageInputSocketId);
+                }
+                break;
+            case NodeKind::ImageToMask:
+                addInput(kImageToMaskInputSocketId);
+                break;
+            case NodeKind::MaskCombine:
+                addInput(kMaskCombineInputASocketId);
+                addInput(kMaskCombineInputBSocketId);
+                break;
+            case NodeKind::MaskUtility:
+                addInput(kMaskUtilityInputSocketId);
+                break;
+            case NodeKind::FieldMean:
+                addInput(kReductionFieldInputSocketId);
+                break;
+            case NodeKind::Scope:
+                addInput(kScopeInputSocketId);
+                break;
+            case NodeKind::Preview:
+                addInput(kPreviewInputSocketId);
+                break;
+            case NodeKind::Image:
+            case NodeKind::ImageGenerator:
+            case NodeKind::MaskGenerator:
+            case NodeKind::FrequencyResponse:
+            case NodeKind::FrequencyMask:
+            case NodeKind::CustomMask:
+            case NodeKind::Value:
+            case NodeKind::Composite:
+                break;
+        }
+    }
+    return state;
 }
 
 } // namespace EditorNodeGraph

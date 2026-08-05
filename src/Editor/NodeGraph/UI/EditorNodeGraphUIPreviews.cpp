@@ -4,6 +4,7 @@
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Renderer/GLHelpers.h"
 #include "ThirdParty/stb_image.h"
+#include "Utils/PixelBufferUtils.h"
 #include <algorithm>
 #include <cstring>
 #include <unordered_set>
@@ -76,21 +77,33 @@ bool DecodeImagePreviewPixelsFromPng(
         return false;
     }
 
-    outPixels.assign(pixels, pixels + (decodedWidth * decodedHeight * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, decodedWidth, decodedHeight, 4, outPixels);
+    stbi_image_free(pixels);
+    if (!copied) {
+        outPixels.clear();
+        return false;
+    }
     outWidth = decodedWidth;
     outHeight = decodedHeight;
     outChannels = 4;
-    stbi_image_free(pixels);
     return true;
 }
 
 } // namespace
 
 EditorNodeGraphUI::~EditorNodeGraphUI() {
+    Shutdown();
+}
+
+void EditorNodeGraphUI::Shutdown() {
+    m_PresetPreviewCurrentRenderer.reset();
+    m_PresetPreviewPreviousRenderer.reset();
     ResetPerGraphVisualCaches();
 }
 
 void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
+    m_LinkLabelRevealAlpha = 0.0f;
     for (auto& item : m_ImagePreviewTextures) {
         unsigned int texture = item.second;
         if (texture != 0) {
@@ -120,6 +133,7 @@ void EditorNodeGraphUI::ResetPerGraphVisualCaches() {
     m_NodeBrowserThumbnailRevisions.clear();
     m_NodeBrowserThumbnailSizes.clear();
     m_NodeMeasuredBaseHeights.clear();
+    m_NodeMeasuredContentRevisions.clear();
     m_NodeContentOverflow.clear();
     m_NodeFrontOrder.clear();
     m_NodeFrontOrderCounter = 1;
@@ -164,8 +178,10 @@ void EditorNodeGraphUI::SyncPerGraphVisualCaches(const EditorNodeGraph::Graph& g
     pruneKeyedMap(m_GraphPreviewRevisions);
     pruneKeyedMap(m_GraphPreviewSizes);
     pruneKeyedMap(m_NodeMeasuredBaseHeights);
+    pruneKeyedMap(m_NodeMeasuredContentRevisions);
     pruneKeyedMap(m_NodeContentOverflow);
     pruneKeyedMap(m_NodeFrontOrder);
+    pruneKeyedMap(m_NodeLayoutCache);
 }
 
 unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::Node& node) {
@@ -289,7 +305,8 @@ unsigned int EditorNodeGraphUI::UploadPreviewTexture(int nodeId, const std::vect
 unsigned int EditorNodeGraphUI::GetGraphPreviewTexture(EditorModule* editor, const EditorNodeGraph::Node& node) {
     if (!editor ||
         (node.kind != EditorNodeGraph::NodeKind::Preview &&
-         node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask)) {
+         node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
+         node.kind != EditorNodeGraph::NodeKind::FrequencyFilter)) {
         return 0;
     }
 

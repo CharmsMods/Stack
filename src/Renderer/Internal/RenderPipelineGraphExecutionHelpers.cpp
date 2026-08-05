@@ -1,9 +1,11 @@
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
+#include <new>
+#include <stdexcept>
 
 namespace Stack::Renderer::GraphExecution {
 
@@ -81,28 +83,6 @@ float MedianFloat(std::vector<float> values) {
     return 0.5f * (values[mid - 1] + values[mid]);
 }
 
-ScopedFramebufferState::ScopedFramebufferState(bool captureViewport) {
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
-    glGetIntegerv(GL_READ_BUFFER, &readBuffer);
-    glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
-    if (captureViewport) {
-        glGetIntegerv(GL_VIEWPORT, viewport);
-    }
-}
-
-void ScopedFramebufferState::Restore(bool restoreViewport) const {
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
-    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
-    glReadBuffer(static_cast<GLenum>(readBuffer));
-    glDrawBuffer(static_cast<GLenum>(drawBuffer));
-    if (restoreViewport) {
-        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-    }
-}
-
 QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height) {
     QuickTextureStats stats;
     if (!texture || width <= 0 || height <= 0) {
@@ -115,6 +95,25 @@ QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height)
         static_cast<float>(kProbeMaxEdge) / static_cast<float>(std::max(width, height)));
     const int probeW = std::max(1, static_cast<int>(std::round(static_cast<float>(width) * scale)));
     const int probeH = std::max(1, static_cast<int>(std::round(static_cast<float>(height) * scale)));
+
+    std::size_t pixelElementCount = 0;
+    std::size_t pixelCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelElementCount(
+            probeW, probeH, 4, pixelElementCount) ||
+        !Stack::PixelBuffer::TryComputePixelElementCount(
+            probeW, probeH, 1, pixelCount)) {
+        return stats;
+    }
+    std::vector<float> pixels;
+    std::vector<float> lumas;
+    try {
+        pixels.assign(pixelElementCount, 0.0f);
+        lumas.reserve(pixelCount);
+    } catch (const std::bad_alloc&) {
+        return stats;
+    } catch (const std::length_error&) {
+        return stats;
+    }
 
     const ScopedFramebufferState savedState(true);
 
@@ -137,20 +136,25 @@ QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height)
         if (probeFbo != 0) {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, probeFbo);
+            while (glGetError() != GL_NO_ERROR) {}
             glBlitFramebuffer(0, 0, width, height, 0, 0, probeW, probeH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            targetReady = glGetError() == GL_NO_ERROR;
             glBindFramebuffer(GL_FRAMEBUFFER, probeFbo);
         } else {
             glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
         }
+    }
+    if (targetReady) {
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glViewport(0, 0, probeW, probeH);
+        const Stack::Renderer::GLState::PixelPackState savedPackState;
+        savedPackState.ConfigureTightCpuReadback();
         while (glGetError() != GL_NO_ERROR) {}
 
-        std::vector<float> pixels(static_cast<std::size_t>(probeW) * static_cast<std::size_t>(probeH) * 4u, 0.0f);
         glReadPixels(0, 0, probeW, probeH, GL_RGBA, GL_FLOAT, pixels.data());
-        if (glGetError() == GL_NO_ERROR) {
-            std::vector<float> lumas;
-            lumas.reserve(static_cast<std::size_t>(probeW) * static_cast<std::size_t>(probeH));
+        const bool readbackOk = glGetError() == GL_NO_ERROR;
+        savedPackState.Restore();
+        if (readbackOk) {
             for (std::size_t i = 0; i + 2 < pixels.size(); i += 4u) {
                 const float r = std::isfinite(pixels[i + 0]) ? std::max(0.0f, pixels[i + 0]) : 0.0f;
                 const float g = std::isfinite(pixels[i + 1]) ? std::max(0.0f, pixels[i + 1]) : 0.0f;
@@ -282,25 +286,48 @@ std::string MakeNodeSocketKey(int nodeId, std::string_view socketId) {
 
 int ExtractNodeIdFromCacheKey(const std::string& key) {
     const std::size_t colonPos = key.find(':');
-    if (colonPos == std::string::npos) {
+    if (colonPos == std::string::npos || colonPos == 0) {
         return -1;
     }
-    return std::atoi(key.substr(0, colonPos).c_str());
+    std::size_t digitIndex = 0;
+    const bool negative = key[0] == '-';
+    if (negative) {
+        digitIndex = 1;
+        if (digitIndex == colonPos) return -1;
+    }
+    const std::uint64_t limit = negative
+        ? static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1u
+        : static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+    std::uint64_t magnitude = 0;
+    for (; digitIndex < colonPos; ++digitIndex) {
+        const char digit = key[digitIndex];
+        if (digit < '0' || digit > '9') return -1;
+        const unsigned int value = static_cast<unsigned int>(digit - '0');
+        if (magnitude > (limit - value) / 10u) return -1;
+        magnitude = magnitude * 10u + value;
+    }
+    if (!negative) return static_cast<int>(magnitude);
+    if (magnitude == limit) return std::numeric_limits<int>::min();
+    return -static_cast<int>(magnitude);
 }
 
-GraphExecutionContext::GraphExecutionContext(const RenderGraphSnapshot& graphSnapshot)
-    : graph(graphSnapshot) {
-    nodes.reserve(graph.nodes.size());
-    for (const RenderGraphNode& node : graph.nodes) {
-        nodes[node.nodeId] = &node;
-    }
-
-    inputLinks.reserve(graph.nodes.size());
-    for (const RenderGraphLink& link : graph.links) {
-        auto& socketLinks = inputLinks[link.toNodeId];
-        socketLinks.emplace(std::string_view(link.toSocketId), &link);
-        ++outputUseCounts[MakeNodeSocketKey(link.fromNodeId, link.fromSocketId)];
-    }
+GraphExecutionContext::GraphExecutionContext(
+    const RenderGraphSnapshot& graphSnapshot,
+    const GraphTopologyIndex& topologyIndex,
+    std::size_t executionEntryCapacity)
+    : graph(graphSnapshot),
+      nodes(topologyIndex.nodes),
+      inputLinks(topologyIndex.inputLinks),
+      outputUseCounts(topologyIndex.outputUseCounts) {
+    imageCache.reserve(executionEntryCapacity);
+    maskCache.reserve(executionEntryCapacity);
+    imageFingerprintCache.reserve(executionEntryCapacity);
+    maskFingerprintCache.reserve(executionEntryCapacity);
+    scalarSocketCache.reserve(executionEntryCapacity);
+    visitingImages.reserve(executionEntryCapacity);
+    visitingMasks.reserve(executionEntryCapacity);
+    fingerprintingImages.reserve(executionEntryCapacity);
+    fingerprintingMasks.reserve(executionEntryCapacity);
 }
 
 const RenderGraphLink* GraphExecutionContext::FindInputLink(int nodeId, std::string_view socketId) const {

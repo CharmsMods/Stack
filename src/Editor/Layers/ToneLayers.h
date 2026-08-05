@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LayerBase.h"
+#include "Raw/RawDevelopmentRecipe.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/MaskRenderTypes.h"
 
@@ -242,6 +243,8 @@ private:
     unsigned int m_ShaderProgram = 0;
     unsigned int m_LutTexture = 0;
     bool m_LutDirty = true;
+    bool m_PointCurveSetEnabled = false;
+    Stack::RawRecipe::RawPointCurveSet m_PointCurveSet;
     ToneCurveMode m_Mode = ToneCurveMode::RGB;
     ToneCurveDomain m_Domain = ToneCurveDomain::LogScene;
     ToneCurveOutputMode m_OutputMode = ToneCurveOutputMode::SceneLinear;
@@ -476,6 +479,8 @@ private:
     float m_Saturation = 1.0f;
     bool m_PreserveHue = true;
     bool m_DebugFalseColor = false;
+    bool m_InputIsRec2020 = false;
+    bool m_EncodeSrgbOutput = false;
     bool m_LastProbeValid = false;
     float m_LastMinRgb = 0.0f;
     float m_LastMaxRgb = 0.0f;

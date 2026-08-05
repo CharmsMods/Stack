@@ -1,5 +1,10 @@
 # Neural Denoise System Plan
 
+> Superseded on 2026-07-24. This plan describes the retired neural-denoise
+> experiment. Stack preserves its saved-project data only for compatibility;
+> current denoise planning starts in
+> `Current/engineering/denoise-rewrite/README.md`.
+
 ## Goals
 
 Stack's neural denoise system is optional infrastructure for high-quality, model-backed denoising. It must never be required for startup, image loading, RAW handling, or existing OpenGL processing. If the model pack, manifest, runtime DLLs, or individual model files are missing, nodes stay in the graph, preserve their settings, and pass their input through unchanged with a readable status.

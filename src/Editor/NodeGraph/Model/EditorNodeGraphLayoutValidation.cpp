@@ -1,7 +1,8 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
+#include "Editor/NodeGraph/Model/EditorNodeGraphLookupCache.h"
 
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -36,6 +37,27 @@ bool IsUniformOrResourceSocketType(SocketType type) {
         default:
             return false;
     }
+}
+
+bool IsSpecializedFrequencySocketType(SocketType type) {
+    return type == SocketType::Spectrum ||
+        type == SocketType::FrequencyResponse ||
+        type == SocketType::SpectrumMagnitude ||
+        type == SocketType::SpectrumPhase;
+}
+
+bool IsImplementedTypedParameterInput(
+    const Node& node,
+    const std::string& socketId,
+    SocketType type) {
+    if (type != SocketType::Scalar) return false;
+    if (node.kind == NodeKind::TechnicalImage) {
+        return socketId == kExposureValueInputSocketId;
+    }
+    if (socketId.rfind("param:", 0) != 0) return false;
+    const std::string parameterId = socketId.substr(6);
+    return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), parameterId) !=
+        node.exposedParameterIds.end();
 }
 
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
@@ -97,6 +119,7 @@ int LayoutKindPriority(const Node& node) {
         case NodeKind::Image:
         case NodeKind::RawSource:
         case NodeKind::RawDevelopment:
+        case NodeKind::RawProjectSourceSet:
         case NodeKind::ImageGenerator:
             return 0;
         case NodeKind::MaskGenerator:
@@ -118,6 +141,7 @@ int LayoutKindPriority(const Node& node) {
         case NodeKind::DataMath:
         case NodeKind::ChannelSplit:
         case NodeKind::ChannelCombine:
+        case NodeKind::ConstantChannel:
             return 3;
         case NodeKind::Preview:
         case NodeKind::Scope:
@@ -365,6 +389,16 @@ ValidationResult Graph::Validate() const {
             result.valid = false;
             result.messages.push_back("Layer node has no layer reference.");
         }
+        if (node.kind == NodeKind::Value) {
+            for (const Stack::NodeMath::ContractIssue& issue :
+                    Stack::NodeMath::ValidateFirstClassValue(
+                        node.value.value)) {
+                result.valid = false;
+                result.messages.push_back(
+                    "Value node " + std::to_string(node.id) +
+                    " is invalid: " + issue.message);
+            }
+        }
         if (!node.definitionResolutionError.empty()) {
             result.valid = false;
             result.messages.push_back("Node " + std::to_string(node.id) +
@@ -385,6 +419,7 @@ ValidationResult Graph::Validate() const {
     }
 
     std::set<std::tuple<int, std::string, int, std::string>> seenLinks;
+    std::set<std::pair<int, std::string>> occupiedInputs;
     for (const Link& link : m_Links) {
         if (!ContainsNodeId(m_Nodes, link.fromNodeId) || !ContainsNodeId(m_Nodes, link.toNodeId)) {
             result.valid = false;
@@ -393,6 +428,11 @@ ValidationResult Graph::Validate() const {
         if (!seenLinks.insert({ link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId }).second) {
             result.valid = false;
             result.messages.push_back("Duplicate graph socket link.");
+        }
+        if (!occupiedInputs.insert({ link.toNodeId, link.toSocketId }).second) {
+            result.valid = false;
+            result.messages.push_back(
+                "An input socket has more than one incoming link.");
         }
 
         const Node* from = FindNode(link.fromNodeId);
@@ -415,7 +455,8 @@ ValidationResult Graph::Validate() const {
         if (from->kind == NodeKind::Image ||
             from->kind == NodeKind::RawDevelopment ||
             from->kind == NodeKind::RawDecode ||
-            from->kind == NodeKind::RawDevelop) {
+            from->kind == NodeKind::RawDevelop ||
+            from->kind == NodeKind::MultiFrameDenoise) {
             outgoingImages.insert(from->id);
         }
 
@@ -423,6 +464,7 @@ ValidationResult Graph::Validate() const {
             if (to->kind == NodeKind::Scope) {
                 const bool validScopeInput = link.toSocketId == kScopeInputSocketId &&
                     (fromSocket.type == SocketType::Image ||
+                     fromSocket.type == SocketType::Channel ||
                      fromSocket.type == SocketType::ScalarField ||
                      (fromSocket.type == SocketType::Mask && IsScalarSocketStream(link.fromNodeId, link.fromSocketId)));
                 if (!validScopeInput) {
@@ -432,6 +474,7 @@ ValidationResult Graph::Validate() const {
             } else if (to->kind == NodeKind::Preview) {
                 const bool validPreview = link.toSocketId == kPreviewInputSocketId &&
                     (fromSocket.type == SocketType::Image ||
+                     fromSocket.type == SocketType::Channel ||
                      fromSocket.type == SocketType::ScalarField ||
                      (fromSocket.type == SocketType::Mask && IsScalarSocketStream(link.fromNodeId, link.fromSocketId)));
                 if (!validPreview) {
@@ -443,23 +486,57 @@ ValidationResult Graph::Validate() const {
                 result.messages.push_back("Invalid analysis link.");
             }
         } else if (fromSocket.type == SocketType::Raw || toSocket.type == SocketType::Raw) {
-            const bool validRawLink =
+            const bool validMfdBinding =
+                fromSocket.type == SocketType::Raw &&
+                toSocket.type == SocketType::Raw &&
+                from->kind == NodeKind::RawProjectFrame &&
+                to->kind == NodeKind::MultiFrameDenoise &&
+                link.fromSocketId == kRawOutputSocketId &&
+                link.toSocketId == MfdFrameInputSocketId(
+                    from->rawProjectFrame.frameId) &&
+                from->rawProjectFrame.sourceSetId ==
+                    to->multiFrameDenoise.sourceSetId;
+            const bool validRawPipelineLink =
                 fromSocket.type == SocketType::Raw &&
                 toSocket.type == SocketType::Raw &&
                 (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
                 link.fromSocketId == kRawOutputSocketId &&
                 (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop) &&
                 link.toSocketId == kRawInputSocketId;
-            if (!validRawLink) {
+            if (!validMfdBinding && !validRawPipelineLink) {
                 result.valid = false;
                 result.messages.push_back("Invalid RAW link.");
+            }
+        } else if (ConnectionRules::IsChannelProcessingBridge(
+                       *this,
+                       link.fromNodeId,
+                       link.fromSocketId,
+                       fromSocket,
+                       *to,
+                       link.toSocketId,
+                       toSocket)) {
+            // One shared Channel-role bridge owns authoring, validation, and
+            // renderer eligibility, including declared Mask/field inputs.
+        } else if (IsSpecializedFrequencySocketType(fromSocket.type) ||
+                   IsSpecializedFrequencySocketType(toSocket.type)) {
+            if (fromSocket.type != toSocket.type) {
+                result.valid = false;
+                result.messages.push_back(
+                    "Frequency links require exact Channel, Spectrum, Response, Magnitude, or Phase types.");
+            }
+        } else if (fromSocket.type == SocketType::Channel ||
+                   toSocket.type == SocketType::Channel) {
+            if (fromSocket.type != toSocket.type) {
+                result.valid = false;
+                result.messages.push_back(
+                    "A Channel link must target a declared Channel-capable input.");
             }
         } else if (IsUniformOrResourceSocketType(fromSocket.type) ||
                    IsUniformOrResourceSocketType(toSocket.type)) {
             const bool exactType = fromSocket.type == toSocket.type;
-            const bool implementedInput = to->kind == NodeKind::TechnicalImage &&
-                link.toSocketId == kExposureValueInputSocketId &&
-                toSocket.type == SocketType::Scalar;
+            const bool implementedInput =
+                to->kind == NodeKind::Compound ||
+                IsImplementedTypedParameterInput(*to, link.toSocketId, toSocket.type);
             if (!exactType || !implementedInput) {
                 result.valid = false;
                 result.messages.push_back(!exactType
@@ -483,6 +560,7 @@ ValidationResult Graph::Validate() const {
                   from->kind == NodeKind::RawDetailFusion ||
                   from->kind == NodeKind::FrequencyMask ||
                   from->kind == NodeKind::MagnitudePhase) && link.fromSocketId == kMaskOutputSocketId) ||
+                from->kind == NodeKind::Compound ||
                 (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(link.fromSocketId)) ||
                 fromIsScalarStream;
 
@@ -503,10 +581,10 @@ ValidationResult Graph::Validate() const {
                     (to->kind == NodeKind::Layer && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::Lut && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::TechnicalImage && link.toSocketId == kImageInputSocketId) ||
+                    (to->kind == NodeKind::Reformat && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::RawDetailAutoMask && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::Mix && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
-                    (to->kind == NodeKind::Output && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::ImageToMask && link.toSocketId == kImageToMaskInputSocketId) ||
                     (to->kind == NodeKind::ChannelSplit && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::FrequencyFft && link.toSocketId == kImageInputSocketId) ||
@@ -514,6 +592,7 @@ ValidationResult Graph::Validate() const {
                     (to->kind == NodeKind::SpectrumView && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::SpectrumAnalyzer && link.toSocketId == kImageInputSocketId) ||
                     (to->kind == NodeKind::MagnitudePhase && link.toSocketId == kImageInputSocketId) ||
+                    to->kind == NodeKind::Compound ||
                     (to->kind == NodeKind::SpectrumMath &&
                         (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
                     DataMathAllowsScalarToImageTarget(*to, link.toSocketId);
@@ -553,27 +632,53 @@ ValidationResult Graph::Validate() const {
         result.messages.push_back("No completed output chains are connected.");
     }
 
-    std::unordered_set<int> visiting;
-    std::unordered_set<int> visited;
-    std::function<bool(int)> hasCycle = [&](int nodeId) {
-        if (visiting.count(nodeId)) return true;
-        if (visited.count(nodeId)) return false;
-        visiting.insert(nodeId);
-        for (const Link& link : m_Links) {
-            if (link.fromNodeId == nodeId && IsRenderLink(link)) {
-                if (hasCycle(link.toNodeId)) return true;
+    std::unordered_map<int, std::vector<int>> renderOutgoing;
+    std::unordered_map<int, std::size_t> renderIndegree;
+    renderOutgoing.reserve(ids.size());
+    renderIndegree.reserve(ids.size());
+    for (int nodeId : ids) {
+        renderOutgoing.emplace(nodeId, std::vector<int>{});
+        renderIndegree.emplace(nodeId, 0u);
+    }
+    for (const Link& link : m_Links) {
+        if (!IsRenderLink(link)) {
+            continue;
+        }
+        const auto fromIt = renderOutgoing.find(link.fromNodeId);
+        const auto toIt = renderIndegree.find(link.toNodeId);
+        if (fromIt == renderOutgoing.end() ||
+            toIt == renderIndegree.end()) {
+            continue;
+        }
+        fromIt->second.push_back(link.toNodeId);
+        ++toIt->second;
+    }
+
+    std::vector<int> ready;
+    ready.reserve(renderIndegree.size());
+    for (const auto& [nodeId, indegree] : renderIndegree) {
+        if (indegree == 0u) {
+            ready.push_back(nodeId);
+        }
+    }
+
+    std::size_t processedNodeCount = 0;
+    while (!ready.empty()) {
+        const int nodeId = ready.back();
+        ready.pop_back();
+        ++processedNodeCount;
+        for (int downstreamNodeId : renderOutgoing[nodeId]) {
+            auto downstreamIt = renderIndegree.find(downstreamNodeId);
+            if (downstreamIt != renderIndegree.end() &&
+                downstreamIt->second > 0u &&
+                --downstreamIt->second == 0u) {
+                ready.push_back(downstreamNodeId);
             }
         }
-        visiting.erase(nodeId);
-        visited.insert(nodeId);
-        return false;
-    };
-    for (const Node& node : m_Nodes) {
-        if (IsRenderChainNode(node) && hasCycle(node.id)) {
-            result.valid = false;
-            result.messages.push_back("Render chain contains a cycle.");
-            break;
-        }
+    }
+    if (processedNodeCount != renderIndegree.size()) {
+        result.valid = false;
+        result.messages.push_back("Render chain contains a cycle.");
     }
 
     return result;
@@ -601,7 +706,9 @@ std::vector<int> Graph::GetRenderLayerNodePath(int outputNodeId) const {
             from->kind == NodeKind::RawDevelopment ||
             from->kind == NodeKind::RawDecode ||
             from->kind == NodeKind::RawDevelop ||
-            from->kind == NodeKind::Mfsr) {
+            from->kind == NodeKind::Mfsr ||
+            from->kind == NodeKind::MultiFrameDenoise ||
+            from->kind == NodeKind::RawProjectSourceSet) {
             std::reverse(reversePath.begin(), reversePath.end());
             return reversePath;
         }
@@ -651,6 +758,9 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::RawDetailFusion ||
         node.kind == NodeKind::HdrMerge ||
         node.kind == NodeKind::Mfsr ||
+        node.kind == NodeKind::RawProjectFrame ||
+        node.kind == NodeKind::MultiFrameDenoise ||
+        node.kind == NodeKind::RawProjectSourceSet ||
         node.kind == NodeKind::Lut ||
         node.kind == NodeKind::ImageGenerator ||
         node.kind == NodeKind::Layer ||
@@ -661,9 +771,15 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::FieldMean ||
         node.kind == NodeKind::Reformat ||
         node.kind == NodeKind::Compound ||
+        node.kind == NodeKind::FrequencyFilter ||
+        node.kind == NodeKind::FrequencyResponse ||
         node.kind == NodeKind::FrequencyFft ||
         node.kind == NodeKind::FrequencyIfft ||
         node.kind == NodeKind::SpectrumView ||
+        node.kind == NodeKind::ApplyFrequencyResponse ||
+        node.kind == NodeKind::CombineSpectra ||
+        node.kind == NodeKind::SpectrumSeparate ||
+        node.kind == NodeKind::SpectrumRecombine ||
         node.kind == NodeKind::FrequencyMask ||
         node.kind == NodeKind::SpectrumMath ||
         node.kind == NodeKind::MagnitudePhase ||
@@ -671,7 +787,8 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::ImageToMask ||
         node.kind == NodeKind::CustomMask ||
         node.kind == NodeKind::ChannelSplit ||
-        node.kind == NodeKind::ChannelCombine;
+        node.kind == NodeKind::ChannelCombine ||
+        node.kind == NodeKind::ConstantChannel;
 }
 
 bool Graph::IsRenderLink(const Link& link) const {
@@ -694,6 +811,21 @@ bool Graph::IsRenderLink(const Link& link) const {
     if (fromSocket.type == SocketType::Raw && toSocket.type == SocketType::Raw) {
         return true;
     }
+    if (ConnectionRules::IsChannelProcessingBridge(
+            *this,
+            link.fromNodeId,
+            link.fromSocketId,
+            fromSocket,
+            *to,
+            link.toSocketId,
+            toSocket)) {
+        return true;
+    }
+    if ((fromSocket.type == SocketType::Channel ||
+         IsSpecializedFrequencySocketType(fromSocket.type)) &&
+        fromSocket.type == toSocket.type) {
+        return true;
+    }
     if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Mask) {
         return true;
     }
@@ -701,14 +833,18 @@ bool Graph::IsRenderLink(const Link& link) const {
         (toSocket.type == SocketType::Mask || toSocket.type == SocketType::ScalarField)) {
         return true;
     }
-    if (fromSocket.type == SocketType::Scalar && toSocket.type == SocketType::Scalar) {
+    if (IsUniformOrResourceSocketType(fromSocket.type) &&
+        fromSocket.type == toSocket.type) {
         return true;
     }
-    if (fromSocket.type == SocketType::Mask && toSocket.type == SocketType::Image) {
+    if ((fromSocket.type == SocketType::Mask ||
+         fromSocket.type == SocketType::ScalarField) &&
+        toSocket.type == SocketType::Image) {
         return true;
     }
     if (fromSocket.type == SocketType::Image &&
-        toSocket.type == SocketType::Mask &&
+        (toSocket.type == SocketType::Mask ||
+         toSocket.type == SocketType::ScalarField) &&
         IsScalarSocketStream(link.fromNodeId, link.fromSocketId)) {
         return true;
     }
@@ -720,6 +856,18 @@ bool Graph::IsRenderLink(const Link& link) const {
 }
 
 const Link* Graph::FindInputLink(int nodeId, const std::string& socketId) const {
+    if (EnsureLookupCache()) {
+        const auto incoming = m_LookupCache->inputLinksByNode.find(nodeId);
+        if (incoming == m_LookupCache->inputLinksByNode.end()) {
+            return nullptr;
+        }
+        for (const Link* link : incoming->second) {
+            if (link->toSocketId == socketId && IsRenderLink(*link)) {
+                return link;
+            }
+        }
+        return nullptr;
+    }
     auto it = std::find_if(m_Links.begin(), m_Links.end(), [this, nodeId, &socketId](const Link& link) {
         return link.toNodeId == nodeId && link.toSocketId == socketId && IsRenderLink(link);
     });
@@ -727,6 +875,18 @@ const Link* Graph::FindInputLink(int nodeId, const std::string& socketId) const 
 }
 
 const Link* Graph::FindAnyInputLink(int nodeId, const std::string& socketId) const {
+    if (EnsureLookupCache()) {
+        const auto incoming = m_LookupCache->inputLinksByNode.find(nodeId);
+        if (incoming == m_LookupCache->inputLinksByNode.end()) {
+            return nullptr;
+        }
+        for (const Link* link : incoming->second) {
+            if (link->toSocketId == socketId) {
+                return link;
+            }
+        }
+        return nullptr;
+    }
     auto it = std::find_if(m_Links.begin(), m_Links.end(), [nodeId, &socketId](const Link& link) {
         return link.toNodeId == nodeId && link.toSocketId == socketId;
     });
@@ -734,6 +894,18 @@ const Link* Graph::FindAnyInputLink(int nodeId, const std::string& socketId) con
 }
 
 const Link* Graph::FindOutputLink(int nodeId, const std::string& socketId) const {
+    if (EnsureLookupCache()) {
+        const auto outgoing = m_LookupCache->outputLinksByNode.find(nodeId);
+        if (outgoing == m_LookupCache->outputLinksByNode.end()) {
+            return nullptr;
+        }
+        for (const Link* link : outgoing->second) {
+            if (link->fromSocketId == socketId && IsRenderLink(*link)) {
+                return link;
+            }
+        }
+        return nullptr;
+    }
     auto it = std::find_if(m_Links.begin(), m_Links.end(), [this, nodeId, &socketId](const Link& link) {
         return link.fromNodeId == nodeId && link.fromSocketId == socketId && IsRenderLink(link);
     });
@@ -741,10 +913,118 @@ const Link* Graph::FindOutputLink(int nodeId, const std::string& socketId) const
 }
 
 const Link* Graph::FindScopeInputLink(int nodeId) const {
+    if (EnsureLookupCache()) {
+        const auto incoming = m_LookupCache->inputLinksByNode.find(nodeId);
+        if (incoming == m_LookupCache->inputLinksByNode.end()) {
+            return nullptr;
+        }
+        for (const Link* link : incoming->second) {
+            if (GetLinkRole(*link) == LinkRole::Scope) {
+                return link;
+            }
+        }
+        return nullptr;
+    }
     auto it = std::find_if(m_Links.begin(), m_Links.end(), [this, nodeId](const Link& link) {
         return link.toNodeId == nodeId && GetLinkRole(link) == LinkRole::Scope;
     });
     return it != m_Links.end() ? &(*it) : nullptr;
+}
+
+void Graph::ForEachIncomingRenderLink(
+    int nodeId,
+    const std::function<void(const Link&)>& visitor) const {
+    if (!visitor) {
+        return;
+    }
+    if (EnsureLookupCache()) {
+        const auto incoming = m_LookupCache->inputLinksByNode.find(nodeId);
+        if (incoming == m_LookupCache->inputLinksByNode.end()) {
+            return;
+        }
+        for (const Link* link : incoming->second) {
+            if (IsRenderLink(*link)) {
+                visitor(*link);
+            }
+        }
+        return;
+    }
+    for (const Link& link : m_Links) {
+        if (link.toNodeId == nodeId && IsRenderLink(link)) {
+            visitor(link);
+        }
+    }
+}
+
+void Graph::ForEachIncomingLink(
+    int nodeId,
+    const std::function<void(const Link&)>& visitor) const {
+    if (!visitor) {
+        return;
+    }
+    if (EnsureLookupCache()) {
+        const auto incoming = m_LookupCache->inputLinksByNode.find(nodeId);
+        if (incoming == m_LookupCache->inputLinksByNode.end()) {
+            return;
+        }
+        for (const Link* link : incoming->second) {
+            visitor(*link);
+        }
+        return;
+    }
+    for (const Link& link : m_Links) {
+        if (link.toNodeId == nodeId) {
+            visitor(link);
+        }
+    }
+}
+
+void Graph::ForEachOutgoingLink(
+    int nodeId,
+    const std::function<void(const Link&)>& visitor) const {
+    if (!visitor) {
+        return;
+    }
+    if (EnsureLookupCache()) {
+        const auto outgoing = m_LookupCache->outputLinksByNode.find(nodeId);
+        if (outgoing == m_LookupCache->outputLinksByNode.end()) {
+            return;
+        }
+        for (const Link* link : outgoing->second) {
+            visitor(*link);
+        }
+        return;
+    }
+    for (const Link& link : m_Links) {
+        if (link.fromNodeId == nodeId) {
+            visitor(link);
+        }
+    }
+}
+
+void Graph::ForEachOutgoingRenderLink(
+    int nodeId,
+    const std::function<void(const Link&)>& visitor) const {
+    if (!visitor) {
+        return;
+    }
+    if (EnsureLookupCache()) {
+        const auto outgoing = m_LookupCache->outputLinksByNode.find(nodeId);
+        if (outgoing == m_LookupCache->outputLinksByNode.end()) {
+            return;
+        }
+        for (const Link* link : outgoing->second) {
+            if (IsRenderLink(*link)) {
+                visitor(*link);
+            }
+        }
+        return;
+    }
+    for (const Link& link : m_Links) {
+        if (link.fromNodeId == nodeId && IsRenderLink(link)) {
+            visitor(link);
+        }
+    }
 }
 
 } // namespace EditorNodeGraph

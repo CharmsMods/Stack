@@ -1,9 +1,12 @@
 #include "Renderer/RenderPipeline.h"
+#include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -64,11 +67,32 @@ RenderPipeline::AutoGainSceneStats RenderPipeline::ComputeAutoGainSceneStats(uns
 
     const int statsWidth = std::clamp(m_Width / 32, 64, 160);
     const int statsHeight = std::clamp(m_Height / 32, 36, 120);
+    const std::size_t statsPixelCount =
+        static_cast<std::size_t>(statsWidth) *
+        static_cast<std::size_t>(statsHeight);
+    std::vector<float> pixels;
+    std::vector<float> lumas;
+    try {
+        pixels.assign(statsPixelCount * 4u, 0.0f);
+        lumas.reserve(statsPixelCount);
+    } catch (const std::bad_alloc&) {
+        return fallback;
+    } catch (const std::length_error&) {
+        return fallback;
+    }
     const unsigned int statsTexture = GLHelpers::CreateEmptyTexture(statsWidth, statsHeight);
     if (!statsTexture) {
         return fallback;
     }
     const unsigned int statsFbo = GLHelpers::CreateFBO(statsTexture);
+    if (!statsFbo) {
+        glDeleteTextures(1, &statsTexture);
+        return fallback;
+    }
+    const Stack::Renderer::GraphExecution::ScopedFramebufferState
+        savedFramebufferState(true);
+    while (glGetError() != GL_NO_ERROR) {
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, statsFbo);
     glViewport(0, 0, statsWidth, statsHeight);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -78,17 +102,27 @@ RenderPipeline::AutoGainSceneStats RenderPipeline::ComputeAutoGainSceneStats(uns
     glUniform1i(glGetUniformLocation(m_AutoGainStatsProgram, "uInputImage"), 0);
     glUniform2f(glGetUniformLocation(m_AutoGainStatsProgram, "uSourceTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
     m_Quad.Draw();
+    const bool renderOk = glGetError() == GL_NO_ERROR;
 
-    std::vector<float> pixels(static_cast<std::size_t>(statsWidth) * static_cast<std::size_t>(statsHeight) * 4u, 0.0f);
-    glReadPixels(0, 0, statsWidth, statsHeight, GL_RGBA, GL_FLOAT, pixels.data());
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    bool readbackOk = false;
+    if (renderOk) {
+        const Stack::Renderer::GLState::PixelPackState savedPackState;
+        savedPackState.ConfigureTightCpuReadback();
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        glReadPixels(0, 0, statsWidth, statsHeight, GL_RGBA, GL_FLOAT, pixels.data());
+        readbackOk = glGetError() == GL_NO_ERROR;
+        savedPackState.Restore();
+    }
+    savedFramebufferState.Restore(true);
     glUseProgram(0);
     glActiveTexture(GL_TEXTURE0);
     glDeleteFramebuffers(1, &statsFbo);
     glDeleteTextures(1, &statsTexture);
+    if (!readbackOk) {
+        return fallback;
+    }
 
-    std::vector<float> lumas;
-    lumas.reserve(pixels.size() / 4);
     float clipped = 0.0f;
     float saturated = 0.0f;
     float textureSum = 0.0f;
@@ -294,17 +328,13 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         return 0;
     }
 
-    auto renderPass = [&](unsigned int texture, const std::function<void(unsigned int)>& fn) {
-        unsigned int fbo = GLHelpers::CreateFBO(texture);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glViewport(0, 0, m_Width, m_Height);
-        glClear(GL_COLOR_BUFFER_BIT);
-        fn(fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glDeleteFramebuffers(1, &fbo);
+    const auto releaseIntermediateTextures = [&]() {
+        glDeleteTextures(1, &smoothTexture);
+        glDeleteTextures(1, &analysisTexture);
+        glDeleteTextures(1, &metricsTexture);
     };
 
-    renderPass(metricsTexture, [&](unsigned int) {
+    if (!RenderIntoGraphTargetTexture(metricsTexture, [&](unsigned int) {
         glUseProgram(m_RawDetailFusionMetricsProgram);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -318,9 +348,12 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uChannelSaturationRisk"), sceneStats.channelSaturationRatio);
         glUniform2f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
         m_Quad.Draw();
-    });
+    })) {
+        releaseIntermediateTextures();
+        return 0;
+    }
 
-    renderPass(analysisTexture, [&](unsigned int) {
+    if (!RenderIntoGraphTargetTexture(analysisTexture, [&](unsigned int) {
         glUseProgram(m_RawDetailFusionAnalysisProgram);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -356,9 +389,12 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         glUniform1f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uManualBlend"), settings.manualBlend);
         glUniform2f(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
         m_Quad.Draw();
-    });
+    })) {
+        releaseIntermediateTextures();
+        return 0;
+    }
 
-    renderPass(smoothTexture, [&](unsigned int) {
+    if (!RenderIntoGraphTargetTexture(smoothTexture, [&](unsigned int) {
         glUseProgram(m_RawDetailFusionSmoothProgram);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, analysisTexture);
@@ -377,14 +413,17 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         glUniform1f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uMaskDebandDither"), settings.maskDebandDither);
         glUniform2f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uTexelSize"), 1.0f / std::max(1, m_Width), 1.0f / std::max(1, m_Height));
         m_Quad.Draw();
-    });
+    })) {
+        releaseIntermediateTextures();
+        return 0;
+    }
 
     glUseProgram(0);
     glActiveTexture(GL_TEXTURE0);
     if (debugPreview) {
         const unsigned int previewTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
-        if (previewTexture) {
-            renderPass(previewTexture, [&](unsigned int) {
+        if (previewTexture &&
+            RenderIntoGraphTargetTexture(previewTexture, [&](unsigned int) {
                 glUseProgram(m_RawDetailFusionApplyProgram);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -405,14 +444,19 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
                 glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uDebugView"), static_cast<int>(settings.debugView));
                 glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMaskOutput"), 1);
                 m_Quad.Draw();
-            });
-            glDeleteTextures(1, &smoothTexture);
-            glDeleteTextures(1, &analysisTexture);
-            glDeleteTextures(1, &metricsTexture);
+            })) {
+            releaseIntermediateTextures();
             glUseProgram(0);
             glActiveTexture(GL_TEXTURE0);
             return previewTexture;
         }
+        if (previewTexture) {
+            glDeleteTextures(1, &previewTexture);
+        }
+        releaseIntermediateTextures();
+        glUseProgram(0);
+        glActiveTexture(GL_TEXTURE0);
+        return 0;
     }
     glDeleteTextures(1, &analysisTexture);
     glDeleteTextures(1, &metricsTexture);
@@ -433,17 +477,7 @@ unsigned int RenderPipeline::RenderRawDetailFusion(
     }
     const AutoGainSceneStats sceneStats = ComputeAutoGainSceneStats(inputTexture);
     const Raw::RawDetailFusionSettings effectiveSettings = ResolveAutoGainEffectiveSettings(inputTexture, settings);
-    auto renderPass = [&](unsigned int texture, const std::function<void(unsigned int)>& fn) {
-        unsigned int fbo = GLHelpers::CreateFBO(texture);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glViewport(0, 0, m_Width, m_Height);
-        glClear(GL_COLOR_BUFFER_BIT);
-        fn(fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glDeleteFramebuffers(1, &fbo);
-    };
-
-    renderPass(outputTexture, [&](unsigned int) {
+    if (!RenderIntoGraphTargetTexture(outputTexture, [&](unsigned int) {
         glUseProgram(m_RawDetailFusionApplyProgram);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
@@ -464,7 +498,12 @@ unsigned int RenderPipeline::RenderRawDetailFusion(
         glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uDebugView"), static_cast<int>(Raw::RawDetailFusionDebugView::FinalImage));
         glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uMaskOutput"), 0);
         m_Quad.Draw();
-    });
+    })) {
+        glDeleteTextures(1, &outputTexture);
+        glUseProgram(0);
+        glActiveTexture(GL_TEXTURE0);
+        return 0;
+    }
 
     glUseProgram(0);
     glActiveTexture(GL_TEXTURE0);

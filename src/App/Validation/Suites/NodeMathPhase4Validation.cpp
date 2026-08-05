@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,28 @@ using Stack::NodeMath::PointwiseOperation;
 using Stack::NodeMath::PointwisePixel;
 using Stack::NodeMath::PointwiseProgram;
 using Stack::NodeMath::PointwiseSourceLocation;
+
+class LegacyStateProbeLayer final : public LayerBase {
+public:
+    json Serialize() const override {
+        return json::object();
+    }
+
+    void Deserialize(const json&) override {}
+    const char* GetDefaultName() const override {
+        return "Legacy State Probe";
+    }
+    const char* GetCategory() const override {
+        return "Validation";
+    }
+    void InitializeGL() override {}
+    void Execute(
+        unsigned int,
+        int,
+        int,
+        FullscreenQuad&) override {}
+    void RenderUI() override {}
+};
 
 RenderGraphNode ImageNode(int id) {
     RenderGraphNode node;
@@ -101,8 +125,14 @@ RenderGraphSnapshot BuildArithmeticGraph(bool forceFanOut, float addValue, float
 
 std::vector<float> ReadTextureFloat(unsigned int texture, int width, int height) {
     if (texture == 0 || width <= 0 || height <= 0) return {};
-    GLint previousFbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFbo);
+    GLint previousReadFbo = 0;
+    GLint previousDrawFbo = 0;
+    GLint previousReadBuffer = 0;
+    GLint previousDrawBuffer = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFbo);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previousDrawFbo);
+    glGetIntegerv(GL_READ_BUFFER, &previousReadBuffer);
+    glGetIntegerv(GL_DRAW_BUFFER, &previousDrawBuffer);
     const unsigned int fbo = GLHelpers::CreateFBO(texture);
     if (fbo == 0) return {};
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -111,7 +141,10 @@ std::vector<float> ReadTextureFloat(unsigned int texture, int width, int height)
     while (glGetError() != GL_NO_ERROR) {}
     glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, pixels.data());
     const GLenum error = glGetError();
-    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(previousFbo));
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousReadFbo));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previousDrawFbo));
+    glReadBuffer(static_cast<GLenum>(previousReadBuffer));
+    glDrawBuffer(static_cast<GLenum>(previousDrawBuffer));
     glDeleteFramebuffers(1, &fbo);
     return error == GL_NO_ERROR ? pixels : std::vector<float>{};
 }
@@ -186,6 +219,753 @@ bool Check(bool condition, const std::string& message) {
     return condition;
 }
 
+bool ValidateExactDefinitionCacheInvalidation(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height) {
+    bool ok = true;
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+
+        RenderGraphNode generator;
+        generator.nodeId = 1;
+        generator.kind = RenderGraphNodeKind::ImageGenerator;
+        generator.definitionId = "stack:test/image-generator";
+        generator.definitionVersion = "1.0.0";
+        generator.definitionHash = "image-v1";
+        generator.imageGeneratorKind = RenderImageGeneratorKind::SolidColor;
+
+        RenderGraphSnapshot graph;
+        graph.outputNodeId = generator.nodeId;
+        graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+        graph.executionInspectionEnabled = true;
+        graph.nodes = { generator };
+
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().imageCacheMisses > 0,
+            "first exact-definition image evaluation did not populate the persistent cache");
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().imageCacheHits > 0,
+            "unchanged exact-definition image evaluation did not reuse the persistent cache");
+
+        graph.nodes.front().definitionHash = "image-v2";
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().imageCacheMisses > 0 &&
+                pipeline.GetLastGraphExecutionStats().imageCacheHits == 0,
+            "changed exact-definition image identity reused stale cached pixels");
+    }
+
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+
+        RenderGraphNode generator;
+        generator.nodeId = 1;
+        generator.kind = RenderGraphNodeKind::MaskGenerator;
+        generator.definitionId = "stack:test/mask-generator";
+        generator.definitionVersion = "1.0.0";
+        generator.definitionHash = "mask-v1";
+        generator.maskKind = RenderMaskGeneratorKind::Solid;
+        generator.maskSettings.value = 0.5f;
+
+        RenderGraphSnapshot graph;
+        graph.outputNodeId = generator.nodeId;
+        graph.outputSocketId = EditorNodeGraph::kMaskOutputSocketId;
+        graph.executionInspectionEnabled = true;
+        graph.nodes = { generator };
+
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().maskCacheMisses > 0,
+            "first exact-definition mask evaluation did not populate the persistent cache");
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().maskCacheHits > 0,
+            "unchanged exact-definition mask evaluation did not reuse the persistent cache");
+
+        graph.nodes.front().definitionHash = "mask-v2";
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().maskCacheMisses > 0 &&
+                pipeline.GetLastGraphExecutionStats().maskCacheHits == 0,
+            "changed exact-definition mask identity reused stale cached pixels");
+    }
+    return ok;
+}
+
+bool ValidateTransientTargetPoolBounds(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height) {
+    RenderPipeline pipeline;
+    pipeline.Initialize();
+    pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+
+    RenderGraphSnapshot graph;
+    graph.outputNodeId = 5;
+    graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+    graph.executionInspectionEnabled = true;
+    graph.nodes = {
+        ImageNode(1),
+        ImageNode(2),
+        {},
+        {},
+        DataMathNode(5, RenderDataMathMode::Average, 1.0f)
+    };
+    graph.nodes[2].nodeId = 3;
+    graph.nodes[2].kind = RenderGraphNodeKind::Reformat;
+    graph.nodes[2].definitionId = "stack:test/reformat-a";
+    graph.nodes[3].nodeId = 4;
+    graph.nodes[3].kind = RenderGraphNodeKind::Reformat;
+    graph.nodes[3].definitionId = "stack:test/reformat-b";
+    graph.links = {
+        Link(1, EditorNodeGraph::kImageOutputSocketId, 3, EditorNodeGraph::kImageInputSocketId),
+        Link(2, EditorNodeGraph::kImageOutputSocketId, 4, EditorNodeGraph::kImageInputSocketId),
+        Link(3, EditorNodeGraph::kImageOutputSocketId, 5, EditorNodeGraph::DataMathInputSocketId(0).c_str()),
+        Link(4, EditorNodeGraph::kImageOutputSocketId, 5, EditorNodeGraph::DataMathInputSocketId(1).c_str())
+    };
+
+    bool observedEviction = false;
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        const int outputWidth = 8 + iteration;
+        const int outputHeight = 2 + iteration;
+        graph.nodes[2].reformatSettings.width = outputWidth;
+        graph.nodes[2].reformatSettings.height = outputHeight;
+        graph.nodes[3].reformatSettings.width = outputWidth;
+        graph.nodes[3].reformatSettings.height = outputHeight;
+        pipeline.ExecuteGraph(graph);
+        observedEviction |=
+            pipeline.GetLastGraphExecutionStats().transientTargetEvictions > 0;
+    }
+
+    bool ok = Check(
+        observedEviction,
+        "multi-resolution transient target pool grew without evicting stale dimensions");
+    graph.nodes[4].dataMathSettings.constantA = 0.125f;
+    pipeline.ExecuteGraph(graph);
+    const GraphExecutionStats reuseStats = pipeline.GetLastGraphExecutionStats();
+    ok &= Check(
+        reuseStats.transientTargetReuses > 0,
+        "transient target trimming discarded the most-recent reusable dimension");
+    ok &= Check(
+        reuseStats.transientPoolBytes <= reuseStats.transientPoolBudgetBytes,
+        "transient target pool remained above its byte budget after execution");
+    return ok;
+}
+
+bool ValidateStableSourceExtentAcrossReformat(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height) {
+    RenderPipeline pipeline;
+    pipeline.Initialize();
+    pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+
+    RenderGraphNode reformat;
+    reformat.nodeId = 2;
+    reformat.kind = RenderGraphNodeKind::Reformat;
+    reformat.definitionId = "stack:test/stable-source-reformat";
+    reformat.reformatSettings.width = 7;
+    reformat.reformatSettings.height = 3;
+
+    RenderGraphSnapshot graph;
+    graph.outputNodeId = 3;
+    graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+    graph.executionInspectionEnabled = true;
+    graph.nodes = { ImageNode(1), reformat, OutputNode(3) };
+    graph.links = {
+        Link(1, EditorNodeGraph::kImageOutputSocketId, 2, EditorNodeGraph::kImageInputSocketId),
+        Link(2, EditorNodeGraph::kImageOutputSocketId, 3, EditorNodeGraph::kImageInputSocketId)
+    };
+
+    pipeline.ExecuteGraph(graph);
+    const std::vector<float> first =
+        ReadTextureFloat(pipeline.GetOutputTexture(), 7, 3);
+    pipeline.ExecuteGraph(graph);
+    const GraphExecutionStats directRepeatStats =
+        pipeline.GetLastGraphExecutionStats();
+    const std::vector<float> directRepeat =
+        ReadTextureFloat(pipeline.GetOutputTexture(), 7, 3);
+
+    bool ok = Check(
+        pipeline.GetCanvasWidth() == 7 &&
+            pipeline.GetCanvasHeight() == 3 &&
+            first.size() == 7u * 3u * 4u &&
+            MaximumDifference(first, directRepeat) <= 1.0e-6,
+        "repeated Reformat execution inherited the prior output extent as its source extent");
+    ok &= Check(
+        directRepeatStats.imageCacheHits > 0,
+        "stable repeated Reformat execution invalidated its unchanged image cache");
+
+    pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+    pipeline.ExecuteGraph(graph);
+    const GraphExecutionStats reloadedStats =
+        pipeline.GetLastGraphExecutionStats();
+    const std::vector<float> afterUnchangedLoad =
+        ReadTextureFloat(pipeline.GetOutputTexture(), 7, 3);
+    ok &= Check(
+        reloadedStats.imageCacheHits > 0 &&
+            MaximumDifference(first, afterUnchangedLoad) <= 1.0e-6,
+        "unchanged source reload after Reformat re-uploaded the source or invalidated graph caches");
+
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    const std::vector<unsigned char> source =
+        pipeline.GetSourcePixels(sourceWidth, sourceHeight);
+    int compareWidth = 0;
+    int compareHeight = 0;
+    const std::vector<unsigned char> compare =
+        pipeline.GetCompareSourcePixels(compareWidth, compareHeight);
+    ok &= Check(
+        sourceWidth == width &&
+            sourceHeight == height &&
+            source.size() == pixels.size(),
+        "source readback used the reformatted output extent");
+    ok &= Check(
+        compareWidth == width &&
+            compareHeight == height &&
+            compare.size() == pixels.size(),
+        "compare-source readback used the reformatted output extent");
+    return ok;
+}
+
+bool ValidateInterleavedTextureUploads() {
+    GLint originalUnpackAlignment = 4;
+    GLint originalUnpackRowLength = 0;
+    GLint originalUnpackSkipRows = 0;
+    GLint originalUnpackSkipPixels = 0;
+    GLint originalUnpackBuffer = 0;
+    GLint originalTextureBinding = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &originalUnpackAlignment);
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &originalUnpackRowLength);
+    glGetIntegerv(GL_UNPACK_SKIP_ROWS, &originalUnpackSkipRows);
+    glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &originalUnpackSkipPixels);
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &originalUnpackBuffer);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &originalTextureBinding);
+
+    unsigned int sentinelTexture = 0;
+    unsigned int sentinelUnpackBuffer = 0;
+    glGenTextures(1, &sentinelTexture);
+    glBindTexture(GL_TEXTURE_2D, sentinelTexture);
+    glGenBuffers(1, &sentinelUnpackBuffer);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, sentinelUnpackBuffer);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, 4, nullptr, GL_STATIC_DRAW);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 7);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 2);
+
+    const std::vector<unsigned char> rgPixels {
+        10, 20, 30, 40, 50, 60,
+        70, 80, 90, 100, 110, 120
+    };
+    const unsigned int rgTexture =
+        GLHelpers::CreateTextureFromPixels(rgPixels.data(), 3, 2, 2);
+    GLint restoredTextureBinding = 0;
+    GLint restoredUnpackBuffer = 0;
+    GLint restoredUnpackRowLength = 0;
+    GLint restoredUnpackSkipRows = 0;
+    GLint restoredUnpackSkipPixels = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &restoredTextureBinding);
+    glGetIntegerv(
+        GL_PIXEL_UNPACK_BUFFER_BINDING, &restoredUnpackBuffer);
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &restoredUnpackRowLength);
+    glGetIntegerv(GL_UNPACK_SKIP_ROWS, &restoredUnpackSkipRows);
+    glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &restoredUnpackSkipPixels);
+    const std::vector<float> uploadedRg =
+        ReadTextureFloat(rgTexture, 3, 2);
+    GLint restoredUnpackAlignment = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &restoredUnpackAlignment);
+
+    bool ok = true;
+    ok &= Check(
+        rgTexture != 0 && uploadedRg.size() == 24,
+        "two-channel texture upload did not produce a readable RGBA texture");
+    if (uploadedRg.size() == 24) {
+        for (std::size_t pixel = 0; pixel < 6; ++pixel) {
+            const std::size_t source = pixel * 2;
+            const std::size_t uploaded = pixel * 4;
+            ok &= Check(
+                std::abs(uploadedRg[uploaded + 0] -
+                         rgPixels[source + 0] / 255.0f) <= 1.0e-4f &&
+                    std::abs(uploadedRg[uploaded + 1] -
+                             rgPixels[source + 1] / 255.0f) <= 1.0e-4f &&
+                    std::abs(uploadedRg[uploaded + 2]) <= 1.0e-4f &&
+                    std::abs(uploadedRg[uploaded + 3] - 1.0f) <= 1.0e-4f,
+                "two-channel texture upload changed RG values or implicit BA defaults");
+        }
+    }
+    ok &= Check(
+        restoredUnpackAlignment == 8 &&
+            restoredUnpackRowLength == 7 &&
+            restoredUnpackSkipRows == 1 &&
+            restoredUnpackSkipPixels == 2 &&
+            restoredUnpackBuffer ==
+                static_cast<GLint>(sentinelUnpackBuffer) &&
+            restoredTextureBinding ==
+                static_cast<GLint>(sentinelTexture),
+        "texture upload did not restore caller texture/unpack state");
+    if (rgTexture != 0) {
+        glDeleteTextures(1, &rgTexture);
+    }
+
+    const std::vector<unsigned char> rgbPixels {
+        5, 10, 15, 20, 25, 30, 35, 40, 45,
+        50, 55, 60, 65, 70, 75, 80, 85, 90
+    };
+    const unsigned int rgbTexture =
+        GLHelpers::CreateTextureFromPixels(rgbPixels.data(), 3, 2, 3);
+    const std::vector<float> uploadedRgb =
+        ReadTextureFloat(rgbTexture, 3, 2);
+    ok &= Check(
+        rgbTexture != 0 && uploadedRgb.size() == 24,
+        "odd-row RGB texture upload did not produce a readable RGBA texture");
+    if (uploadedRgb.size() == 24) {
+        for (std::size_t pixel = 0; pixel < 6; ++pixel) {
+            const std::size_t source = pixel * 3;
+            const std::size_t uploaded = pixel * 4;
+            ok &= Check(
+                std::abs(uploadedRgb[uploaded + 0] -
+                         rgbPixels[source + 0] / 255.0f) <= 1.0e-4f &&
+                    std::abs(uploadedRgb[uploaded + 1] -
+                             rgbPixels[source + 1] / 255.0f) <= 1.0e-4f &&
+                    std::abs(uploadedRgb[uploaded + 2] -
+                             rgbPixels[source + 2] / 255.0f) <= 1.0e-4f &&
+                    std::abs(uploadedRgb[uploaded + 3] - 1.0f) <= 1.0e-4f,
+                "odd-row RGB texture upload used incorrect row alignment");
+        }
+    }
+    if (rgbTexture != 0) {
+        glDeleteTextures(1, &rgbTexture);
+    }
+
+    ok &= Check(
+        GLHelpers::CreateTextureFromPixels(rgbPixels.data(), 3, 2, 5) == 0,
+        "unsupported channel count should fail before creating a texture");
+    ok &= Check(
+        GLHelpers::CreateEmptyTexture(0, 2) == 0,
+        "invalid texture dimensions should fail before allocation");
+    glPixelStorei(GL_UNPACK_ALIGNMENT, originalUnpackAlignment);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, originalUnpackRowLength);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, originalUnpackSkipRows);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, originalUnpackSkipPixels);
+    glBindBuffer(
+        GL_PIXEL_UNPACK_BUFFER,
+        static_cast<GLuint>(originalUnpackBuffer));
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(originalTextureBinding));
+    if (sentinelUnpackBuffer != 0) {
+        glDeleteBuffers(1, &sentinelUnpackBuffer);
+    }
+    if (sentinelTexture != 0) {
+        glDeleteTextures(1, &sentinelTexture);
+    }
+    return ok;
+}
+
+bool ValidateFramebufferStatePreservation() {
+    GLint originalPackAlignment = 4;
+    GLint originalPackRowLength = 0;
+    GLint originalPackSkipRows = 0;
+    GLint originalPackSkipPixels = 0;
+    GLint originalPackBuffer = 0;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &originalPackAlignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &originalPackRowLength);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &originalPackSkipRows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &originalPackSkipPixels);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &originalPackBuffer);
+
+    const unsigned int readTexture = GLHelpers::CreateEmptyTexture(2, 2);
+    const unsigned int drawTexture = GLHelpers::CreateEmptyTexture(2, 2);
+    const unsigned int readFbo = GLHelpers::CreateFBO(readTexture);
+    const unsigned int drawFbo = GLHelpers::CreateFBO(drawTexture);
+    if (readTexture == 0 || drawTexture == 0 ||
+        readFbo == 0 || drawFbo == 0) {
+        if (readFbo != 0) glDeleteFramebuffers(1, &readFbo);
+        if (drawFbo != 0) glDeleteFramebuffers(1, &drawFbo);
+        if (readTexture != 0) glDeleteTextures(1, &readTexture);
+        if (drawTexture != 0) glDeleteTextures(1, &drawTexture);
+        return Check(false, "could not allocate split framebuffer-state fixtures");
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+    const unsigned int scratchTexture = GLHelpers::CreateEmptyTexture(1, 1);
+    const unsigned int scratchFbo = GLHelpers::CreateFBO(scratchTexture);
+    GLint restoredReadFbo = 0;
+    GLint restoredDrawFbo = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &restoredReadFbo);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restoredDrawFbo);
+    bool ok = Check(
+        scratchTexture != 0 && scratchFbo != 0 &&
+            restoredReadFbo == static_cast<GLint>(readFbo) &&
+            restoredDrawFbo == static_cast<GLint>(drawFbo),
+        "framebuffer helper collapsed distinct caller read/draw bindings");
+
+    const std::vector<unsigned char> pixels {
+        10, 20, 30, 255,
+        40, 50, 60, 255,
+        70, 80, 90, 255,
+        100, 110, 120, 255
+    };
+    unsigned int sentinelPackBuffer = 0;
+    glGenBuffers(1, &sentinelPackBuffer);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, sentinelPackBuffer);
+    glBufferData(GL_PIXEL_PACK_BUFFER, 4, nullptr, GL_STATIC_DRAW);
+    glPixelStorei(GL_PACK_ALIGNMENT, 8);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 9);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 1);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
+    const GLboolean originalScissor = glIsEnabled(GL_SCISSOR_TEST);
+    const GLboolean originalDepth = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean originalStencil = glIsEnabled(GL_STENCIL_TEST);
+    const GLboolean originalBlend = glIsEnabled(GL_BLEND);
+    GLint originalViewport[4] = { 0, 0, 0, 0 };
+    glGetIntegerv(GL_VIEWPORT, originalViewport);
+    glEnable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_STENCIL_TEST);
+    glDisable(GL_BLEND);
+    glViewport(3, 5, 17, 19);
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        pipeline.LoadSourceFromPixels(pixels.data(), 2, 2, 4);
+        RenderGraphSnapshot sourceGraph;
+        sourceGraph.outputNodeId = 2;
+        sourceGraph.outputSocketId =
+            EditorNodeGraph::kImageOutputSocketId;
+        sourceGraph.nodes = { ImageNode(1), OutputNode(2) };
+        sourceGraph.links = {
+            Link(
+                1,
+                EditorNodeGraph::kImageOutputSocketId,
+                2,
+                EditorNodeGraph::kImageInputSocketId)
+        };
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
+        pipeline.ExecuteGraph(sourceGraph);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &restoredReadFbo);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restoredDrawFbo);
+        ok &= Check(
+            restoredReadFbo == static_cast<GLint>(readFbo) &&
+                restoredDrawFbo == static_cast<GLint>(drawFbo),
+            "graph execution collapsed distinct caller read/draw bindings");
+        ok &= Check(
+            glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE &&
+                glIsEnabled(GL_DEPTH_TEST) == GL_FALSE &&
+                glIsEnabled(GL_STENCIL_TEST) == GL_TRUE &&
+                glIsEnabled(GL_BLEND) == GL_FALSE,
+            "graph execution did not restore caller fixed-function enable state");
+        GLint restoredViewport[4] = { 0, 0, 0, 0 };
+        glGetIntegerv(GL_VIEWPORT, restoredViewport);
+        ok &= Check(
+            restoredViewport[0] == 3 &&
+                restoredViewport[1] == 5 &&
+                restoredViewport[2] == 17 &&
+                restoredViewport[3] == 19,
+            "graph execution did not restore the caller viewport");
+
+        std::vector<std::shared_ptr<LayerBase>> legacyLayers {
+            nullptr,
+            std::make_shared<LegacyStateProbeLayer>()
+        };
+        pipeline.Execute(legacyLayers);
+        GLint restoredReadBuffer = 0;
+        GLint restoredDrawBuffer = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &restoredReadFbo);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restoredDrawFbo);
+        glGetIntegerv(GL_READ_BUFFER, &restoredReadBuffer);
+        glGetIntegerv(GL_DRAW_BUFFER, &restoredDrawBuffer);
+        glGetIntegerv(GL_VIEWPORT, restoredViewport);
+        ok &= Check(
+            restoredReadFbo == static_cast<GLint>(readFbo) &&
+                restoredDrawFbo == static_cast<GLint>(drawFbo) &&
+                restoredReadBuffer == GL_COLOR_ATTACHMENT0 &&
+                restoredDrawBuffer == GL_COLOR_ATTACHMENT0,
+            "legacy layer execution collapsed distinct caller framebuffer state");
+        ok &= Check(
+            glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE &&
+                glIsEnabled(GL_DEPTH_TEST) == GL_FALSE &&
+                glIsEnabled(GL_STENCIL_TEST) == GL_TRUE &&
+                glIsEnabled(GL_BLEND) == GL_FALSE,
+            "legacy layer execution did not restore caller fixed-function enable state");
+        ok &= Check(
+            restoredViewport[0] == 3 &&
+                restoredViewport[1] == 5 &&
+                restoredViewport[2] == 17 &&
+                restoredViewport[3] == 19,
+            "legacy layer execution did not restore the caller viewport");
+
+        int outputWidth = 0;
+        int outputHeight = 0;
+        const std::vector<unsigned char> output =
+            pipeline.GetOutputPixels(outputWidth, outputHeight);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &restoredReadFbo);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restoredDrawFbo);
+        GLint restoredPackAlignment = 0;
+        GLint restoredPackRowLength = 0;
+        GLint restoredPackSkipRows = 0;
+        GLint restoredPackSkipPixels = 0;
+        GLint restoredPackBuffer = 0;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &restoredPackAlignment);
+        glGetIntegerv(GL_PACK_ROW_LENGTH, &restoredPackRowLength);
+        glGetIntegerv(GL_PACK_SKIP_ROWS, &restoredPackSkipRows);
+        glGetIntegerv(GL_PACK_SKIP_PIXELS, &restoredPackSkipPixels);
+        glGetIntegerv(
+            GL_PIXEL_PACK_BUFFER_BINDING, &restoredPackBuffer);
+        ok &= Check(
+            output.size() == 16 &&
+                outputWidth == 2 &&
+                outputHeight == 2,
+            "texture readback did not return the expected 2x2 RGBA image");
+        ok &= Check(
+            restoredReadFbo == static_cast<GLint>(readFbo) &&
+                restoredDrawFbo == static_cast<GLint>(drawFbo),
+            "texture readback collapsed distinct caller read/draw bindings");
+        ok &= Check(
+            restoredPackAlignment == 8 &&
+                restoredPackRowLength == 9 &&
+                restoredPackSkipRows == 1 &&
+                restoredPackSkipPixels == 2 &&
+                restoredPackBuffer ==
+                    static_cast<GLint>(sentinelPackBuffer),
+            "texture readback did not restore caller pixel-pack state");
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, originalPackAlignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, originalPackRowLength);
+    glPixelStorei(GL_PACK_SKIP_ROWS, originalPackSkipRows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, originalPackSkipPixels);
+    glBindBuffer(
+        GL_PIXEL_PACK_BUFFER,
+        static_cast<GLuint>(originalPackBuffer));
+    if (originalScissor == GL_TRUE) glEnable(GL_SCISSOR_TEST);
+    else glDisable(GL_SCISSOR_TEST);
+    if (originalDepth == GL_TRUE) glEnable(GL_DEPTH_TEST);
+    else glDisable(GL_DEPTH_TEST);
+    if (originalStencil == GL_TRUE) glEnable(GL_STENCIL_TEST);
+    else glDisable(GL_STENCIL_TEST);
+    if (originalBlend == GL_TRUE) glEnable(GL_BLEND);
+    else glDisable(GL_BLEND);
+    glViewport(
+        originalViewport[0],
+        originalViewport[1],
+        originalViewport[2],
+        originalViewport[3]);
+    if (sentinelPackBuffer != 0) {
+        glDeleteBuffers(1, &sentinelPackBuffer);
+    }
+    if (scratchFbo != 0) glDeleteFramebuffers(1, &scratchFbo);
+    if (scratchTexture != 0) glDeleteTextures(1, &scratchTexture);
+    glDeleteFramebuffers(1, &readFbo);
+    glDeleteFramebuffers(1, &drawFbo);
+    glDeleteTextures(1, &readTexture);
+    glDeleteTextures(1, &drawTexture);
+    return ok;
+}
+
+bool ValidateLutTextureUploadSafety() {
+    constexpr int width = 2;
+    constexpr int height = 2;
+    const std::vector<unsigned char> pixels {
+        32, 64, 96, 255,
+        220, 180, 140, 192,
+        10, 120, 240, 128,
+        250, 30, 80, 64
+    };
+
+    RenderGraphNode lutNode;
+    lutNode.nodeId = 2;
+    lutNode.kind = RenderGraphNodeKind::Lut;
+    lutNode.definitionId = "stack:graph/lut/validation";
+    constexpr int lutEdge = 17;
+    lutNode.lut.lut3D.size = lutEdge;
+    lutNode.lut.lut3D.values.reserve(
+        static_cast<std::size_t>(lutEdge) *
+        static_cast<std::size_t>(lutEdge) *
+        static_cast<std::size_t>(lutEdge) * 3u);
+    for (int z = 0; z < lutEdge; ++z) {
+        for (int y = 0; y < lutEdge; ++y) {
+            for (int x = 0; x < lutEdge; ++x) {
+                lutNode.lut.lut3D.values.push_back(
+                    1.0f - static_cast<float>(x) /
+                        static_cast<float>(lutEdge - 1));
+                lutNode.lut.lut3D.values.push_back(
+                    1.0f - static_cast<float>(y) /
+                        static_cast<float>(lutEdge - 1));
+                lutNode.lut.lut3D.values.push_back(
+                    1.0f - static_cast<float>(z) /
+                        static_cast<float>(lutEdge - 1));
+            }
+        }
+    }
+
+    RenderGraphSnapshot graph;
+    graph.outputNodeId = 3;
+    graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+    graph.nodes = { ImageNode(1), lutNode, OutputNode(3) };
+    graph.links = {
+        Link(
+            1, EditorNodeGraph::kImageOutputSocketId,
+            2, EditorNodeGraph::kImageInputSocketId),
+        Link(
+            2, EditorNodeGraph::kImageOutputSocketId,
+            3, EditorNodeGraph::kImageInputSocketId)
+    };
+
+    GLint originalUnpackBuffer = 0;
+    glGetIntegerv(
+        GL_PIXEL_UNPACK_BUFFER_BINDING, &originalUnpackBuffer);
+    unsigned int sentinelUnpackBuffer = 0;
+    glGenBuffers(1, &sentinelUnpackBuffer);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, sentinelUnpackBuffer);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, 4, nullptr, GL_STATIC_DRAW);
+
+    bool ok = true;
+    {
+        RenderPipeline pipeline;
+        pipeline.Initialize();
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        pipeline.LoadSourceFromPixels(
+            pixels.data(), width, height, 4);
+        glBindBuffer(
+            GL_PIXEL_UNPACK_BUFFER, sentinelUnpackBuffer);
+        pipeline.ExecuteGraph(graph);
+        const std::uint64_t expectedLutTextureBytes =
+            static_cast<std::uint64_t>(lutEdge) *
+            static_cast<std::uint64_t>(lutEdge) *
+            static_cast<std::uint64_t>(lutEdge) * 3u * sizeof(float);
+        const std::uint64_t expectedOutputTextureBytes =
+            static_cast<std::uint64_t>(width) *
+            static_cast<std::uint64_t>(height) * 4u * sizeof(std::uint16_t);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().persistentCacheBytes >=
+                expectedLutTextureBytes + expectedOutputTextureBytes,
+            "persistent graph budget omitted the uploaded 3D LUT texture");
+        const std::vector<float> inverted =
+            ReadTextureFloat(pipeline.GetOutputTexture(), width, height);
+        GLint restoredUnpackBuffer = 0;
+        glGetIntegerv(
+            GL_PIXEL_UNPACK_BUFFER_BINDING, &restoredUnpackBuffer);
+        ok &= Check(
+            inverted.size() == pixels.size(),
+            "valid 3D LUT did not produce a readable output");
+        if (inverted.size() == pixels.size()) {
+            for (std::size_t pixel = 0;
+                 pixel < pixels.size() / 4u;
+                 ++pixel) {
+                const std::size_t offset = pixel * 4u;
+                const bool transformedAsAuthored =
+                    std::abs(
+                        inverted[offset + 0] -
+                        (1.0f - pixels[offset + 0] / 255.0f)) <= 0.003f &&
+                    std::abs(
+                        inverted[offset + 1] -
+                        (1.0f - pixels[offset + 1] / 255.0f)) <= 0.003f &&
+                    std::abs(
+                        inverted[offset + 2] -
+                        (1.0f - pixels[offset + 2] / 255.0f)) <= 0.003f &&
+                    std::abs(
+                        inverted[offset + 3] -
+                        pixels[offset + 3] / 255.0f) <= 0.003f;
+                ok &= Check(
+                    transformedAsAuthored,
+                    "3D LUT upload or interpolation changed its authored transform at pixel " +
+                        std::to_string(pixel) + ": got (" +
+                        std::to_string(inverted[offset + 0]) + ", " +
+                        std::to_string(inverted[offset + 1]) + ", " +
+                        std::to_string(inverted[offset + 2]) + ", " +
+                        std::to_string(inverted[offset + 3]) + ")");
+            }
+        }
+        ok &= Check(
+            restoredUnpackBuffer ==
+                static_cast<GLint>(sentinelUnpackBuffer),
+            "3D LUT upload did not restore caller pixel-unpack state");
+
+        graph.nodes[1].lut.lut3D.values[0] =
+            std::numeric_limits<float>::quiet_NaN();
+        pipeline.ExecuteGraph(graph);
+        ok &= Check(
+            pipeline.GetLastGraphExecutionStats().persistentCacheBytes == 0,
+            "malformed LUT replacement retained stale persistent GPU resources");
+        const std::vector<float> rejected =
+            ReadTextureFloat(pipeline.GetOutputTexture(), width, height);
+        ok &= Check(
+            rejected.size() == pixels.size(),
+            "malformed LUT fallback did not produce a readable output");
+        if (rejected.size() == pixels.size()) {
+            for (std::size_t index = 0; index < pixels.size(); ++index) {
+                ok &= Check(
+                    std::abs(
+                        rejected[index] -
+                        pixels[index] / 255.0f) <= 0.003f,
+                    "non-finite LUT values should fail closed to an image passthrough");
+            }
+        }
+    }
+
+    glBindBuffer(
+        GL_PIXEL_UNPACK_BUFFER,
+        static_cast<GLuint>(originalUnpackBuffer));
+    if (sentinelUnpackBuffer != 0) {
+        glDeleteBuffers(1, &sentinelUnpackBuffer);
+    }
+    return ok;
+}
+
+bool ValidateGraphExceptionBoundary(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height) {
+    RenderPipeline pipeline;
+    pipeline.Initialize();
+    pipeline.LoadSourceFromPixels(pixels.data(), width, height, 4);
+
+    RenderGraphNode malformedLayer;
+    malformedLayer.nodeId = 2;
+    malformedLayer.kind = RenderGraphNodeKind::Layer;
+    malformedLayer.definitionId = "stack:graph/layer/malformed-validation";
+    malformedLayer.layerJson = {
+        { "type", 42 }
+    };
+
+    RenderGraphSnapshot graph;
+    graph.outputNodeId = 3;
+    graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+    graph.nodes = { ImageNode(1), std::move(malformedLayer), OutputNode(3) };
+    graph.links = {
+        Link(1, EditorNodeGraph::kImageOutputSocketId, 2, EditorNodeGraph::kImageInputSocketId),
+        Link(2, EditorNodeGraph::kImageOutputSocketId, 3, EditorNodeGraph::kImageInputSocketId)
+    };
+
+    pipeline.ExecuteGraph(graph);
+    const GraphExecutionStats& stats =
+        pipeline.GetLastGraphExecutionStats();
+    bool ok = Check(
+        pipeline.GetOutputTexture() == 0,
+        "malformed graph data published an unprocessed or partial output");
+    ok &= Check(
+        !stats.allocationFailed &&
+            stats.lastSpecializedFailureNodeId == graph.outputNodeId &&
+            !stats.lastSpecializedFailure.empty(),
+        "malformed graph data did not report a contained execution failure");
+    return ok;
+}
+
 bool RunValidationWithContext() {
     const std::vector<unsigned char> pixels {
         64, 32, 16, 128,
@@ -199,7 +979,13 @@ bool RunValidationWithContext() {
     constexpr float multiplyValue = 2.0f;
     constexpr double rgba16fTolerance = 2.5e-3;
 
-    bool ok = true;
+    bool ok = ValidateInterleavedTextureUploads();
+    ok &= ValidateFramebufferStatePreservation();
+    ok &= ValidateLutTextureUploadSafety();
+    ok &= ValidateExactDefinitionCacheInvalidation(pixels, width, height);
+    ok &= ValidateTransientTargetPoolBounds(pixels, width, height);
+    ok &= ValidateStableSourceExtentAcrossReformat(pixels, width, height);
+    ok &= ValidateGraphExceptionBoundary(pixels, width, height);
     std::vector<float> fusedPixels;
     GraphExecutionStats fusedStats;
     {

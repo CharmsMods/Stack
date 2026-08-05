@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace Stack::Validation {
@@ -8,6 +9,35 @@ bool ValidateToneCurveAutoIntegration();
 bool ValidateNodeMathPhase4Integration();
 bool ValidateNodeMathPhase5Integration();
 bool ValidateNodeMathPhase6Integration();
+bool ValidateEditorGraphTransactions();
+bool ValidateMultiSourceProjectFoundation();
+bool ValidateMfdProjectFoundation();
+bool ValidateMfdPhase0Contracts();
+bool ValidateMfdPhase1Preparation();
+bool ValidateMfdPhase2NoiseModel();
+bool ValidateMfdPhase3SameCfaSampler();
+bool ValidateMfdPhase4GlobalRegistration();
+bool ValidateMfdPhase5LocalMotion();
+bool ValidateMfdPhase6Reliability();
+bool ValidateMfdPhase7Fusion();
+bool ValidateMfdPhase8Streaming();
+bool ValidateMfdPhase9Evaluation(int argc, char** argv);
+bool ValidateMfdCorpusIntake();
+bool WriteMfdCorpusIntakeTemplate(
+    const std::string& outputPath,
+    std::string* errorMessage = nullptr);
+bool LockMfdCorpusDefinition(
+    const std::string& definitionPath,
+    const std::string& outputPath,
+    std::string* errorMessage = nullptr);
+bool RunMfdCorpusEntry(
+    const std::string& definitionPath,
+    const std::string& sampleId,
+    const std::string& outputDirectory,
+    std::uint64_t memoryBudgetBytes,
+    std::uint32_t workerCount,
+    std::string* errorMessage = nullptr);
+bool ValidateMfdEndToEndProcessor();
 bool WriteNodeSocketCatalog(const std::string& outputPath, std::string* errorMessage = nullptr);
 bool ValidateDevelopAutoSolveBehavior();
 bool ValidateDevelopNodeSmoke();

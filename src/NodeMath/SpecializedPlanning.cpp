@@ -58,7 +58,7 @@ SpecializedStagePlan PlanSpecializedStage(SpecializedStageKind kind) {
             break;
         case SpecializedStageKind::FrequencyTransform:
             plan.capability = CapabilityClass::MultipassIterative;
-            plan.inputType = LogicalValueType::DataImage;
+            plan.inputType = LogicalValueType::Channel;
             plan.outputType = LogicalValueType::ComplexSpectrum;
             plan.scalePolicy = RenderScalePolicy::ExactRequested;
             plan.cancellation = CancellationPolicy::BetweenStages;
@@ -67,7 +67,7 @@ SpecializedStagePlan PlanSpecializedStage(SpecializedStageKind kind) {
         case SpecializedStageKind::FrequencyInverseTransform:
             plan.capability = CapabilityClass::MultipassIterative;
             plan.inputType = LogicalValueType::ComplexSpectrum;
-            plan.outputType = LogicalValueType::DataImage;
+            plan.outputType = LogicalValueType::Channel;
             plan.scalePolicy = RenderScalePolicy::ExactRequested;
             plan.cancellation = CancellationPolicy::BetweenStages;
             plan.reason = "Inverse FFT is a global multipass transform and cannot consume independent tiles.";

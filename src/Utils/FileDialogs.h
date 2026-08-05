@@ -38,7 +38,12 @@ std::string SaveRenderSceneFileDialog(const char* title = "Save Render Scene Sna
 std::string OpenRenderGltfFileDialog(const char* title = "Import glTF Scene");
 std::string OpenWebProjectFileDialog(const char* title = "Import Web Project (.mns.json)");
 std::string OpenProjectFileDialog(const char* title = "Load Project (.stack/.comp)");
+// Opens portable .stack projects directly. Directory bundles are represented by
+// their project.stackmanifest file and normalized to the bundle directory by the
+// application command dispatcher.
+std::string OpenStackProjectFileDialog(const char* title = "Open Stack Project");
 std::string SaveProjectFileDialog(const char* title = "Save Project (.stack)", const char* defaultFileName = "project.stack");
+std::string SaveProjectBundleDialog(const char* title = "Save Project Bundle (.stackbundle)", const char* defaultFileName = "project.stackbundle");
 std::string OpenThemePresetFileDialog(const char* title = "Import Theme Preset");
 std::string SaveThemePresetFileDialog(const char* title = "Export Theme Preset", const char* defaultFileName = "theme_preset.stacktheme.json");
 std::string OpenFolderDialog(const char* title = "Select Folder");

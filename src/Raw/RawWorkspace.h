@@ -112,6 +112,32 @@ struct ProjectInfo {
     std::string errorMessage;
 };
 
+struct SourceSetProjectMembership {
+    std::string projectId;
+    std::string projectName;
+    std::filesystem::path projectPath;
+    std::string sourceSetId;
+    std::string sourceSetName;
+};
+
+struct SourceSetProjectCatalogEntry {
+    std::string projectId;
+    std::string projectName;
+    std::filesystem::path absolutePath;
+    std::filesystem::path relativePath;
+    Stack::Project::ProjectStorageKind storageKind =
+        Stack::Project::ProjectStorageKind::DirectoryBundle;
+    ProjectStatus status = ProjectStatus::Unknown;
+    bool readOnlyRecovery = false;
+    bool dirty = false;
+    bool conflict = false;
+    std::uint64_t sourceSetCount = 0;
+    std::uint64_t totalFrameCount = 0;
+    std::uint64_t rawSetCount = 0;
+    std::uint64_t rasterSetCount = 0;
+    std::string errorMessage;
+};
+
 struct SourceRecord {
     std::filesystem::path absolutePath;
     std::filesystem::path relativePath;
@@ -125,6 +151,7 @@ struct SourceRecord {
     std::string fingerprint;
     ThumbnailInfo thumbnail;
     ProjectInfo project;
+    std::vector<SourceSetProjectMembership> sourceSetProjectMemberships;
 };
 
 struct CatalogThumbnailRecord {
@@ -176,6 +203,7 @@ struct ScanResult {
     std::string errorMessage;
     ManagedLayout layout;
     std::vector<SourceRecord> sources;
+    std::vector<SourceSetProjectCatalogEntry> sourceSetProjects;
     ScanProgress progress;
 };
 
@@ -184,6 +212,8 @@ struct WorkspaceState {
     std::vector<std::filesystem::path> recentWorkspaceRoots;
     std::vector<SourceRecord> sources;
     std::string selectedSourceKey;
+    std::vector<std::string> selectedSourceKeys;
+    std::vector<SourceSetProjectCatalogEntry> sourceSetProjects;
 };
 
 struct ThumbnailProgress {
@@ -212,6 +242,8 @@ struct GallerySourceView {
     std::filesystem::path thumbnailRelativePath;
     ProjectStatus projectStatus = ProjectStatus::Unknown;
     bool selected = false;
+    bool multiSelected = false;
+    std::uint64_t sourceSetProjectMembershipCount = 0;
 };
 
 struct GalleryFolderGroup {
@@ -248,6 +280,15 @@ struct AppState {
     std::string lastSelectedSourceKey;
     std::vector<std::filesystem::path> recentWorkspaceRoots;
     float controlsPanelWidth = 0.0f;
+    float rawLabWorkbenchHeight = 0.0f;
+    float rawLabToolRailWidth = 0.0f;
+    float rawLabLowerShelfHeight = 0.0f;
+    float rawLabFilmstripHeight = 0.0f;
+    bool rawLabLowerShelfOpen = false;
+    int rawLabActiveTool = 0;
+    int rawLabActivePointCurve = 0;
+    int rawLabLastGalleryHost = 1;
+    int rawLabGalleryDisplayMode = 0;
 };
 
 using RawPathPredicate = std::function<bool(const std::filesystem::path&)>;
@@ -309,6 +350,11 @@ ProjectInfo BuildExpectedProjectInfo(const ManagedLayout& layout, const SourceRe
 bool DiscoverProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
+    CancellationPredicate shouldCancel = {});
+bool DiscoverSourceSetProjects(
+    const ManagedLayout& layout,
+    std::vector<SourceRecord>& sources,
+    std::vector<SourceSetProjectCatalogEntry>& projects,
     CancellationPredicate shouldCancel = {});
 nlohmann::json BuildRawSourceRefJson(const SourceRecord& source, bool linkedRaw = true);
 nlohmann::json BuildRawProjectData(

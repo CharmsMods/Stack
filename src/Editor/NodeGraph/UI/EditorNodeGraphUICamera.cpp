@@ -1,7 +1,7 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
-#include "App/settings/AppearanceTheme.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
+#include "Editor/NodeGraph/UI/EditorNodeGraphUILayout.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,44 +19,12 @@ bool EditorNodeGraphUI::UsesFixedNodeViewport() const {
 }
 
 float EditorNodeGraphUI::NodeContentScale() const {
-    return EditorNodeGraphUIMetrics::NodeUiScaleFromZoom(m_Zoom) * NodeUiScalePreference();
+    return EditorNodeGraphUIMetrics::NodeUiScaleFromZoom(m_Zoom);
 }
 
 float EditorNodeGraphUI::NodePinRadius() const {
-    return EditorNodeGraphUIMetrics::PinRadiusForZoom(NodeContentScale());
-}
-
-float EditorNodeGraphUI::NodeWidthScale() const {
-    const StackAppearance::AppearanceManager* appearance =
-        m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
-    return appearance
-        ? std::clamp(
-            appearance->GetGraphNodeSizing().widthScale,
-            StackAppearance::kGraphNodeWidthScaleMin,
-            StackAppearance::kGraphNodeWidthScaleMax)
-        : 1.12f;
-}
-
-float EditorNodeGraphUI::NodeUiScalePreference() const {
-    const StackAppearance::AppearanceManager* appearance =
-        m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
-    return appearance
-        ? std::clamp(
-            appearance->GetGraphNodeSizing().uiScale,
-            StackAppearance::kGraphNodeUiScaleMin,
-            StackAppearance::kGraphNodeUiScaleMax)
-        : 1.0f;
-}
-
-float EditorNodeGraphUI::NodeGrabAreaHeight() const {
-    const StackAppearance::AppearanceManager* appearance =
-        m_ActiveEditor ? m_ActiveEditor->GetAppearance() : nullptr;
-    return appearance
-        ? std::clamp(
-            appearance->GetGraphNodeSizing().grabAreaHeight,
-            StackAppearance::kGraphNodeGrabAreaHeightMin,
-            StackAppearance::kGraphNodeGrabAreaHeightMax)
-        : 38.0f;
+    return Stack::Editor::NodeGraphUILayout::kSocketRadius *
+        NodeContentScale();
 }
 
 EditorNodeGraph::Vec2 EditorNodeGraphUI::ScreenToGraph(const EditorNodeGraph::Vec2& screen) const {
@@ -82,8 +50,21 @@ EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeViewportSizePx(const EditorNodeGrap
     return EditorNodeGraph::Vec2{ size.x * m_Zoom, size.y * m_Zoom };
 }
 
-EditorNodeGraph::Vec2 EditorNodeGraphUI::NodeGraphFootprintSize(const EditorNodeGraph::Node& node) const {
-    return NodeSize(node);
+Stack::Editor::NodeGraphUILayout::LogicalRect
+EditorNodeGraphUI::NodeGraphBounds(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node) const {
+    using namespace Stack::Editor::NodeGraphUILayout;
+    const auto cached = m_NodeLayoutCache.find(node.id);
+    const std::uint64_t logicalRevision =
+        LogicalNodeLayoutRevision(graph, node);
+    const NodeLogicalLayout logical =
+        cached != m_NodeLayoutCache.end() &&
+            cached->second.hasLogicalLayout &&
+            cached->second.logicalRevision == logicalRevision
+        ? cached->second.logicalLayout
+        : BuildLogicalNodeLayout(graph, node);
+    return AbsoluteGraphBounds(logical, node.position);
 }
 
 void EditorNodeGraphUI::ZoomAtMouse(float wheel) {
@@ -111,18 +92,19 @@ void EditorNodeGraphUI::ClampPanToContent(const EditorNodeGraph::Graph& graph) {
     float maxY = 0.0f;
     bool first = true;
     for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
-        const EditorNodeGraph::Vec2 size = NodeGraphFootprintSize(node);
+        const Stack::Editor::NodeGraphUILayout::LogicalRect bounds =
+            NodeGraphBounds(graph, node);
         if (first) {
-            minX = node.position.x;
-            minY = node.position.y;
-            maxX = node.position.x + size.x;
-            maxY = node.position.y + size.y;
+            minX = bounds.min.x;
+            minY = bounds.min.y;
+            maxX = bounds.max.x;
+            maxY = bounds.max.y;
             first = false;
         } else {
-            minX = std::min(minX, node.position.x);
-            minY = std::min(minY, node.position.y);
-            maxX = std::max(maxX, node.position.x + size.x);
-            maxY = std::max(maxY, node.position.y + size.y);
+            minX = std::min(minX, bounds.min.x);
+            minY = std::min(minY, bounds.min.y);
+            maxX = std::max(maxX, bounds.max.x);
+            maxY = std::max(maxY, bounds.max.y);
         }
     }
 

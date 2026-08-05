@@ -86,6 +86,12 @@ void ApplyFieldRule(
     const FieldDispositionRule& rule) {
     switch (rule.field) {
     case DescriptorField::Channels: ApplyDisposition(output.channels, input.channels, rule.disposition); break;
+    case DescriptorField::PresentImageComponents:
+        ApplyDisposition(
+            output.presentImageComponents,
+            input.presentImageComponents,
+            rule.disposition);
+        break;
     case DescriptorField::Color: ApplyDisposition(output.color, input.color, rule.disposition); break;
     case DescriptorField::Transfer: ApplyDisposition(output.transfer, input.transfer, rule.disposition); break;
     case DescriptorField::Reference: ApplyDisposition(output.reference, input.reference, rule.disposition); break;
@@ -366,7 +372,7 @@ PropagationResult PropagateUnknownExternal(
                 ProvenanceKind::External, {}, operationIdentity });
         }
     }
-    constexpr std::size_t kDescriptorFieldCount = 11;
+    constexpr std::size_t kDescriptorFieldCount = 12;
     if (seen.size() != kDescriptorFieldCount) {
         result.executable = false;
         result.diagnostics.push_back(MakeDiagnostic(

@@ -1,5 +1,6 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Renderer/ScopedGLObjects.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/Layers/ToneLayers.h"
 
@@ -22,6 +23,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
     if (inputTexture == 0 || !node.layerJson.is_object()) {
         return result;
     }
+    const int inputWidth = m_Width;
+    const int inputHeight = m_Height;
 
     const std::string type = node.layerJson.value("type", std::string());
     std::shared_ptr<LayerBase> layer = LayerRegistry::CreateLayerFromTypeId(type);
@@ -35,15 +38,13 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         toneCurve->SetAutoRewriteRenderContext(node.nodeId, node.requestRevision);
     }
 
-    unsigned int processed = CreateGraphRenderTargetTexture();
+    Stack::Renderer::ScopedGLTexture processed(
+        CreateGraphRenderTargetTexture());
     const unsigned int sourceTexture = m_SourceTexture != 0 ? m_SourceTexture : inputTexture;
-    const bool renderedLayer = RenderIntoGraphTargetTexture(processed, [&](unsigned int) {
+    const bool renderedLayer = RenderIntoGraphTargetTexture(processed.Get(), [&](unsigned int) {
         layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
     });
-    if (!renderedLayer || processed == 0) {
-        if (processed != 0) {
-            glDeleteTextures(1, &processed);
-        }
+    if (!renderedLayer || !processed) {
         result.texture = inputTexture;
         result.owned = false;
         std::cerr << "[RenderPipeline] Layer target allocation failed for graph node "
@@ -56,18 +57,15 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
     }
 
-    result.texture = processed;
-    result.owned = true;
     if (type == "ToneCurve" && IsDefaultToneCurvePayload(node.layerJson)) {
         const QuickTextureStats inputStats = ProbeTextureStats(inputTexture, m_Width, m_Height);
-        const QuickTextureStats outputStats = ProbeTextureStats(processed, m_Width, m_Height);
+        const QuickTextureStats outputStats = ProbeTextureStats(processed.Get(), m_Width, m_Height);
         const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
         const bool outputIsBlank =
             outputStats.valid &&
             outputStats.p99Luma <= 0.000001f &&
             outputStats.maxRgb <= 0.00001f;
         if (inputHasSignal && outputIsBlank) {
-            glDeleteTextures(1, &processed);
             result.texture = inputTexture;
             result.owned = false;
             std::cerr << "[RenderPipeline] Default Tone Curve produced a blank output for graph node "
@@ -80,16 +78,37 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
 
     const RenderGraphLink* maskLink = executionContext.FindInputLink(node.nodeId, "maskIn");
     const unsigned int maskTexture = maskLink ? evalMask(maskLink->fromNodeId, maskLink->fromSocketId) : 0;
-    if (maskTexture) {
-        unsigned int blended = CreateGraphRenderTargetTexture();
-        RenderIntoGraphTargetTexture(blended, [&](unsigned int fbo) {
-            RenderMaskBlend(inputTexture, processed, maskTexture, fbo);
-        });
-        if (processed != 0) {
-            glDeleteTextures(1, &processed);
+    m_Width = inputWidth;
+    m_Height = inputHeight;
+    if (maskLink != nullptr && maskTexture == 0) {
+        result.texture = inputTexture;
+        result.owned = false;
+        std::cerr << "[RenderPipeline] Connected mask could not be rendered for graph node "
+                  << node.nodeId << "; passing input texture through.\n";
+    } else if (maskTexture) {
+        EnsureMaskPrograms();
+        Stack::Renderer::ScopedGLTexture blended(
+            CreateGraphRenderTargetTexture());
+        bool blendPassExecuted = false;
+        const bool renderedBlend =
+            m_MaskBlendProgram != 0 &&
+            RenderIntoGraphTargetTexture(blended.Get(), [&](unsigned int fbo) {
+                blendPassExecuted = RenderMaskBlend(
+                    inputTexture, processed.Get(), maskTexture, fbo);
+            }) &&
+            blendPassExecuted;
+        if (renderedBlend && blended) {
+            result.texture = blended.Release();
+            result.owned = true;
+        } else {
+            result.texture = inputTexture;
+            result.owned = false;
+            std::cerr << "[RenderPipeline] Mask blend target allocation failed for graph node "
+                      << node.nodeId << "; passing input texture through.\n";
         }
-        result.texture = blended;
-        result.owned = result.texture != 0;
+    } else {
+        result.texture = processed.Release();
+        result.owned = true;
     }
 
     return result;

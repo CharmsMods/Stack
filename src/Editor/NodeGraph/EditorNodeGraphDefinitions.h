@@ -21,6 +21,7 @@ struct NodeCatalogEntry {
     std::string previewKey;
     std::uint32_t previewRecipeVersion = 1;
     NodeCatalogPreviewStrategy previewStrategy = NodeCatalogPreviewStrategy::Auto;
+    std::string searchAliases;
 };
 
 void ApplyNodeMetadata(EditorNodeGraph::Node& node);

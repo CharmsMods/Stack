@@ -160,8 +160,14 @@ struct GraphPerformanceStats {
     double lastPreviewRequestBuildMs = 0.0;
     double lastCompositeRequestBuildMs = 0.0;
     double lastMainRenderMs = 0.0;
+    double lastMainGraphExecuteMs = 0.0;
+    double lastMainPostExecuteMs = 0.0;
     double lastPreviewRenderMs = 0.0;
     double lastCompositeRenderMs = 0.0;
+    bool lastRawWorkspaceRender = false;
+    bool lastRawInteractivePreview = false;
+    bool lastRawAnalysisCaptured = false;
+    int lastRawPreviewMaxDimension = 0;
     double lastSliceImportDecodeMs = 0.0;
     double lastSliceImportQueueMs = 0.0;
     double lastSliceImportPreviewMs = 0.0;
@@ -249,6 +255,52 @@ struct RawWorkspaceLayoutUiState {
     float controlsPanelWidth = 420.0f;
     bool diagnosticsOpen = false;
     bool diagnosticsOpenRequested = false;
+    bool dockLayoutInitialized = false;
+};
+
+enum class RawLabTool {
+    Light = 0,
+    Zones = 1,
+    Tone = 2,
+    View = 3,
+    Inspect = 4,
+    Setup = 5,
+    // Kept at the end so persisted values for the original six tools do not
+    // change. The tool island presents Denoise first.
+    Denoise = 6,
+    // Post-demosaic, scene-linear RGB denoise. Kept after CFA Denoise so all
+    // previously persisted tool values retain their meaning.
+    RgbDenoise = 7,
+    // Project-level organization only. Processing remains intentionally
+    // unavailable during the multi-source state/storage foundation.
+    MultiFrame = 8
+};
+
+enum class RawGalleryHost {
+    Closed = 0,
+    Filmstrip = 1,
+    Workspace = 2,
+    NativeWindow = 3
+};
+
+struct RawWorkspaceLabUiState {
+    RawLabTool activeTool = RawLabTool::Light;
+    RawGalleryHost galleryHost = RawGalleryHost::Closed;
+    RawGalleryHost lastGalleryHost = RawGalleryHost::Filmstrip;
+    float toolRailWidth = 340.0f;
+    float lowerShelfHeight = 180.0f;
+    float filmstripHeight = 132.0f;
+    bool lowerShelfOpen = false;
+    bool previewActualPixels = false;
+    bool secondarySheetOpen = false;
+    bool clearConfirmationRequested = false;
+    bool zonesTargetedView = false;
+    bool zonesRgbScope = false;
+    bool toneRgbScope = false;
+    int selectedZonePoint = -1;
+    int activePointCurve = 0;
+    int selectedTonePoint = -1;
+    std::string multiFrameStatusText;
 };
 
 struct TimelineUiState {
@@ -471,6 +523,8 @@ struct DeferredLoadedProjectApplyState {
     bool allowRenderSubmission = false;
     Step step = Step::None;
     std::shared_ptr<EditorLoadedProjectData> project;
+    std::shared_ptr<EditorLoadedProjectData> rollbackProject;
+    bool rollbackDirty = false;
     nlohmann::json layerArray = nlohmann::json::array();
     std::size_t nextLayerIndex = 0;
     std::size_t nextThumbnailIndex = 0;

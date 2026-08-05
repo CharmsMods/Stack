@@ -651,13 +651,11 @@ void EditorModule::RenderRawWorkspaceAnalysisPanel(float controlWidth) {
     }
 
     const Stack::RawAnalysis::RawImageAnalysis& analysis = m_RawWorkspaceAnalysis;
-    const Stack::RawAutoBase::AutoBaseRecommendations& recommendations =
-        m_RawWorkspaceAutoBaseUi.recommendations;
 
     ImGui::SeparatorText("Analysis State");
     if (analysis.sourceKey.empty()) {
         ImGui::TextDisabled("Analysis unavailable");
-        ImGui::TextDisabled("Render a RAW preview to populate analysis and suggestions.");
+        ImGui::TextDisabled("Render a RAW preview to populate technical diagnostics.");
     } else {
         ImGui::TextDisabled("Source: %s", analysis.sourceKey.c_str());
         if (analysis.sourceKey != m_ActiveRawWorkspaceSourceKey) {
@@ -672,135 +670,6 @@ void EditorModule::RenderRawWorkspaceAnalysisPanel(float controlWidth) {
     }
     if (!analysis.statusMessage.empty()) {
         ImGui::TextWrapped("%s", analysis.statusMessage.c_str());
-    }
-    if (recommendations.exposure.usedCurrentFrameFallback) {
-        ImGui::TextDisabled("Using fallback stats for RAW Exposure suggestion.");
-    }
-
-    const std::string selectedSourceKey = m_RawWorkspace.selectedSourceKey;
-    const bool hasSelectedSource = !selectedSourceKey.empty();
-    const bool displayFitStateMatchesSelectedSource =
-        hasSelectedSource &&
-        m_RawWorkspaceAutoBaseUi.sourceKey == selectedSourceKey;
-    const bool displayFitAnalysisMatchesSelectedSource =
-        hasSelectedSource &&
-        analysis.sourceKey == selectedSourceKey &&
-        analysis.currentFrameStats.valid;
-    const Stack::EditorModuleTypes::RawAutoValueOwner displayFitOwner =
-        displayFitStateMatchesSelectedSource
-            ? m_RawWorkspaceAutoBaseUi.viewTransformOwner
-            : Stack::EditorModuleTypes::RawAutoValueOwner::None;
-    const bool hasAppliedDisplayFitForSelectedSource =
-        displayFitStateMatchesSelectedSource &&
-        m_RawWorkspaceAutoBaseUi.hasAppliedViewFit;
-    const std::uint64_t appliedDisplayFitAnalysisHash =
-        displayFitStateMatchesSelectedSource
-            ? m_RawWorkspaceAutoBaseUi.appliedAnalysisHash
-            : 0;
-    const std::uint64_t currentDisplayFitAnalysisHash =
-        displayFitAnalysisMatchesSelectedSource
-            ? BuildDisplayFitDiagnosticsAnalysisHash(analysis)
-            : 0;
-    ImGui::SeparatorText("Display Fit State");
-    RenderDisabledWrappedText(
-        BuildDisplayFitDiagnosticsStateSummary(
-            hasSelectedSource,
-            displayFitStateMatchesSelectedSource,
-            displayFitAnalysisMatchesSelectedSource,
-            hasAppliedDisplayFitForSelectedSource,
-            displayFitOwner,
-            appliedDisplayFitAnalysisHash,
-            currentDisplayFitAnalysisHash));
-    ImGui::TextDisabled(
-        "Owner: %s  Source: %s",
-        DisplayFitOwnerDiagnosticsLabel(displayFitOwner, hasAppliedDisplayFitForSelectedSource),
-        displayFitStateMatchesSelectedSource ? "selected RAW" : "none/mismatch");
-    if (displayFitStateMatchesSelectedSource && appliedDisplayFitAnalysisHash != 0) {
-        ImGui::TextDisabled(
-            "Analysis freshness: %s",
-            displayFitAnalysisMatchesSelectedSource &&
-                    appliedDisplayFitAnalysisHash == currentDisplayFitAnalysisHash
-                ? "current"
-                : "needs refit or preview analysis");
-    }
-
-    const bool hasAppliedSuggestion =
-        !m_RawWorkspaceAutoBaseUi.appliedSuggestionKey.empty() ||
-        !m_RawWorkspaceAutoBaseUi.appliedSuggestionLabel.empty();
-    const bool appliedSuggestionStateMatchesSelectedSource =
-        hasSelectedSource &&
-        m_RawWorkspaceAutoBaseUi.sourceKey == selectedSourceKey;
-    const Stack::RawWorkspace::SourceRecord* appliedSuggestionSource =
-        appliedSuggestionStateMatchesSelectedSource
-            ? FindRawWorkspaceSourceByKey(m_RawWorkspaceAutoBaseUi.sourceKey)
-            : nullptr;
-    const bool appliedSuggestionSourceIdentityMatches =
-        appliedSuggestionSource != nullptr &&
-        m_RawWorkspaceAutoBaseUi.sourceHash ==
-            BuildRawWorkspaceAutoBaseSourceHash(*appliedSuggestionSource) &&
-        (m_RawWorkspaceAutoBaseUi.appliedSuggestionSourceHash == 0 ||
-         m_RawWorkspaceAutoBaseUi.appliedSuggestionSourceHash ==
-            m_RawWorkspaceAutoBaseUi.sourceHash);
-    ImGui::SeparatorText("Applied Suggestion State");
-    RenderDisabledWrappedText(
-        BuildAppliedSuggestionDiagnosticsStateSummary(
-            hasSelectedSource,
-            hasAppliedSuggestion,
-            appliedSuggestionStateMatchesSelectedSource,
-            appliedSuggestionSourceIdentityMatches,
-            displayFitAnalysisMatchesSelectedSource,
-            m_RawWorkspaceAutoBaseUi.appliedSuggestionAnalysisHash,
-            currentDisplayFitAnalysisHash));
-    if (hasAppliedSuggestion && appliedSuggestionStateMatchesSelectedSource) {
-        const std::string ownerSection =
-            m_RawWorkspaceAutoBaseUi.appliedSuggestionSection.empty()
-                ? std::string("Unspecified")
-                : m_RawWorkspaceAutoBaseUi.appliedSuggestionSection;
-        ImGui::TextDisabled(
-            "Action: %s",
-            m_RawWorkspaceAutoBaseUi.appliedSuggestionLabel.empty()
-                ? "Unnamed suggestion"
-                : m_RawWorkspaceAutoBaseUi.appliedSuggestionLabel.c_str());
-        ImGui::TextDisabled("Owning control: %s", ownerSection.c_str());
-        ImGui::TextDisabled(
-            "Source: %s",
-            appliedSuggestionSourceIdentityMatches ? "selected RAW" : "source mismatch");
-        if (m_RawWorkspaceAutoBaseUi.appliedSuggestionAnalysisHash != 0) {
-            ImGui::TextDisabled(
-                "Analysis freshness: %s",
-                displayFitAnalysisMatchesSelectedSource &&
-                        m_RawWorkspaceAutoBaseUi.appliedSuggestionAnalysisHash ==
-                            currentDisplayFitAnalysisHash
-                    ? "current"
-                    : "needs preview analysis or re-evaluation");
-        }
-    }
-
-    const bool undoSnapshotStateMatchesSelectedSource =
-        hasSelectedSource &&
-        m_RawWorkspaceAutoBaseUi.sourceKey == selectedSourceKey;
-    const Stack::RawWorkspace::SourceRecord* undoSnapshotSource =
-        undoSnapshotStateMatchesSelectedSource
-            ? FindRawWorkspaceSourceByKey(m_RawWorkspaceAutoBaseUi.sourceKey)
-            : nullptr;
-    const bool undoSnapshotSourceIdentityMatches =
-        undoSnapshotSource != nullptr &&
-        m_RawWorkspaceAutoBaseUi.sourceHash ==
-            BuildRawWorkspaceAutoBaseSourceHash(*undoSnapshotSource);
-    ImGui::SeparatorText("Undo Snapshot State");
-    RenderDisabledWrappedText(
-        BuildUndoSnapshotDiagnosticsStateSummary(
-            hasSelectedSource,
-            m_RawWorkspaceAutoBaseUi.hasRevertSnapshot,
-            undoSnapshotStateMatchesSelectedSource,
-            undoSnapshotSourceIdentityMatches));
-    if (m_RawWorkspaceAutoBaseUi.hasRevertSnapshot &&
-        undoSnapshotStateMatchesSelectedSource) {
-        ImGui::TextDisabled(
-            "Source: %s",
-            undoSnapshotSourceIdentityMatches ? "selected RAW" : "source mismatch");
-        ImGui::TextDisabled(
-            "Undo scope: restores the stored recipe snapshot for this RAW source.");
     }
 
     ImGui::SeparatorText("Technical RAW");
@@ -832,6 +701,21 @@ void EditorModule::RenderRawWorkspaceAnalysisPanel(float controlWidth) {
     }
     if (metadata.hasBaselineExposure) {
         ImGui::TextDisabled("DNG baseline exposure %+.2f EV", metadata.baselineExposureEv);
+    }
+    ImGui::TextDisabled(
+        "DNG OpcodeList2 applied %d  unsupported L1/L2/L3 %d/%d/%d",
+        metadata.appliedOpcodeList2Count,
+        metadata.unsupportedOpcodeList1Count,
+        metadata.unsupportedOpcodeList2Count,
+        metadata.unsupportedOpcodeList3Count);
+    if (metadata.unsupportedOpcodeList1Count +
+            metadata.unsupportedOpcodeList2Count +
+            metadata.unsupportedOpcodeList3Count >
+        0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.68f, 0.24f, 1.0f));
+        ImGui::TextWrapped(
+            "This file requests DNG corrections Stack does not apply. Treat the rendered result as incomplete, not camera-faithful.");
+        ImGui::PopStyleColor();
     }
 
     ImGui::SeparatorText("Highlight Signals");
@@ -878,122 +762,4 @@ void EditorModule::RenderRawWorkspaceAnalysisPanel(float controlWidth) {
         ImGui::TextDisabled("Render a RAW preview to populate current-frame stats.");
     }
 
-    ImGui::SeparatorText("Starting Point Stage Readbacks");
-    if (m_RawWorkspaceStageStatsReadbacks.empty()) {
-        ImGui::TextDisabled("No Starting Point stage readbacks for the current RAW preview.");
-        if (!m_RawWorkspaceStartPointDiagnostics.statusMessage.empty()) {
-            ImGui::TextWrapped("%s", m_RawWorkspaceStartPointDiagnostics.statusMessage.c_str());
-        }
-    } else {
-        for (const RawDevelopmentStageStatsReadback& readback : m_RawWorkspaceStageStatsReadbacks) {
-            RenderTextureStageStatsRow(readback);
-            ImGui::Spacing();
-        }
-        if (!m_RawWorkspaceStartPointDiagnostics.statusMessage.empty()) {
-            ImGui::TextWrapped("%s", m_RawWorkspaceStartPointDiagnostics.statusMessage.c_str());
-        }
-    }
-
-    RenderStartPointCandidateReport(m_RawWorkspaceStartPointDiagnostics);
-    const Stack::RawWorkspace::SourceRecord* lastActionSource =
-        m_RawWorkspaceAutoBaseUi.sourceKey.empty()
-            ? nullptr
-            : FindRawWorkspaceSourceByKey(m_RawWorkspaceAutoBaseUi.sourceKey);
-    const bool hasLastActionSummary =
-        !m_RawWorkspaceAutoBaseUi.summary.empty() &&
-        !m_RawWorkspace.selectedSourceKey.empty() &&
-        m_RawWorkspaceAutoBaseUi.sourceKey == m_RawWorkspace.selectedSourceKey &&
-        lastActionSource != nullptr &&
-        m_RawWorkspaceAutoBaseUi.sourceHash ==
-            BuildRawWorkspaceAutoBaseSourceHash(*lastActionSource);
-    if (hasLastActionSummary) {
-        ImGui::Spacing();
-        ImGui::TextDisabled("Last visible automatic action");
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", m_RawWorkspaceAutoBaseUi.summary.c_str());
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::SeparatorText("Withheld / Advisory");
-    bool renderedWithheld = false;
-    if (recommendations.exposure.blockedByHighlightRisk) {
-        ImGui::TextDisabled("Withheld: positive RAW Exposure blocked by highlight risk.");
-        renderedWithheld = true;
-    }
-    if (recommendations.whiteBalance.manualWhiteBalanceProtected &&
-        recommendations.whiteBalance.alternateCandidateAvailable) {
-        ImGui::TextDisabled("Withheld: White Balance suggestion protected by manual WB.");
-        renderedWithheld = true;
-    }
-    if (recommendations.highlight.recommendReconstruction) {
-        ImGui::TextDisabled("Advisory: highlight reconstruction has no RAW workspace control yet.");
-        renderedWithheld = true;
-    }
-    if (recommendations.highlight.recommendAchromaticClip) {
-        ImGui::TextDisabled("Advisory: achromatic highlight handling may reduce color artifacts.");
-        renderedWithheld = true;
-    }
-    const Stack::RawAutoBase::NoiseDetailRecommendation& noiseDetail =
-        recommendations.noiseDetail;
-    if (noiseDetail.suggestChromaDenoise ||
-        noiseDetail.suggestLumaDenoise ||
-        noiseDetail.suggestReduceSharpening ||
-        noiseDetail.shadowLiftEv >= 0.5f) {
-        ImGui::TextDisabled("Advisory: detail/noise recommendation is informational in this UI pass.");
-        ImGui::TextDisabled(
-            "ISO %.0f  effective noise %.0f%%  shadow lift %+.2f EV",
-            noiseDetail.iso,
-            std::clamp(noiseDetail.effectiveNoiseScore, 0.0f, 1.0f) * 100.0f,
-            noiseDetail.shadowLiftEv);
-        renderedWithheld = true;
-    }
-    if (!renderedWithheld) {
-        ImGui::TextDisabled("No withheld suggestions or advisories for the current analysis.");
-    }
-
-    ImGui::SeparatorText("Starting Point Rationale");
-    bool renderedRationale = false;
-    auto renderRationale = [&](const char* label, float confidence, const std::string& rationale) {
-        if (rationale.empty()) {
-            return;
-        }
-        RenderDiagnosticsRationale(label, confidence, rationale);
-        renderedRationale = true;
-    };
-    renderRationale(
-        "RAW Exposure",
-        recommendations.exposure.confidence,
-        recommendations.exposure.rationale);
-    renderRationale(
-        "White Balance",
-        recommendations.whiteBalance.confidence,
-        recommendations.whiteBalance.rationale);
-    renderRationale(
-        "Highlight Risk",
-        recommendations.highlight.confidence,
-        recommendations.highlight.rationale);
-    renderRationale(
-        "Noise / Detail",
-        recommendations.noiseDetail.confidence,
-        recommendations.noiseDetail.rationale);
-    if (!recommendations.localSuggestionRationale.empty()) {
-        ImGui::TextDisabled("Local Range");
-        ImGui::TextWrapped("%s", recommendations.localSuggestionRationale.c_str());
-        renderedRationale = true;
-    }
-    for (std::size_t i = 0; i < recommendations.localAdjustments.size(); ++i) {
-        const Stack::RawAutoBase::SuggestedLocalAdjustment& suggestion =
-            recommendations.localAdjustments[i];
-        if (!suggestion.valid || suggestion.rationale.empty()) {
-            continue;
-        }
-        const std::string label = suggestion.label.empty()
-            ? std::string(Stack::RawAutoBase::SuggestedLocalAdjustmentKindLabel(suggestion.kind))
-            : suggestion.label;
-        RenderDiagnosticsRationale(label.c_str(), suggestion.confidence, suggestion.rationale);
-        renderedRationale = true;
-    }
-    if (!renderedRationale) {
-        ImGui::TextDisabled("No Starting Point rationale is available yet.");
-    }
 }

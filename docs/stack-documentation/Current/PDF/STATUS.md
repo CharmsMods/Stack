@@ -93,9 +93,10 @@ Last updated: 2026-07-13
 2. Continue author-led Overview writing in
    `source/content/overview-node-graph.typ`, or add further Overview subsections
    as independent files included by `source/content/overview.typ`.
-3. Continue the transform catalog from `Full Operation Tables.txt`, beginning
-   with color-grading operations when requested. Keep one category per compact
-   two-column page, with each operation's name, equation, and purpose.
+3. Continue the transform catalog from the Node Math Rewrite research library
+   under `docs/stack-documentation/Current/ideas/general/Node Math Re-Write/05-research/image-operations/`,
+   beginning with color-grading operations when requested. Keep one category
+   per compact two-column page, with each operation's name, equation, and purpose.
 4. Add future top-level sections through `source/content/outline.typ`.
 5. Keep future top-level section files headed with a labelled level-one title;
    the shared style renders their Roman-numeral title pages automatically.

@@ -58,6 +58,17 @@ std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
             1,
             std::max(GetNodeDirtyGeneration(previewNodeId), GetNodeDirtyGeneration(input->fromNodeId)));
     }
+    if (node && node->kind == EditorNodeGraph::NodeKind::FrequencyFilter) {
+        const EditorNodeGraph::Link* input =
+            m_NodeGraph.FindAnyInputLink(
+                previewNodeId, EditorNodeGraph::kChannelInputSocketId);
+        if (!input) return 0;
+        return std::max<std::uint64_t>(
+            1,
+            std::max(
+                GetNodeDirtyGeneration(previewNodeId),
+                GetNodeDirtyGeneration(input->fromNodeId)));
+    }
     const EditorNodeGraph::Link* input =
         m_NodeGraph.FindAnyInputLink(previewNodeId, EditorNodeGraph::kPreviewInputSocketId);
     if (!input) {
@@ -148,6 +159,17 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
     ImGui::Text("Submitted composite: %d", stats.lastSubmittedCompositeCount);
     ImGui::Spacing();
     ImGui::Text("Main render: %.2f ms", stats.lastMainRenderMs);
+    ImGui::Text("Graph execute: %.2f ms", stats.lastMainGraphExecuteMs);
+    ImGui::Text("Post-render work: %.2f ms", stats.lastMainPostExecuteMs);
+    if (stats.lastRawWorkspaceRender) {
+        ImGui::Text(
+            "RAW render: %s%s",
+            stats.lastRawInteractivePreview ? "Interactive proxy" : "Settled full resolution",
+            stats.lastRawAnalysisCaptured ? " + analysis" : "");
+        if (stats.lastRawPreviewMaxDimension > 0) {
+            ImGui::Text("RAW proxy max edge: %d px", stats.lastRawPreviewMaxDimension);
+        }
+    }
     ImGui::Text("Main tiling: %s (%d)", stats.lastMainOutputTiled ? "Yes" : "No", stats.lastMainOutputTileCount);
     if (stats.lastMainRegionPlanAvailable) {
         ImGui::Text(
@@ -193,6 +215,11 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
         cacheStats.rawStageCacheHits,
         cacheStats.rawStageCacheMisses,
         totalRawCacheEvents == 0 ? " (idle)" : "");
+    if (cacheStats.allocationFailed) {
+        ImGui::TextColored(
+            ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+            "Graph render failed safely after host-memory exhaustion; the prior presentation was retained.");
+    }
 
     ImGui::Spacing();
     ImGui::Text(

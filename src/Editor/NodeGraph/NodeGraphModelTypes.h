@@ -36,9 +36,13 @@ struct Node {
     TechnicalImageSettings technicalImageSettings;
     ReformatSettings reformatSettings;
     CompoundPayload compound;
+    FrequencyFilterSettings frequencyFilterSettings;
+    FrequencyResponseSettings frequencyResponseSettings;
     FrequencyFftSettings frequencyFftSettings;
     FrequencyFftSettings frequencyIfftSettings;
     SpectrumViewSettings spectrumViewSettings;
+    ApplyFrequencyResponseSettings applyFrequencyResponseSettings;
+    CombineSpectraSettings combineSpectraSettings;
     FrequencyMaskShape frequencyMaskShape = FrequencyMaskShape::LowPass;
     FrequencyMaskSettings frequencyMaskSettings;
     SpectrumMathMode spectrumMathMode = SpectrumMathMode::Multiply;
@@ -47,7 +51,11 @@ struct Node {
     MagnitudePhaseSettings magnitudePhaseSettings;
     SpectrumAnalyzerMode spectrumAnalyzerMode = SpectrumAnalyzerMode::RadialEnergy;
     SpectrumAnalyzerSettings spectrumAnalyzerSettings;
+    std::vector<std::string> exposedParameterIds;
     bool outputEnabled = true;
+    OutputSettings outputSettings;
+    ConstantChannelSettings constantChannelSettings;
+    ImageCombineSettings imageCombineSettings;
     std::string definitionId;
     std::string definitionVersion;
     std::string definitionHash;
@@ -63,6 +71,9 @@ struct Node {
     RawDetailFusionPayload rawDetailFusion;
     HdrMergePayload hdrMerge;
     MfsrPayload mfsr;
+    RawProjectFramePayload rawProjectFrame;
+    MultiFrameDenoisePayload multiFrameDenoise;
+    RawProjectSourceSetPayload rawProjectSourceSet;
     LutPayload lut;
     CustomMaskPayload customMask;
 };
@@ -72,6 +83,11 @@ struct Link {
     std::string fromSocketId;
     int toNodeId = 0;
     std::string toSocketId;
+    enum class Ownership {
+        User,
+        ManagedSourceBinding
+    } ownership = Ownership::User;
+    std::string bindingId;
 };
 
 struct NodeGroup {

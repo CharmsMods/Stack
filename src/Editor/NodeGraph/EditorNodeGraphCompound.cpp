@@ -3,18 +3,35 @@
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 
 #include <algorithm>
-#include <functional>
+#include <limits>
 #include <map>
+#include <new>
 #include <set>
+#include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace EditorNodeGraph {
 namespace {
 
+void SetCompoundErrorNoThrow(
+    std::string* error,
+    std::string_view message) noexcept {
+    if (!error) {
+        return;
+    }
+    try {
+        error->assign(message.data(), message.size());
+    } catch (...) {
+        error->clear();
+    }
+}
+
 Stack::NodeMath::LogicalValueType LogicalTypeForSocket(SocketType type) {
     using Logical = Stack::NodeMath::LogicalValueType;
     switch (type) {
+        case SocketType::ImageOrChannel: return Logical::Invalid;
         case SocketType::Mask: return Logical::Mask;
         case SocketType::ScalarField: return Logical::ScalarField;
         case SocketType::Boolean: return Logical::Boolean;
@@ -75,6 +92,50 @@ bool HasPort(
         [&](const Stack::NodeMath::CompoundPortDefinition& port) {
             return port.id == portId && port.direction == direction;
         });
+}
+
+bool ResolveCompoundNodeState(
+    Node& node,
+    const std::vector<Stack::NodeMath::CompoundDefinition>& definitions) {
+    node.compound.instance.instanceUuid = node.instanceUuid;
+    Stack::NodeMath::ResolveCompoundInstance(
+        node.compound.instance,
+        definitions);
+    if (node.compound.instance.resolution ==
+        Stack::NodeMath::CompoundResolutionStatus::Exact) {
+        std::string closureError;
+        const auto closure = Stack::NodeMath::CollectCompoundDependencyClosure(
+            definitions,
+            { node.compound.instance.definition },
+            &closureError);
+        if (closure.empty()) {
+            node.compound.instance.resolution =
+                closureError.find("Recursive") != std::string::npos
+                    ? Stack::NodeMath::CompoundResolutionStatus::RecursiveDependency
+                    : Stack::NodeMath::CompoundResolutionStatus::Missing;
+            node.compound.instance.resolutionError =
+                std::move(closureError);
+        }
+    }
+    node.definitionId = node.compound.instance.definition.id;
+    node.definitionVersion = Stack::NodeMath::ToString(
+        node.compound.instance.definition.version);
+    node.definitionHash =
+        node.compound.instance.definition.contentHash;
+    node.definitionResolved =
+        node.compound.instance.resolution ==
+        Stack::NodeMath::CompoundResolutionStatus::Exact;
+    node.definitionResolutionError =
+        node.compound.instance.resolutionError;
+    if (const Stack::NodeMath::CompoundDefinition* definition =
+            Stack::NodeMath::FindExactCompoundDefinition(
+                definitions,
+                node.compound.instance.definition)) {
+        node.title = definition->label;
+    } else if (node.title.empty()) {
+        node.title = "Unresolved Compound";
+    }
+    return node.definitionResolved;
 }
 
 Node* FindNodeByInstanceUuid(Graph& graph, const std::string& instanceUuid) {
@@ -197,6 +258,18 @@ bool ValidateCanonicalCompoundBindings(
         if (error) *error = "Compound canonical graph contains no executable nodes.";
         return false;
     }
+    const ValidationResult canonicalValidation = canonical.Validate();
+    if (!canonicalValidation.valid) {
+        if (error) {
+            *error = canonicalValidation.messages.empty()
+                ? "Compound canonical graph is invalid."
+                : "Compound canonical graph is invalid: " +
+                    canonicalValidation.messages.front();
+        }
+        return false;
+    }
+
+    std::set<std::pair<std::string, std::string>> publicInputBindings;
     for (const Stack::NodeMath::CompoundPortDefinition& port : definition.ports) {
         const Node* node = FindNodeByInstanceUuid(canonical, port.internalInstanceUuid);
         SocketDefinition socket;
@@ -212,10 +285,32 @@ bool ValidateCanonicalCompoundBindings(
             if (error) *error = "Compound port type or direction disagrees with its canonical internal socket.";
             return false;
         }
+        if (port.direction == Stack::NodeMath::PortDirection::Input) {
+            const auto binding = std::make_pair(
+                port.internalInstanceUuid,
+                port.internalSocketId);
+            if (!publicInputBindings.insert(binding).second) {
+                if (error) *error = "Compound input ports cannot bind to the same canonical input socket.";
+                return false;
+            }
+            if (canonical.FindAnyInputLink(node->id, port.internalSocketId)) {
+                if (error) *error = "Compound public input must bind to an unconnected canonical input socket.";
+                return false;
+            }
+        }
     }
+
+    std::set<std::pair<std::string, std::string>> promotedParameterBindings;
     for (const Stack::NodeMath::CompoundParameterDefinition& parameter :
             definition.parameters) {
         Node* node = FindNodeByInstanceUuid(canonical, parameter.internalInstanceUuid);
+        const auto binding = std::make_pair(
+            parameter.internalInstanceUuid,
+            parameter.internalParameterId);
+        if (!promotedParameterBindings.insert(binding).second) {
+            if (error) *error = "Promoted compound parameters cannot bind to the same canonical parameter.";
+            return false;
+        }
         if (!node || !ApplyPromotedParameter(
                 *node, parameter.internalParameterId, parameter.defaultValue)) {
             if (error) *error = "Promoted compound parameter has no supported canonical binding.";
@@ -230,8 +325,10 @@ bool ValidateCanonicalCompoundBindings(
 bool Graph::AddCompoundDefinition(
     Stack::NodeMath::CompoundDefinition definition,
     std::string* error) {
-    if (!Stack::NodeMath::ValidateCompoundDefinition(definition).empty()) {
-        if (error) *error = Stack::NodeMath::ValidateCompoundDefinition(definition).front().message;
+    const std::vector<Stack::NodeMath::ContractIssue> definitionIssues =
+        Stack::NodeMath::ValidateCompoundDefinition(definition);
+    if (!definitionIssues.empty()) {
+        if (error) *error = definitionIssues.front().message;
         return false;
     }
     if (!ValidateCanonicalCompoundBindings(definition, error)) return false;
@@ -244,13 +341,48 @@ bool Graph::AddCompoundDefinition(
             return false;
         }
     }
-    m_CompoundDefinitions.push_back(std::move(definition));
-    const std::vector<Stack::NodeMath::ContractIssue> catalogIssues =
-        Stack::NodeMath::ValidateCompoundCatalog(m_CompoundDefinitions);
-    if (!catalogIssues.empty()) {
-        if (error) *error = catalogIssues.front().message;
-        m_CompoundDefinitions.pop_back();
+    const Stack::NodeMath::DefinitionReference insertedReference =
+        definition.identity;
+    try {
+        m_CompoundDefinitions.push_back(std::move(definition));
+        const std::vector<Stack::NodeMath::ContractIssue> catalogIssues =
+            Stack::NodeMath::ValidateCompoundCatalog(
+                m_CompoundDefinitions);
+        if (!catalogIssues.empty()) {
+            if (error) *error = catalogIssues.front().message;
+            m_CompoundDefinitions.pop_back();
+            return false;
+        }
+    } catch (const std::bad_alloc&) {
+        if (!m_CompoundDefinitions.empty() &&
+            Stack::NodeMath::SameDefinitionReference(
+                m_CompoundDefinitions.back().identity,
+                insertedReference)) {
+            m_CompoundDefinitions.pop_back();
+        }
+        SetCompoundErrorNoThrow(
+            error,
+            "The compound definition could not be embedded because memory is exhausted.");
         return false;
+    } catch (const std::length_error&) {
+        if (!m_CompoundDefinitions.empty() &&
+            Stack::NodeMath::SameDefinitionReference(
+                m_CompoundDefinitions.back().identity,
+                insertedReference)) {
+            m_CompoundDefinitions.pop_back();
+        }
+        SetCompoundErrorNoThrow(
+            error,
+            "The compound definition catalog size limit was reached.");
+        return false;
+    } catch (...) {
+        if (!m_CompoundDefinitions.empty() &&
+            Stack::NodeMath::SameDefinitionReference(
+                m_CompoundDefinitions.back().identity,
+                insertedReference)) {
+            m_CompoundDefinitions.pop_back();
+        }
+        throw;
     }
     TouchStructure();
     return true;
@@ -272,33 +404,12 @@ Stack::NodeMath::CompoundDefinition* Graph::FindCompoundDefinition(
 bool Graph::ResolveCompoundNode(int nodeId) {
     Node* node = FindNode(nodeId);
     if (!node || node->kind != NodeKind::Compound) return false;
-    node->compound.instance.instanceUuid = node->instanceUuid;
-    Stack::NodeMath::ResolveCompoundInstance(node->compound.instance, m_CompoundDefinitions);
-    if (node->compound.instance.resolution == Stack::NodeMath::CompoundResolutionStatus::Exact) {
-        std::string closureError;
-        const auto closure = Stack::NodeMath::CollectCompoundDependencyClosure(
-            m_CompoundDefinitions, { node->compound.instance.definition }, &closureError);
-        if (closure.empty()) {
-            node->compound.instance.resolution =
-                closureError.find("Recursive") != std::string::npos
-                    ? Stack::NodeMath::CompoundResolutionStatus::RecursiveDependency
-                    : Stack::NodeMath::CompoundResolutionStatus::Missing;
-            node->compound.instance.resolutionError = closureError;
-        }
-    }
-    node->definitionId = node->compound.instance.definition.id;
-    node->definitionVersion = Stack::NodeMath::ToString(node->compound.instance.definition.version);
-    node->definitionHash = node->compound.instance.definition.contentHash;
-    node->definitionResolved =
-        node->compound.instance.resolution == Stack::NodeMath::CompoundResolutionStatus::Exact;
-    node->definitionResolutionError = node->compound.instance.resolutionError;
-    if (const Stack::NodeMath::CompoundDefinition* definition =
-            FindCompoundDefinition(node->compound.instance.definition)) {
-        node->title = definition->label;
-    } else if (node->title.empty()) {
-        node->title = "Unresolved Compound";
-    }
-    return node->definitionResolved;
+    Node resolved = *node;
+    const bool exact = ResolveCompoundNodeState(
+        resolved,
+        m_CompoundDefinitions);
+    *node = std::move(resolved);
+    return exact;
 }
 
 bool Graph::MakeCompoundNodeUnique(int nodeId, std::string* error) {
@@ -317,8 +428,17 @@ bool Graph::MakeCompoundNodeUnique(int nodeId, std::string* error) {
     if (!Stack::NodeMath::CreateUniqueCompoundDefinition(
             *source, source->label + " Copy", unique, error)) return false;
     const Stack::NodeMath::DefinitionReference reference = unique.identity;
+    const std::size_t definitionCountBefore =
+        m_CompoundDefinitions.size();
     if (!AddCompoundDefinition(std::move(unique), error)) return false;
-    return UpdateCompoundNodeDefinition(nodeId, reference, error);
+    if (UpdateCompoundNodeDefinition(nodeId, reference, error)) {
+        return true;
+    }
+    if (m_CompoundDefinitions.size() > definitionCountBefore) {
+        m_CompoundDefinitions.resize(definitionCountBefore);
+        TouchStructure();
+    }
+    return false;
 }
 
 bool Graph::UpdateCompoundNodeDefinition(
@@ -403,9 +523,11 @@ bool Graph::UpdateCompoundNodeDefinition(
             }
         }
     }
-    node->compound.instance.definition = definition;
-    node->compound.instance.interfaceSnapshot = resolved->ports;
-    ResolveCompoundNode(nodeId);
+    Node updated = *node;
+    updated.compound.instance.definition = definition;
+    updated.compound.instance.interfaceSnapshot = resolved->ports;
+    ResolveCompoundNodeState(updated, m_CompoundDefinitions);
+    *node = std::move(updated);
     TouchStructure();
     return true;
 }
@@ -469,13 +591,43 @@ bool Graph::UnpackCompoundNode(
         }
     }
 
-    const std::vector<Link> externalLinks = m_Links;
+    const std::size_t externalLinkCount = static_cast<std::size_t>(
+        std::count_if(
+            m_Links.begin(),
+            m_Links.end(),
+            [nodeId](const Link& link) {
+                return link.fromNodeId == nodeId ||
+                    link.toNodeId == nodeId;
+            }));
+    std::vector<Link> externalLinks;
+    externalLinks.reserve(externalLinkCount);
+    for (const Link& link : m_Links) {
+        if (link.fromNodeId == nodeId || link.toNodeId == nodeId) {
+            externalLinks.push_back(link);
+        }
+    }
+
     std::unordered_map<int, int> oldToNew;
     std::unordered_map<std::string, int> uuidToNew;
     std::vector<Node> clones;
+    std::vector<int> clonedNodeIds;
+    oldToNew.reserve(internal.GetNodes().size());
+    uuidToNew.reserve(internal.GetNodes().size());
+    clones.reserve(internal.GetNodes().size());
+    clonedNodeIds.reserve(internal.GetNodes().size());
+    if (m_NextNodeId <= 0 ||
+        internal.GetNodes().size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<int>::max() - m_NextNodeId)) {
+        if (error) *error = "Unpack cannot allocate additional node IDs.";
+        return false;
+    }
+    int nextNodeId = m_NextNodeId;
     for (const Node& source : internal.GetNodes()) {
-        Node clone = source;
-        clone.id = m_NextNodeId++;
+        Node clone = source.kind == NodeKind::Image
+            ? CloneImageNodeForCompoundExpansion(source)
+            : source;
+        clone.id = nextNodeId++;
         clone.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
         if (clone.kind == NodeKind::Compound) {
             clone.compound.instance.instanceUuid = clone.instanceUuid;
@@ -484,56 +636,164 @@ bool Graph::UnpackCompoundNode(
         clone.position.y = instancePosition.y + (source.position.y - minY);
         oldToNew[source.id] = clone.id;
         uuidToNew[source.instanceUuid] = clone.id;
+        clonedNodeIds.push_back(clone.id);
         clones.push_back(std::move(clone));
     }
 
-    for (Node& clone : clones) m_Nodes.push_back(std::move(clone));
+    std::vector<Link> internalLinks;
+    internalLinks.reserve(internal.GetLinks().size());
     for (const Link& link : internal.GetLinks()) {
         const auto from = oldToNew.find(link.fromNodeId);
         const auto to = oldToNew.find(link.toNodeId);
-        if (from != oldToNew.end() && to != oldToNew.end()) {
-            m_Links.push_back({ from->second, link.fromSocketId, to->second, link.toSocketId });
+        if (from == oldToNew.end() || to == oldToNew.end()) {
+            if (error) *error = "Canonical compound link references a missing internal node.";
+            return false;
         }
+        internalLinks.push_back({
+            from->second,
+            link.fromSocketId,
+            to->second,
+            link.toSocketId
+        });
     }
 
     std::vector<Link> rewired;
+    rewired.reserve(externalLinks.size());
     for (const Link& link : externalLinks) {
         if (link.toNodeId == nodeId) {
             const auto port = std::find_if(definition->ports.begin(), definition->ports.end(),
                 [&](const Stack::NodeMath::CompoundPortDefinition& item) {
                     return item.direction == Stack::NodeMath::PortDirection::Input && item.id == link.toSocketId;
                 });
-            if (port != definition->ports.end() && uuidToNew.count(port->internalInstanceUuid)) {
-                rewired.push_back({ link.fromNodeId, link.fromSocketId,
-                    uuidToNew[port->internalInstanceUuid], port->internalSocketId });
+            const auto target = port == definition->ports.end()
+                ? uuidToNew.end()
+                : uuidToNew.find(port->internalInstanceUuid);
+            if (port == definition->ports.end() || target == uuidToNew.end()) {
+                if (error) *error = "Unpack cannot resolve a connected public input binding.";
+                return false;
             }
+            rewired.push_back({ link.fromNodeId, link.fromSocketId,
+                target->second, port->internalSocketId });
         } else if (link.fromNodeId == nodeId) {
             const auto port = std::find_if(definition->ports.begin(), definition->ports.end(),
                 [&](const Stack::NodeMath::CompoundPortDefinition& item) {
                     return item.direction == Stack::NodeMath::PortDirection::Output && item.id == link.fromSocketId;
                 });
-            if (port != definition->ports.end() && uuidToNew.count(port->internalInstanceUuid)) {
-                rewired.push_back({ uuidToNew[port->internalInstanceUuid], port->internalSocketId,
-                    link.toNodeId, link.toSocketId });
+            const auto source = port == definition->ports.end()
+                ? uuidToNew.end()
+                : uuidToNew.find(port->internalInstanceUuid);
+            if (port == definition->ports.end() || source == uuidToNew.end()) {
+                if (error) *error = "Unpack cannot resolve a connected public output binding.";
+                return false;
             }
+            rewired.push_back({ source->second, port->internalSocketId,
+                link.toNodeId, link.toSocketId });
         }
     }
 
-    RemoveNode(nodeId);
-    for (const Link& link : rewired) {
+    const std::size_t originalNodeCount = m_Nodes.size();
+    const std::size_t originalLinkCount = m_Links.size();
+    const auto rollbackTransientExpansion = [&]() {
+        m_Links.resize(originalLinkCount);
+        m_Nodes.resize(originalNodeCount);
+        TouchStructure();
+    };
+
+    try {
+        const std::size_t availableLinks =
+            m_Links.max_size() - m_Links.size();
+        if (clones.size() > m_Nodes.max_size() - m_Nodes.size() ||
+            internalLinks.size() > availableLinks ||
+            rewired.size() > availableLinks - internalLinks.size()) {
+            throw std::length_error("compound expansion capacity exhausted");
+        }
+        const std::size_t addedLinkCapacity =
+            internalLinks.size() + rewired.size();
+        m_Nodes.reserve(m_Nodes.size() + clones.size());
+        m_Links.reserve(m_Links.size() + addedLinkCapacity);
+        for (Node& clone : clones) {
+            m_Nodes.push_back(std::move(clone));
+        }
+        for (Link& link : internalLinks) {
+            m_Links.push_back(std::move(link));
+        }
+        // Direct temporary appends deliberately bypass the model mutators.
+        // Invalidate lookup/traversal caches before asking the graph to
+        // validate the prospective external connections.
+        TouchStructure();
+    } catch (const std::bad_alloc&) {
+        rollbackTransientExpansion();
+        SetCompoundErrorNoThrow(
+            error,
+            "Unpack could not allocate the expanded graph.");
+        return false;
+    } catch (const std::length_error&) {
+        rollbackTransientExpansion();
+        SetCompoundErrorNoThrow(
+            error,
+            "Unpack would exceed the graph size limit.");
+        return false;
+    } catch (...) {
+        rollbackTransientExpansion();
+        throw;
+    }
+
+    for (Link& link : rewired) {
+        std::string normalizedTarget;
         std::string linkError;
-        if (!TryConnectSockets(
-                link.fromNodeId, link.fromSocketId,
-                link.toNodeId, link.toSocketId, &linkError)) {
-            if (error) *error = "Unpack could not restore an external connection: " + linkError;
+        bool compatible = false;
+        try {
+            compatible = CanConnectSockets(
+                link.fromNodeId,
+                link.fromSocketId,
+                link.toNodeId,
+                link.toSocketId,
+                &normalizedTarget,
+                &linkError);
+        } catch (const std::bad_alloc&) {
+            rollbackTransientExpansion();
+            SetCompoundErrorNoThrow(
+                error,
+                "Unpack could not validate connections because memory is exhausted.");
+            return false;
+        } catch (const std::length_error&) {
+            rollbackTransientExpansion();
+            SetCompoundErrorNoThrow(
+                error,
+                "Unpack could not validate connections because the graph size limit was reached.");
+            return false;
+        } catch (...) {
+            rollbackTransientExpansion();
+            throw;
+        }
+        if (!compatible) {
+            rollbackTransientExpansion();
+            if (error) {
+                *error = "Unpack could not restore an external connection: " +
+                    linkError;
+            }
             return false;
         }
+        link.toSocketId = std::move(normalizedTarget);
     }
+
+    if (!RemoveNode(nodeId)) {
+        rollbackTransientExpansion();
+        if (error) *error = "Unpack could not remove the compound instance.";
+        return false;
+    }
+    for (Link& link : rewired) {
+        m_Links.push_back(std::move(link));
+    }
+    m_NextNodeId = nextNodeId;
+
+    std::vector<int> unpackedResult = clonedNodeIds;
     ClearSelection();
-    if (unpackedNodeIds) unpackedNodeIds->clear();
-    for (const auto& item : oldToNew) {
-        SelectNode(item.second, true);
-        if (unpackedNodeIds) unpackedNodeIds->push_back(item.second);
+    m_SelectedNodeIds = std::move(clonedNodeIds);
+    m_SelectedNodeId =
+        m_SelectedNodeIds.empty() ? -1 : m_SelectedNodeIds.back();
+    if (unpackedNodeIds) {
+        *unpackedNodeIds = std::move(unpackedResult);
     }
     TouchStructure();
     return true;
@@ -558,7 +818,6 @@ bool Graph::ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* res
     expanded.m_HasSelectedLink = m_HasSelectedLink;
     expanded.m_ActiveImageNodeId = m_ActiveImageNodeId;
     expanded.m_OutputNodeId = m_OutputNodeId;
-    expanded.m_ForceOutputFourPins = m_ForceOutputFourPins;
     expanded.m_AllowNoOutput = m_AllowNoOutput;
     expanded.m_SocketPreviewNodeId = m_SocketPreviewNodeId;
     expanded.m_SocketPreviewIntent = m_SocketPreviewIntent;
@@ -641,10 +900,73 @@ bool Graph::ResolveCompoundOutputInputDependencies(
 
     Graph canonical;
     DeserializeGraphPayload(definition->canonicalGraph, canonical, 0, {}, 0, 0, 0);
+    std::unordered_map<int, const Node*> canonicalNodes;
+    std::unordered_map<int, std::vector<SocketDefinition>> canonicalSockets;
+    std::unordered_map<
+        int,
+        std::unordered_map<std::string_view, const Link*>>
+        canonicalInputs;
+    canonicalNodes.reserve(canonical.GetNodes().size());
+    canonicalSockets.reserve(canonical.GetNodes().size());
+    canonicalInputs.reserve(canonical.GetNodes().size());
+    for (const Node& canonicalNode : canonical.GetNodes()) {
+        canonicalNodes.emplace(canonicalNode.id, &canonicalNode);
+        canonicalSockets.emplace(
+            canonicalNode.id,
+            canonical.GetSockets(canonicalNode, false));
+    }
+    for (const Link& canonicalLink : canonical.GetLinks()) {
+        canonicalInputs[canonicalLink.toNodeId].emplace(
+            std::string_view(canonicalLink.toSocketId),
+            &canonicalLink);
+    }
+    const auto findCanonicalNode = [&](int internalNodeId) {
+        const auto found = canonicalNodes.find(internalNodeId);
+        return found != canonicalNodes.end()
+            ? found->second
+            : nullptr;
+    };
+    const auto findCanonicalSocket = [&](
+            int internalNodeId,
+            std::string_view internalSocketId,
+            SocketDefinition* socket) {
+        const auto sockets = canonicalSockets.find(internalNodeId);
+        if (sockets == canonicalSockets.end()) {
+            return false;
+        }
+        const auto found = std::find_if(
+            sockets->second.begin(),
+            sockets->second.end(),
+            [&](const SocketDefinition& candidate) {
+                return candidate.id == internalSocketId;
+            });
+        if (found == sockets->second.end()) {
+            return false;
+        }
+        if (socket) {
+            *socket = *found;
+        }
+        return true;
+    };
+    const auto findCanonicalInput = [&](
+            int internalNodeId,
+            std::string_view internalSocketId) {
+        const auto nodeInputs = canonicalInputs.find(internalNodeId);
+        if (nodeInputs == canonicalInputs.end()) {
+            return static_cast<const Link*>(nullptr);
+        }
+        const auto input = nodeInputs->second.find(internalSocketId);
+        return input != nodeInputs->second.end()
+            ? input->second
+            : nullptr;
+    };
     const Node* outputNode = FindNodeByInstanceUuid(canonical, publicOutput->internalInstanceUuid);
     SocketDefinition outputSocket;
     if (!outputNode ||
-        !canonical.FindSocket(outputNode->id, publicOutput->internalSocketId, &outputSocket) ||
+        !findCanonicalSocket(
+            outputNode->id,
+            publicOutput->internalSocketId,
+            &outputSocket) ||
         outputSocket.direction != SocketDirection::Output) {
         if (errorMessage) *errorMessage = "The connected compound output has no valid canonical binding.";
         return false;
@@ -657,76 +979,170 @@ bool Graph::ResolveCompoundOutputInputDependencies(
         }
     }
 
-    std::set<std::pair<int, std::string>> visiting;
-    std::set<std::pair<int, std::string>> visited;
     std::set<std::string> dependencies;
-    std::function<bool(int, const std::string&)> walkOutput;
-    std::function<bool(int, const SocketDefinition&)> walkInput;
-
-    walkInput = [&](int internalNodeId, const SocketDefinition& inputSocket) -> bool {
-        const Node* internalNode = canonical.FindNode(internalNodeId);
-        if (!internalNode) return false;
-        const auto publicBinding = publicInputsByBinding.find(
-            { internalNode->instanceUuid, inputSocket.id });
-        if (publicBinding != publicInputsByBinding.end()) {
-            dependencies.insert(publicBinding->second);
-            return true;
-        }
-        if (const Link* upstream = canonical.FindInputLink(internalNodeId, inputSocket.id)) {
-            return walkOutput(upstream->fromNodeId, upstream->fromSocketId);
-        }
-        // Optional inputs have a canonical default owned by their internal node.
-        // Hidden required alternatives (for example packed image versus separate
-        // channels) are inactive unless linked or deliberately bound.
-        return inputSocket.optional || !inputSocket.visible;
+    enum class DependencyVisitState {
+        Visiting,
+        Valid,
+        Invalid
+    };
+    struct DependencyFrame {
+        std::pair<int, std::string> key;
+        std::vector<SocketDefinition> inputs;
+        std::size_t nextInput = 0;
+        bool valid = true;
+        bool initialized = false;
     };
 
-    walkOutput = [&](int internalNodeId, const std::string& internalOutputSocketId) -> bool {
-        const std::pair<int, std::string> key { internalNodeId, internalOutputSocketId };
-        if (visited.count(key) != 0) return true;
-        if (!visiting.insert(key).second) return false;
-        const Node* internalNode = canonical.FindNode(internalNodeId);
-        SocketDefinition internalOutput;
-        if (!internalNode ||
-            !canonical.FindSocket(internalNodeId, internalOutputSocketId, &internalOutput) ||
-            internalOutput.direction != SocketDirection::Output) {
-            visiting.erase(key);
-            return false;
-        }
+    std::map<
+        std::pair<int, std::string>,
+        DependencyVisitState>
+        visitStates;
+    std::vector<DependencyFrame> pending;
+    pending.push_back(
+        DependencyFrame{
+            {
+                outputNode->id,
+                publicOutput->internalSocketId
+            }
+        });
 
-        bool valid = true;
-        if (internalNode->kind == NodeKind::Compound) {
-            std::vector<std::string> nestedDependencies;
-            std::string nestedError;
-            valid = canonical.ResolveCompoundOutputInputDependencies(
-                internalNodeId, internalOutputSocketId, nestedDependencies, &nestedError);
-            if (valid) {
-                for (const std::string& nestedInputId : nestedDependencies) {
-                    SocketDefinition nestedInput;
-                    if (!canonical.FindSocket(internalNodeId, nestedInputId, &nestedInput) ||
-                        !walkInput(internalNodeId, nestedInput)) {
-                        valid = false;
-                        break;
+    while (!pending.empty()) {
+        DependencyFrame& frame = pending.back();
+        if (!frame.initialized) {
+            const auto existing = visitStates.find(frame.key);
+            if (existing != visitStates.end()) {
+                pending.pop_back();
+                continue;
+            }
+            visitStates.emplace(
+                frame.key,
+                DependencyVisitState::Visiting);
+
+            const Node* internalNode =
+                findCanonicalNode(frame.key.first);
+            SocketDefinition internalOutput;
+            if (!internalNode ||
+                !findCanonicalSocket(
+                    frame.key.first,
+                    frame.key.second,
+                    &internalOutput) ||
+                internalOutput.direction != SocketDirection::Output) {
+                frame.valid = false;
+            } else if (internalNode->kind == NodeKind::Compound) {
+                std::vector<std::string> nestedDependencies;
+                std::string nestedError;
+                frame.valid =
+                    canonical.ResolveCompoundOutputInputDependencies(
+                        internalNode->id,
+                        frame.key.second,
+                        nestedDependencies,
+                        &nestedError);
+                if (frame.valid) {
+                    frame.inputs.reserve(nestedDependencies.size());
+                    for (const std::string& nestedInputId :
+                            nestedDependencies) {
+                        SocketDefinition nestedInput;
+                        if (!findCanonicalSocket(
+                                internalNode->id,
+                                nestedInputId,
+                                &nestedInput)) {
+                            frame.valid = false;
+                            break;
+                        }
+                        frame.inputs.push_back(
+                            std::move(nestedInput));
+                    }
+                }
+            } else {
+                const auto sockets =
+                    canonicalSockets.find(internalNode->id);
+                if (sockets == canonicalSockets.end()) {
+                    frame.valid = false;
+                } else {
+                    for (const SocketDefinition& socket :
+                            sockets->second) {
+                        if (socket.direction == SocketDirection::Input) {
+                            frame.inputs.push_back(socket);
+                        }
                     }
                 }
             }
-        } else {
-            for (const SocketDefinition& socket : canonical.GetSockets(*internalNode, false)) {
-                if (socket.direction == SocketDirection::Input &&
-                    !walkInput(internalNodeId, socket)) {
-                    valid = false;
-                    break;
-                }
-            }
+            frame.initialized = true;
         }
 
-        visiting.erase(key);
-        if (valid) visited.insert(key);
-        return valid;
-    };
+        if (!frame.valid) {
+            visitStates[frame.key] =
+                DependencyVisitState::Invalid;
+            pending.pop_back();
+            continue;
+        }
+        if (frame.nextInput >= frame.inputs.size()) {
+            visitStates[frame.key] =
+                DependencyVisitState::Valid;
+            pending.pop_back();
+            continue;
+        }
 
-    if (!walkOutput(outputNode->id, publicOutput->internalSocketId)) {
-        if (errorMessage) *errorMessage = "The compound output's canonical dependency path is invalid or incomplete.";
+        const SocketDefinition& inputSocket =
+            frame.inputs[frame.nextInput];
+        const Node* internalNode =
+            findCanonicalNode(frame.key.first);
+        if (!internalNode) {
+            frame.valid = false;
+            continue;
+        }
+        const auto publicBinding = publicInputsByBinding.find(
+            {
+                internalNode->instanceUuid,
+                inputSocket.id
+            });
+        if (publicBinding != publicInputsByBinding.end()) {
+            dependencies.insert(publicBinding->second);
+            ++frame.nextInput;
+            continue;
+        }
+
+        const Link* upstream = findCanonicalInput(
+            internalNode->id,
+            inputSocket.id);
+        if (!upstream) {
+            // Optional inputs have a canonical default owned by their
+            // internal node. Hidden required alternatives (for example
+            // packed image versus separate channels) are inactive unless
+            // linked or deliberately bound.
+            frame.valid =
+                inputSocket.optional || !inputSocket.visible;
+            ++frame.nextInput;
+            continue;
+        }
+
+        const std::pair<int, std::string> upstreamKey{
+            upstream->fromNodeId,
+            upstream->fromSocketId
+        };
+        const auto upstreamState = visitStates.find(upstreamKey);
+        if (upstreamState == visitStates.end()) {
+            pending.push_back(
+                DependencyFrame{ upstreamKey });
+            continue;
+        }
+        if (upstreamState->second != DependencyVisitState::Valid) {
+            frame.valid = false;
+        }
+        ++frame.nextInput;
+    }
+
+    const auto rootState = visitStates.find(
+        {
+            outputNode->id,
+            publicOutput->internalSocketId
+        });
+    if (rootState == visitStates.end() ||
+        rootState->second != DependencyVisitState::Valid) {
+        if (errorMessage) {
+            *errorMessage =
+                "The compound output's canonical dependency path is invalid or incomplete.";
+        }
         return false;
     }
 
@@ -745,7 +1161,15 @@ bool Graph::CreateCompoundFromSelection(
     const std::string& label,
     int* compoundNodeId,
     std::string* error) {
-    std::unordered_set<int> selected(nodeIds.begin(), nodeIds.end());
+    std::unordered_set<int> selected;
+    selected.reserve(nodeIds.size());
+    std::vector<int> uniqueNodeIds;
+    uniqueNodeIds.reserve(nodeIds.size());
+    for (const int nodeId : nodeIds) {
+        if (selected.insert(nodeId).second) {
+            uniqueNodeIds.push_back(nodeId);
+        }
+    }
     if (selected.empty()) {
         if (error) *error = "Select at least one pointwise graph node.";
         return false;
@@ -754,7 +1178,8 @@ bool Graph::CreateCompoundFromSelection(
     float minX = 0.0f;
     float minY = 0.0f;
     bool first = true;
-    for (int nodeId : nodeIds) {
+    selectedNodes.reserve(uniqueNodeIds.size());
+    for (int nodeId : uniqueNodeIds) {
         const Node* node = FindNode(nodeId);
         if (!node || (node->kind != NodeKind::DataMath &&
                       node->kind != NodeKind::TechnicalImage &&
@@ -806,13 +1231,13 @@ bool Graph::CreateCompoundFromSelection(
     Graph internal;
     internal.Clear();
     internal.SetAllowNoOutput(true);
-    internal.GetNodes() = selectedNodes;
+    internal.EditNodes() = selectedNodes;
     int maxInternalId = 0;
     for (const Node& node : selectedNodes) maxInternalId = std::max(maxInternalId, node.id);
     internal.SetNextNodeId(maxInternalId + 1);
     for (const Link& link : m_Links) {
         if (selected.count(link.fromNodeId) && selected.count(link.toNodeId)) {
-            internal.GetLinks().push_back(link);
+            internal.EditLinks().push_back(link);
         }
     }
 
@@ -880,32 +1305,114 @@ bool Graph::CreateCompoundFromSelection(
     PromoteSupportedParameters(selectedNodes, definition.parameters);
     Stack::NodeMath::RefreshCompoundDefinitionContentHash(definition);
     const Stack::NodeMath::DefinitionReference reference = definition.identity;
+    const std::size_t definitionCountBefore =
+        m_CompoundDefinitions.size();
+    const int nextNodeIdBefore = m_NextNodeId;
     if (!AddCompoundDefinition(std::move(definition), error)) return false;
 
-    for (int selectedId : nodeIds) RemoveNode(selectedId);
-    Node* compound = AddCompoundNode(reference, { minX, minY });
-    if (!compound) {
-        if (error) *error = "Could not create the compound instance.";
+    int newCompoundId = -1;
+    const auto rollbackPreparedCompound = [&]() {
+        if (newCompoundId > 0) {
+            RemoveNode(newCompoundId);
+        }
+        if (m_CompoundDefinitions.size() > definitionCountBefore) {
+            m_CompoundDefinitions.resize(definitionCountBefore);
+        }
+        m_NextNodeId = nextNodeIdBefore;
+        TouchStructure();
+    };
+
+    std::vector<Link> replacementLinks;
+    try {
+        Node* compound = AddCompoundNode(reference, { minX, minY });
+        if (!compound) {
+            rollbackPreparedCompound();
+            if (error) *error = "Could not create the compound instance.";
+            return false;
+        }
+        newCompoundId = compound->id;
+
+        const std::size_t replacementCount =
+            inputs.size() + outputs.size();
+        replacementLinks.reserve(replacementCount);
+        const auto prepareConnection =
+            [&](int fromNodeId,
+                const std::string& fromSocketId,
+                int toNodeId,
+                const std::string& toSocketId) {
+                std::string normalizedTarget;
+                std::string linkError;
+                if (!CanConnectSockets(
+                        fromNodeId,
+                        fromSocketId,
+                        toNodeId,
+                        toSocketId,
+                        &normalizedTarget,
+                        &linkError)) {
+                    if (error) *error = std::move(linkError);
+                    return false;
+                }
+                replacementLinks.push_back({
+                    fromNodeId,
+                    fromSocketId,
+                    toNodeId,
+                    std::move(normalizedTarget)
+                });
+                return true;
+            };
+        for (const BoundaryLink& boundary : inputs) {
+            if (!prepareConnection(
+                    boundary.link.fromNodeId,
+                    boundary.link.fromSocketId,
+                    newCompoundId,
+                    boundary.portId)) {
+                rollbackPreparedCompound();
+                return false;
+            }
+        }
+        for (const BoundaryLink& boundary : outputs) {
+            if (!prepareConnection(
+                    newCompoundId,
+                    boundary.portId,
+                    boundary.link.toNodeId,
+                    boundary.link.toSocketId)) {
+                rollbackPreparedCompound();
+                return false;
+            }
+        }
+        if (replacementLinks.size() >
+            m_Links.max_size() - m_Links.size()) {
+            throw std::length_error(
+                "compound replacement link capacity exhausted");
+        }
+        m_Links.reserve(m_Links.size() + replacementLinks.size());
+        m_SelectedNodeIds.reserve(1u);
+    } catch (const std::bad_alloc&) {
+        rollbackPreparedCompound();
+        SetCompoundErrorNoThrow(
+            error,
+            "The compound could not be created because memory is exhausted.");
         return false;
+    } catch (const std::length_error&) {
+        rollbackPreparedCompound();
+        SetCompoundErrorNoThrow(
+            error,
+            "The compound could not be created because the graph size limit was reached.");
+        return false;
+    } catch (...) {
+        rollbackPreparedCompound();
+        throw;
     }
-    const int newCompoundId = compound->id;
-    for (const BoundaryLink& boundary : inputs) {
-        std::string linkError;
-        if (!TryConnectSockets(
-                boundary.link.fromNodeId, boundary.link.fromSocketId,
-                newCompoundId, boundary.portId, &linkError)) {
-            if (error) *error = linkError;
-            return false;
-        }
+
+    // Every fallible allocation and connection check is complete. Removing
+    // the selected nodes also removes the old boundary links, after which the
+    // prepared moves publish the equivalent compound boundary without
+    // allocating.
+    for (int selectedId : uniqueNodeIds) {
+        RemoveNode(selectedId);
     }
-    for (const BoundaryLink& boundary : outputs) {
-        std::string linkError;
-        if (!TryConnectSockets(
-                newCompoundId, boundary.portId,
-                boundary.link.toNodeId, boundary.link.toSocketId, &linkError)) {
-            if (error) *error = linkError;
-            return false;
-        }
+    for (Link& link : replacementLinks) {
+        m_Links.push_back(std::move(link));
     }
     SelectNode(newCompoundId, false);
     if (compoundNodeId) *compoundNodeId = newCompoundId;

@@ -10,6 +10,12 @@ text. Twenty-one are covered below as lifecycle, hidden/deprecated, placeholder,
 or runtime-incomplete entries. `Output` can also display a `Deactivated` runtime
 state, but that is normal user-controlled state rather than a fix marker.
 
+> Denoise update, 2026-07-24: the RAW/CFA and Linear RGB neural experiments,
+> Classical RGB Denoise, and Scene Denoise were retired from new-node authoring.
+> Their current compatibility policy is owned by
+> [denoise-rewrite/README.md](denoise-rewrite/README.md). The original audit
+> evidence below has been updated where those lifecycle decisions changed.
+
 ## Marker Sources
 
 - `src/Editor/LayerRegistry.h` defines lifecycle markers:
@@ -49,9 +55,9 @@ fix markers. Those only control node-browser thumbnail generation.
 - Fix plan:
   - Short-term: mark the catalog label as `MFSR (Placeholder)` or
     `MFSR (Experimental)` so the add-node browser tells the truth.
-  - Implementation pass: follow `docs/stack-documentation/Current/engineering/mfsr/03_MFSR_IMPLEMENTATION_PLAN.md`,
-    starting with the MFSR tab shell and then CPU reference fusion before GPU
-    acceleration.
+  - Implementation pass: follow `docs/stack-documentation/Current/engineering/mfsr/03_MFSR_IMPLEMENTATION_PLAN.md`.
+    The top-level MFSR tab shell is superseded by RAW Lab's Multi-Frame
+    source-set surface; processing remains deferred before CPU/GPU fusion.
   - Thread MFSR settings through a real control surface or hide/defer settings
     that cannot yet influence execution.
   - Acceptance: connected burst frames produce a cached output that differs from
@@ -60,30 +66,15 @@ fix markers. Those only control node-browser thumbnail generation.
 
 ### RAW/CFA Neural Denoise
 
-- Marker: UI runtime text says bypass/pass-through; visible node.
-- Evidence:
-  - `src/Editor/Internal/EditorModuleRawBasicControls.cpp:157` displays
-    `Execution: bypass / pass-through until real inference is implemented.`
-  - `src/Renderer/Internal/RenderPipelineGraphRawStages.cpp:26` walks through a
-    `RawNeuralDenoise` node to find the original upstream RAW source.
-  - `src/Renderer/Internal/RenderPipelineGraphExecution.cpp:1064` produces no
-    image texture for the node.
-- What is wrong:
-  - The raw-stage node has model selection UI, but the render path ignores the
-    selected model and leaves the RAW packet effectively unchanged.
-  - Runtime choices include provider options that the ONNX backend rejects, and
-    the serialized `allowCpuFallback` setting is not exposed on the node surface.
-- Fix plan:
-  - Short-term: mark the node-browser label as `RAW/CFA Neural Denoise
-    (Placeholder)` or hide it until raw inference exists.
-  - Surface or disable unsupported provider choices, and expose
-    `allowCpuFallback` if it remains part of the settings contract.
-  - Implementation pass: add a real RAW/CFA denoise stage between RAW source and
-    decode/develop, probably using the existing `NeuralDenoise` manager and ONNX
-    backend where possible.
-  - Acceptance: enabling the node changes the RAW/develop result for a valid
-    mosaiced CFA input, disabled mode is identity, and unavailable model/provider
-    states fail honestly without silently pretending to denoise.
+- Marker: `Legacy`; hidden from new-node authoring.
+- Current behavior:
+  - old graph nodes and their serialized settings remain loadable;
+  - the RAW graph traversal explicitly passes through to the upstream RAW
+    source;
+  - the control surface is read-only and identifies the node as retired;
+  - no model manager, ONNX provider, or inference path is active.
+- Follow-up: design a new versioned RAW denoise contract through
+  `denoise-rewrite/README.md`; do not reactivate this payload as the new system.
 
 ### Text Overlay
 
@@ -146,26 +137,19 @@ fix markers. Those only control node-browser thumbnail generation.
 
 ### Classical RGB Denoise
 
-- Marker: `Experimental`.
-- Evidence: `src/Editor/LayerRegistry.cpp:81` calls it a CPU prototype with an
-  explicit `Run Denoise` cache workflow.
-- Assessment:
-  - This appears intentional rather than broken. It is an offline/cached node,
-    not a normal live shader effect.
-- Fix plan:
-  - Keep experimental until cache invalidation, cancel/progress behavior, and
-    full-image validation are solid.
+- Marker: `Deprecated`; hidden from new-node authoring.
+- Compatibility behavior: old projects retain the implementation and serialized
+  settings so their pixels do not silently change.
+- Follow-up: use it only as historical/reference evidence during the denoise
+  rewrite.
 
 ### Linear RGB Neural Denoise
 
-- Marker: `Experimental`.
-- Evidence: `src/Editor/LayerRegistry.cpp:83` requires external ONNX model packs.
-- Assessment:
-  - The RGB neural denoise layer has real ONNX backend plumbing, but availability
-    depends on local model/runtime packs.
-- Fix plan:
-  - Keep experimental until model-pack install/discovery UX is reliable and
-    provider fallback rules are fully validated.
+- Marker: `Deprecated`; hidden from new-node authoring.
+- Compatibility behavior: settings survive old-project load/save, while the
+  retired node explicitly passes pixels through unchanged.
+- The model-pack discovery and ONNX Runtime backend have been removed from the
+  active source tree.
 
 ## Likely False-Positive `Needs Fix` Labels
 
@@ -227,8 +211,9 @@ These are not visible in the add-node browser because
 ## Recommended Next Pass Order
 
 1. Clean up truth-in-labeling.
-   - Mark MFSR and RAW/CFA Neural Denoise as placeholder/experimental in the
-     catalog, or hide them until their render paths exist.
+   - Keep MFSR truthfully marked as a placeholder/experimental node.
+   - RAW/CFA Neural Denoise is complete for this audit as a hidden,
+     compatibility-only pass-through node.
    - Reclassify false-positive `NeedsFix` labels after minimal full-image smoke
      validation.
 
@@ -244,8 +229,10 @@ These are not visible in the add-node browser because
 4. Treat large architecture work as separate feature passes.
    - Real canvas-resizing Crop/Rotate/Expand requires variable output sizes in
      the graph renderer.
-   - Real MFSR requires its planned tab, cache, diagnostics, and fusion pipeline.
-   - RAW/CFA Neural Denoise requires a real RAW-stage inference integration.
+   - Real MFSR uses RAW Lab's Multi-Frame surface and still requires cache,
+     diagnostics, alignment, and fusion contracts.
+   - New denoise work belongs to the separate versioned
+     `denoise-rewrite/README.md` workstream.
 
 ## Verification To Run Next Pass
 
@@ -254,5 +241,6 @@ These are not visible in the add-node browser because
 - Channel-stream smoke: split a channel, insert each policy class, and verify
   warning/blocking behavior.
 - Full-image smoke for all reclassified nodes.
-- Feature-specific smoke for Background Remover, Text Overlay, MFSR, and
-  RAW/CFA Neural Denoise when those implementations are touched.
+- Feature-specific smoke for Background Remover, Text Overlay, and MFSR when
+  those implementations are touched; use the denoise-rewrite tests for future
+  denoise work.

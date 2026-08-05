@@ -2,6 +2,7 @@
 
 #include "Raw/RawImageData.h"
 #include "Utils/HashUtils.h"
+#include "Utils/PixelBufferUtils.h"
 #include "Utils/SharedPixelBuffer.h"
 
 #include <algorithm>
@@ -70,24 +71,26 @@ int ResolveRawDevelopOrientation(const Raw::RawMetadata& metadata, const Raw::Ra
     return effectiveOrientation;
 }
 
-std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return {};
-    }
-    return std::vector<unsigned char>(static_cast<size_t>(width * height * 4), 0);
-}
-
 } // namespace
 
 SharedPixelBuffer EditorModule::EnsureSharedImagePixels(const EditorNodeGraph::ImagePayload& payload) const {
-    if (payload.width <= 0 || payload.height <= 0) {
+    const auto payloadIsComplete = [&](std::size_t availableBytes) {
+        return Stack::PixelBuffer::HasCompletePixelBuffer(
+            availableBytes,
+            payload.width,
+            payload.height,
+            payload.channels);
+    };
+    if (payload.width <= 0 || payload.height <= 0 ||
+        !Stack::PixelBuffer::IsSupportedInterleavedChannelCount(payload.channels)) {
         payload.sharedPixels.reset();
         payload.pixelsFingerprint = 0;
         return {};
     }
 
     if (payload.pixels.empty()) {
-        if (!payload.sharedPixels || payload.sharedPixels->empty()) {
+        if (!payload.sharedPixels || payload.sharedPixels->empty() ||
+            !payloadIsComplete(payload.sharedPixels->size())) {
             payload.sharedPixels.reset();
             payload.pixelsFingerprint = 0;
             return {};
@@ -98,6 +101,11 @@ SharedPixelBuffer EditorModule::EnsureSharedImagePixels(const EditorNodeGraph::I
         return MakeSharedPixelBufferAlias(payload.sharedPixels, payload.pixelsFingerprint);
     }
 
+    if (!payloadIsComplete(payload.pixels.size())) {
+        payload.sharedPixels.reset();
+        payload.pixelsFingerprint = 0;
+        return {};
+    }
     if (!payload.sharedPixels || payload.sharedPixels->size() != payload.pixels.size()) {
         payload.pixelsFingerprint = StackHash::HashBytes(payload.pixels);
         payload.sharedPixels = std::make_shared<std::vector<unsigned char>>(payload.pixels);
@@ -169,9 +177,10 @@ bool EditorModule::TryCopyImageNodeSharedPixels(
     }
 
     if (sourceNode->kind != EditorNodeGraph::NodeKind::Image ||
-        sourceNode->image.pixels.empty() ||
         sourceNode->image.width <= 0 ||
-        sourceNode->image.height <= 0) {
+        sourceNode->image.height <= 0 ||
+        !Stack::PixelBuffer::IsSupportedInterleavedChannelCount(
+            sourceNode->image.channels)) {
         return false;
     }
 
@@ -232,20 +241,24 @@ bool EditorModule::TryCopyImageNodePixels(int sourceNodeId, std::vector<unsigned
             outH = swaps ? visibleWidth : visibleHeight;
         }
         outChannels = 4;
-        outPixels = BuildTransparentPixels(outW, outH);
-        return !outPixels.empty();
+        outPixels.clear();
+        return outW > 0 && outH > 0;
     }
 
     if (sourceNode->kind == EditorNodeGraph::NodeKind::RawSource) {
         outW = Raw::DisplayWidth(sourceNode->rawSource.metadata);
         outH = Raw::DisplayHeight(sourceNode->rawSource.metadata);
         outChannels = 4;
-        outPixels = BuildTransparentPixels(outW, outH);
-        return !outPixels.empty();
+        outPixels.clear();
+        return outW > 0 && outH > 0;
     }
 
     if (sourceNode->kind != EditorNodeGraph::NodeKind::Image ||
-        sourceNode->image.pixels.empty() ||
+        !Stack::PixelBuffer::HasCompletePixelBuffer(
+            sourceNode->image.pixels.size(),
+            sourceNode->image.width,
+            sourceNode->image.height,
+            sourceNode->image.channels) ||
         sourceNode->image.width <= 0 ||
         sourceNode->image.height <= 0) {
         return false;

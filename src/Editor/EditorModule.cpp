@@ -4,13 +4,15 @@
 #include "Layers/ToneLayers.h"
 #include "NodeGraph/EditorNodeGraphDefinitions.h"
 #include "NodeGraph/EditorNodeGraphSerializer.h"
+#include "NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
 #include "Library/LibraryManager.h"
 #include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
+#include "Utils/PixelBufferUtils.h"
+#include "Utils/PngEncodingUtils.h"
 #include "ThirdParty/stb_image.h"
-#include "ThirdParty/stb_image_write.h"
 #include "App/settings/AppearanceTheme.h"
 #include <algorithm>
 #include <cmath>
@@ -19,7 +21,9 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <imgui.h>
 #include <imgui_internal.h>
 
@@ -53,26 +57,18 @@ bool DecodeImageFromFile(const std::string& path, DecodedImageData& outImage) {
     outImage.height = height;
     outImage.channels = 4;
     outImage.originalChannels = channels;
-    outImage.pixels.assign(pixels, pixels + (width * height * 4));
+    const bool copied = Stack::PixelBuffer::CopyInterleavedPixels(
+        pixels, width, height, 4, outImage.pixels);
     stbi_image_free(pixels);
-    return true;
-}
-
-void PngWriteCallback(void* context, void* data, int size) {
-    auto* bytes = static_cast<std::vector<unsigned char>*>(context);
-    const auto* begin = static_cast<unsigned char*>(data);
-    bytes->insert(bytes->end(), begin, begin + size);
+    if (!copied) {
+        outImage = {};
+    }
+    return copied;
 }
 
 std::vector<unsigned char> EncodePngBytes(const std::vector<unsigned char>& pixels, int width, int height, int channels) {
-    std::vector<unsigned char> pngBytes;
-    if (pixels.empty() || width <= 0 || height <= 0) {
-        return pngBytes;
-    }
-
-    const int safeChannels = std::max(1, channels);
-    stbi_write_png_to_func(PngWriteCallback, &pngBytes, width, height, safeChannels, pixels.data(), width * safeChannels);
-    return pngBytes;
+    return Stack::PngEncoding::EncodeInterleaved(
+        pixels, width, height, channels);
 }
 
 std::string SanitizeProjectFileStem(const std::string& value) {
@@ -102,8 +98,23 @@ void ResizeNearestRgba(
     int dstW,
     int dstH,
     std::vector<unsigned char>& dstPixels) {
-    dstPixels.assign(static_cast<size_t>(dstW * dstH * 4), 0);
-    if (srcPixels.empty() || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
+    dstPixels.clear();
+    if (!Stack::PixelBuffer::HasCompletePixelBuffer(
+            srcPixels.size(), srcW, srcH, 4)) {
+        return;
+    }
+    std::size_t destinationByteCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            dstW, dstH, 4, destinationByteCount)) {
+        return;
+    }
+    try {
+        dstPixels.assign(destinationByteCount, 0);
+    } catch (const std::bad_alloc&) {
+        dstPixels.clear();
+        return;
+    } catch (const std::length_error&) {
+        dstPixels.clear();
         return;
     }
 
@@ -111,8 +122,12 @@ void ResizeNearestRgba(
         const int srcY = std::clamp(static_cast<int>((static_cast<float>(y) / static_cast<float>(dstH)) * srcH), 0, srcH - 1);
         for (int x = 0; x < dstW; ++x) {
             const int srcX = std::clamp(static_cast<int>((static_cast<float>(x) / static_cast<float>(dstW)) * srcW), 0, srcW - 1);
-            const size_t dstIndex = static_cast<size_t>((y * dstW + x) * 4);
-            const size_t srcIndex = static_cast<size_t>((srcY * srcW + srcX) * 4);
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * static_cast<size_t>(dstW) +
+                 static_cast<size_t>(x)) * 4u;
+            const size_t srcIndex =
+                (static_cast<size_t>(srcY) * static_cast<size_t>(srcW) +
+                 static_cast<size_t>(srcX)) * 4u;
             dstPixels[dstIndex + 0] = srcPixels[srcIndex + 0];
             dstPixels[dstIndex + 1] = srcPixels[srcIndex + 1];
             dstPixels[dstIndex + 2] = srcPixels[srcIndex + 2];
@@ -162,74 +177,8 @@ std::vector<unsigned char> EncodePngBytesForImageStorage(
     int width,
     int height,
     int channels) {
-    if (bottomLeftPixels.empty() || width <= 0 || height <= 0 || channels <= 0) {
-        return {};
-    }
-
-    std::vector<unsigned char> topLeftPixels = bottomLeftPixels;
-    LibraryManager::FlipImageRowsInPlace(topLeftPixels, width, height, std::max(1, channels));
-    return EncodePngBytes(topLeftPixels, width, height, channels);
-}
-
-int NormalizeQuarterTurnsClockwise(int quarterTurnsClockwise) {
-    int normalized = quarterTurnsClockwise % 4;
-    if (normalized < 0) {
-        normalized += 4;
-    }
-    return normalized;
-}
-
-std::vector<unsigned char> RotateBottomLeftImagePixels(
-    const std::vector<unsigned char>& pixels,
-    int width,
-    int height,
-    int channels,
-    int quarterTurnsClockwise,
-    int& outWidth,
-    int& outHeight) {
-    outWidth = width;
-    outHeight = height;
-    const int safeChannels = std::max(1, channels);
-    const int normalizedTurns = NormalizeQuarterTurnsClockwise(quarterTurnsClockwise);
-    if (pixels.empty() || width <= 0 || height <= 0 || normalizedTurns == 0) {
-        return pixels;
-    }
-
-    if (normalizedTurns == 2) {
-        std::vector<unsigned char> rotated(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(safeChannels));
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int srcX = width - 1 - x;
-                const int srcY = height - 1 - y;
-                const std::size_t dstIndex = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * static_cast<std::size_t>(safeChannels);
-                const std::size_t srcIndex = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * static_cast<std::size_t>(safeChannels);
-                std::copy_n(pixels.data() + srcIndex, safeChannels, rotated.data() + dstIndex);
-            }
-        }
-        return rotated;
-    }
-
-    outWidth = height;
-    outHeight = width;
-    std::vector<unsigned char> rotated(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight) * static_cast<std::size_t>(safeChannels));
-    for (int y = 0; y < outHeight; ++y) {
-        for (int x = 0; x < outWidth; ++x) {
-            int srcX = 0;
-            int srcY = 0;
-            if (normalizedTurns == 1) {
-                srcX = width - 1 - y;
-                srcY = x;
-            } else {
-                srcX = y;
-                srcY = height - 1 - x;
-            }
-            const std::size_t dstIndex = (static_cast<std::size_t>(y) * static_cast<std::size_t>(outWidth) + static_cast<std::size_t>(x)) * static_cast<std::size_t>(safeChannels);
-            const std::size_t srcIndex = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(srcX)) * static_cast<std::size_t>(safeChannels);
-            std::copy_n(pixels.data() + srcIndex, safeChannels, rotated.data() + dstIndex);
-        }
-    }
-
-    return rotated;
+    return EditorNodeGraph::EncodeImagePayloadPngForStorage(
+        bottomLeftPixels, width, height, channels);
 }
 
 std::string FileNameFromPath(const std::string& path);
@@ -384,6 +333,9 @@ ScenePathState AnalyzeScenePathFromNode(
             mergeInput("g");
             mergeInput("b");
             mergeInput("a");
+            break;
+        case EditorNodeGraph::NodeKind::ConstantChannel:
+            mergeInput(EditorNodeGraph::kMatchExtentInputSocketId);
             break;
         case EditorNodeGraph::NodeKind::Output:
             if (graph.FindInputLink(node->id, EditorNodeGraph::kImageInputSocketId)) {
@@ -559,10 +511,7 @@ std::string FileNameFromPath(const std::string& path) {
 }
 
 std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return {};
-    }
-    return std::vector<unsigned char>(static_cast<size_t>(width * height * 4), 0);
+    return Stack::PixelBuffer::BuildTransparentRgbaPixels(width, height);
 }
 
 EditorNodeGraph::MaskCombineMode ToGraphMaskCombineMode(ToneCurveScopeMaskAction action) {
@@ -715,6 +664,11 @@ EditorModule::~EditorModule() {
 
 void EditorModule::MarkDirty() {
     m_Dirty = true;
+    if (m_ActiveRawProjectSnapshot) {
+        m_ActiveRawProjectSnapshot->dirtyRevision =
+            m_ProjectSessionController.NoteEdit();
+        return;
+    }
     if (IsRawWorkspaceProjectActive()) {
         BumpRawWorkspaceProjectSaveRevision(
             m_RawWorkspace.workspaceRoot,
@@ -722,7 +676,13 @@ void EditorModule::MarkDirty() {
     }
 }
 
+void EditorModule::ClearDirty() {
+    m_Dirty = false;
+}
+
 void EditorModule::RequestWorkerShutdownForAppClose() {
+    CancelMfdExperimentalProcessing(
+        "MFD processing canceled for application shutdown.");
     RequestRawWorkspaceProjectSaveWorkerDrain();
     m_RenderWorker.RequestStopForShutdown();
     m_NodeBrowserRenderWorker.RequestStopForShutdown();
@@ -741,6 +701,7 @@ void EditorModule::Shutdown() {
         return;
     }
     m_ShutdownComplete = true;
+    CancelMfdExperimentalProcessing({}, true);
     CloseDetachedPreviewFullscreen();
     ShutdownRawWorkspaceProjectSaveWorker();
     FlushRawWorkspacePersistenceForShutdown();
@@ -751,6 +712,8 @@ void EditorModule::Shutdown() {
     for (EditorRenderWorker::Result& result : m_DeferredRenderResults) {
         QueueViewportOutputTextureRelease(result.outputTexture);
         QueueViewportOutputTileSetRelease(result.outputTiles);
+        QueueViewportOutputTextureRelease(
+            result.rawWorkspace.localRangeOverlayTexture);
     }
     m_DeferredRenderResults.clear();
     ClearViewportOutputTiles();
@@ -758,6 +721,11 @@ void EditorModule::Shutdown() {
     PumpViewportOutputTileTextureDeletes(true);
     ClearCompositeSceneTextures();
     ClearRawWorkspaceThumbnailTextures(true);
+    m_Sidebar.GetNodeGraphUI().Shutdown();
+    m_Layers.clear();
+    m_CompositePreviewPipeline.Shutdown();
+    m_Pipeline.Shutdown();
+    UnloadResourceTextures();
 }
 
 bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload payload) {
@@ -939,7 +907,11 @@ void EditorModule::EnterSingleOutputPreviewMode() {
     (void)GetCompositePixelsForOutputNode(previewOutputNodeId, outW, outH);
     if (outW > 0 && outH > 0) {
         const std::vector<unsigned char> transparentPixels = BuildTransparentPixels(outW, outH);
-        LoadSourceFromPixels(transparentPixels.data(), outW, outH, 4);
+        LoadSourceFromPixels(
+            transparentPixels.empty() ? nullptr : transparentPixels.data(),
+            outW,
+            outH,
+            4);
     } else {
         MarkRenderDirty();
     }
@@ -959,13 +931,12 @@ void EditorModule::HandleViewportModeTransition(ViewportMode previousMode, Viewp
 }
 
 void EditorModule::BeginLibraryLoadReveal() {
-    const bool wallpaperSurfaces = m_Appearance && m_Appearance->GetSeamlessSurfaceStylingEnabled();
     m_LibraryLoadRevealStartTime = -1.0;
-    m_LibraryLoadRevealPendingFirstFrame = !wallpaperSurfaces;
+    m_LibraryLoadRevealPendingFirstFrame = true;
     m_LibraryLoadRevealLayoutPending = true;
-    m_LibraryLoadCanvasRevealAlpha = wallpaperSurfaces ? 1.0f : 0.0f;
-    m_LibraryLoadGraphRevealAlpha = wallpaperSurfaces ? 1.0f : 0.0f;
-    m_LibraryLoadToolbarRevealAlpha = wallpaperSurfaces ? 1.0f : 0.0f;
+    m_LibraryLoadCanvasRevealAlpha = 0.0f;
+    m_LibraryLoadGraphRevealAlpha = 0.0f;
+    m_LibraryLoadToolbarRevealAlpha = 0.0f;
     m_NodeGraphFullscreen = false;
     m_TargetSubWindow = EditorSubWindow::NodeGraph;
     m_ActiveSubWindow = EditorSubWindow::NodeGraph;
@@ -1089,38 +1060,36 @@ void EditorModule::RenderUI() {
     }
 
     if (m_LibraryLoadRevealStartTime >= 0.0) {
-        if (wallpaperSurfaces) {
+        const double elapsed = ImGui::GetTime() - m_LibraryLoadRevealStartTime;
+        auto easeOutCubic = [](float value) {
+            value = std::clamp(value, 0.0f, 1.0f);
+            return 1.0f - std::pow(1.0f - value, 3.0f);
+        };
+        // Reveal the workspace in reading order: establish the graph first,
+        // then its controls, then bring the developed-image viewport in from
+        // the far right once the graph is already legible.
+        m_LibraryLoadGraphRevealAlpha = easeOutCubic(
+            static_cast<float>(elapsed / 0.58));
+        m_LibraryLoadToolbarRevealAlpha = easeOutCubic(
+            static_cast<float>((elapsed - 0.48) / 0.38));
+        m_LibraryLoadCanvasRevealAlpha = easeOutCubic(
+            static_cast<float>((elapsed - 0.82) / 0.64));
+        if (elapsed >= 1.90) {
             m_LibraryLoadRevealStartTime = -1.0;
             m_LibraryLoadRevealPendingFirstFrame = false;
+            m_LibraryLoadRevealLayoutPending = false;
             m_LibraryLoadCanvasRevealAlpha = 1.0f;
             m_LibraryLoadGraphRevealAlpha = 1.0f;
             m_LibraryLoadToolbarRevealAlpha = 1.0f;
-        } else {
-            const double elapsed = ImGui::GetTime() - m_LibraryLoadRevealStartTime;
-            auto easeOutCubic = [](float value) {
-                value = std::clamp(value, 0.0f, 1.0f);
-                return 1.0f - std::pow(1.0f - value, 3.0f);
-            };
-            m_LibraryLoadCanvasRevealAlpha = easeOutCubic(static_cast<float>(elapsed / 0.78));
-            m_LibraryLoadGraphRevealAlpha = easeOutCubic(static_cast<float>((elapsed - 0.58) / 0.62));
-            m_LibraryLoadToolbarRevealAlpha = easeOutCubic(static_cast<float>((elapsed - 1.22) / 0.36));
-            if (elapsed >= 1.90) {
-                m_LibraryLoadRevealStartTime = -1.0;
-                m_LibraryLoadRevealPendingFirstFrame = false;
-                m_LibraryLoadRevealLayoutPending = false;
-                m_LibraryLoadCanvasRevealAlpha = 1.0f;
-                m_LibraryLoadGraphRevealAlpha = 1.0f;
-                m_LibraryLoadToolbarRevealAlpha = 1.0f;
-            }
         }
     } else {
         m_LibraryLoadCanvasRevealAlpha = 1.0f;
         m_LibraryLoadGraphRevealAlpha = 1.0f;
         m_LibraryLoadToolbarRevealAlpha = 1.0f;
     }
-    const float graphPaneRevealAlpha = wallpaperSurfaces ? 1.0f : m_LibraryLoadGraphRevealAlpha;
-    const float canvasPaneRevealAlpha = wallpaperSurfaces ? 1.0f : m_LibraryLoadCanvasRevealAlpha;
-    const float toolbarRevealAlpha = wallpaperSurfaces ? 1.0f : m_LibraryLoadToolbarRevealAlpha;
+    const float graphPaneRevealAlpha = m_LibraryLoadGraphRevealAlpha;
+    const float canvasPaneRevealAlpha = m_LibraryLoadCanvasRevealAlpha;
+    const float toolbarRevealAlpha = m_LibraryLoadToolbarRevealAlpha;
 
     const ImGuiIO& commandIo = ImGui::GetIO();
     const bool altOnePressed =
@@ -1181,22 +1150,13 @@ void EditorModule::RenderUI() {
     const float maxLeftWidth = std::max(minLeftWidth, workspaceSize.x - minRightWidth - splitGap);
 
     if (m_LibraryLoadRevealLayoutPending) {
-        int imgW = m_Pipeline.GetCanvasWidth();
-        int imgH = m_Pipeline.GetCanvasHeight();
-        float targetLeftPaneWidth = std::clamp(520.0f, minLeftWidth, maxLeftWidth);
-        if (imgW > 0 && imgH > 0) {
-            const float paddingY = 32.0f;
-            const float paddingX = 36.0f;
-            const float availY = std::max(100.0f, workspaceSize.y - paddingY);
-            const float imageAspect = static_cast<float>(imgW) / std::max(1.0f, static_cast<float>(imgH));
-            const float displayWidth = availY * imageAspect;
-            const float optimalRightWidth = displayWidth + paddingX;
-            const float maxRightWidth = std::max(minRightWidth, workspaceSize.x - minLeftWidth - splitGap);
-            const float constrainedRightWidth = std::clamp(optimalRightWidth, minRightWidth, maxRightWidth);
-            targetLeftPaneWidth = workspaceSize.x - splitGap - constrainedRightWidth;
-        }
-
-        targetLeftPaneWidth = std::clamp(targetLeftPaneWidth, minLeftWidth, maxLeftWidth);
+        // A freshly opened project should introduce its graph before asking
+        // the viewport to dominate the workspace. This is an initial layout
+        // only; subsequent user split adjustments remain authoritative.
+        const float targetLeftPaneWidth = std::clamp(
+            workspaceSize.x * 0.74f,
+            minLeftWidth,
+            maxLeftWidth);
         m_LeftPaneWidth = targetLeftPaneWidth;
         m_LastUserNodeGraphWidth = targetLeftPaneWidth;
         m_SplitAutoAnimFrom = targetLeftPaneWidth;
@@ -1420,6 +1380,21 @@ void EditorModule::RenderUI() {
         ? 0.0f
         : std::max(0.0f, workspaceSize.x - m_LeftPaneWidth - effectiveSplitGap);
 
+    const std::vector<int>& canvasStackZOrder = GetCompositeZOrder();
+    const float canvasStackRequestedHeight = canvasStackZOrder.empty()
+        ? 112.0f
+        : 86.0f + static_cast<float>(canvasStackZOrder.size()) * 34.0f;
+    const float canvasStackMaxHeight = std::max(
+        112.0f,
+        std::min(430.0f, paneHeight - 62.0f));
+    const float canvasStackPanelHeight = std::clamp(
+        canvasStackRequestedHeight,
+        112.0f,
+        canvasStackMaxHeight);
+    const ImVec2 canvasStackPanelOrigin(
+        workspacePos.x + 8.0f,
+        workspacePos.y + (paneHeight - canvasStackPanelHeight) * 0.5f);
+
     // Update Left Panel Hover & Animation State
     const bool isGraphDrawerOpen = m_Sidebar.GetNodeGraphUI().HasDrawerOpen();
     const bool graphMiddlePanActive = m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive();
@@ -1430,30 +1405,36 @@ void EditorModule::RenderUI() {
         bool hoveringPanelOrTab = false;
 
         if (!isGraphDrawerOpen) {
-            if (!m_LeftPanelExpanded) {
-                // Hover trigger along the entire left wall/edge of the window
-                if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + 15.0f &&
-                    mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
-                    hoveringPanelOrTab = true;
-                }
-            } else {
-                if (mousePos.x >= workspacePos.x && mousePos.x <= workspacePos.x + m_LeftPanelWidthAnim + 15.0f &&
-                    mousePos.y >= workspacePos.y && mousePos.y <= workspacePos.y + paneHeight) {
-                    hoveringPanelOrTab = true;
-                }
-            }
+            const bool pointerOnEdge =
+                mousePos.x >= workspacePos.x &&
+                mousePos.x <= workspacePos.x + 15.0f &&
+                mousePos.y >= workspacePos.y &&
+                mousePos.y <= workspacePos.y + paneHeight;
+            const bool pointerOverPanel = m_LeftPanelExpanded &&
+                mousePos.x >= canvasStackPanelOrigin.x - 10.0f &&
+                mousePos.x <= canvasStackPanelOrigin.x + 220.0f + 15.0f &&
+                mousePos.y >= canvasStackPanelOrigin.y - 12.0f &&
+                mousePos.y <= canvasStackPanelOrigin.y + canvasStackPanelHeight + 12.0f;
+            hoveringPanelOrTab = pointerOnEdge || pointerOverPanel;
 
             if (ImGui::IsDragDropActive()) {
                 hoveringPanelOrTab = true;
             }
         }
 
-        m_LeftPanelExpanded = hoveringPanelOrTab;
+        const float hoverDt = ImGui::GetIO().DeltaTime;
+        if (hoveringPanelOrTab) {
+            m_LeftPanelHoverGrace = 0.28f;
+        } else {
+            m_LeftPanelHoverGrace = std::max(0.0f, m_LeftPanelHoverGrace - hoverDt);
+        }
+        m_LeftPanelExpanded = hoveringPanelOrTab || m_LeftPanelHoverGrace > 0.0f;
     } else if (!graphMiddlePanActive) {
         // Locked graph panning uses a hidden cursor path, so preserve the
         // drawer state instead of letting hover-reactive chrome chase the
         // drifting virtual cursor mid-pan.
         m_LeftPanelExpanded = false;
+        m_LeftPanelHoverGrace = 0.0f;
     }
 
     float leftPanelTargetWidth = m_LeftPanelExpanded ? 220.0f : 0.0f;
@@ -1493,11 +1474,10 @@ void EditorModule::RenderUI() {
 
             // 1. Sliding panel background & content
             if (m_LeftPanelWidthAnim > 0.1f) {
-                ImVec2 panelMin = workspacePos;
-
-                // Redesigned premium feathered blend background
-                float gradientWidth = std::min(60.0f, m_LeftPanelWidthAnim);
-                float solidWidth = m_LeftPanelWidthAnim - gradientWidth;
+                const ImVec2 panelMin = canvasStackPanelOrigin;
+                const ImVec2 panelMax(
+                    canvasStackPanelOrigin.x + m_LeftPanelWidthAnim,
+                    canvasStackPanelOrigin.y + canvasStackPanelHeight);
                 auto colorWithAlpha = [](ImVec4 color, float alphaScale) {
                     color.w *= std::clamp(alphaScale, 0.0f, 1.0f);
                     return ImGui::ColorConvertFloat4ToU32(color);
@@ -1510,20 +1490,13 @@ void EditorModule::RenderUI() {
                 const ImVec4 activeHeaderColor = ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive);
 
                 ImVec4 colBgOpaqueVec = workspaceColor;
-                ImU32 colBgOpaque = 0;
-                ImU32 colBgTrans = 0;
                 if (wallpaperSurfaces) {
                     colBgOpaqueVec = surfacePalette.drawerSurface;
-                    colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
-                    colBgTrans = ImGui::ColorConvertFloat4ToU32(surfacePalette.drawerSurfaceTransparent);
+                    colBgOpaqueVec.w = std::max(colBgOpaqueVec.w, 0.92f);
                 } else {
                     const float luminance = 0.2126f * workspaceColor.x + 0.7152f * workspaceColor.y + 0.0722f * workspaceColor.z;
                     const bool isLightBg = luminance >= 0.5f;
                     colBgOpaqueVec.w = isLightBg ? 0.94f : 0.92f;
-                    colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
-                    ImVec4 colBgTransVec = workspaceColor;
-                    colBgTransVec.w = 0.0f;
-                    colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
                 }
 
                 const ImU32 colTitleText = colorWithAlpha(textColor, 1.0f);
@@ -1533,34 +1506,39 @@ void EditorModule::RenderUI() {
                 const ImU32 colHoveredHeader = colorWithAlpha(hoveredHeaderColor, 1.0f);
                 const ImU32 colActiveHeader = colorWithAlpha(activeHeaderColor, 1.0f);
 
-                if (wallpaperSurfaces) {
+                const float panelReveal = std::clamp(
+                    m_LeftPanelWidthAnim / 220.0f,
+                    0.0f,
+                    1.0f);
+                for (int layer = 3; layer >= 1; --layer) {
+                    const float spread = static_cast<float>(layer) * 5.0f;
                     drawList->AddRectFilled(
-                        panelMin,
-                        ImVec2(workspacePos.x + m_LeftPanelWidthAnim, workspacePos.y + paneHeight),
-                        colBgOpaque);
-                } else {
-                    // Solid part
-                    if (solidWidth > 0.0f) {
-                        drawList->AddRectFilled(panelMin, ImVec2(workspacePos.x + solidWidth, workspacePos.y + paneHeight), colBgOpaque);
-                    }
-                    // Gradient feathered blend part
-                    drawList->AddRectFilledMultiColor(
-                        ImVec2(workspacePos.x + solidWidth, workspacePos.y),
-                        ImVec2(workspacePos.x + m_LeftPanelWidthAnim, workspacePos.y + paneHeight),
-                        colBgOpaque, colBgTrans, colBgTrans, colBgOpaque
-                    );
+                        ImVec2(panelMin.x - spread, panelMin.y - spread),
+                        ImVec2(panelMax.x + spread, panelMax.y + spread),
+                        IM_COL32(0, 0, 0, static_cast<int>(7.0f * panelReveal)),
+                        14.0f + spread);
                 }
+                colBgOpaqueVec.w *= panelReveal;
+                drawList->AddRectFilled(
+                    panelMin,
+                    panelMax,
+                    ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec),
+                    12.0f);
 
                 // Content area
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_SubWindowTransitionAlpha);
 
-                float contentWidth = m_LeftPanelWidthAnim - 40.0f; // breathing room on right for the feathered edge
-                if (contentWidth > 1.0f) {
-                    ImGui::SetCursorScreenPos(ImVec2(workspacePos.x + 16.0f, workspacePos.y + 28.0f));
+                float contentWidth = m_LeftPanelWidthAnim - 28.0f;
+                if (contentWidth > 120.0f) {
+                    ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 14.0f, panelMin.y + 13.0f));
                     if (wallpaperSurfaces) {
                         ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
                     }
-                    ImGui::BeginChild("CanvasStackDrawer", ImVec2(contentWidth, paneHeight - 56.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav);
+                    ImGui::BeginChild(
+                        "CanvasStackDrawer",
+                        ImVec2(contentWidth, canvasStackPanelHeight - 26.0f),
+                        false,
+                        ImGuiWindowFlags_NoNav);
 
                     ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
                     ImGui::TextUnformatted("CANVAS STACK");
@@ -1568,7 +1546,7 @@ void EditorModule::RenderUI() {
 
                     ImGui::Dummy(ImVec2(0.0f, 10.0f)); // Spacing instead of solid separator line
 
-                    const std::vector<int>& zOrder = GetCompositeZOrder();
+                    const std::vector<int>& zOrder = canvasStackZOrder;
                     if (zOrder.empty()) {
                         ImGui::PushStyleColor(ImGuiCol_Text, colPassiveText);
                         ImGui::TextWrapped("Add at least two completed chains to enable the canvas stack.");
@@ -1833,7 +1811,9 @@ void EditorModule::RenderUI() {
     }
 
     if (timelineHeight > 1.0f) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, toolbarRevealAlpha);
         RenderTimelinePanel(workspacePos, workspaceSize, timelineHeight);
+        ImGui::PopStyleVar();
     }
 
     SubmitRenderIfReady();
@@ -1849,8 +1829,8 @@ void EditorModule::RenderUI() {
             workspacePos);
     }
 
-    RenderProjectLifecyclePopups();
     RenderManagedRawGraphMutationConfirmPopup();
+    RenderMultiFrameSourceSetDeletePopup();
     RenderGraphCaptureWindow();
 
     if (IsGraphDropImportBusy()) {

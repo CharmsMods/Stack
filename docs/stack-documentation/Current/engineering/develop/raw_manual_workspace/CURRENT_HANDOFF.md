@@ -123,7 +123,11 @@ Phase 5 per-image project lifecycle is now also complete:
 
 - Project discovery scans `Stack RAW Projects`, associates `.stack` files with RAW source records, and surfaces project status/path/mode in source records, catalog data, and RAW browsing UI.
 - The editor exposes lifecycle APIs for Phase 6 controls to ensure a project exists before applying image-affecting recipe edits.
-- First image-affecting edit creates or loads one per-image project under the RAW Workspace project tree and mirrors source subfolders.
+- Legacy schema-1/2 behavior still creates or loads one per-image project under
+  the RAW Workspace project tree. New schema-3 projects may instead own
+  multiple manually grouped source sets and exact embedded originals in a
+  `.stackbundle` or portable `.stack` v3 store; see
+  `../../../raw-tab-ui-overhaul/manual-first-raw-workflow/multi-image-raw-project-foundation.md`.
 - Project files persist RAW source metadata, linked/embedded source state, recipe data, downstream graph data, ownership mode payload slots, managed/custom state where applicable, and read-only state in a RAW Workspace project section.
 - RAW Workspace projects route through the save lifecycle: explicit Save, `Ctrl+S`, save-before-export, save-before-load, save-before-switch, save-before-tab-leave, clear/close protection, and close-drained save worker paths. Later usability stabilization disables active RAW per-control and idle-timer saves.
 - Minimal relink-to-selected-source and bake/embed actions exist for the selected active project.

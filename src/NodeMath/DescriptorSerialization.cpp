@@ -1,6 +1,8 @@
 #include "NodeMath/DescriptorSerialization.h"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <exception>
 #include <map>
 #include <utility>
@@ -45,6 +47,7 @@ const std::map<LogicalValueType, const char*> kLogicalTypes = {
     { LogicalValueType::Coordinate2, "coordinate2" },
     { LogicalValueType::Curve1D, "curve1d" },
     { LogicalValueType::Lut, "lut" },
+    { LogicalValueType::Channel, "channel" },
     { LogicalValueType::ScalarField, "scalar-field" },
     { LogicalValueType::Vector2Field, "vector2-field" },
     { LogicalValueType::Vector3Field, "vector3-field" },
@@ -53,6 +56,9 @@ const std::map<LogicalValueType, const char*> kLogicalTypes = {
     { LogicalValueType::Mask, "mask" },
     { LogicalValueType::DataImage, "data-image" },
     { LogicalValueType::ComplexSpectrum, "complex-spectrum" },
+    { LogicalValueType::FrequencyResponse, "frequency-response" },
+    { LogicalValueType::SpectrumMagnitude, "spectrum-magnitude" },
+    { LogicalValueType::SpectrumPhase, "spectrum-phase" },
     { LogicalValueType::Histogram, "histogram" },
     { LogicalValueType::Statistics, "statistics" },
     { LogicalValueType::Metadata, "metadata" },
@@ -229,6 +235,15 @@ nlohmann::json SerializeValueDescriptor(const ValueDescriptor& descriptor) {
             { "layout", EnumToken(value.layout, kChannelLayouts) }, { "roles", value.roles }
         };
     });
+    result["presentImageComponents"] = EncodeField(
+        descriptor.presentImageComponents,
+        [](const ImageComponentSet& value) {
+            nlohmann::json components = nlohmann::json::array();
+            for (const ImageComponent component : OrderedImageComponents(value)) {
+                components.push_back(ImageComponentToken(component));
+            }
+            return components;
+        });
     result["color"] = EncodeField(descriptor.color, [](const ColorIdentity& value) {
         return nlohmann::json{
             { "identity", value.identity }, { "profileHash", value.profileHash },
@@ -299,9 +314,13 @@ DescriptorParseResult ParseValueDescriptor(const nlohmann::json& value) {
     }
 
     ValueDescriptor descriptor;
+    std::uint32_t serializedSchemaVersion = 0;
     try {
-        descriptor.schemaVersion = value.at("schemaVersion").get<std::uint32_t>();
-        if (descriptor.schemaVersion == 1) {
+        serializedSchemaVersion =
+            value.at("schemaVersion").get<std::uint32_t>();
+        descriptor.schemaVersion = serializedSchemaVersion;
+        if (descriptor.schemaVersion == 1 ||
+            descriptor.schemaVersion == 2) {
             descriptor.schemaVersion = kSemanticDescriptorSchemaVersion;
         }
     } catch (...) {
@@ -325,6 +344,83 @@ DescriptorParseResult ParseValueDescriptor(const nlohmann::json& value) {
             return false;
         }
     }, result.issues);
+    if (serializedSchemaVersion >= 3) {
+        DecodeField(
+            value,
+            "presentImageComponents",
+            descriptor.presentImageComponents,
+            [](const nlohmann::json& item, ImageComponentSet& output) {
+                if (!item.is_array()) {
+                    return false;
+                }
+                for (const nlohmann::json& tokenValue : item) {
+                    if (!tokenValue.is_string()) {
+                        return false;
+                    }
+                    const std::optional<ImageComponent> component =
+                        ParseImageComponentToken(tokenValue.get<std::string>());
+                    if (!component || !AddImageComponent(output, *component)) {
+                        return false;
+                    }
+                }
+                return output.bits != 0;
+            },
+            result.issues);
+    } else if (descriptor.logicalType != LogicalValueType::ColorImage) {
+        descriptor.presentImageComponents =
+            SemanticField<ImageComponentSet>::NotApplicable();
+    } else if (descriptor.channels.state != KnowledgeState::Known) {
+        descriptor.presentImageComponents =
+            SemanticField<ImageComponentSet>::Unknown();
+    } else {
+        ImageComponentSet migrated;
+        const ChannelDescriptor& channels = descriptor.channels.value;
+        if (channels.layout == ChannelLayout::RGB) {
+            migrated = MakeImageComponentSet({
+                ImageComponent::Red,
+                ImageComponent::Green,
+                ImageComponent::Blue
+            });
+        } else if (channels.layout == ChannelLayout::RGBA) {
+            migrated = MakeImageComponentSet({
+                ImageComponent::Red,
+                ImageComponent::Green,
+                ImageComponent::Blue,
+                ImageComponent::Alpha
+            });
+        } else {
+            bool recognized = !channels.roles.empty();
+            for (std::string role : channels.roles) {
+                std::transform(
+                    role.begin(),
+                    role.end(),
+                    role.begin(),
+                    [](unsigned char character) {
+                        return static_cast<char>(std::tolower(character));
+                    });
+                std::optional<ImageComponent> component;
+                if (role == "r" || role == "red") {
+                    component = ImageComponent::Red;
+                } else if (role == "g" || role == "green") {
+                    component = ImageComponent::Green;
+                } else if (role == "b" || role == "blue") {
+                    component = ImageComponent::Blue;
+                } else if (role == "a" || role == "alpha") {
+                    component = ImageComponent::Alpha;
+                }
+                if (!component || !AddImageComponent(migrated, *component)) {
+                    recognized = false;
+                    break;
+                }
+            }
+            if (!recognized) {
+                migrated.bits = 0;
+            }
+        }
+        descriptor.presentImageComponents = migrated.bits != 0
+            ? SemanticField<ImageComponentSet>::Known(migrated)
+            : SemanticField<ImageComponentSet>::Unknown();
+    }
     DecodeField(value, "color", descriptor.color, [](const nlohmann::json& item, ColorIdentity& output) {
         if (!item.is_object() || !item.contains("identity") || !item["identity"].is_string() ||
             !item.contains("profileHash") || !item["profileHash"].is_string() ||
@@ -408,7 +504,7 @@ DescriptorParseResult ParseValueDescriptor(const nlohmann::json& value) {
 }
 
 std::string CanonicalDescriptorContent(const ValueDescriptor& descriptor) {
-    return std::string("stack.semantic-descriptor.canonical.v2\n") +
+    return std::string("stack.semantic-descriptor.canonical.v3\n") +
         SerializeValueDescriptor(descriptor).dump();
 }
 

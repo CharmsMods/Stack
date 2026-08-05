@@ -1,15 +1,21 @@
 #include "Editor/EditorModule.h"
 
+#include "Editor/Internal/EditorGraphSnapshotLookup.h"
 #include "Editor/Layers/LayerBase.h"
 #include "Editor/Timeline/TimelineFrameProducer.h"
 #include "Renderer/MaskRenderTypes.h"
+#include "NodeMath/ChannelImageSemantics.h"
+#include "NodeMath/DescriptorSerialization.h"
 #include "NodeMath/SemanticSpine.h"
 #include "NodeMath/FirstClassValue.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
-#include <map>
 #include <memory>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -43,6 +49,111 @@ Stack::NodeMath::ValueDescriptor UnknownLiveImageDescriptor(const std::string& o
     return descriptor;
 }
 
+Stack::NodeMath::ValueDescriptor UnknownLiveChannelDescriptor(
+    std::string role,
+    const std::string& operation) {
+    Stack::NodeMath::ValueDescriptor descriptor =
+        Stack::NodeMath::MakeUnknownDescriptor(
+            Stack::NodeMath::LogicalValueType::Channel);
+    if (role.empty()) {
+        role = "value";
+    } else if (role == "r") {
+        role = "R";
+    } else if (role == "g") {
+        role = "G";
+    } else if (role == "b") {
+        role = "B";
+    } else if (role == "a") {
+        role = "A";
+    }
+    descriptor.channels =
+        Stack::NodeMath::SemanticField<
+            Stack::NodeMath::ChannelDescriptor>::Known({
+                Stack::NodeMath::ChannelLayout::Gray,
+                { std::move(role) }
+            });
+    descriptor.units =
+        Stack::NodeMath::SemanticField<
+            Stack::NodeMath::UnitDescriptor>::Known({
+                Stack::NodeMath::UnitKind::Unitless,
+                {}
+            });
+    descriptor.provenance =
+        Stack::NodeMath::SemanticField<
+            Stack::NodeMath::ProvenanceDescriptor>::Known({
+                Stack::NodeMath::ProvenanceKind::Derived,
+                {},
+                operation
+            });
+    return descriptor;
+}
+
+void DeclareRawSceneOutput(
+    Stack::NodeMath::ValueDescriptor& descriptor,
+    Raw::RawWorkingSpace workingSpace,
+    const char* operation) {
+    descriptor.color =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::ColorIdentity>::Known({
+            workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
+                ? "rec2020-d65"
+                : "srgb-d65",
+            {},
+            Stack::NodeMath::ColorRelation::Standard
+        });
+    descriptor.transfer =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::TransferDescriptor>::Known({
+            Stack::NodeMath::TransferKind::Linear, 0.0, {}
+        });
+    descriptor.reference =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::ReferenceState>::Known(
+            Stack::NodeMath::ReferenceState::Scene);
+    descriptor.alpha =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::AlphaMode>::Known(
+            Stack::NodeMath::AlphaMode::Opaque);
+    descriptor.precision =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::LogicalPrecision>::Known(
+            Stack::NodeMath::LogicalPrecision::Float32);
+    descriptor.provenance =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::ProvenanceDescriptor>::Known({
+            Stack::NodeMath::ProvenanceKind::RawDeveloped, {}, operation
+        });
+}
+
+void DeclareRawDisplayOutput(
+    Stack::NodeMath::ValueDescriptor& descriptor,
+    bool encodeSrgbOutput,
+    const char* operation) {
+    descriptor.color =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::ColorIdentity>::Known({
+            "srgb-d65", {}, Stack::NodeMath::ColorRelation::Standard
+        });
+    descriptor.transfer =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::TransferDescriptor>::Known({
+            encodeSrgbOutput
+                ? Stack::NodeMath::TransferKind::Srgb
+                : Stack::NodeMath::TransferKind::Linear,
+            0.0,
+            {}
+        });
+    descriptor.reference =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::ReferenceState>::Known(
+            Stack::NodeMath::ReferenceState::Display);
+    descriptor.alpha =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::AlphaMode>::Known(
+            Stack::NodeMath::AlphaMode::Opaque);
+    descriptor.range =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::NumericRange>::Known({
+            0.0, 1.0, false, false, Stack::NodeMath::NonFinitePolicy::Forbidden
+        });
+    descriptor.precision =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::LogicalPrecision>::Known(
+            Stack::NodeMath::LogicalPrecision::Float32);
+    descriptor.provenance =
+        Stack::NodeMath::SemanticField<Stack::NodeMath::ProvenanceDescriptor>::Known({
+            Stack::NodeMath::ProvenanceKind::RawDeveloped, {}, operation
+        });
+}
+
 bool HasSemanticImageOutput(RenderGraphNodeKind kind) {
     switch (kind) {
     case RenderGraphNodeKind::Image:
@@ -53,6 +164,7 @@ bool HasSemanticImageOutput(RenderGraphNodeKind kind) {
     case RenderGraphNodeKind::RawDetailFusion:
     case RenderGraphNodeKind::HdrMerge:
     case RenderGraphNodeKind::Mfsr:
+    case RenderGraphNodeKind::RawProjectSourceSet:
     case RenderGraphNodeKind::Lut:
     case RenderGraphNodeKind::Layer:
     case RenderGraphNodeKind::Output:
@@ -61,11 +173,7 @@ bool HasSemanticImageOutput(RenderGraphNodeKind kind) {
     case RenderGraphNodeKind::ChannelCombine:
     case RenderGraphNodeKind::DataMath:
     case RenderGraphNodeKind::TechnicalImage:
-    case RenderGraphNodeKind::FrequencyFft:
-    case RenderGraphNodeKind::FrequencyIfft:
     case RenderGraphNodeKind::SpectrumView:
-    case RenderGraphNodeKind::SpectrumMath:
-    case RenderGraphNodeKind::MagnitudePhase:
     case RenderGraphNodeKind::Reformat:
         return true;
     default:
@@ -252,6 +360,27 @@ RenderImageGeneratorSettings ToRenderImageGeneratorSettings(const EditorNodeGrap
     return result;
 }
 
+RenderFrequencyResponseSettings ToRenderFrequencyResponseSettings(
+    const EditorNodeGraph::FrequencyResponseSettings& settings) {
+    RenderFrequencyResponseSettings result;
+    result.mode = static_cast<RenderFrequencyFilterMode>(settings.mode);
+    result.profile = static_cast<RenderFrequencyTransitionProfile>(settings.profile);
+    result.lowCutoff = settings.lowCutoff;
+    result.highCutoff = settings.highCutoff;
+    result.transitionWidth = settings.transitionWidth;
+    result.butterworthOrder = settings.butterworthOrder;
+    result.notches.reserve(settings.notches.size());
+    for (const EditorNodeGraph::FrequencyNotch& notch : settings.notches) {
+        result.notches.push_back({
+            notch.id,
+            notch.frequency,
+            notch.directionDegrees,
+            notch.width
+        });
+    }
+    return result;
+}
+
 } // namespace
 
 std::vector<std::shared_ptr<LayerBase>> EditorModule::BuildGraphRenderLayers() const {
@@ -349,6 +478,9 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
         renderGraph = &expandedGraph;
     }
     const EditorNodeGraph::Graph& graph = *renderGraph;
+    const std::vector<EditorNodeGraph::Node>& graphNodes = graph.GetNodes();
+    const std::vector<EditorNodeGraph::Link>& graphLinks = graph.GetLinks();
+    const EditorGraphSnapshotInternal::Lookup graphLookup(graph);
     snapshot.outputNodeId = graph.ResolvePreviewOutputNodeId();
     snapshot.executionInspectionEnabled = m_ShowGraphPerformancePopup;
     const Stack::Timeline::TimelineFrameEvaluation frameEvaluation =
@@ -365,7 +497,11 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
         }
     }
 
-    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+    snapshot.nodes.reserve(graphNodes.size());
+    for (const EditorNodeGraph::Node& node : graphNodes) {
+        if (!node.definitionResolved) {
+            continue;
+        }
         RenderGraphNode renderNode;
         renderNode.nodeId = node.id;
         renderNode.requestRevision = std::max<std::uint64_t>(1, GetNodeDirtyGeneration(node.id));
@@ -423,6 +559,105 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
                 renderNode.mfsr.placeholderStatus = node.mfsr.placeholderStatus;
                 renderNode.mfsr.errorMessage = node.mfsr.errorMessage;
                 break;
+            case EditorNodeGraph::NodeKind::RawProjectFrame:
+                renderNode.kind = RenderGraphNodeKind::RawProjectSourceSet;
+                renderNode.rawProjectSourceSet.sourceSetId =
+                    node.rawProjectFrame.sourceSetId;
+                renderNode.rawProjectSourceSet.unavailableStatus =
+                    "Embedded MFD mosaic frame; decoded lazily in RAW Lab.";
+                renderNode.rawProjectSourceSet.quarantined =
+                    node.rawProjectFrame.quarantined;
+                break;
+            case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+                renderNode.kind = RenderGraphNodeKind::RawProjectSourceSet;
+                renderNode.rawProjectSourceSet.sourceSetId =
+                    node.multiFrameDenoise.sourceSetId;
+                renderNode.rawProjectSourceSet.unavailableStatus =
+                    node.multiFrameDenoise.presentationStatus;
+                renderNode.rawProjectSourceSet.quarantined =
+                    node.multiFrameDenoise.quarantined;
+                if (m_ActiveRawProjectSnapshot) {
+                    const Stack::Project::MultiFrameSourceSet* sourceSet =
+                        Stack::Project::FindSourceSet(
+                            *m_ActiveRawProjectSnapshot,
+                            node.multiFrameDenoise.sourceSetId);
+                    const bool adopted =
+                        sourceSet != nullptr &&
+                        m_MfdAdoptedRawResult &&
+                        m_MfdAdoptedRawResult->rawData &&
+                        m_MfdAdoptedRawResult->projectId ==
+                            m_ActiveRawProjectSnapshot->projectId &&
+                        m_MfdAdoptedRawResult->sourceSetId ==
+                            sourceSet->sourceSetId &&
+                        m_MfdAdoptedRawResult->inputRevision ==
+                            m_ActiveRawProjectSnapshot->mfdInputRevision;
+                    if (adopted) {
+                        const nlohmann::json storedRecipe =
+                            sourceSet->settings.value(
+                                "sharedPostMfdRecipe",
+                                nlohmann::json::object());
+                        Stack::RawRecipe::RawDevelopmentRecipe recipe =
+                            storedRecipe.is_object() &&
+                                storedRecipe.contains("rawRecipeVersion")
+                            ? Stack::RawRecipe::DeserializeRecipe(
+                                  storedRecipe)
+                            : Stack::RawRecipe::MakeDefaultRecipe(
+                                  "mfd://" +
+                                      m_ActiveRawProjectSnapshot->projectId +
+                                      "/" + sourceSet->sourceSetId,
+                                  sourceSet->name + " developed result");
+                        recipe.technical.processingVersion =
+                            Raw::RawProcessingVersion::TruthfulV1;
+                        recipe.technical.mosaicDenoise.enabled = false;
+                        recipe.source.sourcePath =
+                            "mfd://" +
+                            m_ActiveRawProjectSnapshot->projectId + "/" +
+                            sourceSet->sourceSetId;
+                        recipe.source.relativePathKey =
+                            recipe.source.sourcePath;
+                        recipe.source.fingerprint = std::to_string(
+                            m_MfdAdoptedRawResult->contentHash);
+                        recipe.source.fileSizeBytes =
+                            static_cast<std::uint64_t>(
+                                m_MfdAdoptedRawResult->rawData
+                                    ->normalizedMosaicBuffer->size()) *
+                            sizeof(float);
+                        recipe.source.modifiedTimeTicks =
+                            static_cast<std::int64_t>(
+                                m_MfdAdoptedRawResult->inputRevision);
+                        recipe.source.displayName =
+                            sourceSet->name + " developed result";
+                        if (sourceSet->settings.value(
+                                "viewTransformPlacement",
+                                std::string("internal")) == "graph") {
+                            recipe.viewTransform.layerJson["enabled"] =
+                                false;
+                        }
+                        renderNode.rawDevelopment.recipe =
+                            std::move(recipe);
+                        renderNode.rawDevelopment.embeddedRawData =
+                            m_MfdAdoptedRawResult->rawData;
+                        renderNode.rawProjectSourceSet.inputRevision =
+                            m_MfdAdoptedRawResult->inputRevision;
+                        renderNode.rawProjectSourceSet.postRecipeRevision =
+                            m_ActiveRawProjectSnapshot
+                                ->postRecipeRevision;
+                        renderNode.rawProjectSourceSet.contentHash =
+                            m_MfdAdoptedRawResult->contentHash;
+                        renderNode.rawProjectSourceSet.resultAvailable =
+                            true;
+                    }
+                }
+                break;
+            case EditorNodeGraph::NodeKind::RawProjectSourceSet:
+                renderNode.kind = RenderGraphNodeKind::RawProjectSourceSet;
+                renderNode.rawProjectSourceSet.sourceSetId =
+                    node.rawProjectSourceSet.sourceSetId;
+                renderNode.rawProjectSourceSet.unavailableStatus =
+                    node.rawProjectSourceSet.presentationStatus;
+                renderNode.rawProjectSourceSet.quarantined =
+                    node.rawProjectSourceSet.quarantined;
+                break;
             case EditorNodeGraph::NodeKind::Lut:
                 renderNode.kind = RenderGraphNodeKind::Lut;
                 renderNode.lut = node.lut;
@@ -440,6 +675,8 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
                 break;
             case EditorNodeGraph::NodeKind::Output:
                 renderNode.kind = RenderGraphNodeKind::Output;
+                renderNode.outputChannelViewMode =
+                    node.outputSettings.channelViewMode;
                 break;
             case EditorNodeGraph::NodeKind::MaskGenerator:
                 renderNode.kind = RenderGraphNodeKind::MaskGenerator;
@@ -490,29 +727,129 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
                 renderNode.technicalExposureValue = node.technicalImageSettings.exposureValue;
                 if (node.technicalImageSettings.operation == Stack::NodeMath::TechnicalImageOperation::Exposure) {
                     double connectedExposure = 0.0;
-                    if (graph.TryResolveUniformScalarInput(
+                    if (graphLookup.TryResolveUniformScalarInput(
                             node.id,
                             EditorNodeGraph::kExposureValueInputSocketId,
-                            connectedExposure,
-                            nullptr)) {
+                            connectedExposure)) {
                         renderNode.technicalExposureValue = static_cast<float>(connectedExposure);
                     }
                 }
                 break;
+            case EditorNodeGraph::NodeKind::FrequencyFilter: {
+                renderNode.kind = RenderGraphNodeKind::FrequencyFilter;
+                renderNode.frequencyFilterSettings.localResponse =
+                    ToRenderFrequencyResponseSettings(node.frequencyFilterSettings.localResponse);
+                renderNode.frequencyFilterSettings.edgePolicy =
+                    static_cast<RenderFrequencyEdgePolicy>(node.frequencyFilterSettings.edgePolicy);
+                renderNode.frequencyFilterSettings.strength =
+                    node.frequencyFilterSettings.strength;
+                double connected = 0.0;
+                if (graphLookup.TryResolveUniformScalarInput(
+                        node.id,
+                        EditorNodeGraph::ParameterInputSocketId(
+                            EditorNodeGraph::kStrengthParameterId),
+                        connected)) {
+                    renderNode.frequencyFilterSettings.strength =
+                        std::clamp(static_cast<float>(connected), 0.0f, 1.0f);
+                }
+                break;
+            }
+            case EditorNodeGraph::NodeKind::FrequencyResponse: {
+                renderNode.kind = RenderGraphNodeKind::FrequencyResponse;
+                renderNode.frequencyResponseSettings =
+                    ToRenderFrequencyResponseSettings(node.frequencyResponseSettings);
+                const auto resolve = [&](const char* parameterId, float& target, float minimum, float maximum) {
+                    double connected = 0.0;
+                    if (graphLookup.TryResolveUniformScalarInput(
+                            node.id,
+                            EditorNodeGraph::ParameterInputSocketId(parameterId),
+                            connected)) {
+                        target = std::clamp(static_cast<float>(connected), minimum, maximum);
+                    }
+                };
+                resolve(EditorNodeGraph::kLowCutoffParameterId,
+                    renderNode.frequencyResponseSettings.lowCutoff, 0.0f, 0.5f);
+                resolve(EditorNodeGraph::kHighCutoffParameterId,
+                    renderNode.frequencyResponseSettings.highCutoff, 0.0f, 0.5f);
+                resolve(EditorNodeGraph::kTransitionWidthParameterId,
+                    renderNode.frequencyResponseSettings.transitionWidth, 0.0f, 0.5f);
+                resolve(EditorNodeGraph::kButterworthOrderParameterId,
+                    renderNode.frequencyResponseSettings.butterworthOrder, 1.0f, 12.0f);
+                for (std::size_t notchIndex = 0;
+                     notchIndex < renderNode.frequencyResponseSettings.notches.size();
+                     ++notchIndex) {
+                    RenderFrequencyNotch& notch =
+                        renderNode.frequencyResponseSettings.notches[notchIndex];
+                    const auto resolveNotch = [&](const char* field,
+                                                  float& target,
+                                                  float minimum,
+                                                  float maximum) {
+                        const std::string parameterId =
+                            EditorNodeGraph::FrequencyNotchParameterId(
+                                node.frequencyResponseSettings.notches[notchIndex].id,
+                                field);
+                        double connected = 0.0;
+                        if (graphLookup.TryResolveUniformScalarInput(
+                                node.id,
+                                EditorNodeGraph::ParameterInputSocketId(parameterId),
+                                connected)) {
+                            target = std::clamp(
+                                static_cast<float>(connected), minimum, maximum);
+                        }
+                    };
+                    resolveNotch(
+                        "frequency", notch.frequency, 0.0f, 0.5f);
+                    resolveNotch(
+                        "direction", notch.directionDegrees, -180.0f, 180.0f);
+                    resolveNotch(
+                        "width", notch.width, 0.001f, 0.25f);
+                }
+                break;
+            }
             case EditorNodeGraph::NodeKind::FrequencyFft:
                 renderNode.kind = RenderGraphNodeKind::FrequencyFft;
-                renderNode.frequencyFftSettings.luminanceOnly = node.frequencyFftSettings.luminanceOnly;
+                renderNode.frequencyFftSettings.edgePolicy =
+                    static_cast<RenderFrequencyEdgePolicy>(node.frequencyFftSettings.edgePolicy);
                 break;
             case EditorNodeGraph::NodeKind::FrequencyIfft:
                 renderNode.kind = RenderGraphNodeKind::FrequencyIfft;
-                renderNode.frequencyIfftSettings.luminanceOnly = node.frequencyIfftSettings.luminanceOnly;
+                renderNode.frequencyIfftSettings.edgePolicy =
+                    static_cast<RenderFrequencyEdgePolicy>(node.frequencyIfftSettings.edgePolicy);
                 break;
             case EditorNodeGraph::NodeKind::SpectrumView:
                 renderNode.kind = RenderGraphNodeKind::SpectrumView;
+                renderNode.spectrumViewSettings.mode =
+                    static_cast<RenderSpectrumViewMode>(node.spectrumViewSettings.mode);
                 renderNode.spectrumViewSettings.lut = static_cast<RenderSpectrumViewLut>(node.spectrumViewSettings.lut);
                 renderNode.spectrumViewSettings.exposure = node.spectrumViewSettings.exposure;
                 renderNode.spectrumViewSettings.gamma = node.spectrumViewSettings.gamma;
                 renderNode.spectrumViewSettings.centerDc = node.spectrumViewSettings.centerDc;
+                break;
+            case EditorNodeGraph::NodeKind::ApplyFrequencyResponse: {
+                renderNode.kind = RenderGraphNodeKind::ApplyFrequencyResponse;
+                renderNode.applyFrequencyResponseSettings.strength =
+                    node.applyFrequencyResponseSettings.strength;
+                double connected = 0.0;
+                if (graphLookup.TryResolveUniformScalarInput(
+                        node.id,
+                        EditorNodeGraph::ParameterInputSocketId(
+                            EditorNodeGraph::kStrengthParameterId),
+                        connected)) {
+                    renderNode.applyFrequencyResponseSettings.strength =
+                        std::clamp(static_cast<float>(connected), 0.0f, 1.0f);
+                }
+                break;
+            }
+            case EditorNodeGraph::NodeKind::CombineSpectra:
+                renderNode.kind = RenderGraphNodeKind::CombineSpectra;
+                renderNode.combineSpectraSettings.mode =
+                    static_cast<RenderSpectrumCombineMode>(node.combineSpectraSettings.mode);
+                break;
+            case EditorNodeGraph::NodeKind::SpectrumSeparate:
+                renderNode.kind = RenderGraphNodeKind::SpectrumSeparate;
+                break;
+            case EditorNodeGraph::NodeKind::SpectrumRecombine:
+                renderNode.kind = RenderGraphNodeKind::SpectrumRecombine;
                 break;
             case EditorNodeGraph::NodeKind::FrequencyMask:
                 renderNode.kind = RenderGraphNodeKind::FrequencyMask;
@@ -541,12 +878,41 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
                 renderNode.spectrumAnalyzerMode = static_cast<RenderSpectrumAnalyzerMode>(node.spectrumAnalyzerMode);
                 renderNode.spectrumAnalyzerSettings.innerRadius = node.spectrumAnalyzerSettings.innerRadius;
                 renderNode.spectrumAnalyzerSettings.outerRadius = node.spectrumAnalyzerSettings.outerRadius;
+                renderNode.spectrumAnalyzerSettings.excludeDc = node.spectrumAnalyzerSettings.excludeDc;
+                {
+                    double connected = 0.0;
+                    if (graphLookup.TryResolveUniformScalarInput(
+                            node.id,
+                            EditorNodeGraph::ParameterInputSocketId(
+                                EditorNodeGraph::kAnalyzerLowParameterId),
+                            connected)) {
+                        renderNode.spectrumAnalyzerSettings.innerRadius =
+                            std::clamp(static_cast<float>(connected), 0.0f, 0.70710678f);
+                    }
+                    if (graphLookup.TryResolveUniformScalarInput(
+                            node.id,
+                            EditorNodeGraph::ParameterInputSocketId(
+                                EditorNodeGraph::kAnalyzerHighParameterId),
+                            connected)) {
+                        renderNode.spectrumAnalyzerSettings.outerRadius =
+                            std::clamp(static_cast<float>(connected), 0.0f, 0.70710678f);
+                    }
+                }
                 break;
             case EditorNodeGraph::NodeKind::ChannelSplit:
                 renderNode.kind = RenderGraphNodeKind::ChannelSplit;
                 break;
             case EditorNodeGraph::NodeKind::ChannelCombine:
                 renderNode.kind = RenderGraphNodeKind::ChannelCombine;
+                break;
+            case EditorNodeGraph::NodeKind::ConstantChannel:
+                renderNode.kind =
+                    RenderGraphNodeKind::ConstantChannel;
+                renderNode.constantChannelValue =
+                    std::isfinite(
+                        node.constantChannelSettings.value)
+                        ? node.constantChannelSettings.value
+                        : 1.0f;
                 break;
             case EditorNodeGraph::NodeKind::FieldMean:
                 renderNode.kind = RenderGraphNodeKind::FieldMean;
@@ -565,12 +931,25 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
         snapshot.nodes.push_back(std::move(renderNode));
     }
 
-    for (const EditorNodeGraph::Link& link : graph.GetLinks()) {
-        if (graph.GetLinkRole(link) == EditorNodeGraph::LinkRole::Scope) {
+    std::unordered_set<int> renderNodeIds;
+    renderNodeIds.reserve(snapshot.nodes.size());
+    for (const RenderGraphNode& node : snapshot.nodes) {
+        renderNodeIds.insert(node.nodeId);
+    }
+
+    snapshot.links.reserve(graphLinks.size());
+    for (const EditorNodeGraph::Link& link : graphLinks) {
+        if (graphLookup.IsAnalysisLink(link)) {
             continue;
         }
-        const EditorNodeGraph::Node* source = graph.FindNode(link.fromNodeId);
-        const EditorNodeGraph::Node* destination = graph.FindNode(link.toNodeId);
+        if (renderNodeIds.count(link.fromNodeId) == 0 ||
+            renderNodeIds.count(link.toNodeId) == 0) {
+            continue;
+        }
+        const EditorNodeGraph::Node* source =
+            graphLookup.FindNode(link.fromNodeId);
+        const EditorNodeGraph::Node* destination =
+            graphLookup.FindNode(link.toNodeId);
         if ((source && source->kind == EditorNodeGraph::NodeKind::Value) ||
             (destination && destination->kind == EditorNodeGraph::NodeKind::Value)) {
             continue;
@@ -583,8 +962,33 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
         });
     }
 
+    std::unordered_map<int, Stack::NodeMath::ValueDescriptor>
+        channelOutputDescriptors;
+    for (const RenderGraphNode& node : snapshot.nodes) {
+        if (node.kind != RenderGraphNodeKind::Output ||
+            !m_NodeGraph.IsOutputChannelInspection(node.nodeId)) {
+            continue;
+        }
+        const EditorNodeGraph::Link* input =
+            m_NodeGraph.FindInputLink(
+                node.nodeId,
+                EditorNodeGraph::kImageInputSocketId);
+        const std::string role = input
+            ? m_NodeGraph.ResolveSocketChannel(
+                input->fromNodeId,
+                input->fromSocketId)
+            : std::string();
+        channelOutputDescriptors.emplace(
+            node.nodeId,
+            UnknownLiveChannelDescriptor(
+                role,
+                "output.channel-inspection.v1"));
+    }
+
     std::vector<Stack::NodeMath::SemanticImageNode> semanticNodes;
-    std::map<int, const RenderGraphNode*> renderNodeById;
+    semanticNodes.reserve(snapshot.nodes.size());
+    std::unordered_map<int, const RenderGraphNode*> renderNodeById;
+    renderNodeById.reserve(snapshot.nodes.size());
     for (const RenderGraphNode& node : snapshot.nodes) {
         renderNodeById[node.nodeId] = &node;
         if (!HasSemanticImageOutput(node.kind)) continue;
@@ -596,15 +1000,117 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
             semantic.sourceDescriptor = HasValidImageDescriptor(node.image.sourceDescriptor)
                 ? node.image.sourceDescriptor
                 : UnknownLiveImageDescriptor("source.image.unknown");
-        } else if (node.kind == RenderGraphNodeKind::RawDevelopment ||
-                   node.kind == RenderGraphNodeKind::RawDecode ||
-                   node.kind == RenderGraphNodeKind::RawDevelop ||
-                   node.kind == RenderGraphNodeKind::ImageGenerator ||
-                   node.kind == RenderGraphNodeKind::ChannelCombine) {
+        } else if (node.kind == RenderGraphNodeKind::RawDevelopment) {
             semantic.kind = Stack::NodeMath::SemanticImageNodeKind::Source;
             semantic.sourceDescriptor = UnknownLiveImageDescriptor(
-                node.kind == RenderGraphNodeKind::ImageGenerator
-                    ? "source.generated-image" : "source.opaque-specialized");
+                "source.raw-development");
+            if (Stack::RawRecipe::IsViewTransformEnabled(
+                    node.rawDevelopment.recipe)) {
+                const bool encodeSrgb =
+                    node.rawDevelopment.recipe.viewTransform.layerJson.value(
+                        "encodeSrgbOutput",
+                        node.rawDevelopment.recipe.technical.encodeSrgbOutput);
+                DeclareRawDisplayOutput(
+                    semantic.sourceDescriptor,
+                    encodeSrgb,
+                    "raw.development.display-output.v1");
+            } else {
+                DeclareRawSceneOutput(
+                    semantic.sourceDescriptor,
+                    node.rawDevelopment.recipe.technical.workingSpace,
+                    "raw.development.scene-output.v1");
+            }
+        } else if (node.kind ==
+                   RenderGraphNodeKind::RawProjectSourceSet) {
+            semantic.kind =
+                Stack::NodeMath::SemanticImageNodeKind::Source;
+            semantic.sourceDescriptor = UnknownLiveImageDescriptor(
+                "source.mfd-raw-development");
+            if (node.rawProjectSourceSet.resultAvailable) {
+                if (Stack::RawRecipe::IsViewTransformEnabled(
+                        node.rawDevelopment.recipe)) {
+                    const bool encodeSrgb =
+                        node.rawDevelopment.recipe.viewTransform.layerJson
+                            .value(
+                                "encodeSrgbOutput",
+                                node.rawDevelopment.recipe.technical
+                                    .encodeSrgbOutput);
+                    DeclareRawDisplayOutput(
+                        semantic.sourceDescriptor,
+                        encodeSrgb,
+                        "mfd.raw-development.display-output.v1");
+                } else {
+                    DeclareRawSceneOutput(
+                        semantic.sourceDescriptor,
+                        node.rawDevelopment.recipe.technical.workingSpace,
+                        "mfd.raw-development.scene-output.v1");
+                }
+            }
+        } else if (node.kind == RenderGraphNodeKind::RawDecode) {
+            semantic.kind = Stack::NodeMath::SemanticImageNodeKind::Source;
+            semantic.sourceDescriptor = UnknownLiveImageDescriptor("source.raw-decode");
+            DeclareRawSceneOutput(
+                semantic.sourceDescriptor,
+                node.rawDecode.settings.workingSpace,
+                "raw.decode.scene-output.v1");
+        } else if (node.kind == RenderGraphNodeKind::RawDevelop) {
+            semantic.kind = Stack::NodeMath::SemanticImageNodeKind::Source;
+            semantic.sourceDescriptor = UnknownLiveImageDescriptor("source.raw-develop");
+            DeclareRawSceneOutput(
+                semantic.sourceDescriptor,
+                node.rawDevelop.settings.workingSpace,
+                "raw.develop.scene-output.v1");
+        } else if (node.kind == RenderGraphNodeKind::ImageGenerator ||
+                   node.kind == RenderGraphNodeKind::ChannelCombine) {
+            semantic.kind = Stack::NodeMath::SemanticImageNodeKind::Source;
+            if (node.kind == RenderGraphNodeKind::ImageGenerator) {
+                semantic.sourceDescriptor =
+                    UnknownLiveImageDescriptor("source.generated-image");
+            } else {
+                Stack::NodeMath::ImageComponentSet presentComponents;
+                for (const RenderGraphLink& link : snapshot.links) {
+                    if (link.toNodeId != node.nodeId) {
+                        continue;
+                    }
+                    if (link.toSocketId == "r") {
+                        Stack::NodeMath::AddImageComponent(
+                            presentComponents,
+                            Stack::NodeMath::ImageComponent::Red);
+                    } else if (link.toSocketId == "g") {
+                        Stack::NodeMath::AddImageComponent(
+                            presentComponents,
+                            Stack::NodeMath::ImageComponent::Green);
+                    } else if (link.toSocketId == "b") {
+                        Stack::NodeMath::AddImageComponent(
+                            presentComponents,
+                            Stack::NodeMath::ImageComponent::Blue);
+                    } else if (link.toSocketId == "a") {
+                        Stack::NodeMath::AddImageComponent(
+                            presentComponents,
+                            Stack::NodeMath::ImageComponent::Alpha);
+                    }
+                }
+                semantic.sourceDescriptor = presentComponents.bits != 0
+                    ? Stack::NodeMath::MakePartialColorImageDescriptor(
+                        presentComponents,
+                        "image.combine.v2")
+                    : UnknownLiveImageDescriptor("image.combine.v2");
+            }
+        } else if (node.kind == RenderGraphNodeKind::Layer &&
+                   node.layerJson.value("type", std::string()) == "ViewTransform") {
+            semantic.kind = Stack::NodeMath::SemanticImageNodeKind::DeclaredColorOutput;
+            semantic.declaredColor = {
+                "srgb-d65", {}, Stack::NodeMath::ColorRelation::Standard
+            };
+            semantic.declaredTransfer = {
+                node.layerJson.value("encodeSrgbOutput", false)
+                    ? Stack::NodeMath::TransferKind::Srgb
+                    : Stack::NodeMath::TransferKind::Linear,
+                0.0,
+                {}
+            };
+            semantic.declaredReference = Stack::NodeMath::ReferenceState::Display;
+            semantic.declaredOperationIdentity = "view-transform.display-output.v1";
         } else if (node.kind == RenderGraphNodeKind::TechnicalImage) {
             semantic.kind = Stack::NodeMath::SemanticImageNodeKind::TechnicalOperation;
             semantic.technicalOperation = node.technicalImageOperation;
@@ -624,12 +1130,25 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
                    node.mixBlendMode == RenderMixBlendMode::PremultipliedSourceOver) {
             semantic.kind = Stack::NodeMath::SemanticImageNodeKind::PremultipliedSourceOver;
         } else if (node.kind == RenderGraphNodeKind::Output) {
-            semantic.kind = Stack::NodeMath::SemanticImageNodeKind::DirectOutput;
+            const auto channelDescriptor =
+                channelOutputDescriptors.find(node.nodeId);
+            if (channelDescriptor != channelOutputDescriptors.end()) {
+                // Channel inspection is a viewport materialization boundary,
+                // not an image conversion. Model it as the unchanged Channel
+                // value so no PNG policy or hidden color meaning is applied.
+                semantic.kind =
+                    Stack::NodeMath::SemanticImageNodeKind::Source;
+                semantic.sourceDescriptor = channelDescriptor->second;
+            } else {
+                semantic.kind =
+                    Stack::NodeMath::SemanticImageNodeKind::DirectOutput;
+            }
         }
         semanticNodes.push_back(std::move(semantic));
     }
 
     std::vector<Stack::NodeMath::SemanticImageEdge> semanticEdges;
+    semanticEdges.reserve(snapshot.links.size());
     for (const RenderGraphLink& link : snapshot.links) {
         const auto source = renderNodeById.find(link.fromNodeId);
         const auto destination = renderNodeById.find(link.toNodeId);
@@ -660,32 +1179,62 @@ RenderGraphSnapshot EditorModule::BuildGraphSnapshotForTimelineFrame(int timelin
         Stack::NodeMath::AnalyzeSemanticImageGraph(semanticNodes, semanticEdges);
     snapshot.semanticFingerprint = semantic.semanticFingerprint;
     snapshot.semanticDiagnostics = semantic.diagnostics;
+    std::unordered_map<std::string_view, const Stack::NodeMath::SemanticNodeOutput*>
+        semanticOutputByIdentity;
+    semanticOutputByIdentity.reserve(semantic.nodeOutputs.size());
+    for (const Stack::NodeMath::SemanticNodeOutput& output : semantic.nodeOutputs) {
+        semanticOutputByIdentity.emplace(output.nodeIdentity, &output);
+    }
+    std::unordered_map<std::string_view, const Stack::NodeMath::SemanticEdgeState*>
+        semanticEdgeByIdentity;
+    semanticEdgeByIdentity.reserve(semantic.edges.size());
+    for (const Stack::NodeMath::SemanticEdgeState& edge : semantic.edges) {
+        semanticEdgeByIdentity.emplace(edge.edge.identity, &edge);
+    }
     for (RenderGraphNode& node : snapshot.nodes) {
-        if (const auto* output = Stack::NodeMath::FindSemanticNodeOutput(
-                semantic, SemanticNodeIdentity(node.nodeId))) {
-            node.semanticDescriptor = output->descriptor;
-            node.semanticDescriptorIdentity = output->descriptorIdentity;
+        const std::string identity = SemanticNodeIdentity(node.nodeId);
+        const auto output = semanticOutputByIdentity.find(identity);
+        if (output != semanticOutputByIdentity.end()) {
+            node.semanticDescriptor = output->second->descriptor;
+            node.semanticDescriptorIdentity = output->second->descriptorIdentity;
         }
     }
     for (RenderGraphLink& link : snapshot.links) {
-        if (const auto* edge = Stack::NodeMath::FindSemanticEdgeState(
-                semantic, SemanticLinkIdentity(link))) {
-            link.semanticDescriptor = edge->descriptor;
-            link.semanticDescriptorIdentity = edge->descriptorIdentity;
+        const std::string identity = SemanticLinkIdentity(link);
+        const auto edge = semanticEdgeByIdentity.find(identity);
+        const auto channelOutput =
+            channelOutputDescriptors.find(link.toNodeId);
+        if (channelOutput != channelOutputDescriptors.end() &&
+            link.toSocketId == EditorNodeGraph::kImageInputSocketId) {
+            const std::string outputIdentity =
+                SemanticNodeIdentity(link.toNodeId);
+            const auto output =
+                semanticOutputByIdentity.find(outputIdentity);
+            link.semanticDescriptor = output !=
+                    semanticOutputByIdentity.end()
+                ? output->second->descriptor
+                : channelOutput->second;
+            link.semanticDescriptorIdentity =
+                Stack::NodeMath::DescriptorContentIdentity(
+                    link.semanticDescriptor);
+        } else if (edge != semanticEdgeByIdentity.end()) {
+            link.semanticDescriptor = edge->second->descriptor;
+            link.semanticDescriptorIdentity = edge->second->descriptorIdentity;
         } else if (const auto source = renderNodeById.find(link.fromNodeId);
                    source != renderNodeById.end()) {
-            const auto* output = Stack::NodeMath::FindSemanticNodeOutput(
-                semantic, SemanticNodeIdentity(link.fromNodeId));
-            if (output) {
-                link.semanticDescriptor = output->descriptor;
-                link.semanticDescriptorIdentity = output->descriptorIdentity;
+            const std::string sourceIdentity = SemanticNodeIdentity(link.fromNodeId);
+            const auto output = semanticOutputByIdentity.find(sourceIdentity);
+            if (output != semanticOutputByIdentity.end()) {
+                link.semanticDescriptor = output->second->descriptor;
+                link.semanticDescriptorIdentity = output->second->descriptorIdentity;
             }
         }
     }
-    if (const auto* output = Stack::NodeMath::FindSemanticNodeOutput(
-            semantic, SemanticNodeIdentity(snapshot.outputNodeId))) {
-        snapshot.outputDescriptor = output->descriptor;
-        snapshot.outputDescriptorIdentity = output->descriptorIdentity;
+    const std::string outputIdentity = SemanticNodeIdentity(snapshot.outputNodeId);
+    const auto semanticOutput = semanticOutputByIdentity.find(outputIdentity);
+    if (semanticOutput != semanticOutputByIdentity.end()) {
+        snapshot.outputDescriptor = semanticOutput->second->descriptor;
+        snapshot.outputDescriptorIdentity = semanticOutput->second->descriptorIdentity;
     }
     m_LastGraphOutputSemanticDescriptor = snapshot.outputDescriptor;
     m_LastGraphOutputSemanticDescriptorIdentity = snapshot.outputDescriptorIdentity;
@@ -712,5 +1261,58 @@ bool EditorModule::TryGetGraphLinkSemanticDescriptor(
     const auto found = m_LastGraphLinkSemanticDescriptors.find(SemanticLinkIdentity(link));
     if (found == m_LastGraphLinkSemanticDescriptors.end()) return false;
     descriptor = found->second;
+    return true;
+}
+
+bool EditorModule::TryGetGraphLinkWireReadoutInput(
+    const EditorNodeGraph::Link& link,
+    EditorNodeGraph::WireReadout::Input& input) const {
+    input = {};
+    const EditorNodeGraph::Node* source = m_NodeGraph.FindNode(link.fromNodeId);
+    if (source == nullptr) return false;
+
+    if (!m_NodeGraph.FindSocket(link.fromNodeId, link.fromSocketId, &input.sourceSocket)) {
+        input.sourceSocket.id = link.fromSocketId;
+        input.sourceSocket.nodeId = link.fromNodeId;
+        input.sourceSocket.direction = EditorNodeGraph::SocketDirection::Output;
+        input.sourceSocket.label = "Unknown";
+        EditorNodeGraph::SocketPresentation::NormalizeSocketDefinition(
+            source->kind,
+            input.sourceSocket);
+    }
+
+    input.hasDescriptor = TryGetGraphLinkSemanticDescriptor(link, input.descriptor);
+
+    // A Value node owns a declared uniform payload, so presenting it needs no
+    // evaluation. Other known values are copied only from an accepted current
+    // render result; stale or absent results deliberately fall back to type.
+    if (source->kind == EditorNodeGraph::NodeKind::Value &&
+        link.fromSocketId == EditorNodeGraph::kValueOutputSocketId) {
+        input.value = source->value.value;
+    } else if (!m_RenderDirty &&
+               m_LastGraphUniformOutputGeneration == m_LastCompletedRenderGeneration) {
+        const auto value = m_LastGraphUniformOutputValues.find(
+            EditorNodeGraph::WireReadout::OutputIdentity(
+                link.fromNodeId,
+                link.fromSocketId));
+        if (value != m_LastGraphUniformOutputValues.end()) {
+            input.value = value->second;
+        }
+    }
+
+    // Semantic diagnostics currently identify node outputs. Attribute one to
+    // a wire only when that node has exactly one output, preventing a node-wide
+    // diagnostic from being shown on an arbitrary sibling output.
+    int outputCount = 0;
+    for (const EditorNodeGraph::SocketDefinition& socket : m_NodeGraph.GetSockets(*source)) {
+        if (socket.direction == EditorNodeGraph::SocketDirection::Output) ++outputCount;
+    }
+    if (outputCount == 1) {
+        input.sourceDiagnostics =
+            EditorNodeGraph::WireReadout::FilterSourceOutputDiagnostics(
+                m_LastGraphSemanticDiagnostics,
+                SemanticNodeIdentity(link.fromNodeId),
+                true);
+    }
     return true;
 }

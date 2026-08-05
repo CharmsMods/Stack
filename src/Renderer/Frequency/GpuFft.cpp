@@ -1,8 +1,10 @@
 #include "Renderer/Frequency/GpuFft.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/GLLoader.h"
+#include "Renderer/GLStateGuards.h"
 
 #include <algorithm>
+#include <limits>
 #include <iostream>
 
 namespace Stack::Renderer::Frequency {
@@ -34,6 +36,9 @@ namespace {
 #ifndef GL_TEXTURE_FETCH_BARRIER_BIT
 #define GL_TEXTURE_FETCH_BARRIER_BIT 0x00000008
 #endif
+#ifndef GL_FRAMEBUFFER_BARRIER_BIT
+#define GL_FRAMEBUFFER_BARRIER_BIT 0x00000400
+#endif
 #ifndef GL_COMPUTE_SHADER
 #define GL_COMPUTE_SHADER 0x91B9
 #endif
@@ -46,39 +51,114 @@ namespace {
 constexpr int kWorkgroupX = 8;
 constexpr int kWorkgroupY = 8;
 
+struct ScopedComputeState {
+    struct ImageBinding {
+        GLint texture = 0;
+        GLint level = 0;
+        GLint layered = GL_FALSE;
+        GLint layer = 0;
+        GLint access = GL_READ_ONLY;
+        GLint format = GL_RGBA16F;
+    };
+
+    GLint program = 0;
+    GLint activeTexture = GL_TEXTURE0;
+    GLint texture0 = 0;
+    ImageBinding imageBindings[2];
+
+    ScopedComputeState() {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture0);
+        glActiveTexture(static_cast<GLenum>(activeTexture));
+        for (GLuint unit = 0; unit < 2; ++unit) {
+            ImageBinding& binding = imageBindings[unit];
+            glGetIntegeri_v(GL_IMAGE_BINDING_NAME, unit, &binding.texture);
+            glGetIntegeri_v(GL_IMAGE_BINDING_LEVEL, unit, &binding.level);
+            glGetIntegeri_v(GL_IMAGE_BINDING_LAYERED, unit, &binding.layered);
+            glGetIntegeri_v(GL_IMAGE_BINDING_LAYER, unit, &binding.layer);
+            glGetIntegeri_v(GL_IMAGE_BINDING_ACCESS, unit, &binding.access);
+            glGetIntegeri_v(GL_IMAGE_BINDING_FORMAT, unit, &binding.format);
+        }
+    }
+
+    ~ScopedComputeState() {
+        for (GLuint unit = 0; unit < 2; ++unit) {
+            const ImageBinding& binding = imageBindings[unit];
+            const GLuint texture =
+                binding.texture > 0 &&
+                    glIsTexture(static_cast<GLuint>(binding.texture))
+                ? static_cast<GLuint>(binding.texture)
+                : 0;
+            glBindImageTexture(
+                unit,
+                texture,
+                binding.level,
+                static_cast<GLboolean>(binding.layered),
+                binding.layer,
+                static_cast<GLenum>(binding.access),
+                binding.format != 0
+                    ? static_cast<GLenum>(binding.format)
+                    : GL_RGBA16F);
+        }
+        glUseProgram(static_cast<GLuint>(program));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture0));
+        glActiveTexture(static_cast<GLenum>(activeTexture));
+    }
+};
+
+void ClearGlErrors() {
+    while (glGetError() != GL_NO_ERROR) {
+    }
+}
+
 // Allocate an immutable-storage RG32F texture usable as an image2D target.
 unsigned int CreateComplexTexture(int w, int h) {
-    unsigned int tex = 0;
-    glGenTextures(1, &tex);
+    const unsigned int tex =
+        GLHelpers::CreateStorageTexture(w, h, GL_RG32F);
+    if (tex == 0) return 0;
+    const Stack::Renderer::GLState::TextureBinding savedTexture(
+        GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RG32F, w, h);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    savedTexture.Restore();
     return tex;
 }
 
 // Copy a texture by FBO blit (glCopyImageSubData is not loaded in Stack's
 // loader; blit is, and it works between identically-sized RG32F textures).
 unsigned int BlitClone(unsigned int src, int w, int h) {
+    if (src == 0 || w <= 0 || h <= 0) return 0;
     unsigned int dst = CreateComplexTexture(w, h);
-    unsigned int readFbo = 0;
-    unsigned int drawFbo = 0;
-    glGenFramebuffers(1, &readFbo);
-    glGenFramebuffers(1, &drawFbo);
+    if (dst == 0) return 0;
+    const Stack::Renderer::GLState::FramebufferState savedState;
+    const unsigned int readFbo = GLHelpers::CreateFBO(src);
+    const unsigned int drawFbo = GLHelpers::CreateFBO(dst);
+    if (readFbo == 0 || drawFbo == 0) {
+        if (readFbo != 0) glDeleteFramebuffers(1, &readFbo);
+        if (drawFbo != 0) glDeleteFramebuffers(1, &drawFbo);
+        glDeleteTextures(1, &dst);
+        return 0;
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
-    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ClearGlErrors();
     glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    const bool copied = glGetError() == GL_NO_ERROR;
+    savedState.Restore();
     glDeleteFramebuffers(1, &readFbo);
     glDeleteFramebuffers(1, &drawFbo);
+    if (!copied) {
+        glDeleteTextures(1, &dst);
+        return 0;
+    }
     return dst;
 }
 
@@ -98,19 +178,38 @@ int BitsForPowerOfTwo(int n) {
     return bits;
 }
 
+bool IsPowerOfTwo(int value) {
+    return value > 0 && (value & (value - 1)) == 0;
+}
+
 } // namespace
 
 GpuFft::~GpuFft() {
+    Shutdown();
+}
+
+void GpuFft::Shutdown() {
     if (m_ComplexA) glDeleteTextures(1, &m_ComplexA);
     if (m_ComplexB) glDeleteTextures(1, &m_ComplexB);
     if (m_ButterflyProgram) glDeleteProgram(m_ButterflyProgram);
     if (m_PackProgram) glDeleteProgram(m_PackProgram);
     if (m_BitReverseProgram) glDeleteProgram(m_BitReverseProgram);
     if (m_UnpackProgram) glDeleteProgram(m_UnpackProgram);
+    m_ComplexA = 0;
+    m_ComplexB = 0;
+    m_ButterflyProgram = 0;
+    m_PackProgram = 0;
+    m_BitReverseProgram = 0;
+    m_UnpackProgram = 0;
+    m_ScratchW = 0;
+    m_ScratchH = 0;
 }
 
 int GpuFft::NextPowerOfTwo(int n) {
     if (n <= 1) return 1;
+    constexpr int highestPositivePowerOfTwo =
+        1 << (std::numeric_limits<int>::digits - 1);
+    if (n > highestPositivePowerOfTwo) return 0;
     int p = 1;
     while (p < n) p <<= 1;
     return p;
@@ -126,7 +225,8 @@ const char* GpuFft::PackComputeSource() {
         uniform int uSourceH;
         uniform int uPaddedW;
         uniform int uPaddedH;
-        uniform int uLuminanceOnly;
+        uniform ivec2 uPaddingOrigin;
+        uniform int uEdgePolicy;
         uniform int uBitsX;
         uniform int uBitsY;
 
@@ -140,22 +240,45 @@ const char* GpuFft::PackComputeSource() {
             return r;
         }
 
+        int wrapIndex(int value, int size) {
+            if (size <= 1) return 0;
+            // Avoid driver-dependent signed remainder behavior for negative
+            // padding coordinates. floor-based modulo is exact for the image
+            // extents Stack can allocate and maps -1 to size - 1.
+            return value - int(floor(float(value) / float(size))) * size;
+        }
+
+        int mirrorIndex(int value, int size) {
+            if (size <= 1) return 0;
+            int period = 2 * (size - 1);
+            int folded = wrapIndex(value, period);
+            return folded < size ? folded : period - folded;
+        }
+
         void main() {
             ivec2 p = ivec2(gl_GlobalInvocationID.xy);
             if (p.x >= uPaddedW || p.y >= uPaddedH) return;
             ivec2 outP = ivec2(
                 int(reverseBits(uint(p.x), uBitsX)),
                 int(reverseBits(uint(p.y), uBitsY)));
-            if (p.x < uSourceW && p.y < uSourceH) {
-                vec4 c = texelFetch(uSource, p, 0);
-                float v = uLuminanceOnly != 0
-                    ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722))
-                    : c.r;
-                imageStore(uOut, outP, vec4(v, 0.0, 0.0, 0.0));
-            } else {
-                // Zero-padding: out-of-source texels are complex zero.
+            ivec2 sourceP = p - uPaddingOrigin;
+            bool inside = sourceP.x >= 0 && sourceP.x < uSourceW &&
+                          sourceP.y >= 0 && sourceP.y < uSourceH;
+            if (!inside && uEdgePolicy == 2) {
                 imageStore(uOut, outP, vec4(0.0, 0.0, 0.0, 0.0));
+                return;
             }
+            if (!inside && uEdgePolicy == 0) {
+                sourceP = ivec2(
+                    mirrorIndex(sourceP.x, uSourceW),
+                    mirrorIndex(sourceP.y, uSourceH));
+            } else if (!inside) {
+                sourceP = ivec2(
+                    wrapIndex(sourceP.x, uSourceW),
+                    wrapIndex(sourceP.y, uSourceH));
+            }
+            float v = texelFetch(uSource, sourceP, 0).r;
+            imageStore(uOut, outP, vec4(v, 0.0, 0.0, 0.0));
         }
     )";
 }
@@ -310,16 +433,27 @@ void GpuFft::EnsurePrograms() {
     }
 }
 
-void GpuFft::EnsureScratch(int paddedW, int paddedH) {
+bool GpuFft::EnsureScratch(int paddedW, int paddedH) {
     if (m_ScratchW == paddedW && m_ScratchH == paddedH && m_ComplexA && m_ComplexB) {
-        return;
+        return true;
     }
     if (m_ComplexA) glDeleteTextures(1, &m_ComplexA);
     if (m_ComplexB) glDeleteTextures(1, &m_ComplexB);
+    m_ComplexA = 0;
+    m_ComplexB = 0;
+    m_ScratchW = 0;
+    m_ScratchH = 0;
     m_ComplexA = CreateComplexTexture(paddedW, paddedH);
+    if (m_ComplexA == 0) return false;
     m_ComplexB = CreateComplexTexture(paddedW, paddedH);
+    if (m_ComplexB == 0) {
+        glDeleteTextures(1, &m_ComplexA);
+        m_ComplexA = 0;
+        return false;
+    }
     m_ScratchW = paddedW;
     m_ScratchH = paddedH;
+    return true;
 }
 
 // Run the full log2(N) Stockham passes along one axis. Reads start from
@@ -369,11 +503,22 @@ unsigned int GpuFft::Forward(unsigned int sourceTexture,
                              int sourceH,
                              int paddedW,
                              int paddedH,
-                             bool luminanceOnly) {
-    if (!sourceTexture || paddedW <= 0 || paddedH <= 0) return 0;
+                             int paddingOriginX,
+                             int paddingOriginY,
+                             FftEdgePolicy edgePolicy) {
+    if (!sourceTexture ||
+        sourceW <= 0 || sourceH <= 0 ||
+        !IsPowerOfTwo(paddedW) || !IsPowerOfTwo(paddedH) ||
+        paddingOriginX < 0 || paddingOriginY < 0 ||
+        sourceW > paddedW - paddingOriginX ||
+        sourceH > paddedH - paddingOriginY) {
+        return 0;
+    }
+    const ScopedComputeState savedState;
     EnsurePrograms();
     if (!Ready()) return 0;
-    EnsureScratch(paddedW, paddedH);
+    if (!EnsureScratch(paddedW, paddedH)) return 0;
+    ClearGlErrors();
 
     // Pack source (sampled) -> complexA (zero-padded).
     glUseProgram(m_PackProgram);
@@ -381,7 +526,13 @@ unsigned int GpuFft::Forward(unsigned int sourceTexture,
     glUniform1i(glGetUniformLocation(m_PackProgram, "uSourceH"), sourceH);
     glUniform1i(glGetUniformLocation(m_PackProgram, "uPaddedW"), paddedW);
     glUniform1i(glGetUniformLocation(m_PackProgram, "uPaddedH"), paddedH);
-    glUniform1i(glGetUniformLocation(m_PackProgram, "uLuminanceOnly"), luminanceOnly ? 1 : 0);
+    glUniform2i(
+        glGetUniformLocation(m_PackProgram, "uPaddingOrigin"),
+        paddingOriginX,
+        paddingOriginY);
+    glUniform1i(
+        glGetUniformLocation(m_PackProgram, "uEdgePolicy"),
+        static_cast<int>(edgePolicy));
     glUniform1i(glGetUniformLocation(m_PackProgram, "uBitsX"), BitsForPowerOfTwo(paddedW));
     glUniform1i(glGetUniformLocation(m_PackProgram, "uBitsY"), BitsForPowerOfTwo(paddedH));
 
@@ -402,16 +553,26 @@ unsigned int GpuFft::Forward(unsigned int sourceTexture,
 
     // The scratch buffers are reused across calls, but graph caching assumes
     // returned textures are uniquely owned. Hand back a fresh clone.
+    glMemoryBarrier(
+        GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+        GL_TEXTURE_FETCH_BARRIER_BIT |
+        GL_FRAMEBUFFER_BARRIER_BIT);
+    if (glGetError() != GL_NO_ERROR) return 0;
     return BlitClone(finalResult, paddedW, paddedH);
 }
 
 unsigned int GpuFft::Inverse(unsigned int spectrumTexture,
                              int paddedW,
                              int paddedH) {
-    if (!spectrumTexture || paddedW <= 0 || paddedH <= 0) return 0;
+    if (!spectrumTexture ||
+        !IsPowerOfTwo(paddedW) || !IsPowerOfTwo(paddedH)) {
+        return 0;
+    }
+    const ScopedComputeState savedState;
     EnsurePrograms();
     if (!Ready()) return 0;
-    EnsureScratch(paddedW, paddedH);
+    if (!EnsureScratch(paddedW, paddedH)) return 0;
+    ClearGlErrors();
 
     // Inverse DIT needs bit-reversed input just like forward. Copy the
     // externally-owned spectrum into complexA while reversing both axes.
@@ -423,15 +584,20 @@ unsigned int GpuFft::Inverse(unsigned int spectrumTexture,
     glBindImageTexture(0, spectrumTexture, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RG32F);
     glBindImageTexture(1, m_ComplexA, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RG32F);
     DispatchCover(paddedW, paddedH);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    glMemoryBarrier(
+        GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+        GL_TEXTURE_FETCH_BARRIER_BIT |
+        GL_FRAMEBUFFER_BARRIER_BIT);
 
     unsigned int rowResult = RunAxis(m_ButterflyProgram, m_ComplexA, m_ComplexB, paddedW, paddedH, 0, +1);
     unsigned int colSource = rowResult;
     unsigned int colOther = (rowResult == m_ComplexA) ? m_ComplexB : m_ComplexA;
     unsigned int finalResult = RunAxis(m_ButterflyProgram, colSource, colOther, paddedW, paddedH, 1, +1);
+    if (glGetError() != GL_NO_ERROR) return 0;
 
     // Unpack complex -> RG32F spatial (real part only, normalized).
     unsigned int outTex = CreateComplexTexture(paddedW, paddedH);
+    if (outTex == 0) return 0;
     glUseProgram(m_UnpackProgram);
     glUniform1i(glGetUniformLocation(m_UnpackProgram, "uW"), paddedW);
     glUniform1i(glGetUniformLocation(m_UnpackProgram, "uH"), paddedH);
@@ -441,6 +607,10 @@ unsigned int GpuFft::Inverse(unsigned int spectrumTexture,
     glBindImageTexture(1, outTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RG32F);
     DispatchCover(paddedW, paddedH);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    if (glGetError() != GL_NO_ERROR) {
+        glDeleteTextures(1, &outTex);
+        return 0;
+    }
 
     return outTex;
 }
@@ -450,8 +620,18 @@ unsigned int GpuFft::RoundTrip(unsigned int sourceTexture,
                                int sourceH,
                                int paddedW,
                                int paddedH,
-                               bool luminanceOnly) {
-    const unsigned int spectrum = Forward(sourceTexture, sourceW, sourceH, paddedW, paddedH, luminanceOnly);
+                               int paddingOriginX,
+                               int paddingOriginY,
+                               FftEdgePolicy edgePolicy) {
+    const unsigned int spectrum = Forward(
+        sourceTexture,
+        sourceW,
+        sourceH,
+        paddedW,
+        paddedH,
+        paddingOriginX,
+        paddingOriginY,
+        edgePolicy);
     if (!spectrum) return 0;
     unsigned int reconstructed = Inverse(spectrum, paddedW, paddedH);
     glDeleteTextures(1, &spectrum);

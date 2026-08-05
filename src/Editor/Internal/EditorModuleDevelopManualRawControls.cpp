@@ -67,11 +67,10 @@ ManualRawBasicControlResult RenderDevelopManualRawBasicControls(
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW COLOR", 4.0f);
-    const char* wbLabels[] = { "Camera WB", "Auto WB", "Neutral", "Manual" };
-    int wbMode = static_cast<int>(settings.whiteBalanceMode);
-    ImGui::SetNextItemWidth(controlWidth);
-    if (ImGui::Combo("White Balance", &wbMode, wbLabels, 4)) {
-        settings.whiteBalanceMode = static_cast<Raw::WhiteBalanceMode>(std::clamp(wbMode, 0, 3));
+    if (Stack::Editor::RawControls::RenderManualWhiteBalanceModeCombo(
+            "White Balance",
+            settings.whiteBalanceMode,
+            controlWidth)) {
         result.changed = true;
     }
     result.changed |= ResettableDevelopSliderFloat("Red Mult", "##RawWbR", &settings.manualWhiteBalance[0], defaultSettings.manualWhiteBalance[0], 0.05f, 16.0f, "%.3f", controlWidth);
@@ -159,8 +158,15 @@ bool RenderDevelopManualRawAdvancedControls(
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
     ImGui::BeginDisabled(!demosaicEnabled);
-    ImGui::TextDisabled("Method: Fast / Bilinear (preview-safe)");
-    ImGui::TextDisabled("Only Bilinear is selectable in this build; unsafe demosaic modes are forced back to Bilinear.");
+    const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5" };
+    int demosaicMethod = static_cast<int>(settings.demosaicMethod);
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo("Method", &demosaicMethod, demosaicLabels, IM_ARRAYSIZE(demosaicLabels))) {
+        settings.demosaicMethod = static_cast<Raw::DemosaicMethod>(
+            std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
+        changed = true;
+    }
+    ImGui::TextDisabled("MHC is the high-quality 5x5 linear reconstruction; Bilinear remains the fast draft option.");
     ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
@@ -204,10 +210,42 @@ bool RenderDevelopManualRawAdvancedControls(
     ImGuiExtras::RichSectionLabel("RAW MOSAIC DENOISE", 4.0f);
     ImGui::BeginDisabled(!demosaicEnabled);
     changed |= ImGuiExtras::NodeCheckbox("Enable", "##RawMosaicDenoiseEnabled", &settings.mosaicDenoise.enabled, controlWidth);
+    const char* mosaicDenoiseModeLabels[] = {
+        "Legacy / Fixed Threshold",
+        "DNG Noise Profile"
+    };
+    int mosaicDenoiseMode = static_cast<int>(settings.mosaicDenoise.mode);
+    ImGui::SetNextItemWidth(controlWidth);
+    if (ImGui::Combo(
+            "Noise Model",
+            &mosaicDenoiseMode,
+            mosaicDenoiseModeLabels,
+            IM_ARRAYSIZE(mosaicDenoiseModeLabels))) {
+        settings.mosaicDenoise.mode =
+            static_cast<Raw::RawMosaicDenoiseMode>(
+                std::clamp(
+                    mosaicDenoiseMode,
+                    0,
+                    IM_ARRAYSIZE(mosaicDenoiseModeLabels) - 1));
+        changed = true;
+    }
+    if (settings.mosaicDenoise.mode ==
+        Raw::RawMosaicDenoiseMode::DngNoiseProfile) {
+        if (settings.processingVersion != Raw::RawProcessingVersion::TruthfulV1) {
+            ImGui::TextDisabled(
+                "DNG noise-aware filtering requires Truthful V1; fixed-threshold fallback is active.");
+        } else if (!metadata.hasDngNoiseProfile) {
+            ImGui::TextDisabled(
+                "NoiseProfile unavailable; fixed-threshold fallback is active.");
+        } else {
+            ImGui::TextDisabled(
+                "Using DNG shot/read variance in normalized sensor space.");
+        }
+    }
     changed |= ImGuiExtras::NodeCheckbox("Hot Pixel Suppression", "##RawMosaicHotPixels", &settings.mosaicDenoise.hotPixelSuppression, controlWidth);
     changed |= ResettableDevelopSliderFloat("Hot Pixel Threshold", "##RawMosaicHotThreshold", &settings.mosaicDenoise.hotPixelThreshold, defaultSettings.mosaicDenoise.hotPixelThreshold, 0.005f, 0.5f, "%.3f", controlWidth);
-    changed |= ResettableDevelopSliderFloat("Luminance Strength", "##RawMosaicLumaStrength", &settings.mosaicDenoise.lumaStrength, defaultSettings.mosaicDenoise.lumaStrength, 0.0f, 1.0f, "%.2f", controlWidth);
-    changed |= ResettableDevelopSliderFloat("Chroma Strength", "##RawMosaicChromaStrength", &settings.mosaicDenoise.chromaStrength, defaultSettings.mosaicDenoise.chromaStrength, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ResettableDevelopSliderFloat("Green Plane Strength", "##RawMosaicLumaStrength", &settings.mosaicDenoise.lumaStrength, defaultSettings.mosaicDenoise.lumaStrength, 0.0f, 1.0f, "%.2f", controlWidth);
+    changed |= ResettableDevelopSliderFloat("Red / Blue Plane Strength", "##RawMosaicChromaStrength", &settings.mosaicDenoise.chromaStrength, defaultSettings.mosaicDenoise.chromaStrength, 0.0f, 1.0f, "%.2f", controlWidth);
     changed |= ResettableDevelopSliderInt("Radius", "##RawMosaicRadius", &settings.mosaicDenoise.radius, defaultSettings.mosaicDenoise.radius, 1, 4, "%d CFA steps", controlWidth);
     changed |= ResettableDevelopSliderFloat("Edge Protection", "##RawMosaicEdgeProtection", &settings.mosaicDenoise.edgeProtection, defaultSettings.mosaicDenoise.edgeProtection, 0.0f, 1.0f, "%.2f", controlWidth);
     changed |= ResettableDevelopSliderInt("Iterations", "##RawMosaicIterations", &settings.mosaicDenoise.iterations, defaultSettings.mosaicDenoise.iterations, 1, 2, "%d", controlWidth);
