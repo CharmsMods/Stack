@@ -110,6 +110,15 @@ bool ValidDiagnostic(const FusionPixelDiagnostics& diagnostic) {
         FiniteNonnegative(diagnostic.alternateWeight) &&
         FiniteNonnegative(diagnostic.alternateToReferenceWeightRatio) &&
         FiniteNonnegative(diagnostic.effectiveSampleCount) &&
+        diagnostic.rawSupportCount > 0u &&
+        FiniteNonnegative(diagnostic.ownerContribution) &&
+        diagnostic.ownerContribution <= 1.0f &&
+        FiniteNonnegative(diagnostic.robustAttenuation) &&
+        diagnostic.robustAttenuation <= 1.0f &&
+        FiniteNonnegative(diagnostic.modelQuadraticVariance) &&
+        FiniteNonnegative(
+            diagnostic.policyConditionalSamplingVariance) &&
+        FiniteNonnegative(diagnostic.finiteSampleRobustVariance) &&
         FiniteNonnegative(diagnostic.outputVarianceComparisonDomain);
 }
 
@@ -191,6 +200,13 @@ void HashDiagnostic(
     HashPod(hash, diagnostic.alternateWeight);
     HashPod(hash, diagnostic.alternateToReferenceWeightRatio);
     HashPod(hash, diagnostic.effectiveSampleCount);
+    HashPod(hash, diagnostic.rawSupportCount);
+    HashPod(hash, diagnostic.ownerSourceIndex);
+    HashPod(hash, diagnostic.ownerContribution);
+    HashPod(hash, diagnostic.robustAttenuation);
+    HashPod(hash, diagnostic.modelQuadraticVariance);
+    HashPod(hash, diagnostic.policyConditionalSamplingVariance);
+    HashPod(hash, diagnostic.finiteSampleRobustVariance);
     HashPod(hash, diagnostic.outputVarianceComparisonDomain);
 }
 
@@ -235,6 +251,14 @@ bool WriteDiagnostic(
         WritePod(output, diagnostic.alternateWeight) &&
         WritePod(output, diagnostic.alternateToReferenceWeightRatio) &&
         WritePod(output, diagnostic.effectiveSampleCount) &&
+        WritePod(output, diagnostic.rawSupportCount) &&
+        WritePod(output, diagnostic.ownerSourceIndex) &&
+        WritePod(output, diagnostic.ownerContribution) &&
+        WritePod(output, diagnostic.robustAttenuation) &&
+        WritePod(output, diagnostic.modelQuadraticVariance) &&
+        WritePod(output,
+            diagnostic.policyConditionalSamplingVariance) &&
+        WritePod(output, diagnostic.finiteSampleRobustVariance) &&
         WritePod(output, diagnostic.outputVarianceComparisonDomain);
 }
 
@@ -255,6 +279,14 @@ bool ReadDiagnostic(
         !ReadPod(input, diagnostic.alternateWeight) ||
         !ReadPod(input, diagnostic.alternateToReferenceWeightRatio) ||
         !ReadPod(input, diagnostic.effectiveSampleCount) ||
+        !ReadPod(input, diagnostic.rawSupportCount) ||
+        !ReadPod(input, diagnostic.ownerSourceIndex) ||
+        !ReadPod(input, diagnostic.ownerContribution) ||
+        !ReadPod(input, diagnostic.robustAttenuation) ||
+        !ReadPod(input, diagnostic.modelQuadraticVariance) ||
+        !ReadPod(input,
+            diagnostic.policyConditionalSamplingVariance) ||
+        !ReadPod(input, diagnostic.finiteSampleRobustVariance) ||
         !ReadPod(input, diagnostic.outputVarianceComparisonDomain)) {
         return false;
     }

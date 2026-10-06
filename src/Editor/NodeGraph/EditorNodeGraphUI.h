@@ -1,12 +1,15 @@
 #pragma once
 
 #include "Editor/GraphCapture.h"
+#include "Editor/NodeGraph/GraphEditorContext.h"
 #include "EditorNodeGraph.h"
+#include "Editor/NodeGraph/UI/NodeSocketIconTexture.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUILayout.h"
 #include "ThirdParty/json.hpp"
 #include <imgui.h>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -15,6 +18,10 @@
 
 class EditorModule;
 struct PresetEntry;
+namespace Stack::Editor::NodeGraphUIVisuals {
+struct GraphStyleTokens;
+struct NodeLayoutMetrics;
+} // namespace Stack::Editor::NodeGraphUIVisuals
 
 class EditorNodeGraphUI {
 public:
@@ -34,7 +41,12 @@ public:
     bool IsNodeBrowserOpen() const { return m_DrawerMode == DrawerMode::NodeBrowser; }
     bool HasDrawerOpen() const { return m_DrawerMode != DrawerMode::None; }
     bool IsGraphMiddlePanActive() const { return m_MiddlePanCaptureActive; }
+    void SetCatalogHost(const ImVec2& position, const ImVec2& size,
+        bool expanded, float visibleWidth = -1.0f);
+    bool HasCatalogHost() const { return m_CatalogHostSize.x > 0.0f && m_CatalogHostSize.y > 0.0f; }
+    bool IsCatalogDocked() const { return HasCatalogHost() && m_CatalogHostExpanded; }
     void CloseTransientDrawers();
+    void ResetProjectInteractionState();
     void RenderNodesPanelDrawer(
         EditorModule* editor,
         float panelWidth,
@@ -53,6 +65,11 @@ public:
 
 
 private:
+    Stack::Editor::GraphEditorContext m_GraphContext;
+    mutable std::unordered_map<std::string,bool> m_ConnectionCapabilityCache;
+    bool CanConnectInContext(const EditorNodeGraph::Graph& graph, int from, const std::string& output,
+        int to, const std::string& input) const;
+
     enum class ContextTarget {
         Canvas,
         Node,
@@ -142,6 +159,31 @@ private:
         bool loadAttempted = false;
     };
 
+    struct NodeContentRenderContext {
+        EditorModule* editor;
+        EditorNodeGraph::Graph& graph;
+        EditorNodeGraph::Node& node;
+        const Stack::Editor::NodeGraphUIVisuals::NodeLayoutMetrics& metrics;
+        const NodeSurfaceSpec& nodeSurfaceSpec;
+        const Stack::Editor::NodeGraphUIVisuals::GraphStyleTokens& graphStyle;
+        ImDrawList* drawList;
+        ImVec2 previewSize;
+        float controlWidth;
+        float safeContentWidth;
+        float logicalControlWidth;
+        float logicalSafeContentWidth;
+        float uiScale;
+        float contentScale;
+        float itemGap;
+        float sectionGap;
+        bool richExpandedSurface;
+        bool selected;
+        std::function<void()> captureIfActive;
+        std::function<bool(const char*, const char*, float*, float, float)>
+            renderSlider;
+        std::function<void()> drawInlineSeparator;
+    };
+
     EditorNodeGraph::Vec2 ScreenToGraph(const EditorNodeGraph::Vec2& screen) const;
     EditorNodeGraph::Vec2 GraphToScreen(const EditorNodeGraph::Vec2& graph) const;
     EditorNodeGraph::Vec2 NodeSize(const EditorNodeGraph::Node& node) const;
@@ -160,6 +202,10 @@ private:
 
     void RenderContextMenu(EditorModule* editor);
     void RenderNode(EditorModule* editor, EditorNodeGraph::Node& node);
+    bool RenderSourceNodeContent(NodeContentRenderContext& context);
+    bool RenderMaskDataNodeContent(NodeContentRenderContext& context);
+    bool RenderFrequencyNodeContent(NodeContentRenderContext& context);
+    bool RenderUtilityNodeContent(NodeContentRenderContext& context);
     void RenderGroups(EditorModule* editor, EditorNodeGraph::Graph& graph);
     void RenderLinks(const EditorNodeGraph::Graph& graph);
     void RenderPendingOutputLinkDrag(EditorModule* editor, const EditorNodeGraph::Graph& graph, const SocketHit& hoveredInput);
@@ -285,6 +331,8 @@ private:
         ImDrawList* drawList,
         ImU32 textColor,
         float uiScale);
+    bool IsSocketVisibleDuringDrag(const EditorNodeGraph::Graph& graph, int nodeId,
+        const std::string& socketId, EditorNodeGraph::SocketDirection direction) const;
     bool ShouldShowSocketContextLabel(
         const EditorNodeGraph::Graph& graph,
         const EditorNodeGraph::Node& node,
@@ -331,6 +379,7 @@ private:
     int m_HoveredOutputNodeId = -1;
     std::string m_HoveredOutputSocketId;
     bool m_NodeContentActive = false;
+    bool m_LastTabDown = false;
     bool m_NodeContentHovered = false;
     bool m_BoxSelecting = false;
     bool m_DebugInteractionOverlay = false;
@@ -343,6 +392,13 @@ private:
     EditorNodeGraph::Vec2 m_CanvasMax;
     char m_SearchBuffer[128] = {};
     char m_NodeBrowserSearchBuffer[128] = {};
+    ImVec2 m_CatalogHostPosition {};
+    ImVec2 m_CatalogHostSize {};
+    float m_CatalogHostVisibleWidth = 0.0f;
+    bool m_CatalogHostExpanded = false;
+    bool m_NodeBrowserSearchFocused = false;
+    bool m_NodeBrowserRestoreScroll = false;
+    float m_NodeBrowserScrollY = 0.0f;
     DrawerMode m_DrawerMode = DrawerMode::None;
     bool m_NodeBrowserFocusSearch = false;
     bool m_NodeBrowserThumbnailCatalogEnsured = false;
@@ -373,6 +429,7 @@ private:
     std::map<int, size_t> m_ImagePreviewFingerprints;
     std::map<int, ImVec2> m_ImagePreviewSizes;
     std::map<int, unsigned int> m_GraphPreviewTextures;
+    Stack::Editor::NodeGraphUIVisuals::NodeSocketIconTexture m_SocketIconTexture;
     std::map<int, std::uint64_t> m_GraphPreviewRevisions;
     std::map<int, ImVec2> m_GraphPreviewSizes;
     std::map<std::string, unsigned int> m_NodeBrowserThumbnailTextures;
@@ -454,6 +511,7 @@ private:
     int m_ClipboardPasteCount = 0;
     bool m_OpenRenameProjectPopup = false;
     char m_RenameProjectBuffer[256] = {};
+    char m_RenamePresetBuffer[128] = {};
     bool m_OpenSavePresetPopup = false;
     char m_SavePresetNameBuffer[128] = {};
 };

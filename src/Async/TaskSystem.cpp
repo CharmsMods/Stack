@@ -6,6 +6,17 @@
 
 namespace Async {
 
+namespace {
+thread_local std::shared_ptr<const ActivityMetadata> currentActivity;
+
+struct ActivityScope {
+    std::shared_ptr<const ActivityMetadata> previous;
+    explicit ActivityScope(std::shared_ptr<const ActivityMetadata> activity)
+        : previous(std::move(currentActivity)) { currentActivity = std::move(activity); }
+    ~ActivityScope() { currentActivity = std::move(previous); }
+};
+}
+
 TaskSystem& TaskSystem::Get() {
     static TaskSystem instance;
     return instance;
@@ -16,11 +27,15 @@ TaskSystem::~TaskSystem() {
 }
 
 void TaskSystem::Initialize() {
+    std::lock_guard<std::mutex> lifecycleLock(m_LifecycleMutex);
     if (m_Initialized) {
         return;
     }
 
-    m_StopRequested = false;
+    {
+        std::lock_guard<std::mutex> lock(m_WorkMutex);
+        m_StopRequested = false;
+    }
     const std::size_t workerCount = ResolveWorkerCount();
     try {
         m_Workers.reserve(workerCount);
@@ -48,14 +63,22 @@ void TaskSystem::Initialize() {
         if (m_InteractiveWorker.joinable()) {
             m_InteractiveWorker.join();
         }
-        m_StopRequested = false;
+        {
+            std::lock_guard<std::mutex> lock(m_WorkMutex);
+            m_StopRequested = false;
+        }
         throw;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(m_MainMutex);
+        m_AcceptMainTasks = true;
+    }
     m_Initialized = true;
 }
 
 void TaskSystem::Shutdown() {
+    std::lock_guard<std::mutex> lifecycleLock(m_LifecycleMutex);
     if (!m_Initialized) {
         return;
     }
@@ -72,21 +95,26 @@ void TaskSystem::Shutdown() {
         m_InteractiveWorker.join();
     }
 
+    std::queue<Task> discardedHighPriority;
+    std::queue<Task> discardedWork;
+    std::queue<Task> discardedMain;
     {
         std::lock_guard<std::mutex> workLock(m_WorkMutex);
-        std::queue<Task> highPriorityEmpty;
-        m_HighPriorityWorkQueue.swap(highPriorityEmpty);
-        std::queue<Task> empty;
-        m_WorkQueue.swap(empty);
+        m_HighPriorityWorkQueue.swap(discardedHighPriority);
+        m_WorkQueue.swap(discardedWork);
     }
 
     {
         std::lock_guard<std::mutex> mainLock(m_MainMutex);
-        std::queue<Task> empty;
-        m_MainQueue.swap(empty);
+        m_AcceptMainTasks = false;
+        m_MainQueue.swap(discardedMain);
     }
 
-    m_StopRequested = false;
+    // Captured objects may post cleanup while being destroyed. Destroy them
+    // without either queue lock, while submissions still see a stopped pool.
+    while (!discardedHighPriority.empty()) discardedHighPriority.pop();
+    while (!discardedWork.empty()) discardedWork.pop();
+    while (!discardedMain.empty()) discardedMain.pop();
     m_Initialized = false;
 }
 
@@ -95,13 +123,13 @@ void TaskSystem::RequestStopDiscardQueued() {
         return;
     }
 
+    std::queue<Task> discardedHighPriority;
+    std::queue<Task> discardedWork;
     {
         std::lock_guard<std::mutex> lock(m_WorkMutex);
         m_StopRequested = true;
-        std::queue<Task> highPriorityEmpty;
-        m_HighPriorityWorkQueue.swap(highPriorityEmpty);
-        std::queue<Task> empty;
-        m_WorkQueue.swap(empty);
+        m_HighPriorityWorkQueue.swap(discardedHighPriority);
+        m_WorkQueue.swap(discardedWork);
     }
     m_WorkCv.notify_all();
 }
@@ -111,6 +139,12 @@ bool TaskSystem::IsDrainedForShutdown() const {
         return true;
     }
     return m_ActiveWorkers.load() == 0;
+}
+
+bool TaskSystem::HasPendingWork() {
+    std::scoped_lock lock(m_WorkMutex, m_MainMutex);
+    return m_ActiveWorkers.load(std::memory_order_acquire) != 0 ||
+        !m_WorkQueue.empty() || !m_HighPriorityWorkQueue.empty() || !m_MainQueue.empty();
 }
 
 bool TaskSystem::Submit(Task task) {
@@ -135,8 +169,81 @@ bool TaskSystem::Submit(Task task) {
     } catch (...) {
         return false;
     }
-    m_WorkCv.notify_one();
+    // The dedicated interactive worker shares this condition variable but
+    // cannot take ordinary work. notify_one can wake only that worker and
+    // strand this queue until another submission. Wake eligible workers too.
+    m_WorkCv.notify_all();
     return true;
+}
+
+bool TaskSystem::Submit(std::string activityLabel, Task task) {
+    ActivityMetadata activity = CurrentActivity();
+    activity.id = 0;
+    activity.label = std::move(activityLabel);
+    return Submit(std::move(activity), std::move(task));
+}
+
+bool TaskSystem::SubmitHighPriority(std::string activityLabel, Task task) {
+    ActivityMetadata activity = CurrentActivity();
+    activity.id = 0;
+    activity.label = std::move(activityLabel);
+    return SubmitHighPriority(std::move(activity), std::move(task));
+}
+
+bool TaskSystem::Submit(ActivityMetadata activity, Task task) {
+    return Submit(TrackActivity(std::move(activity), std::move(task)));
+}
+
+bool TaskSystem::SubmitHighPriority(ActivityMetadata activity, Task task) {
+    return SubmitHighPriority(TrackActivity(std::move(activity), std::move(task)));
+}
+
+ActivityMetadata TaskSystem::CurrentActivity() {
+    return currentActivity ? *currentActivity : ActivityMetadata{};
+}
+
+TaskSystem::Task TaskSystem::TrackActivity(ActivityMetadata metadata, Task task) {
+    if (!task) return {};
+    if (metadata.id == 0) metadata.id = m_NextActivityId.fetch_add(1, std::memory_order_relaxed);
+    if (metadata.operationId == 0) metadata.operationId = metadata.id | (std::uint64_t{1} << 63);
+    const auto activity = std::make_shared<const ActivityMetadata>(std::move(metadata));
+    {
+        std::lock_guard<std::mutex> lock(m_ActivityMutex);
+        m_Activities.erase(std::remove_if(m_Activities.begin(), m_Activities.end(),
+            [](const auto& entry) { return entry.expired(); }), m_Activities.end());
+        m_Activities.emplace_back(activity);
+    }
+    // The ticket lives through queueing and execution, including exceptions.
+    // Discarding a queued task also removes its activity automatically.
+    return [activity, task = std::move(task)] {
+        ActivityScope scope(activity);
+        task();
+    };
+}
+
+std::vector<std::string> TaskSystem::ActivityLabels() {
+    std::vector<std::string> labels;
+    for (const auto& activity : Activities()) {
+        if (!activity.label.empty() &&
+            std::find(labels.begin(), labels.end(), activity.label) == labels.end()) {
+            labels.push_back(activity.label);
+        }
+    }
+    return labels;
+}
+
+std::vector<ActivityMetadata> TaskSystem::Activities() {
+    std::lock_guard<std::mutex> lock(m_ActivityMutex);
+    std::vector<ActivityMetadata> activities;
+    for (auto it = m_Activities.begin(); it != m_Activities.end();) {
+        if (const auto activity = it->lock()) {
+            activities.push_back(*activity);
+            ++it;
+        } else {
+            it = m_Activities.erase(it);
+        }
+    }
+    return activities;
 }
 
 bool TaskSystem::SubmitHighPriority(Task task) {
@@ -171,12 +278,27 @@ bool TaskSystem::PostToMain(Task task) {
     }
 
     try {
+        // Keep the worker's label through its UI completion, including any
+        // further main-thread stages. A handoff is still the same operation.
+        if (currentActivity) {
+            task = [activity = currentActivity, task = std::move(task)] {
+                ActivityScope scope(activity);
+                task();
+            };
+        }
         std::lock_guard<std::mutex> lock(m_MainMutex);
+        if (!m_AcceptMainTasks) {
+            return false;
+        }
         m_MainQueue.push(std::move(task));
     } catch (...) {
         return false;
     }
     return true;
+}
+
+bool TaskSystem::PostToMain(ActivityMetadata activity, Task task) {
+    return PostToMain(TrackActivity(std::move(activity), std::move(task)));
 }
 
 void TaskSystem::PumpMainThreadTasks(std::size_t maxTasks) {
@@ -252,6 +374,9 @@ void TaskSystem::WorkerLoop(bool interactiveOnly) {
         } catch (...) {
             std::cerr << "[TaskSystem] Worker task failed: unknown exception\n";
         }
+        // A task's captured objects can own cleanup work too. Do not report
+        // the pool drained while those destructors still use application data.
+        task = {};
         m_ActiveWorkers.fetch_sub(1, std::memory_order_release);
     }
 }

@@ -24,46 +24,6 @@ void TooltipIfHovered(const char* text, ImGuiHoveredFlags flags = 0) {
     }
 }
 
-bool NearlyEqual(float a, float b, float epsilon = 0.001f) {
-    return std::abs(a - b) <= epsilon;
-}
-
-bool RawLocalExposureLooksUntouched(const Stack::RawRecipe::RawLocalExposureRecipe& localExposure) {
-    return !localExposure.enabled &&
-        (NearlyEqual(localExposure.amount, 0.85f) ||
-            NearlyEqual(localExposure.amount, 0.35f) ||
-            NearlyEqual(localExposure.amount, 1.0f)) &&
-        NearlyEqual(localExposure.shadowLiftEv, 0.0f) &&
-        NearlyEqual(localExposure.highlightCompressionEv, 0.0f) &&
-        NearlyEqual(localExposure.localBaselineEv, 0.0f) &&
-        NearlyEqual(localExposure.noiseGuardBias, 0.0f) &&
-        NearlyEqual(localExposure.highlightGuardBias, 0.0f) &&
-        NearlyEqual(localExposure.shadowGuardBias, 0.0f) &&
-        NearlyEqual(localExposure.smoothGradientProtection, 0.85f) &&
-        NearlyEqual(localExposure.haloGuard, 0.90f);
-}
-
-float ProtectDetailFromLocalExposure(const Stack::RawRecipe::RawLocalExposureRecipe& localExposure) {
-    const float noise = std::clamp(localExposure.noiseGuardBias * 0.5f + 0.5f, 0.0f, 1.0f);
-    const float highlight = std::clamp(localExposure.highlightGuardBias * 0.5f + 0.5f, 0.0f, 1.0f);
-    const float shadow = std::clamp(localExposure.shadowGuardBias * 0.5f + 0.5f, 0.0f, 1.0f);
-    const float gradient = std::clamp(localExposure.smoothGradientProtection, 0.0f, 1.0f);
-    const float edge = std::clamp(localExposure.haloGuard, 0.0f, 1.0f);
-    return std::clamp((noise + highlight + shadow + gradient + edge) * 0.20f, 0.0f, 1.0f);
-}
-
-void ApplyProtectDetailToLocalExposure(
-    Stack::RawRecipe::RawLocalExposureRecipe& localExposure,
-    float protectDetail) {
-    protectDetail = std::clamp(protectDetail, 0.0f, 1.0f);
-    const float guardBias = protectDetail * 2.0f - 1.0f;
-    localExposure.noiseGuardBias = guardBias;
-    localExposure.highlightGuardBias = guardBias;
-    localExposure.shadowGuardBias = guardBias;
-    localExposure.smoothGradientProtection = std::clamp(0.25f + protectDetail * 0.75f, 0.0f, 1.0f);
-    localExposure.haloGuard = std::clamp(0.35f + protectDetail * 0.65f, 0.0f, 1.0f);
-}
-
 void CopyLocalRangeTargetSampleToColorTarget(
     Stack::RawRecipe::RawLocalRangeRecipe& localRange,
     float r,
@@ -208,12 +168,13 @@ Stack::RawRecipe::RawLocalRangeRecipe BuildLocalRangeUiRecipe(
 
 bool DrawLocalRangeWidget(
     Stack::RawRecipe::RawLocalRangeRecipe& localRange,
+    Stack::Editor::PointCurveInteractionState& interaction,
     const ImVec2& size,
     int* outSelectedPoint,
     const float* sampledSceneEv = nullptr) {
-    static int selectedPoint = -1;
-    static int draggingPoint = -1;
-    static int contextPoint = -1;
+    auto& selectedPoint = interaction.selectedPoint;
+    auto& draggingPoint = interaction.draggingPoint;
+    auto& contextPoint = interaction.contextPoint;
 
     bool changed = false;
     localRange = BuildLocalRangeUiRecipe(localRange);
@@ -531,6 +492,7 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
     }
     if (DrawLocalRangeWidget(
             editedRecipe.localRange,
+            m_ProjectInteractionUi.localRange,
             ImVec2(controlWidth, std::clamp(controlWidth * 0.48f, 190.0f, 230.0f)),
             &selectedLocalRangePoint,
             sampledSceneEvMarker)) {
@@ -814,108 +776,6 @@ bool EditorModule::RenderRawWorkspaceLocalRangeControls(
                 changed = true;
             }
             TooltipIfHovered("Softens the selected scene-EV range; 1.00 is a broad four-stop feather.");
-        }
-        ImGui::EndDisabled();
-        ImGui::TreePop();
-    }
-
-    const bool showLegacyLocalExposure =
-        Stack::RawRecipe::IsLocalExposureEnabled(editedRecipe) ||
-        !RawLocalExposureLooksUntouched(editedRecipe.localExposure);
-    if (showLegacyLocalExposure &&
-        ImGui::TreeNodeEx("Legacy Local Exposure##RawLocalExposureCompatibility")) {
-        if (Stack::RawRecipe::IsLocalExposureEnabled(editedRecipe) &&
-            ImGuiExtras::RichFullWidthButton("Convert To Local Range", controlWidth, 0.0f)) {
-            editedRecipe.localRange = BuildLocalRangeUiRecipe(
-                Stack::RawRecipe::LocalRangeRecipeFromLocalExposure(
-                    editedRecipe.localExposure,
-                    editedRecipe.localRange));
-            editedRecipe.localExposure = Stack::RawRecipe::RawLocalExposureRecipe{};
-            changed = true;
-        }
-        TooltipIfHovered("Converts old Local Exposure settings into Local Range graph points and disables the legacy block.");
-
-        bool legacyEnabled = editedRecipe.localExposure.enabled;
-        if (ImGuiExtras::NodeCheckbox("Enable Legacy Local Exposure", "##RawLegacyLocalExposureEnabled", &legacyEnabled, controlWidth)) {
-            editedRecipe.localExposure.enabled = legacyEnabled;
-            changed = true;
-        }
-        TooltipIfHovered("Compatibility controls for projects that already use the older Local Exposure block.");
-
-        ImGui::BeginDisabled(!editedRecipe.localExposure.enabled);
-        float amount = std::clamp(editedRecipe.localExposure.amount, 0.0f, 1.0f);
-        if (ImGuiExtras::NodeSliderFloat("Overall Strength", "##RawLocalExposureStrength", &amount, 0.0f, 1.0f, "%.2f", controlWidth)) {
-            editedRecipe.localExposure.amount = amount;
-            changed = true;
-        }
-
-        float openShadows = std::clamp(editedRecipe.localExposure.shadowLiftEv, 0.0f, 4.0f);
-        if (ImGuiExtras::NodeSliderFloat("Open Shadows", "##RawLocalOpenShadows", &openShadows, 0.0f, 4.0f, "%.2f EV", controlWidth)) {
-            editedRecipe.localExposure.shadowLiftEv = openShadows;
-            changed = true;
-        }
-
-        float recoverHighlights = std::clamp(-editedRecipe.localExposure.highlightCompressionEv, 0.0f, 4.0f);
-        if (ImGuiExtras::NodeSliderFloat("Recover Highlights", "##RawLocalRecoverHighlights", &recoverHighlights, 0.0f, 4.0f, "%.2f EV", controlWidth)) {
-            editedRecipe.localExposure.highlightCompressionEv = -recoverHighlights;
-            changed = true;
-        }
-
-        float baseline = editedRecipe.localExposure.localBaselineEv;
-        if (ImGuiExtras::NodeSliderFloat("Balance", "##RawLocalBalance", &baseline, -1.25f, 1.25f, "%+.2f EV", controlWidth)) {
-            editedRecipe.localExposure.localBaselineEv = baseline;
-            changed = true;
-        }
-
-        float protectDetail = ProtectDetailFromLocalExposure(editedRecipe.localExposure);
-        if (ImGuiExtras::NodeSliderFloat("Protect Detail", "##RawLocalProtectDetail", &protectDetail, 0.0f, 1.0f, "%.2f", controlWidth)) {
-            ApplyProtectDetailToLocalExposure(editedRecipe.localExposure, protectDetail);
-            changed = true;
-        }
-
-        if (ImGui::TreeNodeEx("Advanced##RawLocalExposureAdvanced")) {
-            float shadowLift = std::clamp(editedRecipe.localExposure.shadowLiftEv, 0.0f, 4.0f);
-            if (ImGuiExtras::NodeSliderFloat("Shadow Lift EV", "##RawLocalShadowLiftEv", &shadowLift, 0.0f, 4.0f, "%.2f EV", controlWidth)) {
-                editedRecipe.localExposure.shadowLiftEv = shadowLift;
-                changed = true;
-            }
-
-            float highlightCompression = std::clamp(-editedRecipe.localExposure.highlightCompressionEv, 0.0f, 4.0f);
-            if (ImGuiExtras::NodeSliderFloat("Highlight Recovery EV", "##RawLocalHighlightRecoveryEv", &highlightCompression, 0.0f, 4.0f, "%.2f EV", controlWidth)) {
-                editedRecipe.localExposure.highlightCompressionEv = -highlightCompression;
-                changed = true;
-            }
-
-            float noiseGuard = editedRecipe.localExposure.noiseGuardBias;
-            if (ImGuiExtras::NodeSliderFloat("Noise Guard", "##RawLocalNoiseGuard", &noiseGuard, -1.0f, 1.0f, "%+.2f", controlWidth)) {
-                editedRecipe.localExposure.noiseGuardBias = noiseGuard;
-                changed = true;
-            }
-
-            float highlightGuard = editedRecipe.localExposure.highlightGuardBias;
-            if (ImGuiExtras::NodeSliderFloat("Highlight Guard", "##RawLocalHighlightGuard", &highlightGuard, -1.0f, 1.0f, "%+.2f", controlWidth)) {
-                editedRecipe.localExposure.highlightGuardBias = highlightGuard;
-                changed = true;
-            }
-
-            float shadowGuard = editedRecipe.localExposure.shadowGuardBias;
-            if (ImGuiExtras::NodeSliderFloat("Shadow Guard", "##RawLocalShadowGuard", &shadowGuard, -1.0f, 1.0f, "%+.2f", controlWidth)) {
-                editedRecipe.localExposure.shadowGuardBias = shadowGuard;
-                changed = true;
-            }
-
-            float smoothGradientProtection = editedRecipe.localExposure.smoothGradientProtection;
-            if (ImGuiExtras::NodeSliderFloat("Gradient Protection", "##RawLocalGradientProtection", &smoothGradientProtection, 0.0f, 1.0f, "%.2f", controlWidth)) {
-                editedRecipe.localExposure.smoothGradientProtection = smoothGradientProtection;
-                changed = true;
-            }
-
-            float haloGuard = editedRecipe.localExposure.haloGuard;
-            if (ImGuiExtras::NodeSliderFloat("Edge Protection", "##RawLocalEdgeProtection", &haloGuard, 0.0f, 1.0f, "%.2f", controlWidth)) {
-                editedRecipe.localExposure.haloGuard = haloGuard;
-                changed = true;
-            }
-            ImGui::TreePop();
         }
         ImGui::EndDisabled();
         ImGui::TreePop();

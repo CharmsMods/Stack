@@ -1,6 +1,9 @@
 #pragma once
+#include "Editor/UI/GraphFrameTransition.h"
 
 #include <imgui.h>
+#include <cstdint>
+#include <deque>
 #include <vector>
 
 class EditorModule;
@@ -16,10 +19,13 @@ public:
     ~EditorViewport();
 
     void Initialize();
+    GraphFrameTransition& FrameTransition() { return m_FrameTransition; }
+    const GraphFrameTransition& FrameTransition() const { return m_FrameTransition; }
     void Render(EditorModule* editor, float revealAlpha = 1.0f, HostMode hostMode = HostMode::DockedPane);
     void ResetSinglePreviewState();
 
 private:
+    GraphFrameTransition m_FrameTransition;
     enum class ExportHandleType {
         None,
         Move,
@@ -59,9 +65,54 @@ private:
         ImU32 color = 0;
     };
 
+    struct PixelInspectionDrawCommand {
+        unsigned int program = 0;
+        unsigned int vertexArray = 0;
+        unsigned int texture = 0;
+        int fullWidth = 0;
+        int fullHeight = 0;
+        int tileX = 0;
+        int tileY = 0;
+        int tileHaloX = 0;
+        int tileHaloY = 0;
+        bool tiled = false;
+        ImVec2 imageMin = ImVec2(0.0f, 0.0f);
+        ImVec2 imageMax = ImVec2(0.0f, 0.0f);
+        ImVec2 displayPos = ImVec2(0.0f, 0.0f);
+        ImVec2 displaySize = ImVec2(0.0f, 0.0f);
+        ImVec2 framebufferScale = ImVec2(1.0f, 1.0f);
+        float revealAlpha = 1.0f;
+    };
+
+    static void DrawPixelInspectionCallback(const ImDrawList* parentList, const ImDrawCmd* command);
+
+    void RenderCompositeMode(
+        EditorModule* editor,
+        float viewportRevealAlpha,
+        float deltaTime,
+        bool wallpaperSurfaces,
+        const ImVec2& hostAvail,
+        const ImVec2& hostScreen,
+        ImDrawList* hostDrawList,
+        bool inputBlocked);
+    void RenderSingleImageMode(
+        EditorModule* editor,
+        float viewportRevealAlpha,
+        float deltaTime,
+        bool wallpaperSurfaces,
+        const ImVec2& hostAvail,
+        const ImVec2& hostScreen,
+        ImDrawList* hostDrawList,
+        bool inputBlocked);
+
     float m_ZoomLevel = 1.0f;
     float m_PanX = 0.0f;
     float m_PanY = 0.0f;
+    float m_ZoomTarget = 1.0f;
+    bool m_ZoomAnimating = false;
+    bool m_Panning = false;
+    ImVec2 m_ZoomFocusScreen;
+    ImVec2 m_ZoomFocusUv;
     bool  m_IsLocked = false;
     bool  m_ShowStaticSingleCompare = false;
     float m_StaticSingleCompareBlend = 0.0f;
@@ -113,4 +164,13 @@ private:
     float m_DevelopSubjectStartCenterY = 0.5f;
     float m_DevelopSubjectStartRadiusX = 0.18f;
     float m_DevelopSubjectStartRadiusY = 0.18f;
+    std::vector<unsigned char> m_PixelInspectionPixels;
+    std::uint64_t m_PixelInspectionTextureSignature = 0;
+    int m_PixelInspectionWidth = 0;
+    int m_PixelInspectionHeight = 0;
+    int m_PixelInspectionOriginX = 0;
+    int m_PixelInspectionOriginY = 0;
+    unsigned int m_PixelInspectionProgram = 0;
+    unsigned int m_PixelInspectionVertexArray = 0;
+    std::deque<PixelInspectionDrawCommand> m_PixelInspectionDrawCommands;
 };

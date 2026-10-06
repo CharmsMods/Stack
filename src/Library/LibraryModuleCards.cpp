@@ -1,6 +1,7 @@
 #include "LibraryModule.h"
 
 #include "Editor/EditorModule.h"
+#include "App/PlatformHelpers.h"
 #include "Library/Internal/LibraryModuleUIHelpers.h"
 #include "LibraryManager.h"
 #include "Utils/ImGuiExtras.h"
@@ -31,7 +32,6 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
     LibraryCardMotionState& motion = GetCardMotionState(m_ProjectCardMotion, project.fileName);
     motion.lastSeenFrame = frameCount;
     const float entranceProgress = ResolveCardEntranceProgress(motion, ImGui::GetTime());
-    motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, matchesFilter ? 1.0f : 0.0f, dt, kCardMotionSpeed);
     motion.selected = ImGuiExtras::AnimateTowards(motion.selected, isSelected ? 1.0f : 0.0f, dt, kCardMotionSpeed);
 
     if (!matchesFilter && motion.reveal <= 0.01f) {
@@ -41,7 +41,7 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
     ImVec2 thumbSize = ComputeLibraryCardSize(
         static_cast<float>(project.sourceWidth),
         static_cast<float>(project.sourceHeight),
-        m_LibraryViewScale);
+        motion.layoutScale);
 
     const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
@@ -74,12 +74,17 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
             rounding);
     } else {
         drawList->AddRectFilled(imageRect.Min, imageRect.Max, IM_COL32(40, 46, 52, static_cast<int>(240.0f * cardAlpha)), rounding);
-        const char* noPreview = "No Preview";
-        const ImVec2 noPreviewSize = ImGui::CalcTextSize(noPreview);
+        const std::string typeLabel = project.needsAttention
+            ? "Needs attention"
+            : project.projectKind == "raw"
+                ? "RAW project"
+                : "Project";
+        const std::string placeholder = project.projectName + "\n" + typeLabel;
+        const ImVec2 noPreviewSize = ImGui::CalcTextSize(placeholder.c_str());
         drawList->AddText(
             ImVec2(imageRect.Min.x + (imageRect.GetWidth() - noPreviewSize.x) * 0.5f, imageRect.Min.y + (imageRect.GetHeight() - noPreviewSize.y) * 0.5f),
             IM_COL32(220, 228, 236, static_cast<int>(210.0f * cardAlpha)),
-            noPreview);
+            placeholder.c_str());
     }
 
     ImGui::InvisibleButton("##hitbox", ImVec2(cardWidth, totalHeight));
@@ -155,18 +160,38 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
     }
 
     const std::string popupId = std::string("ProjectCardContextMenu##") + project.fileName;
+    if (ImGui::IsPopupOpen(popupId.c_str())) {
+        m_BlockLibraryGridContextMenuThisFrame = true;
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_Border));
     if (ImGui::BeginPopup(popupId.c_str())) {
+        m_BlockLibraryGridContextMenuThisFrame = true;
         const bool multiple = m_SelectedProjects.size() > 1;
         if (!multiple) {
-            if (project.projectKind == "editor" || project.projectKind.empty()) {
+            if (!project.needsAttention &&
+                project.projectKind != "composite" &&
+                project.projectKind != "render") {
                 if (ImGui::MenuItem("Open in Editor")) {
                     RequestOpenEditorProject(project.fileName);
                 }
+            }
+            if (project.needsAttention) {
+                ImGui::TextWrapped(
+                    "%s",
+                    project.errorMessage.empty()
+                        ? "This project needs attention before it can be opened."
+                        : project.errorMessage.c_str());
+                if (ImGui::MenuItem("Retry Indexing")) {
+                    LibraryManager::Get().RequestRefreshLibraryAsync();
+                }
+            }
+            if (project.needsAttention &&
+                ImGui::MenuItem("Reveal in Explorer")) {
+                PlatformHelpers::RevealPathInExplorer(project.absolutePath);
             }
             if (project.projectKind == "composite") {
                 ImGui::BeginDisabled();
@@ -183,11 +208,27 @@ bool LibraryModule::RenderProjectCard(const ProjectEntry& project, EditorModule*
 
         char deleteLabel[64];
         snprintf(deleteLabel, sizeof(deleteLabel), "Delete Selected (%d)", (int)m_SelectedProjects.size());
+        const bool canDeleteSelection = std::all_of(
+            m_SelectedProjects.begin(),
+            m_SelectedProjects.end(),
+            [&](const std::string& selectedFile) {
+                const auto& projects = LibraryManager::Get().GetProjects();
+                const auto found = std::find_if(
+                    projects.begin(),
+                    projects.end(),
+                    [&](const std::shared_ptr<ProjectEntry>& selectedProject) {
+                        return selectedProject &&
+                            selectedProject->fileName == selectedFile;
+                    });
+                return found != projects.end() && !(*found)->needsAttention;
+            });
+        ImGui::BeginDisabled(!canDeleteSelection);
         if (ImGui::MenuItem(deleteLabel)) {
             m_PendingDeleteFileNames.assign(m_SelectedProjects.begin(), m_SelectedProjects.end());
             m_DeletingAssets = false;
             m_DeleteConfirmOpen = true;
         }
+        ImGui::EndDisabled();
 
         ImGui::EndPopup();
     }
@@ -207,7 +248,6 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     LibraryCardMotionState& motion = GetCardMotionState(m_AssetCardMotion, asset.fileName);
     motion.lastSeenFrame = frameCount;
     const float entranceProgress = ResolveCardEntranceProgress(motion, ImGui::GetTime());
-    motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, matchesFilter ? 1.0f : 0.0f, dt, kCardMotionSpeed);
     motion.selected = ImGuiExtras::AnimateTowards(motion.selected, isSelected ? 1.0f : 0.0f, dt, kCardMotionSpeed);
 
     if (!matchesFilter && motion.reveal <= 0.01f) {
@@ -217,7 +257,7 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     ImVec2 thumbSize = ComputeLibraryCardSize(
         static_cast<float>(asset.width),
         static_cast<float>(asset.height),
-        m_LibraryViewScale);
+        motion.layoutScale);
 
     const float cardWidth = thumbSize.x;
     const float totalHeight = thumbSize.y;
@@ -332,12 +372,16 @@ bool LibraryModule::RenderAssetCard(const AssetEntry& asset, EditorModule* edito
     }
 
     const std::string popupId = std::string("AssetCardContextMenu##") + asset.fileName;
+    if (ImGui::IsPopupOpen(popupId.c_str())) {
+        m_BlockLibraryGridContextMenuThisFrame = true;
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_Border));
     if (ImGui::BeginPopup(popupId.c_str())) {
+        m_BlockLibraryGridContextMenuThisFrame = true;
         if (ImGui::MenuItem("Add Selected To Editor Composite", nullptr, false, !m_SelectedAssets.empty() && editor != nullptr)) {
             for (const auto& fn : m_SelectedAssets) {
                 editor->AddCompositeLibraryAssetChain(fn);

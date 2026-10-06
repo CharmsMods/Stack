@@ -1,13 +1,19 @@
+#include "Renderer/RawCandidateRenderer.h"
+#include "Editor/CompositePixels.h"
 #include "EditorRenderWorker.h"
 
 #include "Editor/Internal/EditorRenderWorkerScheduling.h"
 #include "Editor/Internal/EditorRenderWorkerTileGraph.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Editor/RawRenderGraphOverlay.h"
+#include "Project/RawLayerStackSnapshot.h"
 #include "Raw/RawAutoBase.h"
 #include "Renderer/Internal/RenderPipelineGraphSchedule.h"
+#include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLLoader.h"
+#include "Utils/PixelBufferUtils.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
@@ -25,21 +31,61 @@
 namespace {
 
 constexpr int kRawWorkspaceGraphScopeMaxDimension = 192;
+constexpr int kRawWorkspaceGradingScopeMaxDimension = 192;
 
-void ReleaseSharedTexture(EditorRenderWorker::SharedTextureResult& texture) {
-    if (texture.readyFence) {
-        glDeleteSync(texture.readyFence);
-        texture.readyFence = nullptr;
+std::size_t ResolveRawGraphScopeFingerprint(
+    const EditorRenderWorker::RawWorkspaceSnapshot& workspace) {
+    if (!workspace.hasRecipe) return 0;
+    if (workspace.graphScopeInputFingerprint != 0) {
+        return workspace.graphScopeInputFingerprint;
     }
-    if (texture.texture != 0) {
-        glDeleteTextures(1, &texture.texture);
-        texture.texture = 0;
+    using Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint;
+    using Stack::Renderer::RawDevelopmentCache::Stage;
+    // Scope packets are reduced to their own fixed sampling size. The
+    // interactive preview can change resolution several times during a drag,
+    // but that does not change the image distribution represented here.
+    const int scopeSamplingDimension = std::clamp(
+        workspace.graphScopeMaxDimension,
+        kRawWorkspaceGraphScopeMaxDimension,
+        2048);
+    switch (workspace.graphScopeStage) {
+        case RawDevelopmentGraphScopeStage::LocalRangeInput:
+            return BuildStageFingerprint(
+                workspace.recipe,
+                scopeSamplingDimension,
+                Stage::RawPlacement);
+        case RawDevelopmentGraphScopeStage::FinishToneInput:
+            return BuildStageFingerprint(
+                workspace.recipe,
+                scopeSamplingDimension,
+                Stage::PostLocalRange);
+        case RawDevelopmentGraphScopeStage::ColorWarpInput:
+            return BuildStageFingerprint(
+                workspace.recipe,
+                scopeSamplingDimension,
+                Stage::PostFinishTone);
+        case RawDevelopmentGraphScopeStage::None:
+        default:
+            return 0;
     }
-    texture = {};
 }
 
-bool FenceSharedTexture(EditorRenderWorker::SharedTextureResult& texture) {
-    if (texture.texture == 0) return false;
+void ReleaseSharedTexture(EditorRenderWorker::SharedTextureResult& texture) {
+    texture.Reset();
+}
+
+std::string RenderFailureReason(const RenderPipeline& pipeline, const char* fallback) {
+    const auto& graphError = pipeline.GetLastGraphExecutionStats().lastSpecializedFailure;
+    if (!graphError.empty()) return graphError;
+    const auto& denoiseError = pipeline.GetLastRawRgbDenoiseError();
+    return denoiseError.empty() ? fallback : denoiseError;
+}
+
+bool FenceSharedTexture(
+    EditorRenderWorker::SharedTextureResult& texture,
+    Raw::RawGpuImageFamily family =
+        Raw::RawGpuImageFamily::Presentation) {
+    if (texture.texture == 0 || !texture.EnsureLease(family)) return false;
     texture.readyFence =
         glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (texture.readyFence == nullptr) {
@@ -74,55 +120,13 @@ void ReleaseResultResources(EditorRenderWorker::Result& result) {
     result.outputTiles.tiles.clear();
 }
 
-Stack::RawAnalysis::CurrentFrameInputStats ToRawCurrentFrameInputStats(const RenderTextureStats& stats) {
-    Stack::RawAnalysis::CurrentFrameInputStats rawStats;
-    rawStats.valid = stats.valid;
-    rawStats.p001Luma = stats.p001Luma;
-    rawStats.p01Luma = stats.p01Luma;
-    rawStats.p05Luma = stats.p05Luma;
-    rawStats.p50Luma = stats.p50Luma;
-    rawStats.p95Luma = stats.p95Luma;
-    rawStats.p99Luma = stats.p99Luma;
-    rawStats.p999Luma = stats.p999Luma;
-    rawStats.logAverageLuma = stats.logAverageLuma;
-    rawStats.dynamicRangeEv = stats.dynamicRangeEv;
-    rawStats.validPixelPercent = stats.validPixelPercent;
-    rawStats.hdrPixelPercent = stats.hdrPixelPercent;
-    rawStats.displayClipPercent = stats.displayClipPercent;
-    return rawStats;
-}
-
-float ElapsedMilliseconds(
-    std::chrono::steady_clock::time_point begin,
-    std::chrono::steady_clock::time_point end) {
-    return std::chrono::duration<float, std::milli>(end - begin).count();
-}
-
-std::size_t FindRawDevelopmentNodeForCandidate(
-    const RenderGraphSnapshot& graph,
-    const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
-    std::size_t firstRawDevelopment = graph.nodes.size();
-    for (std::size_t i = 0; i < graph.nodes.size(); ++i) {
-        const RenderGraphNode& node = graph.nodes[i];
-        if (node.kind != RenderGraphNodeKind::RawDevelopment) {
-            continue;
-        }
-        if (firstRawDevelopment == graph.nodes.size()) {
-            firstRawDevelopment = i;
-        }
-        if (!recipe.source.sourcePath.empty() &&
-            node.rawDevelopment.recipe.source.sourcePath == recipe.source.sourcePath) {
-            return i;
-        }
-    }
-    return firstRawDevelopment;
-}
-
 int EstimateRenderProgressStepCount(const EditorRenderWorker::Snapshot& snapshot) {
     int steps = 0;
     if (!snapshot.compositeOutputs.empty()) {
         steps += static_cast<int>(snapshot.compositeOutputs.size());
-    } else if (snapshot.outputConnected) {
+    } else if (snapshot.outputConnected ||
+        (snapshot.rawSessionTemplate &&
+         snapshot.rawSessionTemplate->outputConnected)) {
         steps += 1;
     }
     steps += static_cast<int>(snapshot.developCandidateRenders.size());
@@ -239,7 +243,8 @@ void CaptureRawWorkspaceLocalRangeOverlay(RenderPipeline& pipeline, EditorRender
         return;
     }
     if (!FenceSharedTexture(
-            result.rawWorkspace.localRangeOverlayTexture)) {
+            result.rawWorkspace.localRangeOverlayTexture,
+            Raw::RawGpuImageFamily::AuxiliaryOverlay)) {
         result.rawWorkspace.localRangeOverlayWidth = 0;
         result.rawWorkspace.localRangeOverlayHeight = 0;
     }
@@ -292,7 +297,10 @@ void CaptureRawWorkspaceLocalRangeTargetSample(RenderPipeline& pipeline, EditorR
         strongestAuthoredZoneWeight;
 }
 
-void CaptureRawWorkspaceViewTransformInputStats(RenderPipeline& pipeline, EditorRenderWorker::Result& result) {
+void CaptureRawWorkspaceViewTransformInputStats(
+    RenderPipeline& pipeline,
+    const EditorRenderWorker::Snapshot& snapshot,
+    EditorRenderWorker::Result& result) {
     if (result.rawWorkspace.sourceKey.empty()) {
         result.rawWorkspace.viewTransformInputStats = {};
         result.rawWorkspace.finalDisplayStats = {};
@@ -311,11 +319,122 @@ void CaptureRawWorkspaceViewTransformInputStats(RenderPipeline& pipeline, Editor
     result.rawWorkspace.stageStatsReadbacks = pipeline.GetRawDevelopmentStageStatsReadbacks();
     result.rawWorkspace.graphScopeReadback =
         pipeline.GetRawDevelopmentGraphScopeReadback();
+    result.rawWorkspace.colorWarpCloudPacket = {};
+    const RawDevelopmentGraphScopeReadback& colorScope =
+        result.rawWorkspace.graphScopeReadback;
+    const std::size_t scopePixelCount = colorScope.valid &&
+            colorScope.stage == RawDevelopmentGraphScopeStage::ColorWarpInput &&
+            colorScope.width > 0 && colorScope.height > 0
+        ? static_cast<std::size_t>(colorScope.width) *
+            static_cast<std::size_t>(colorScope.height)
+        : 0u;
+    if (snapshot.rawWorkspace.hasRecipe && scopePixelCount > 0u &&
+        colorScope.pixels.size() >= scopePixelCount * 3u) {
+        constexpr std::size_t kBinColumns = 48u;
+        constexpr std::size_t kBinRows = 48u;
+        constexpr std::size_t kBinCount = kBinColumns * kBinRows;
+        constexpr std::size_t kMaximumSamples = 4096u;
+        std::array<std::size_t, kBinCount> counts {};
+        const auto buildSample = [&](std::size_t index,
+                                     Raw::RawColorCloudSample& sample) {
+            const std::size_t offset = index * 3u;
+            sample.rgb = {
+                colorScope.pixels[offset + 0u],
+                colorScope.pixels[offset + 1u],
+                colorScope.pixels[offset + 2u]
+            };
+            if (!std::isfinite(sample.rgb[0]) ||
+                !std::isfinite(sample.rgb[1]) ||
+                !std::isfinite(sample.rgb[2])) {
+                return false;
+            }
+            const Stack::RawRecipe::RawColorWarpCoordinate coordinate =
+                Stack::RawRecipe::WorkingRgbToColorWarpCoordinate(
+                    sample.rgb,
+                    snapshot.rawWorkspace.recipe.technical.workingSpace);
+            sample.a = coordinate.a;
+            sample.b = coordinate.b;
+            sample.sceneEv = coordinate.sceneEv;
+            return std::isfinite(sample.a) &&
+                std::isfinite(sample.b) &&
+                std::isfinite(sample.sceneEv);
+        };
+        const auto binForSample = [&](const Raw::RawColorCloudSample& sample) {
+            const float normalizedA = std::clamp(
+                (sample.a + 1.0f) * 0.5f,
+                0.0f,
+                0.999999f);
+            const float normalizedB = std::clamp(
+                (sample.b + 1.0f) * 0.5f,
+                0.0f,
+                0.999999f);
+            return static_cast<std::size_t>(
+                       normalizedB * static_cast<float>(kBinRows)) *
+                    kBinColumns +
+                static_cast<std::size_t>(
+                    normalizedA * static_cast<float>(kBinColumns));
+        };
+        Raw::RawColorCloudSample candidate;
+        for (std::size_t index = 0; index < scopePixelCount; ++index) {
+            if (buildSample(index, candidate)) {
+                ++counts[binForSample(candidate)];
+            }
+        }
+        std::array<std::size_t, kBinCount> quotas {};
+        std::size_t totalQuota = 0u;
+        for (std::size_t bin = 0; bin < kBinCount; ++bin) {
+            if (counts[bin] == 0u) continue;
+            quotas[bin] = std::min(
+                counts[bin],
+                std::max<std::size_t>(
+                    1u,
+                    static_cast<std::size_t>(std::ceil(
+                        std::sqrt(static_cast<float>(counts[bin])) * 3.0f))));
+            totalQuota += quotas[bin];
+        }
+        if (totalQuota > kMaximumSamples) {
+            const float scale = static_cast<float>(kMaximumSamples) /
+                static_cast<float>(totalQuota);
+            totalQuota = 0u;
+            for (std::size_t bin = 0; bin < kBinCount; ++bin) {
+                if (quotas[bin] == 0u) continue;
+                quotas[bin] = std::max<std::size_t>(
+                    1u,
+                    static_cast<std::size_t>(std::floor(
+                        static_cast<float>(quotas[bin]) * scale)));
+                totalQuota += quotas[bin];
+            }
+        }
+        Raw::RawColorCloudPacket& packet =
+            result.rawWorkspace.colorWarpCloudPacket;
+        packet.sourceKey = result.rawWorkspace.sourceKey;
+        packet.inputFingerprint =
+            snapshot.rawWorkspace.graphScopeInputFingerprint;
+        packet.workingSpace = static_cast<int>(
+            snapshot.rawWorkspace.recipe.technical.workingSpace);
+        packet.colorWarpVersion =
+            snapshot.rawWorkspace.recipe.colorWarp.version;
+        packet.samples.reserve(std::min(totalQuota, kMaximumSamples));
+        std::array<std::size_t, kBinCount> seen {};
+        std::array<std::size_t, kBinCount> selected {};
+        for (std::size_t index = 0;
+             index < scopePixelCount && packet.samples.size() < kMaximumSamples;
+             ++index) {
+            if (!buildSample(index, candidate)) continue;
+            const std::size_t bin = binForSample(candidate);
+            const std::size_t binSeen = ++seen[bin];
+            const std::size_t desired =
+                (binSeen * quotas[bin]) / counts[bin];
+            if (desired <= selected[bin]) continue;
+            ++selected[bin];
+            packet.samples.push_back(candidate);
+        }
+    }
     result.rawWorkspace.startPointDiagnostics =
         pipeline.BuildRawDevelopmentStartPointDiagnostics(result.rawWorkspace.sourceKey);
     result.rawWorkspace.analysis =
         Stack::RawAnalysis::BuildCurrentFrameAnalysisFromCurrentFrameStats(
-            ToRawCurrentFrameInputStats(result.rawWorkspace.viewTransformInputStats),
+            Stack::Renderer::BuildCurrentFrameInputStats(result.rawWorkspace.viewTransformInputStats),
             result.rawWorkspace.sourceKey);
 }
 
@@ -354,8 +473,8 @@ void CaptureRawWorkspaceAutoBaseRecommendations(
          passIndex < kMaxStartingPointCandidateRenderPasses &&
          !result.rawWorkspace.startPointCandidateRenderRequests.empty();
          ++passIndex) {
-        std::vector<EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult> passResults =
-            EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+        std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderResult> passResults =
+            Stack::Renderer::RenderRawCandidates(
                 pipeline,
                 snapshot.graph,
                 result.rawWorkspace.sourceKey,
@@ -363,7 +482,7 @@ void CaptureRawWorkspaceAutoBaseRecommendations(
         const bool anyPassSuccess = std::any_of(
             passResults.begin(),
             passResults.end(),
-            [](const EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult& item) {
+            [](const Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderResult& item) {
                 return item.success;
             });
         result.rawWorkspace.startPointDiagnostics =
@@ -1268,6 +1387,39 @@ EditorRenderWorker::~EditorRenderWorker() {
     Shutdown();
 }
 
+bool EditorRenderWorker::ExecuteOpenGlTaskBlocking(
+    OpenGlTask task,
+    std::string& error) {
+    error.clear();
+    if (!task) {
+        error = "The OpenGL task is empty.";
+        return false;
+    }
+    std::shared_ptr<OpenGlTaskState> state;
+    try {
+        state = std::make_shared<OpenGlTaskState>();
+        state->task = std::move(task);
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            if (m_StopRequested || !m_InitComplete || !m_InitSucceeded ||
+                !m_Thread.joinable()) {
+                error = "The OpenGL render worker is unavailable.";
+                return false;
+            }
+            m_OpenGlTasks.push(state);
+            m_Busy = true;
+        }
+    } catch (const std::bad_alloc&) {
+        error = "Host memory could not queue the OpenGL compute task.";
+        return false;
+    }
+    m_Cv.notify_one();
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cv.wait(lock, [&state]() { return state->completed; });
+    error = state->error;
+    return state->success;
+}
+
 EditorRenderWorker::DevelopCandidateRenderMetrics
 EditorRenderWorker::AnalyzeDevelopCandidatePixelsForValidation(
     const std::vector<unsigned char>& pixels,
@@ -1357,138 +1509,6 @@ float EditorRenderWorker::CompareDevelopCandidateRenderMetrics(
         std::fabs(a.subjectMarkedLowPriorityPressure - b.subjectMarkedLowPriorityPressure) * 0.08f;
 }
 
-std::vector<EditorRenderWorker::RawWorkspaceStartPointCandidateRenderResult>
-EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
-    RenderPipeline& pipeline,
-    const RenderGraphSnapshot& graph,
-    const std::string& sourceKey,
-    const std::vector<Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest>& requests) {
-    std::vector<RawWorkspaceStartPointCandidateRenderResult> results;
-    results.reserve(requests.size());
-    if (requests.empty()) {
-        return results;
-    }
-
-    pipeline.SetRawDevelopmentAnalysisEnabled(true);
-    int requestIndex = 0;
-    for (const Stack::RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest& request : requests) {
-        RawWorkspaceStartPointCandidateRenderResult result;
-        result.request = request;
-        result.attempted = true;
-        if (!request.valid || !request.hasRecipe) {
-            result.error = "Candidate render request did not include a valid visible recipe.";
-            results.push_back(std::move(result));
-            ++requestIndex;
-            continue;
-        }
-
-        RenderGraphSnapshot candidateGraph = graph;
-        candidateGraph.rawWorkspaceLocalRangeOverlayMode.clear();
-        candidateGraph.rawWorkspaceLocalRangeTargetSampleRequested = false;
-        const std::size_t rawDevelopmentIndex =
-            FindRawDevelopmentNodeForCandidate(candidateGraph, request.recipe);
-        if (rawDevelopmentIndex >= candidateGraph.nodes.size()) {
-            result.error = "No RAW Development node was present for the candidate render.";
-            results.push_back(std::move(result));
-            ++requestIndex;
-            continue;
-        }
-
-        RenderGraphNode& rawDevelopmentNode = candidateGraph.nodes[rawDevelopmentIndex];
-        rawDevelopmentNode.rawDevelopment.recipe = request.recipe;
-        rawDevelopmentNode.requestRevision =
-            std::max<std::uint64_t>(
-                rawDevelopmentNode.requestRevision + 1,
-                static_cast<std::uint64_t>(requestIndex + 1));
-
-        pipeline.SetRawDevelopmentStageImageReadbackMaxDimension(
-            request.featureReadbackMaxDimension);
-        pipeline.SetRawDevelopmentGraphScopeReadbackRequest(
-            RawDevelopmentGraphScopeStage::None,
-            0);
-
-        auto executeCandidateGraph =
-            [&](std::vector<RawDevelopmentStageStatsReadback>& outReadbacks) {
-                const auto renderBegin = std::chrono::steady_clock::now();
-                pipeline.ExecuteGraph(candidateGraph);
-                result.renderMs +=
-                    ElapsedMilliseconds(renderBegin, std::chrono::steady_clock::now());
-                result.renderWidth = pipeline.GetCanvasWidth();
-                result.renderHeight = pipeline.GetCanvasHeight();
-                outReadbacks = pipeline.GetRawDevelopmentStageStatsReadbacks();
-                result.stageImageReadbacks = pipeline.GetRawDevelopmentStageImageReadbacks();
-                const GraphExecutionStats& graphStats = pipeline.GetLastGraphExecutionStats();
-                result.imageCacheHits += graphStats.imageCacheHits;
-                result.imageCacheMisses += graphStats.imageCacheMisses;
-                result.rawStageCacheHits += graphStats.rawStageCacheHits;
-                result.rawStageCacheMisses += graphStats.rawStageCacheMisses;
-                result.diagnostics = pipeline.BuildRawDevelopmentStartPointDiagnostics(sourceKey);
-            };
-        auto hasCompleteRequestedStage =
-            [&](const std::vector<RawDevelopmentStageStatsReadback>& readbacks) {
-                return std::any_of(
-                    readbacks.begin(),
-                    readbacks.end(),
-                    [&](const RawDevelopmentStageStatsReadback& readback) {
-                        return readback.valid &&
-                            readback.stage == request.stage &&
-                            readback.status ==
-                                Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete;
-                    });
-            };
-
-        std::vector<RawDevelopmentStageStatsReadback> stageStatsReadbacks;
-        executeCandidateGraph(stageStatsReadbacks);
-        if (request.stage == Stack::RawAutoStartPoint::RawAutoStartPointStage::DisplayCandidate) {
-            const RenderTextureStats viewTransformInputStats =
-                pipeline.GetRawDevelopmentViewTransformInputStats();
-            const Stack::RawAnalysis::RawImageAnalysis candidateAnalysis =
-                Stack::RawAnalysis::BuildCurrentFrameAnalysisFromCurrentFrameStats(
-                    ToRawCurrentFrameInputStats(viewTransformInputStats),
-                    sourceKey);
-            const Stack::RawAutoBase::ViewFitDecision fitDecision =
-                Stack::RawAutoBase::BuildAutoBaseViewFitDecision(
-                    candidateAnalysis,
-                    request.recipe);
-            if (!fitDecision.canApply) {
-                result.error = fitDecision.reason.empty()
-                    ? "Display Candidate render could not fit View Transform from the post-edit analysis."
-                    : fitDecision.reason;
-                pipeline.SetRawDevelopmentStageImageReadbackMaxDimension(0);
-                results.push_back(std::move(result));
-                ++requestIndex;
-                continue;
-            }
-
-            Stack::RawRecipe::RawDevelopmentRecipe fittedRecipe = request.recipe;
-            Stack::RawAutoBase::ApplyViewTransformFitToRecipe(fittedRecipe, fitDecision.fit);
-            result.hasRenderedRecipe = true;
-            result.renderedRecipe = fittedRecipe;
-            rawDevelopmentNode.rawDevelopment.recipe = std::move(fittedRecipe);
-            rawDevelopmentNode.requestRevision =
-                std::max<std::uint64_t>(
-                    rawDevelopmentNode.requestRevision + 1,
-                    static_cast<std::uint64_t>(requestIndex + 1001));
-            executeCandidateGraph(stageStatsReadbacks);
-        }
-
-        result.success =
-            result.diagnostics.valid &&
-            hasCompleteRequestedStage(stageStatsReadbacks);
-        if (!result.success) {
-            result.error =
-                "Candidate render completed without a complete readback for the requested Starting Point stage.";
-        } else if (!result.hasRenderedRecipe && request.hasRecipe) {
-            result.hasRenderedRecipe = true;
-            result.renderedRecipe = request.recipe;
-        }
-        pipeline.SetRawDevelopmentStageImageReadbackMaxDimension(0);
-        results.push_back(std::move(result));
-        ++requestIndex;
-    }
-    return results;
-}
-
 bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
     if (m_Thread.joinable()) {
         return true;
@@ -1518,8 +1538,11 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_StopRequested = false;
         m_HasPending = false;
+        m_ActiveOpenGlTask.reset();
         m_InvalidBeforeGeneration = 0;
-        m_LatestSubmittedGeneration = 0;
+        m_NextSchedulingSerial = 1;
+        m_InvalidBeforeSchedulingSerial = 0;
+        m_Rendering = false;
         m_InitComplete = false;
         m_InitSucceeded = false;
         m_InitError.clear();
@@ -1588,6 +1611,8 @@ bool EditorRenderWorker::Initialize(GLFWwindow* sharedWindow) {
 
 void EditorRenderWorker::HandleThreadFailure(
     const char* message) noexcept {
+    std::queue<std::shared_ptr<OpenGlTaskState>> abandonedTasks;
+    std::shared_ptr<OpenGlTaskState> activeTask;
     try {
         std::lock_guard<std::mutex> lock(m_Mutex);
         if (!m_InitComplete) {
@@ -1602,9 +1627,11 @@ void EditorRenderWorker::HandleThreadFailure(
             }
             m_InitComplete = true;
         }
+        while (!m_CompletedTimings.empty()) m_CompletedTimings.pop();
+        while (!m_CompletedViewportTimings.empty()) m_CompletedViewportTimings.pop();
         while (!m_Completed.empty()) {
             Result stale = std::move(m_Completed.front());
-            m_Completed.pop();
+            m_Completed.pop_front();
             try {
                 ReleaseResultResources(stale);
             } catch (...) {
@@ -1612,8 +1639,14 @@ void EditorRenderWorker::HandleThreadFailure(
                 // encounters an unexpected host-side failure.
             }
         }
+        if (m_FallbackCompleted) {
+            ReleaseResultResources(*m_FallbackCompleted);
+            m_FallbackCompleted.reset();
+        }
         m_Pending = {};
         m_HasPending = false;
+        abandonedTasks.swap(m_OpenGlTasks);
+        activeTask = std::move(m_ActiveOpenGlTask);
         m_Busy = false;
         m_StopRequested = true;
         m_ProgressCompletedSteps = 0;
@@ -1622,8 +1655,35 @@ void EditorRenderWorker::HandleThreadFailure(
     } catch (...) {
         // std::thread entry points cannot permit an exception to escape.
     }
+    const auto failTask = [message](
+        const std::shared_ptr<OpenGlTaskState>& state) noexcept {
+        if (!state) return;
+        try {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->success = false;
+            try {
+                state->error = message != nullptr
+                    ? std::string("The OpenGL worker failed: ") + message
+                    : "The OpenGL worker failed.";
+            } catch (...) {
+                state->error.clear();
+            }
+            state->completed = true;
+        } catch (...) {
+            return;
+        }
+        state->cv.notify_all();
+    };
+    failTask(activeTask);
+    while (!abandonedTasks.empty()) {
+        const auto state = std::move(abandonedTasks.front());
+        abandonedTasks.pop();
+        failTask(state);
+    }
     m_Cv.notify_all();
     try {
+        DrainDenoiseForShutdown();
+        m_CalibrationPipeline.reset();
         m_PersistentPipeline.reset();
     } catch (...) {
     }
@@ -1632,6 +1692,7 @@ void EditorRenderWorker::HandleThreadFailure(
 
 void EditorRenderWorker::RequestStopForShutdown() {
     Snapshot abandoned;
+    std::queue<std::shared_ptr<OpenGlTaskState>> abandonedTasks;
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_StopRequested = true;
@@ -1640,6 +1701,19 @@ void EditorRenderWorker::RequestStopForShutdown() {
             m_Pending = {};
         }
         m_HasPending = false;
+        abandonedTasks.swap(m_OpenGlTasks);
+    }
+    while (!abandonedTasks.empty()) {
+        const auto state = std::move(abandonedTasks.front());
+        abandonedTasks.pop();
+        if (!state) continue;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->success = false;
+            state->error = "The OpenGL worker is shutting down.";
+            state->completed = true;
+        }
+        state->cv.notify_all();
     }
     m_Cv.notify_all();
 }
@@ -1657,7 +1731,13 @@ void EditorRenderWorker::Shutdown() {
 
 bool EditorRenderWorker::HasPendingOrBusyForShutdown() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
-    return m_HasPending || m_Busy.load();
+    return m_HasPending || !m_OpenGlTasks.empty() || m_Busy.load();
+}
+
+bool EditorRenderWorker::IsWaitingForRawDenoiseCompletion() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return !m_Rendering && HasDenoiseWorkLocked() && !m_HasPending &&
+        m_OpenGlTasks.empty() && !m_ActiveOpenGlTask;
 }
 
 void EditorRenderWorker::InvalidateSnapshotsBefore(std::uint64_t generation) {
@@ -1665,12 +1745,18 @@ void EditorRenderWorker::InvalidateSnapshotsBefore(std::uint64_t generation) {
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_InvalidBeforeGeneration = std::max(m_InvalidBeforeGeneration, generation);
-        m_LatestSubmittedGeneration =
-            std::max(m_LatestSubmittedGeneration, m_InvalidBeforeGeneration);
+        m_InvalidBeforeSchedulingSerial = std::max(
+            m_InvalidBeforeSchedulingSerial, m_NextSchedulingSerial);
         if (m_HasPending && m_Pending.generation < m_InvalidBeforeGeneration) {
             abandoned = std::move(m_Pending);
             m_Pending = {};
             m_HasPending = false;
+        }
+        for (auto& [id, owner] : m_OwnerStates) {
+            (void)id;
+            owner.continuation.reset();
+            owner.continuationReady = false;
+            owner.resetDenoiseRequested = true;
         }
         if (m_Busy.load()) {
             m_ProgressLabel = "Cancelling stale render...";
@@ -1678,27 +1764,90 @@ void EditorRenderWorker::InvalidateSnapshotsBefore(std::uint64_t generation) {
     }
 }
 
+void EditorRenderWorker::CancelActiveAndPending() {
+    Snapshot abandoned;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_InvalidBeforeSchedulingSerial = std::max(
+            m_InvalidBeforeSchedulingSerial, m_NextSchedulingSerial);
+        if (m_HasPending) {
+            abandoned = std::move(m_Pending);
+            m_Pending = {};
+            m_HasPending = false;
+        }
+        for (auto& [id, owner] : m_OwnerStates) {
+            (void)id;
+            owner.continuation.reset();
+            owner.continuationReady = false;
+            owner.resetDenoiseRequested = true;
+        }
+        if (m_Busy.load()) {
+            m_ProgressLabel = "Cancelling stale render...";
+        }
+    }
+}
+
+void EditorRenderWorker::UpdateGraphContext(const Stack::GraphRendering::RequestTag& context) {
+    Snapshot abandoned;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_LatestGraphRequest.enabled &&
+            !Stack::GraphRendering::SameContext(m_LatestGraphRequest, context)) {
+            m_InvalidBeforeSchedulingSerial = m_NextSchedulingSerial;
+            if (m_HasPending) {
+                abandoned = std::move(m_Pending);
+                m_Pending = {};
+                m_HasPending = false;
+            }
+            auto& owner = m_OwnerStates[0];
+            owner.continuation.reset();
+            owner.continuationReady = false;
+            owner.resetDenoiseRequested = true;
+        }
+        m_LatestGraphRequest = context;
+    }
+}
+
+bool EditorRenderWorker::IsAvailable() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_InitSucceeded && !m_StopRequested;
+}
+
 bool EditorRenderWorker::Submit(Snapshot snapshot) {
     const int progressTotal = EstimateRenderProgressStepCount(snapshot);
     Snapshot superseded;
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        if (!Stack::EditorRenderScheduling::AcceptSubmission(
-                snapshot.generation,
-                m_StopRequested,
-                m_InvalidBeforeGeneration,
-                m_LatestSubmittedGeneration)) {
+        auto& owner = m_OwnerStates[snapshot.ownerId];
+        if (m_StopRequested ||
+            snapshot.generation < m_InvalidBeforeGeneration || owner.released ||
+            snapshot.generation < owner.invalidBeforeGeneration) {
             return false;
         }
+        snapshot.schedulingSerial = m_NextSchedulingSerial++;
+        owner.latestGeneration = snapshot.generation;
+        owner.latestSerial = snapshot.schedulingSerial;
+        owner.latestGraphRequest = snapshot.graphRequest;
+        owner.continuation.reset();
+        owner.continuationReady = false;
+        owner.resumeOriginalPurpose = false;
         const bool replacingInFlightWork = m_Busy.load() || m_HasPending;
         if (m_HasPending) {
+            // A service continuation may be superseded before the worker
+            // takes it. Preserve another owner's wakeup in that case.
+            if (m_Pending.ownerId != snapshot.ownerId) {
+                auto& previous = m_OwnerStates[m_Pending.ownerId];
+                previous.denoisePurpose = m_Pending.rawRenderPurpose;
+                previous.continuation = std::move(m_Pending);
+                previous.continuationReady = true;
+                previous.resumeOriginalPurpose = true;
+            }
             superseded = std::move(m_Pending);
             m_Pending = {};
         }
+        m_LatestGraphRequest = snapshot.graphRequest;
         m_Pending = std::move(snapshot);
         m_HasPending = true;
-        m_LatestSubmittedGeneration =
-            std::max(m_LatestSubmittedGeneration, m_Pending.generation);
         m_ProgressCompletedSteps = 0;
         m_ProgressTotalSteps = progressTotal;
         try {
@@ -1714,9 +1863,14 @@ bool EditorRenderWorker::Submit(Snapshot snapshot) {
 
 bool EditorRenderWorker::TryConsumeCompleted(Result& result) {
     std::lock_guard<std::mutex> lock(m_Mutex);
+    if (!m_CompletedTimings.empty()) {
+        result = std::move(m_CompletedTimings.front());
+        m_CompletedTimings.pop();
+        return true;
+    }
     if (!m_Completed.empty()) {
         result = std::move(m_Completed.front());
-        m_Completed.pop();
+        m_Completed.pop_front();
         return true;
     }
     if (!m_FallbackCompleted.has_value()) {
@@ -1730,7 +1884,7 @@ bool EditorRenderWorker::TryConsumeCompleted(Result& result) {
 EditorRenderWorker::RenderProgress EditorRenderWorker::GetProgress() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
     RenderProgress progress;
-    progress.busy = m_Busy.load() || m_HasPending;
+    progress.busy = m_Busy.load() || m_HasPending || !m_OpenGlTasks.empty();
     progress.completedSteps = m_ProgressCompletedSteps;
     progress.totalSteps = m_ProgressTotalSteps;
     progress.label = m_ProgressLabel;
@@ -1772,14 +1926,16 @@ std::string EditorRenderWorker::BuildDevelopCandidateProgressLabelForValidation(
         candidateCount);
 }
 
-bool EditorRenderWorker::ShouldAbortStaleSnapshot(std::uint64_t currentGeneration) const {
+bool EditorRenderWorker::ShouldAbortStaleSnapshot(
+    const Snapshot& snapshot) const {
     std::lock_guard<std::mutex> lock(m_Mutex);
-    return ShouldAbortStaleSnapshotForValidation(
-        currentGeneration,
-        m_StopRequested,
-        m_HasPending,
-        m_Pending.generation) ||
-        currentGeneration < m_InvalidBeforeGeneration;
+    return m_StopRequested ||
+        (m_HasPending &&
+         m_Pending.schedulingSerial > snapshot.schedulingSerial &&
+         (m_Pending.ownerId != snapshot.ownerId ||
+          !Stack::GraphRendering::MayFinishActive(snapshot.graphRequest, m_Pending.graphRequest))) ||
+        IsOwnerSnapshotInvalidLocked(snapshot.ownerId, snapshot.generation,
+            snapshot.schedulingSerial, snapshot.rawRenderPurpose);
 }
 
 void EditorRenderWorker::ThreadMain() {
@@ -1809,50 +1965,187 @@ void EditorRenderWorker::ThreadMain() {
     m_Cv.notify_all();
 
     if (!initSucceeded) {
+        m_CalibrationPipeline.reset();
         m_PersistentPipeline.reset();
         glfwMakeContextCurrent(nullptr);
         return;
     }
 
     while (true) {
+        PollViewportTimings();
         Snapshot snapshot;
+        std::shared_ptr<OpenGlTaskState> openGlTask;
         {
             std::unique_lock<std::mutex> lock(m_Mutex);
-            m_Cv.wait(lock, [this]() {
-                return m_StopRequested || m_HasPending;
+            m_Cv.wait_for(lock, std::chrono::milliseconds(16), [this]() {
+                return m_StopRequested || m_HasPending ||
+                    !m_OpenGlTasks.empty();
             });
             if (m_StopRequested) {
                 break;
             }
-            snapshot = std::move(m_Pending);
-            m_HasPending = false;
+            PollDenoiseContinuationsLocked();
+            const auto dedicated = m_OwnerStates.find(0);
+            const bool denoiseCompletionReady =
+                !m_HasPending &&
+                m_OpenGlTasks.empty() &&
+                dedicated != m_OwnerStates.end() &&
+                dedicated->second.continuationReady &&
+                dedicated->second.continuation.has_value();
+            if (!m_OpenGlTasks.empty() && !m_HasPending) {
+                openGlTask = std::move(m_OpenGlTasks.front());
+                m_OpenGlTasks.pop();
+                m_ActiveOpenGlTask = openGlTask;
+            } else if (m_HasPending) {
+                snapshot = std::move(m_Pending);
+                m_Pending = {};
+                m_HasPending = false;
+            } else if (denoiseCompletionReady) {
+                auto& owner = dedicated->second;
+                snapshot = std::move(*owner.continuation);
+                owner.continuation.reset();
+                owner.continuationReady = false;
+                if (!owner.resumeOriginalPurpose)
+                    snapshot.rawRenderPurpose = RawRenderPurpose::DenoiseCompletion;
+                owner.resumeOriginalPurpose = false;
+                snapshot.schedulingSerial = m_NextSchedulingSerial++;
+                owner.latestSerial = snapshot.schedulingSerial;
+                owner.denoisePurpose = snapshot.rawRenderPurpose;
+            } else {
+                m_Busy = HasDenoiseWorkLocked();
+                continue;
+            }
+            m_Rendering = !openGlTask;
+            if (m_Rendering) {
+                m_RenderingOwner = snapshot.ownerId;
+            }
             m_Busy = true;
         }
-        if (ShouldAbortStaleSnapshot(snapshot.generation)) {
+        if (openGlTask) {
+            bool success = false;
+            std::string taskError;
+            try {
+                success = openGlTask->task(taskError);
+                if (!success && taskError.empty())
+                    taskError = "The OpenGL compute task failed.";
+            } catch (const std::exception& exception) {
+                taskError = exception.what();
+            } catch (...) {
+                taskError = "The OpenGL compute task failed unexpectedly.";
+            }
+            {
+                std::lock_guard<std::mutex> lock(openGlTask->mutex);
+                openGlTask->success = success;
+                openGlTask->error = std::move(taskError);
+                openGlTask->completed = true;
+            }
+            openGlTask->cv.notify_all();
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                m_ActiveOpenGlTask.reset();
+                m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
+                    HasDenoiseWorkLocked();
+            }
+            continue;
+        }
+        if (ShouldAbortStaleSnapshot(snapshot)) {
             std::lock_guard<std::mutex> lock(m_Mutex);
-            m_Busy = m_HasPending;
+            RetainDenoiseContinuationLocked(snapshot);
+            m_Rendering = false;
+            m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
+                HasDenoiseWorkLocked();
             if (!m_Busy.load()) {
                 m_ProgressCompletedSteps = m_ProgressTotalSteps;
                 m_ProgressLabel = "Stale render cancelled.";
             }
             continue;
         }
-        SetProgress(0, EstimateRenderProgressStepCount(snapshot), "Starting render...");
-
-        Result result = RenderSnapshot(snapshot);
         {
             std::lock_guard<std::mutex> lock(m_Mutex);
+            if (DeferAuthoritativeRenderLocked(snapshot)) {
+                m_Rendering = false;
+                m_Busy = true;
+                continue;
+            }
+        }
+        SetProgress(0, EstimateRenderProgressStepCount(snapshot), "Starting render...");
+
+        const auto workerStart = std::chrono::steady_clock::now();
+        Result result = RenderSnapshot(snapshot);
+        const auto workerEnd = std::chrono::steady_clock::now();
+        result.telemetry.queueWaitMs =
+            snapshot.telemetry.queuedAt.time_since_epoch().count() == 0
+                ? 0.0
+                : MillisecondsBetween(
+                      snapshot.telemetry.queuedAt,
+                      workerStart);
+        if (m_PersistentPipeline && snapshot.rawRenderPurpose != RawRenderPurpose::ViewportCalibration &&
+            !snapshot.rawWorkspace.sourceKey.empty()) {
+            result.cacheStateMeasured = true;
+            result.nativeCachedStages = m_PersistentPipeline->RawViewportCachedStages(snapshot.rawWorkspace.recipe, 0);
+            result.cacheEdge = m_PersistentPipeline->GetRawViewportCacheEdge();
+            result.cachedStages = m_PersistentPipeline->RawViewportCachedStages(snapshot.rawWorkspace.recipe, result.cacheEdge);
+
+        }
+        if (result.graphRequest.enabled && result.outputTexture.texture != 0) {
+            // Graph geometry can change the final extent beyond RAW crop settings.
+            result.rawWorkspace.expectedNativeOutputWidth = result.outputTexture.width;
+            result.rawWorkspace.expectedNativeOutputHeight = result.outputTexture.height;
+        }
+        result.telemetry.workerTotalMs =
+            MillisecondsBetween(workerStart, std::chrono::steady_clock::now());
+        result.telemetry.workerStarted = true;
+        result.telemetry.sourceTransferredBytes = snapshot.rawSessionCommand
+            ? 0u
+            : snapshot.sourcePixels.size();
+        result.telemetry.publishedTextureBytes =
+            result.outputTexture.texture != 0
+                ? static_cast<std::size_t>(
+                      std::max(0, result.outputTexture.width)) *
+                    static_cast<std::size_t>(
+                      std::max(0, result.outputTexture.height)) * 8u
+                : 0u;
+        result.telemetry.readbackTransferredBytes = result.pixels.size();
+        for (const SharedTextureTile& tile : result.outputTiles.tiles) {
+            result.telemetry.publishedTextureBytes +=
+                static_cast<std::size_t>(std::max(0, tile.haloWidth)) *
+                static_cast<std::size_t>(std::max(0, tile.haloHeight)) * 8u;
+        }
+        result.telemetry.superseded =
+            result.error == "Render superseded by a newer snapshot.";
+        CaptureViewportTiming(snapshot,result);
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            RetainDenoiseContinuationLocked(snapshot);
+            m_Rendering = false;
+            if (result.rawRenderPurpose == RawRenderPurpose::ViewportCalibration && result.calibration.renderMs > 0.0 &&
+                (result.telemetry.superseded || IsOwnerResultStaleLocked(result))) {
+                // Numeric measurements have a longer lifetime than presentation
+                // requests. Keep completed passes even if the next edit canceled
+                // the remaining passes or superseded the ordinary result queue.
+                try {
+                    Result timing;
+                    timing.ownerId = result.ownerId;
+                    timing.rawRenderPurpose = RawRenderPurpose::ViewportCalibration;
+                    timing.rawWorkspace.sourceKey = result.rawWorkspace.sourceKey;
+                    timing.rawWorkspace.sourceHash = result.rawWorkspace.sourceHash;
+                    timing.workloadKeys = result.workloadKeys;
+                    timing.timingRepresentation=result.timingRepresentation;
+                    timing.telemetry.timingHistoryEpoch=result.telemetry.timingHistoryEpoch;
+                    timing.calibration = result.calibration;
+                    timing.telemetry.superseded = true;
+                    m_CompletedTimings.push(std::move(timing));
+                } catch (const std::bad_alloc&) { /* Foreground work retains priority. */ }
+            }
             const bool carriesCancellationAcknowledgement =
                 result.rawWorkspace.preciseSolveResult.has_value() &&
                 result.rawWorkspace.preciseSolveResult->canceled;
-            if (Stack::EditorRenderScheduling::DiscardCompletedResult(
-                    result.generation,
-                    m_StopRequested,
-                    m_InvalidBeforeGeneration,
-                    m_LatestSubmittedGeneration,
-                    carriesCancellationAcknowledgement)) {
+            const bool staleResult = IsOwnerResultStaleLocked(result);
+            if (m_StopRequested ||
+                (staleResult && !carriesCancellationAcknowledgement)) {
                 ReleaseResultResources(result);
-                m_Busy = m_HasPending;
+                m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
+                    HasDenoiseWorkLocked();
                 if (!m_Busy.load()) {
                     m_ProgressCompletedSteps = m_ProgressTotalSteps;
                     m_ProgressLabel =
@@ -1861,9 +2154,18 @@ void EditorRenderWorker::ThreadMain() {
                 continue;
             }
             std::optional<Result> cancellationAcknowledgement;
-            while (!m_Completed.empty()) {
-                Result stale = std::move(m_Completed.front());
-                m_Completed.pop();
+            for (auto it = m_Completed.begin(); it != m_Completed.end();) {
+                if (it->ownerId != result.ownerId) {
+                    ++it;
+                    continue;
+                }
+                Result stale = std::move(*it);
+                it = m_Completed.erase(it);
+                if (stale.rawRenderPurpose == RawRenderPurpose::ViewportCalibration && stale.calibration.renderMs > 0.0) {
+                    stale.telemetry.superseded = true;
+                    try { m_CompletedTimings.push(std::move(stale)); } catch (const std::bad_alloc&) {}
+                    continue;
+                }
                 const bool staleIsCancellationAcknowledgement =
                     stale.rawWorkspace.preciseSolveResult.has_value() &&
                     stale.rawWorkspace.preciseSolveResult->canceled;
@@ -1879,7 +2181,7 @@ void EditorRenderWorker::ThreadMain() {
                     ReleaseResultResources(stale);
                 }
             }
-            if (m_FallbackCompleted.has_value()) {
+            if (m_FallbackCompleted && m_FallbackCompleted->ownerId == result.ownerId) {
                 ReleaseResultResources(*m_FallbackCompleted);
                 m_FallbackCompleted.reset();
             }
@@ -1888,11 +2190,11 @@ void EditorRenderWorker::ThreadMain() {
             bool resultStoredWithoutQueueAllocation = false;
             try {
                 if (cancellationAcknowledgement.has_value()) {
-                    m_Completed.push(
+                    m_Completed.push_back(
                         std::move(*cancellationAcknowledgement));
                     cancellationAcknowledgementQueued = true;
                 }
-                m_Completed.push(std::move(result));
+                m_Completed.push_back(std::move(result));
                 resultQueued = true;
             } catch (...) {
                 if (!cancellationAcknowledgementQueued &&
@@ -1901,13 +2203,18 @@ void EditorRenderWorker::ThreadMain() {
                         *cancellationAcknowledgement);
                 }
                 try {
-                    m_FallbackCompleted.emplace(std::move(result));
-                    resultStoredWithoutQueueAllocation = true;
+                    if (!m_FallbackCompleted) {
+                        m_FallbackCompleted.emplace(std::move(result));
+                        resultStoredWithoutQueueAllocation = true;
+                    } else {
+                        ReleaseResultResources(result);
+                    }
                 } catch (...) {
                     ReleaseResultResources(result);
                 }
             }
-            m_Busy = m_HasPending;
+            m_Busy = m_HasPending || !m_OpenGlTasks.empty() ||
+                HasDenoiseWorkLocked();
             if (!m_Busy.load()) {
                 m_ProgressCompletedSteps = m_ProgressTotalSteps;
                 if (resultQueued || resultStoredWithoutQueueAllocation) {
@@ -1921,9 +2228,11 @@ void EditorRenderWorker::ThreadMain() {
 
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
+        while (!m_CompletedTimings.empty()) m_CompletedTimings.pop();
+        while (!m_CompletedViewportTimings.empty()) m_CompletedViewportTimings.pop();
         while (!m_Completed.empty()) {
             Result stale = std::move(m_Completed.front());
-            m_Completed.pop();
+            m_Completed.pop_front();
             ReleaseResultResources(stale);
         }
         if (m_FallbackCompleted.has_value()) {
@@ -1933,22 +2242,115 @@ void EditorRenderWorker::ThreadMain() {
         m_ProgressCompletedSteps = 0;
         m_ProgressTotalSteps = 0;
         m_ProgressLabel.clear();
+        m_Rendering = false;
         m_Busy = false;
     }
 
+    DrainDenoiseForShutdown();
+    m_CalibrationPipeline.reset();
+    for (auto& timing : m_PendingViewportTimings) Raw::ViewportGpuTiming::Release(timing.batch);
+    m_PendingViewportTimings.clear();
     m_PersistentPipeline.reset();
     glfwMakeContextCurrent(nullptr);
 }
 
 EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& snapshot) {
+    if (snapshot.rawSessionCommand && snapshot.rawSessionTemplate) {
+        const auto expansionBegin = std::chrono::steady_clock::now();
+        Snapshot expanded = *snapshot.rawSessionTemplate;
+        expanded.ownerId = snapshot.ownerId;
+        expanded.generation = snapshot.generation;
+        expanded.schedulingSerial = snapshot.schedulingSerial;
+        expanded.lastAcceptedGeneration = snapshot.lastAcceptedGeneration;
+        expanded.rawRenderPurpose = snapshot.rawRenderPurpose;
+        expanded.telemetry = snapshot.telemetry;
+        expanded.previewMaxDimension = snapshot.previewMaxDimension;
+        expanded.rawWorkspace = snapshot.rawWorkspace;
+        expanded.viewportTiling = snapshot.viewportTiling;
+        expanded.previews = snapshot.previews;
+        expanded.rawSessionTemplate.reset();
+        expanded.rawSessionContractRevision =
+            snapshot.rawSessionContractRevision;
+        expanded.rawSessionCommand = true;
+
+        expanded.graph.rawWorkspaceLocalRangeOverlayMode =
+            expanded.rawWorkspace.localRangeOverlayMode;
+        expanded.graph.rawWorkspaceLocalRangeTargetPreview =
+            expanded.rawWorkspace.localRangeTargetPreview;
+        expanded.graph.rawWorkspaceLocalRangeTargetSampleRequested =
+            expanded.rawWorkspace.localRangeTargetSampleRequested;
+        expanded.graph.rawWorkspaceLocalRangeTargetSampleU =
+            expanded.rawWorkspace.localRangeTargetSampleU;
+        expanded.graph.rawWorkspaceLocalRangeTargetSampleV =
+            expanded.rawWorkspace.localRangeTargetSampleV;
+        if (expanded.rawWorkspace.hasRecipe) {
+            Stack::EditorRendering::ApplyRawRecipeOverlayToRenderGraph(
+                expanded.graph,
+                expanded.rawWorkspace.recipe,
+                expanded.rawWorkspace.managedRawDecodeNodeId,
+                expanded.rawWorkspace.managedToneCurveNodeId,
+                expanded.rawWorkspace.managedViewTransformNodeId);
+            expanded.rawWorkspace.graphScopeInputFingerprint =
+                ResolveRawGraphScopeFingerprint(
+                    expanded.rawWorkspace);
+        }
+        expanded.telemetry.sessionExpansionMs =
+            MillisecondsBetween(
+                expansionBegin,
+                std::chrono::steady_clock::now());
+        return RenderSnapshot(expanded);
+    }
+
     Result result;
+    result.ownerId = snapshot.ownerId;
     result.generation = snapshot.generation;
+    result.graphRequest = snapshot.graphRequest;
+    result.schedulingSerial = snapshot.schedulingSerial;
+    result.lastAcceptedGeneration = snapshot.lastAcceptedGeneration;
+    result.rawRenderPurpose = snapshot.rawRenderPurpose;
+    result.telemetry = snapshot.telemetry;
     result.previewMaxDimension = snapshot.previewMaxDimension;
     result.rawWorkspace.sourceKey = snapshot.rawWorkspace.sourceKey;
     result.rawWorkspace.sourceHash = snapshot.rawWorkspace.sourceHash;
+    result.rawWorkspace.recipeRevision =
+        snapshot.rawWorkspace.recipeRevision;
+    if (snapshot.rawWorkspace.hasRecipe) {
+        const auto& recipe = snapshot.rawWorkspace.recipe;
+        result.rawWorkspace.presentationFingerprint =
+            Stack::EditorRendering::BuildRawPresentationFingerprint(recipe, snapshot.graph);
+        const auto viewJson = recipe.viewTransform.layerJson.is_object() ? recipe.viewTransform.layerJson : nlohmann::json::object();
+        result.rawWorkspace.viewportEncodedSrgb = Stack::RawRecipe::IsViewTransformEnabled(recipe) && viewJson.value("encodeSrgbOutput", recipe.technical.encodeSrgbOutput);
+        result.rawWorkspace.viewportDiagnostic = recipe.rgbDenoise.diagnosticMode != Stack::RawRecipe::RawDenoiseDiagnosticMode::None ||
+            (!snapshot.rawWorkspace.localRangeOverlayMode.empty() && snapshot.rawWorkspace.localRangeOverlayMode != "none") ||
+            viewJson.value("debugFalseColor", false);
+        const Stack::RawRecipe::RawCropRotationRecipe& crop =
+            snapshot.rawWorkspace.recipe.cropRotation;
+        const Stack::EditorRenderScheduling::RawPresentationExtent
+            expectedExtent =
+                Stack::EditorRenderScheduling::
+                    ResolveExpectedRawPresentationExtent(
+                        snapshot.rawWorkspace.fullFrameWidth,
+                        snapshot.rawWorkspace.fullFrameHeight,
+                        crop.rotationDegrees,
+                        crop.cropEnabled,
+                        crop.cropX,
+                        crop.cropY,
+                        crop.cropWidth,
+                        crop.cropHeight);
+        result.rawWorkspace.expectedNativeOutputWidth =
+            expectedExtent.width;
+        result.rawWorkspace.expectedNativeOutputHeight =
+            expectedExtent.height;
+    } else {
+        result.rawWorkspace.expectedNativeOutputWidth =
+            snapshot.rawWorkspace.fullFrameWidth;
+        result.rawWorkspace.expectedNativeOutputHeight =
+            snapshot.rawWorkspace.fullFrameHeight;
+    }
     result.rawWorkspace.analysisCaptured = snapshot.rawWorkspace.analysisRequested;
     result.rawWorkspace.graphScopeInputFingerprint =
-        snapshot.rawWorkspace.graphScopeInputFingerprint;
+        ResolveRawGraphScopeFingerprint(
+            snapshot.rawWorkspace);
     result.rawWorkspace.localRangeOverlayMode = snapshot.rawWorkspace.localRangeOverlayMode;
     result.rawWorkspace.localRangeTargetPreviewGeneration =
         snapshot.rawWorkspace.localRangeTargetPreview.generation;
@@ -1956,20 +2358,136 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         snapshot.rawWorkspace.startPointCandidateRenderRequests;
     result.rawWorkspace.localRangeTargetSample.u = snapshot.rawWorkspace.localRangeTargetSampleU;
     result.rawWorkspace.localRangeTargetSample.v = snapshot.rawWorkspace.localRangeTargetSampleV;
+    result.rawWorkspace.cachePrewarmStage =
+        snapshot.rawWorkspace.cachePrewarmStage;
+    result.rawWorkspace.cachePrewarmFingerprint =
+        snapshot.rawWorkspace.cachePrewarmFingerprint;
 
     try {
-        if (!m_PersistentPipeline) {
-            m_PersistentPipeline = std::make_unique<RenderPipeline>();
-            m_PersistentPipeline->Initialize();
+        const bool calibration = snapshot.rawRenderPurpose == RawRenderPurpose::ViewportCalibration;
+        const bool privateOverview = snapshot.rawRenderPurpose == RawRenderPurpose::ViewportOverview &&
+            snapshot.rawWorkspace.viewportDependencyEdge >= 0;
+        if (!calibration && !privateOverview) m_CalibrationPipeline.reset();
+        auto& owner = calibration || privateOverview ? m_CalibrationPipeline : m_PersistentPipeline;
+        const bool calibrationResourcesUnprepared = calibration && !owner;
+        if (!owner) {
+            owner = std::make_unique<RenderPipeline>();
+            owner->Initialize();
         }
-        RenderPipeline& pipeline = *m_PersistentPipeline;
-        pipeline.SetPreviewMaxDimension(snapshot.previewMaxDimension);
+        RenderPipeline& pipeline = *owner;
+        if (!calibration && !privateOverview) BindDenoiseState(snapshot, pipeline);
+        PrepareGraphResourceBudget(snapshot, pipeline, result);
+        pipeline.BeginRawViewportTiming(!snapshot.rawWorkspace.sourceKey.empty());
+        result.editStage = snapshot.rawWorkspace.editStage;
+        if (snapshot.rawWorkspace.hasRecipe)
+            result.workloadKeys = Raw::ViewportWorkloadKeys(snapshot.rawWorkspace.recipe);
+        if (snapshot.rawWorkspace.graphWorkloadKeys.back())
+            result.workloadKeys = snapshot.rawWorkspace.graphWorkloadKeys;
+        if (snapshot.rawRenderPurpose==RawRenderPurpose::ViewportRefinement)
+            result.workloadKeys=Raw::ViewportRefinementKeys(result.workloadKeys);
+        std::size_t shape = 1;
+        for (const auto& node : snapshot.graph.nodes) {
+            Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,static_cast<int>(node.kind));
+            Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,node.definitionId);
+            Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,node.definitionVersion);
+            Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,node.definitionHash);
+            Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,static_cast<int>(node.technicalImageOperation));
+            if (node.kind==RenderGraphNodeKind::Layer && node.nodeId!=snapshot.rawWorkspace.managedToneCurveNodeId &&
+                node.nodeId!=snapshot.rawWorkspace.managedViewTransformNodeId)
+                Stack::Renderer::RawDevelopmentCache::HashTypedJson(shape,node.layerJson);
+            if (const auto& raw=node.rawDevelopment.embeddedRawData; raw) {
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,raw->metadata.mosaiced);
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,static_cast<int>(raw->metadata.pixelLayout));
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,static_cast<int>(raw->metadata.cfaPattern));
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,raw->metadata.rawWidth);
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,raw->metadata.rawHeight);
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,raw->reconstructedCameraRgb);
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,static_cast<int>(raw->normalizedMosaicInputContract));
+                Stack::Renderer::RawDevelopmentCache::HashTypedValue(shape,!raw->linearFloatBuffer.empty());
+            }
+        }
+        result.timingRepresentation = std::to_string(shape);
+        if (!snapshot.graphRequest.enabled && snapshot.rawWorkspace.gpuWorkingBudgetBytes > 0) {
+            pipeline.SetGraphCacheBudget(
+                snapshot.rawWorkspace.gpuCacheBudgetBytes,
+                snapshot.rawWorkspace.minimumRawStageCacheBytes);
+        }
+        const bool calibrationProxy = calibration && snapshot.previewMaxDimension > 0 &&
+            snapshot.previewMaxDimension < std::max(snapshot.rawWorkspace.fullFrameWidth,
+                snapshot.rawWorkspace.fullFrameHeight);
+        const bool authoritativeOutput =
+            snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport ||
+            snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitInspection;
+        // Seeded overviews reuse an existing reconstruction dependency. They
+        // must not launch a second inference from their temporary pipeline.
+        pipeline.SetRawRgbDenoiseAsyncEnabled(!authoritativeOutput && !calibration && !privateOverview);
+        (void)pipeline.ConsumeRawRgbDenoiseAsyncCompletion();
+        const int nativeEdge = std::max(snapshot.rawWorkspace.fullFrameWidth, snapshot.rawWorkspace.fullFrameHeight);
+        const int processingEdge = nativeEdge > 0 && snapshot.previewMaxDimension >= nativeEdge ? 0 : snapshot.previewMaxDimension;
+        pipeline.SetPreviewMaxDimension(processingEdge);
+        if (!calibration && snapshot.rawWorkspace.hasRecipe) {
+            const auto cached = pipeline.RawViewportCachedStages(snapshot.rawWorkspace.recipe,processingEdge);
+            for (std::size_t i = 0; i < cached.size(); ++i)
+                if (cached[i]) result.firstMeasuredStage = i + 1;
+        }
+        pipeline.SetRawViewportRequest(!snapshot.rawWorkspace.analysisRequested &&
+            (snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation ||
+             snapshot.rawRenderPurpose == RawRenderPurpose::ViewportRefinement)
+            ? snapshot.rawWorkspace.viewport : Raw::ViewportRequest{});
+        result.rawWorkspace.viewportGeneration = snapshot.rawWorkspace.viewport.generation;
+        pipeline.SetRawDevelopmentInteractivePreview(
+            calibration || (snapshot.rawRenderPurpose ==
+                RawRenderPurpose::InteractivePresentation &&
+            snapshot.telemetry.interactionActive));
+        pipeline.SetRawDevelopmentColorWarpMaskPolicy(
+            snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport ||
+                    snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitInspection
+                ? 2048
+                : ((snapshot.telemetry.interactionActive || calibration) ? 384 : 1024),
+            snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport);
+        pipeline.SetRawDevelopmentViewportValidationEnabled(
+            authoritativeOutput || snapshot.rawWorkspace.analysisRequested);
+        pipeline.SetRawDevelopmentPreferredCacheInputStage(
+            snapshot.rawWorkspace.preferredCacheInputStage);
+        pipeline.SetRawDevelopmentGlobalExposureInteraction(
+            snapshot.rawWorkspace.globalExposureInteractionActive);
         pipeline.SetRawDevelopmentAnalysisEnabled(snapshot.rawWorkspace.analysisRequested);
+        pipeline.SetRawDevelopmentCachePrewarmRequest(
+            snapshot.rawRenderPurpose == RawRenderPurpose::CachePrewarm &&
+                snapshot.rawWorkspace.cachePrewarmStage.has_value(),
+            snapshot.rawWorkspace.cachePrewarmStage.value_or(
+                Stack::Renderer::RawDevelopmentCache::Stage::NeutralPlacement),
+            snapshot.rawWorkspace.cachePrewarmStage && snapshot.rawWorkspace.hasRecipe
+                ? Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(snapshot.rawWorkspace.recipe,
+                    processingEdge, *snapshot.rawWorkspace.cachePrewarmStage) : snapshot.rawWorkspace.cachePrewarmFingerprint,
+            snapshot.rawWorkspace.cachePrewarmByteBudget);
         pipeline.SetRawDevelopmentGraphScopeReadbackRequest(
             snapshot.rawWorkspace.graphScopeStage,
             snapshot.rawWorkspace.graphScopeStage == RawDevelopmentGraphScopeStage::None
                 ? 0
-                : kRawWorkspaceGraphScopeMaxDimension);
+                : std::clamp(
+                    snapshot.rawWorkspace.graphScopeMaxDimension,
+                    kRawWorkspaceGraphScopeMaxDimension,
+                    2048));
+        pipeline.SetRawDevelopmentGradingScopeReadbackRequest(
+            snapshot.rawWorkspace.gradingScopeSource,
+            snapshot.rawWorkspace.gradingScopeSource ==
+                    RawDevelopmentGradingScopeSource::None
+                ? 0
+                : kRawWorkspaceGradingScopeMaxDimension,
+            snapshot.generation,
+            snapshot.rawWorkspace.sourceKey);
+        auto collectReadyGradingScopePacket = [&]() {
+            (void)pipeline.PollRawDevelopmentGradingScopeReadback();
+            const RawDevelopmentGradingScopeReadback& packet =
+                pipeline.GetRawDevelopmentGradingScopeReadback();
+            if (packet.valid &&
+                packet.source == snapshot.rawWorkspace.gradingScopeSource &&
+                packet.sourceKey == snapshot.rawWorkspace.sourceKey) {
+                result.rawWorkspace.gradingScopeVisualization = packet.visualization;
+            }
+        };
+        collectReadyGradingScopePacket();
         const int totalProgressSteps = EstimateRenderProgressStepCount(snapshot);
         int progressCompleted = 0;
         auto reportProgress = [&](std::string label) {
@@ -1979,8 +2497,14 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             progressCompleted = std::min(totalProgressSteps, progressCompleted + 1);
             SetProgress(progressCompleted, totalProgressSteps, std::move(label));
         };
+        bool renderCancelled = false;
         auto shouldAbortStaleWork = [&]() {
-            return ShouldAbortStaleSnapshot(snapshot.generation);
+            // Once any stage stops, this snapshot cannot become complete again.
+            // The pending job can be withdrawn or replaced while the GPU stage
+            // unwinds, so re-reading only the queue can misreport cancellation
+            // as a render with no pixels.
+            renderCancelled = renderCancelled || ShouldAbortStaleSnapshot(snapshot);
+            return renderCancelled;
         };
         auto collectToneCurveAutoRewriteFeedback = [&]() {
             std::vector<ToneCurveAutoRewriteFeedback> feedbacks =
@@ -2104,11 +2628,12 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     std::to_string(previewCount) +
                     "...");
                 PreviewResult previewResult;
+                previewResult.rawLayerId = request.rawLayerId;
+                previewResult.rawMaskId = request.rawMaskId;
                 previewResult.previewNodeId = request.previewNodeId;
                 previewResult.dirtyGeneration = request.dirtyGeneration;
 
                 const bool useRequestSourcePixels =
-                    !request.sourcePixels.empty() &&
                     request.width > 0 &&
                     request.height > 0;
                 SharedPixelBuffer sourceBuffer = useRequestSourcePixels
@@ -2117,7 +2642,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 int sourceWidth = useRequestSourcePixels ? request.width : snapshot.width;
                 int sourceHeight = useRequestSourcePixels ? request.height : snapshot.height;
                 int sourceChannels = useRequestSourcePixels ? request.channels : snapshot.channels;
-                if ((sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
+                if ((sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
                     resolveGraphImageSourceBuffer(
                         request.sourceNodeId,
                         sourceBuffer,
@@ -2125,7 +2650,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         sourceHeight,
                         sourceChannels);
                 }
-                if (sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
+                if (sourceWidth <= 0 || sourceHeight <= 0) {
                     previewResult.error = "No source image.";
                     result.previews.push_back(std::move(previewResult));
                     ++previewIndex;
@@ -2133,9 +2658,21 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     continue;
                 }
 
+                const bool layerThumbnail = !request.rawLayerId.empty();
+                pipeline.SetPreviewMaxDimension(layerThumbnail ? 256 : processingEdge);
                 loadSourceBuffer(sourceBuffer, sourceWidth, sourceHeight, sourceChannels);
                 bool temporaryFrequencyView = false;
-                if (request.frequencySpectrumInput) {
+                if (layerThumbnail) {
+                    auto thumbnailGraph = snapshot.graph;
+                    if (!Stack::Project::ConfigureRawLayerThumbnail(thumbnailGraph,
+                            request.rawLayerId, request.rawMaskId, previewResult.error)) {
+                        result.previews.push_back(std::move(previewResult));
+                        ++previewIndex;
+                        finishProgressStep("Layer thumbnail skipped.");
+                        continue;
+                    }
+                    pipeline.ExecuteGraph(thumbnailGraph);
+                } else if (request.frequencySpectrumInput) {
                     if (frequencyTransformNodeId == 0 ||
                         frequencyViewNodeId == 0) {
                         previewResult.error =
@@ -2188,16 +2725,23 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         previewTopology.nodeCount);
                     previewGraph.links.resize(
                         previewTopology.linkCount);
-                } else {
+                } else if (!layerThumbnail) {
                     pipeline.ExecuteGraph(
                         previewGraph,
                         previewTopology);
                 }
                 collectToneCurveAutoRewriteFeedback();
-                previewResult.pixels = pipeline.GetPreviewPixels(previewResult.width, previewResult.height, 512);
+                previewResult.pixels = request.scopeAnalysis
+                    ? pipeline.GetScopesPixels(previewResult.width, previewResult.height)
+                    : pipeline.GetPreviewPixels(previewResult.width, previewResult.height, layerThumbnail ? 128 : 512);
+                if (request.scopeAnalysis && !previewResult.pixels.empty()) {
+                    previewResult.scopeData = AnalyzeGraphScopePixels(
+                        previewResult.pixels, previewResult.width, previewResult.height);
+                }
                 previewResult.success = !previewResult.pixels.empty();
                 if (!previewResult.success) {
-                    previewResult.error = "Preview produced no pixels.";
+                    previewResult.error = RenderFailureReason(pipeline,
+                        "Could not read the rendered preview image.");
                 }
                 result.previews.push_back(std::move(previewResult));
                 ++result.renderedPreviewCount;
@@ -2205,6 +2749,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 finishProgressStep("Preview rendered.");
             }
             result.previewRenderMs += MillisecondsBetween(previewBegin, std::chrono::steady_clock::now());
+            pipeline.SetPreviewMaxDimension(processingEdge);
         };
 
         // A precise RAW solve is an isolated job, not a background replacement
@@ -2270,7 +2815,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 int sourceWidth = request.width;
                 int sourceHeight = request.height;
                 int sourceChannels = request.channels;
-                if ((sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
+                if ((sourceWidth <= 0 || sourceHeight <= 0) && request.sourceNodeId > 0) {
                     resolveGraphImageSourceBuffer(
                         request.sourceNodeId,
                         sourceBuffer,
@@ -2278,7 +2823,7 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                         sourceHeight,
                         sourceChannels);
                 }
-                if (sourceBuffer.empty() || sourceWidth <= 0 || sourceHeight <= 0) {
+                if (sourceWidth <= 0 || sourceHeight <= 0) {
                     outputResult.error = "No source image.";
                     result.success = false;
                     result.compositeOutputs.push_back(std::move(outputResult));
@@ -2301,8 +2846,23 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                 }
                 outputResult.pixels = pipeline.GetOutputPixels(outputResult.width, outputResult.height);
                 outputResult.success = !outputResult.pixels.empty();
+                if (outputResult.success && request.preparePixels) {
+                    Stack::EditorRendering::PreparedCompositePixels prepared;
+                    outputResult.success = Stack::EditorRendering::PrepareCompositePixels(
+                        std::move(outputResult.pixels), outputResult.width, outputResult.height,
+                        request.trimPadding, request.keepFullFrame, prepared);
+                    if (outputResult.success) {
+                        outputResult.pixels = std::move(prepared.pixels);
+                        outputResult.width = prepared.width;
+                        outputResult.height = prepared.height;
+                        outputResult.pixelsPrepared = true;
+                    } else {
+                        outputResult.error = "Canvas output preparation failed.";
+                    }
+                }
                 if (!outputResult.success) {
-                    outputResult.error = "Render produced no pixels.";
+                    if (outputResult.error.empty()) outputResult.error = RenderFailureReason(pipeline,
+                        "Could not read the rendered canvas image.");
                     result.success = false;
                 }
                 result.compositeOutputs.push_back(std::move(outputResult));
@@ -2317,7 +2877,13 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
         }
 
         if (!snapshot.outputConnected) {
-            result.success = true;
+            result.success = snapshot.rawWorkspace.sourceKey.empty() ||
+                !RawRenderPurposeMayPublishPresentation(
+                    snapshot.rawRenderPurpose);
+            if (!result.success) {
+                result.error =
+                    "RAW presentation has no connected graph output.";
+            }
             renderDevelopCandidateRequests();
             renderPreviewRequests();
             return result;
@@ -2330,6 +2896,71 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             return result;
         }
         loadSourceBuffer(snapshot.sourcePixels, snapshot.width, snapshot.height, snapshot.channels);
+        if (snapshot.rawRenderPurpose == RawRenderPurpose::ViewportCalibration) {
+            result.calibration.edge = snapshot.previewMaxDimension;
+            result.calibration.changingStage = static_cast<std::size_t>(snapshot.rawWorkspace.editStage);
+            const bool firstUse = snapshot.rawWorkspace.calibrationFirstUse || calibrationResourcesUnprepared;
+            const int passes = firstUse ? 4 : 3;
+            const bool reuseReconstruction = Stack::RawRecipe::IsRgbDenoiseActive(snapshot.rawWorkspace.recipe.rgbDenoise);
+            std::array<Raw::ViewportStageCosts, 3> warmStages {};
+            std::array<double, 3> warmTimes {};
+            int warmCount = 0;
+            if (reuseReconstruction) result.calibration.firstMeasuredStage = 2;
+            for (int pass = 0; pass < passes; ++pass) {
+                if (shouldAbortStaleWork()) return result;
+                SetProgress(pass, passes, "Measuring RAW viewport, pass " + std::to_string(pass + 1) + "/" + std::to_string(passes));
+                pipeline.PrepareRawCalibrationPass(snapshot.rawWorkspace.editStage);
+                if (reuseReconstruction && (!m_PersistentPipeline || !pipeline.SeedViewportDependency(
+                    *m_PersistentPipeline,snapshot.rawWorkspace.recipe,processingEdge,snapshot.rawWorkspace.viewportDependencyEdge))) {
+                    result.error = "No matching completed denoise input for background verification.";
+                    return result;
+                }
+                pipeline.BeginRawViewportTiming(true);
+                const auto begin = std::chrono::steady_clock::now();
+                pipeline.ExecuteGraph(snapshot.graph);
+                pipeline.m_RawViewportGpuTiming.Finish();
+                if (shouldAbortStaleWork()) return result;
+                GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                if (!fence) { result.error = "Calibration fence failed."; return result; }
+                glFlush();
+                GLenum status = GL_TIMEOUT_EXPIRED;
+                while (status == GL_TIMEOUT_EXPIRED && !shouldAbortStaleWork())
+                    status = glClientWaitSync(fence, 0, 1000000);
+                glDeleteSync(fence);
+                if (shouldAbortStaleWork()) return result;
+                if (status == GL_WAIT_FAILED || pipeline.GetOutputTexture() == 0 ||
+                    pipeline.GetLastGraphExecutionStats().allocationFailed) {
+                    result.error = "Calibration render failed.";
+                    return result;
+                }
+                const double elapsed = MillisecondsBetween(begin, std::chrono::steady_clock::now());
+                const auto stageCosts = pipeline.CollectRawViewportTiming(shouldAbortStaleWork);
+                if (firstUse && pass == 0) {
+                    result.calibration.startupMs = elapsed;
+                    result.calibration.startupStages = stageCosts;
+                } else {
+                    warmTimes[warmCount] = elapsed;
+                    warmStages[warmCount++] = stageCosts;
+                    auto median = [warmCount](std::array<double,3> values) {
+                        std::sort(values.begin(), values.begin() + warmCount);
+                        return values[(warmCount-1)/2];
+                    };
+                    result.calibration.renderMs = median(warmTimes);
+                    for (std::size_t i = 0; i < stageCosts.size(); ++i)
+                        result.calibration.stages[i] = median({warmStages[0][i],warmStages[1][i],warmStages[2][i]});
+                }
+            }
+            result.calibration.edge = snapshot.previewMaxDimension > 0 ? snapshot.previewMaxDimension :
+                std::max(snapshot.rawWorkspace.fullFrameWidth, snapshot.rawWorkspace.fullFrameHeight);
+            result.calibration.native =
+                pipeline.GetCanvasWidth() == result.rawWorkspace.expectedNativeOutputWidth &&
+                pipeline.GetCanvasHeight() == result.rawWorkspace.expectedNativeOutputHeight;
+            result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
+            result.success = result.calibration.renderMs > 0.0;
+            SetProgress(passes, passes, "RAW viewport timing measured");
+            return result;
+        }
+
 
         if (!snapshot.graph.nodes.empty()) {
             GLint maxTextureSize = 0;
@@ -2488,46 +3119,101 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             }
             reportProgress("Rendering main output...");
             const auto mainRenderBegin = std::chrono::steady_clock::now();
+            if (privateOverview) {
+                pipeline.PrepareRawCalibrationPass();
+                if (!m_PersistentPipeline || !pipeline.SeedViewportDependency(*m_PersistentPipeline,
+                    snapshot.rawWorkspace.recipe,processingEdge,snapshot.rawWorkspace.viewportDependencyEdge)) {
+                    result.error = "The completed denoise input is no longer available for the overview.";
+                    return result;
+                }
+            }
             pipeline.ExecuteGraph(snapshot.graph);
+            pipeline.m_RawViewportGpuTiming.Finish();
             result.mainRenderMs = MillisecondsBetween(mainRenderBegin, std::chrono::steady_clock::now());
             result.mainGraphStats = pipeline.GetLastGraphExecutionStats();
-            collectToneCurveAutoRewriteFeedback();
             if (shouldAbortStaleWork()) {
                 finishProgressStep("Newer render queued.");
                 result.error = "Render superseded by a newer snapshot.";
                 return result;
             }
+            collectReadyGradingScopePacket();
+            collectToneCurveAutoRewriteFeedback();
             if (rawWorkspaceMainOutput) {
+                if (!snapshot.rawWorkspace.analysisRequested &&
+                    snapshot.rawWorkspace.graphScopeStage != RawDevelopmentGraphScopeStage::None) {
+                    result.rawWorkspace.graphScopeReadback = pipeline.GetRawDevelopmentGraphScopeReadback();
+                }
                 if (snapshot.rawWorkspace.analysisRequested) {
-                    CaptureRawWorkspaceViewTransformInputStats(pipeline, result);
+                    CaptureRawWorkspaceViewTransformInputStats(
+                        pipeline,
+                        snapshot,
+                        result);
                     if (!snapshot.rawWorkspace.startPointCandidateRenderRequests.empty()) {
                         CaptureRawWorkspaceAutoBaseRecommendations(pipeline, snapshot, result);
                     }
+                    if (shouldAbortStaleWork()) {
+                        finishProgressStep("Newer render queued.");
+                        result.error = "Render superseded by a newer snapshot.";
+                        return result;
+                    }
                 }
-                result.outputTexture.texture = pipeline.PublishSharedOutputTexture(
-                    result.outputTexture.width,
-                    result.outputTexture.height,
-                    true);
-                result.success = result.outputTexture.texture != 0;
-                if (result.success) {
+                if (snapshot.rawRenderPurpose ==
+                        RawRenderPurpose::ExplicitExport) {
+                    result.pixels = pipeline.GetOutputPixelsTiledPbo(
+                        result.width,
+                        result.height);
+                    result.success =
+                        Stack::PixelBuffer::HasCompletePixelBuffer(
+                            result.pixels.size(),
+                            result.width,
+                            result.height,
+                            4);
+                } else if (snapshot.rawRenderPurpose ==
+                        RawRenderPurpose::CachePrewarm) {
+                    result.rawWorkspace.cachePrewarmCompleted =
+                        pipeline.WasRawDevelopmentCachePrewarmCompleted();
+                    result.success =
+                        result.rawWorkspace.cachePrewarmCompleted;
+                    if (!result.success) {
+                        result.error =
+                            "RAW cache prewarm was canceled or its semantic target was not produced.";
+                    }
+                } else if (!RawRenderPurposeMayPublishPresentation(
+                        snapshot.rawRenderPurpose) && snapshot.rawRenderPurpose != RawRenderPurpose::ViewportOverview) {
                     CaptureRawWorkspaceLocalRangeTargetSample(pipeline, result);
                     CaptureRawWorkspaceLocalRangeOverlay(pipeline, result);
-                    result.success =
-                        FenceSharedTexture(result.outputTexture);
+                    // Auxiliary packets are intentionally unable to carry an
+                    // adoptable main presentation. Their own overlay texture,
+                    // if any, is fenced independently by the capture helper.
+                    result.success = true;
+                } else {
+                    result.rawWorkspace.viewportRegion = pipeline.GetRawViewportRegion();
+                    result.outputTexture.texture =
+                        pipeline.PublishSharedOutputTexture(
+                            result.outputTexture.width,
+                            result.outputTexture.height,
+                            true, &result.error);
+                    result.success = result.outputTexture.texture != 0;
+                    if (result.success) {
+                        CaptureRawWorkspaceLocalRangeTargetSample(pipeline, result);
+                        CaptureRawWorkspaceLocalRangeOverlay(pipeline, result);
+                        result.success =
+                            FenceSharedTexture(result.outputTexture);
+                    }
                 }
             } else {
-                result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
+                result.outputTexture.texture = pipeline.PublishSharedOutputTexture(
+                    result.outputTexture.width, result.outputTexture.height, false, &result.error);
                 result.success =
                     FenceSharedTexture(result.outputTexture);
             }
-            if (!result.success) {
-                const std::string& denoiseError =
-                    pipeline.GetLastRawRgbDenoiseError();
-                result.error = denoiseError.empty()
-                    ? "Render produced no pixels."
-                    : denoiseError;
+            if (!result.success && result.error.empty()) {
+                result.error = RenderFailureReason(pipeline,
+                    snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport
+                        ? "Could not read the rendered image for export."
+                        : "Could not synchronize the rendered image with the preview.");
             }
-            finishProgressStep("Main output rendered.");
+            finishProgressStep(result.success ? "Main output rendered." : "Main output failed.");
             renderDevelopCandidateRequests();
             renderPreviewRequests();
             return result;
@@ -2575,37 +3261,79 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
             result.error = "Render superseded by a newer snapshot.";
             return result;
         }
+        collectReadyGradingScopePacket();
         if (!snapshot.rawWorkspace.sourceKey.empty()) {
+            if (!snapshot.rawWorkspace.analysisRequested &&
+                    snapshot.rawWorkspace.graphScopeStage != RawDevelopmentGraphScopeStage::None) {
+                result.rawWorkspace.graphScopeReadback = pipeline.GetRawDevelopmentGraphScopeReadback();
+            }
             if (snapshot.rawWorkspace.analysisRequested) {
-                CaptureRawWorkspaceViewTransformInputStats(pipeline, result);
+                CaptureRawWorkspaceViewTransformInputStats(
+                    pipeline,
+                    snapshot,
+                    result);
                 if (!snapshot.rawWorkspace.startPointCandidateRenderRequests.empty()) {
                     CaptureRawWorkspaceAutoBaseRecommendations(pipeline, snapshot, result);
                 }
+                if (shouldAbortStaleWork()) {
+                    finishProgressStep("Newer render queued.");
+                    result.error = "Render superseded by a newer snapshot.";
+                    return result;
+                }
             }
-            result.outputTexture.texture = pipeline.PublishSharedOutputTexture(
-                result.outputTexture.width,
-                result.outputTexture.height,
-                true);
-            result.success = result.outputTexture.texture != 0;
-            if (result.success) {
+            if (snapshot.rawRenderPurpose ==
+                    RawRenderPurpose::ExplicitExport) {
+                result.pixels = pipeline.GetOutputPixelsTiledPbo(
+                    result.width,
+                    result.height);
+                result.success =
+                    Stack::PixelBuffer::HasCompletePixelBuffer(
+                        result.pixels.size(),
+                        result.width,
+                        result.height,
+                        4);
+            } else if (snapshot.rawRenderPurpose ==
+                    RawRenderPurpose::CachePrewarm) {
+                result.rawWorkspace.cachePrewarmCompleted =
+                    pipeline.WasRawDevelopmentCachePrewarmCompleted();
+                result.success =
+                    result.rawWorkspace.cachePrewarmCompleted;
+                if (!result.success) {
+                    result.error =
+                        "RAW cache prewarm was canceled or its semantic target was not produced.";
+                }
+            } else if (!RawRenderPurposeMayPublishPresentation(
+                    snapshot.rawRenderPurpose)) {
                 CaptureRawWorkspaceLocalRangeTargetSample(pipeline, result);
                 CaptureRawWorkspaceLocalRangeOverlay(pipeline, result);
-                result.success =
-                    FenceSharedTexture(result.outputTexture);
+                result.success = true;
+            } else {
+                result.outputTexture.texture =
+                    pipeline.PublishSharedOutputTexture(
+                        result.outputTexture.width,
+                        result.outputTexture.height,
+                        true, &result.error);
+                result.success = result.outputTexture.texture != 0;
+                if (result.success) {
+                    CaptureRawWorkspaceLocalRangeTargetSample(pipeline, result);
+                    CaptureRawWorkspaceLocalRangeOverlay(pipeline, result);
+                    result.success =
+                        FenceSharedTexture(result.outputTexture);
+                }
             }
         } else {
-            result.outputTexture.texture = pipeline.PublishSharedOutputTexture(result.outputTexture.width, result.outputTexture.height);
+            result.outputTexture.texture = pipeline.PublishSharedOutputTexture(
+                result.outputTexture.width, result.outputTexture.height, false, &result.error);
             result.success =
                 FenceSharedTexture(result.outputTexture);
         }
-        if (!result.success) {
-            const std::string& denoiseError =
-                pipeline.GetLastRawRgbDenoiseError();
-            result.error = denoiseError.empty()
-                ? "Render produced no pixels."
-                : denoiseError;
+        if (!result.success && result.error.empty()) {
+            result.error = RenderFailureReason(pipeline,
+                snapshot.rawRenderPurpose == RawRenderPurpose::ExplicitExport
+                    ? "Could not read the rendered image for export."
+                    : "Could not synchronize the rendered image with the preview.");
         }
-        finishProgressStep("Layer stack rendered.");
+        finishProgressStep(result.success ? "Layer stack rendered." : "Layer stack failed.");
         renderDevelopCandidateRequests();
         renderPreviewRequests();
     } catch (const std::bad_alloc&) {

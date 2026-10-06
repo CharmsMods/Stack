@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "legalOwner": "Darynn Ho",
+  "brands": [
+    "Stack",
+    "Charm",
+    "CharmsMods"
+  ],
+  "approvalState": "draft",
+  "approvalDate": null,
+  "approvalReference": null,
+  "documents": {
+    "sourceLicense": {
+      "path": "LICENSE",
+      "version": "1.1",
+      "sha256": "defce3e5a10c7529ab380bfc3e27779ed6bc753b6f49427f473e61de7c7e679c"
+    },
+    "eula": {
+      "path": "legal/EULA.txt",
+      "version": "1.0-draft",
+      "sha256": "fd69cca4ffba57eda4f6b7dccb359a43a2fb79bb770d053c479865ffd93b436e"
+    },
+    "privacy": {
+      "path": "legal/PRIVACY.md",
+      "version": "1.0-draft",
+      "sha256": "6b854e6e3d97836b72bfc7958e5683850757f0e07a347bd1cdd5cea5bb5ef5c3"
+    },
+    "installerInformation": {
+      "path": "legal/INFO_BEFORE_INSTALL.txt",
+      "version": "1.0-draft",
+      "sha256": "fcb396b8925cdfdaea1c4b9ff2442b38f1526ce87fade71359afd742ca29b249"
+    }
+  }
+}

@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "components": [
+    {
+      "id": "dear-imgui",
+      "name": "Dear ImGui",
+      "version": "commit 5a76f2adf1b0403b86a45010121fb32a6bff8680",
+      "homepage": "https://github.com/ocornut/imgui",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2014-2026 Omar Cornut",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "DearImGui-MIT.txt"
+      ]
+    },
+    {
+      "id": "glfw",
+      "name": "GLFW",
+      "version": "3.4",
+      "homepage": "https://www.glfw.org/",
+      "license": "zlib/libpng",
+      "copyright": "Copyright (c) 2002-2006 Marcus Geelnard; Copyright (c) 2006-2019 Camilla Lowy",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "GLFW-zlib-libpng.txt"
+      ]
+    },
+    {
+      "id": "nlohmann-json",
+      "name": "JSON for Modern C++",
+      "version": "3.11.2",
+      "homepage": "https://github.com/nlohmann/json",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2013-2022 Niels Lohmann",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "NlohmannJSON-MIT.txt"
+      ]
+    },
+    {
+      "id": "stb",
+      "name": "stb_image, stb_image_write, and stb_truetype",
+      "version": "stb_image 2.30; stb_image_write 1.16; stb_truetype (Dear ImGui bundled revision)",
+      "homepage": "https://github.com/nothings/stb",
+      "license": "MIT or public domain",
+      "copyright": "Copyright (c) 2017 Sean Barrett",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "stb-MIT-or-Public-Domain.txt"
+      ]
+    },
+    {
+      "id": "libraw",
+      "name": "LibRaw",
+      "version": "0.22.1 (commit b860248a89d9082b8e0a1e202e516f46af9adb29)",
+      "homepage": "https://github.com/LibRaw/LibRaw",
+      "license": "GNU LGPL 2.1 option",
+      "copyright": "Copyright (C) 2008-2026 LibRaw LLC",
+      "scope": "desktop",
+      "presence": "Stack/App/Runtime/libraw.dll",
+      "licenseFiles": [
+        "LibRaw-LGPL-2.1.txt",
+        "LibRaw-COPYRIGHT.txt"
+      ]
+    },
+    {
+      "id": "windows-app-sdk-bootstrap",
+      "name": "Microsoft Windows App SDK Bootstrap",
+      "version": "resolved build dependency",
+      "homepage": "https://learn.microsoft.com/windows/apps/windows-app-sdk/",
+      "license": "Microsoft Software License Terms",
+      "copyright": "Copyright Microsoft Corporation",
+      "scope": "desktop",
+      "presence": "Stack/App/Runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll",
+      "licenseFiles": [
+        "Microsoft-WindowsAppSDK-License.txt"
+      ]
+    },
+    {
+      "id": "ffmpeg-provider",
+      "name": "FFmpeg provider",
+      "version": "provider manifest",
+      "homepage": "https://ffmpeg.org/",
+      "license": "provider manifest and bundled license files",
+      "copyright": "FFmpeg project contributors",
+      "scope": "desktop",
+      "presence": "Stack/App/Tools/FFmpeg/ffmpeg.exe",
+      "licenseFiles": []
+    },
+    {
+      "id": "website-fonts",
+      "name": "Outfit, Space Grotesk, Newsreader, and IBM Plex Mono fonts",
+      "version": "repository-hosted webfont files",
+      "homepage": "https://github.com/google/fonts",
+      "license": "SIL Open Font License 1.1",
+      "copyright": "Copyright notices are retained in the font files and website font notice",
+      "scope": "website",
+      "presence": "website/fonts",
+      "licenseFiles": [
+        "fonts/OFL-1.1.txt"
+      ]
+    },
+    {
+      "id": "opencv",
+      "name": "OpenCV CPU panorama modules",
+      "version": "4.13.0, commit 2e1f8da65e4f9fa1a98423e6ac223187438a4db8",
+      "homepage": "https://opencv.org/",
+      "license": "Apache-2.0; BSD-3-Clause; zlib; FDLIBM permission notice",
+      "copyright": "See OpenCV copyright and bundled notices",
+      "scope": "desktop",
+      "presence": "always",
+      "licenseFiles": [
+        "OpenCV-Apache-2.0.txt",
+        "OpenCV-COPYRIGHT.txt",
+        "OpenCV-zlib.txt",
+        "OpenCV-SoftFloat-FDLIBM.txt",
+        "OpenCV-FLANN-BSD.txt"
+      ]
+    }
+  ]
+}

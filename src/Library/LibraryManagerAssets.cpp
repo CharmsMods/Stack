@@ -25,6 +25,7 @@ using namespace Stack::Library::StorageHelpers;
 
 void LibraryManager::ClearAssetConflicts() {
     for (auto& conflict : m_PendingAssetConflicts) {
+        m_Notifier.CancelActivity(conflict.activity, "Asset import stopped.");
         if (conflict.localPreviewTex) {
             m_DeferredTextureDeletions.push_back(conflict.localPreviewTex);
         }
@@ -63,10 +64,16 @@ void LibraryManager::PrepareAssetConflictPreview(int index) {
     conflict.previewsReady = true;
 }
 
-void LibraryManager::ResolveAssetConflict(int index, AssetConflictAction action) {
-    if (index < 0 || index >= static_cast<int>(m_PendingAssetConflicts.size())) {
-        return;
+int LibraryManager::FindAssetConflictIndex(std::uint64_t id) const {
+    for (std::size_t i = 0; i < m_PendingAssetConflicts.size(); ++i) {
+        if (m_PendingAssetConflicts[i].id == id) return static_cast<int>(i);
     }
+    return -1;
+}
+
+ConflictResolutionResult LibraryManager::ResolveAssetConflict(std::uint64_t id, AssetConflictAction action) {
+    const int index = FindAssetConflictIndex(id);
+    if (index < 0) return { ConflictResolutionState::Failed, "This asset import is no longer waiting for a decision." };
 
     auto conflict = m_PendingAssetConflicts[static_cast<std::size_t>(index)];
     bool resolved = false;
@@ -81,6 +88,7 @@ void LibraryManager::ResolveAssetConflict(int index, AssetConflictAction action)
         return candidate;
     };
 
+    try {
     if (action == AssetConflictAction::UseExisting) {
         resolved = true;
     } else if (action == AssetConflictAction::Replace) {
@@ -91,9 +99,14 @@ void LibraryManager::ResolveAssetConflict(int index, AssetConflictAction action)
         const std::string targetFileName = buildUniqueAssetFileName(baseStem);
         resolved = WriteFileBytes(m_AssetsPath / targetFileName, conflict.importedImageBytes);
     }
+    } catch (const std::exception& error) {
+        return { ConflictResolutionState::Failed, std::string("Could not save the imported asset. ") + error.what() };
+    } catch (...) {
+        return { ConflictResolutionState::Failed, "Could not save the imported asset. Check the destination and try again." };
+    }
 
     if (!resolved) {
-        return;
+        return { ConflictResolutionState::Failed, "Could not save the imported asset. Check that the Library folder is writable, then try again." };
     }
 
     if (conflict.localPreviewTex) {
@@ -108,6 +121,9 @@ void LibraryManager::ResolveAssetConflict(int index, AssetConflictAction action)
         m_LastLibrarySignature = 0;
         RequestRefreshLibraryAsync();
     }
+    m_Notifier.CompleteActivity(conflict.activity, action == AssetConflictAction::UseExisting
+        ? "Existing asset kept." : "Asset imported.");
+    return { ConflictResolutionState::Resolved, {} };
 }
 
 std::vector<std::string> LibraryManager::SyncProjectAssets(
@@ -263,33 +279,56 @@ void LibraryManager::QueueLooseAssetSave(
     const std::string& preferredFileName,
     const std::string& projectFileName,
     const std::string& projectName,
-    const std::string& projectKind) {
+    const std::string& projectKind,
+    bool meaningful) {
 
     if (imageBytes.empty()) {
+        if (meaningful) m_Notifier.Error("No image data is available to import.");
         return;
     }
 
     const std::string trimmedDisplayName = TrimWhitespace(displayName).empty() ? "Imported Asset" : TrimWhitespace(displayName);
     const std::string fallbackFileName = SanitizeFileStem(trimmedDisplayName) + ".png";
     const std::string resolvedPreferredFileName = EnsureAssetFileName(preferredFileName, fallbackFileName);
+    const auto notifier = m_Notifier;
+    Stack::Notifications::NoticeSpec work;
+    work.title = "Importing asset";
+    work.context = trimmedDisplayName;
+    const auto inherited = Async::TaskSystem::CurrentActivity();
+    if (inherited.ownerId == notifier.GetOwner().id && inherited.ownerGeneration == notifier.GetOwner().generation)
+        work.operationId = inherited.operationId;
+    work.preview = false;
+    work.maintenance = !meaningful;
+    const auto activity = notifier.BeginActivity(std::move(work));
+    Async::ActivityMetadata metadata;
+    metadata.ownerId = notifier.GetOwner().id;
+    metadata.ownerGeneration = notifier.GetOwner().generation;
+    metadata.operationId = activity.operationId;
+    metadata.label = "Loading assets";
+    metadata.maintenance = !meaningful;
 
-    Async::TaskSystem::Get().Submit([this,
+    const bool submitted = Async::TaskSystem::Get().Submit(std::move(metadata),[this,
                                      trimmedDisplayName,
                                      imageBytes,
                                      resolvedPreferredFileName,
                                      projectFileName,
                                      projectName,
-                                     projectKind]() mutable {
+                                     projectKind, notifier, activity, meaningful]() mutable {
+        try {
         std::vector<unsigned char> importedPixels;
         int importedW = 0;
         int importedH = 0;
         int importedC = 4;
         if (!DecodeImageBytes(imageBytes, importedPixels, importedW, importedH, importedC)) {
+            notifier.FailActivity(activity, "Could not read the imported image.");
             return;
         }
 
-        if (!std::filesystem::exists(m_AssetsPath)) {
-            std::filesystem::create_directories(m_AssetsPath);
+        std::error_code ec;
+        std::filesystem::create_directories(m_AssetsPath, ec);
+        if (ec) {
+            notifier.FailActivity(activity, "Could not access the Library image folder.", ec.message());
+            return;
         }
 
         const std::filesystem::path preferredPath = m_AssetsPath / resolvedPreferredFileName;
@@ -303,6 +342,7 @@ void LibraryManager::QueueLooseAssetSave(
                     existingPixels.size() == importedPixels.size() &&
                     ComputeExactPixelFingerprint(existingPixels) == ComputeExactPixelFingerprint(importedPixels) &&
                     existingPixels == importedPixels) {
+                    notifier.CompleteActivity(activity, "The image is already in the Library.", false);
                     return;
                 }
             }
@@ -376,7 +416,8 @@ void LibraryManager::QueueLooseAssetSave(
         }
 
         if (foundConflict) {
-            Async::TaskSystem::Get().PostToMain([this, conflict = std::move(pendingConflict)]() mutable {
+            pendingConflict.activity = activity;
+            Async::TaskSystem::Get().PostToMain([this, notifier, activity, conflict = std::move(pendingConflict)]() mutable {
                 const auto alreadyQueued = std::find_if(
                     m_PendingAssetConflicts.begin(),
                     m_PendingAssetConflicts.end(),
@@ -387,7 +428,11 @@ void LibraryManager::QueueLooseAssetSave(
                                existing.importedHeight == conflict.importedHeight;
                     });
                 if (alreadyQueued == m_PendingAssetConflicts.end()) {
+                    conflict.id = m_NextConflictId++;
                     m_PendingAssetConflicts.push_back(std::move(conflict));
+                    notifier.UpdateActivity(activity, "Waiting for your choice");
+                } else {
+                    notifier.CompleteActivity(activity, "This image is already waiting for a decision.", false);
                 }
             });
             return;
@@ -401,14 +446,22 @@ void LibraryManager::QueueLooseAssetSave(
         }
 
         if (!WriteFileBytes(m_AssetsPath / targetFileName, imageBytes)) {
+            notifier.FailActivity(activity, "Could not save the imported image.");
             return;
         }
 
-        Async::TaskSystem::Get().PostToMain([this]() {
+        Async::TaskSystem::Get().PostToMain([this, notifier, activity, meaningful]() {
             m_LastLibrarySignature = 0;
             RequestRefreshLibraryAsync();
+            notifier.CompleteActivity(activity, "Asset imported.", meaningful);
         });
+        } catch (const std::exception& error) {
+            notifier.FailActivity(activity, "Could not import the image.", error.what());
+        } catch (...) {
+            notifier.FailActivity(activity, "Could not import the image.");
+        }
     });
+    if (!submitted) notifier.FailActivity(activity, "The image import could not be started.");
 }
 
 void LibraryManager::MirrorCompositeEmbeddedAssets(const StackFormat::ProjectDocument& document) {
@@ -440,7 +493,7 @@ void LibraryManager::MirrorCompositeEmbeddedAssets(const StackFormat::ProjectDoc
         }
 
         const std::string layerName = item.value("name", std::string("Composite Asset"));
-        QueueLooseAssetSave(layerName, imageBytes, SanitizeFileStem(layerName) + ".png");
+        QueueLooseAssetSave(layerName, imageBytes, SanitizeFileStem(layerName) + ".png", {}, {}, {}, false);
     }
 }
 
@@ -449,7 +502,10 @@ bool LibraryManager::ExportAsset(const std::string& fileName, const std::string&
 
     try {
         const std::filesystem::path sourcePath = m_AssetsPath / fileName;
-        if (!std::filesystem::exists(sourcePath)) return false;
+        if (!std::filesystem::exists(sourcePath)) {
+            PostNotification(UiNotificationSeverity::Error, "The image to export is no longer available.", "library-export-asset");
+            return false;
+        }
 
         const std::filesystem::path destination = destinationPath;
         if (destination.has_parent_path()) {
@@ -457,10 +513,10 @@ bool LibraryManager::ExportAsset(const std::string& fileName, const std::string&
         }
 
         std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::overwrite_existing);
-        QueueUiNotification(UiNotificationSeverity::Success, "Asset exported.", "library-export-asset");
+        PostNotification(UiNotificationSeverity::Success, "Asset exported.", "library-export-asset");
         return true;
     } catch (...) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to export the asset.", "library-export-asset");
+        PostNotification(UiNotificationSeverity::Error, "Failed to export the asset.", "library-export-asset");
         return false;
     }
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <imgui.h>
+#include <cstdint>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -183,6 +184,85 @@ inline CaptionThemeResult ApplyMainWindow(
     return ApplyCaptionTheme(window ? glfwGetWin32Window(window) : nullptr, captionColor, textColor, borderColor, false);
 }
 
+inline bool SetMainWindowBorderVisible(
+    GLFWwindow* window,
+    const ImVec4& borderColor,
+    bool visible) {
+    HWND hwnd = window ? glfwGetWin32Window(window) : nullptr;
+    if (!hwnd) {
+        return false;
+    }
+    const COLORREF color = visible
+        ? ToColorRef(borderColor)
+        : static_cast<COLORREF>(DWMWA_COLOR_NONE);
+    return SUCCEEDED(DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_BORDER_COLOR,
+        &color,
+        sizeof(color)));
+}
+
+inline bool HideMainWindowUntilFirstFrame(
+    GLFWwindow* window,
+    std::intptr_t& originalExtendedStyle) {
+    HWND hwnd = window ? glfwGetWin32Window(window) : nullptr;
+    if (!hwnd) {
+        return false;
+    }
+
+    const LONG_PTR currentExtendedStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((currentExtendedStyle & WS_EX_LAYERED) != 0) {
+        return false;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR previousStyle = SetWindowLongPtrW(
+        hwnd,
+        GWL_EXSTYLE,
+        currentExtendedStyle | WS_EX_LAYERED);
+    if (previousStyle == 0 && GetLastError() != ERROR_SUCCESS) {
+        return false;
+    }
+    if (!SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA)) {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, currentExtendedStyle);
+        return false;
+    }
+
+    originalExtendedStyle = static_cast<std::intptr_t>(currentExtendedStyle);
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    return true;
+}
+
+inline bool RevealMainWindowAfterFirstFrame(
+    GLFWwindow* window,
+    std::intptr_t originalExtendedStyle) {
+    HWND hwnd = window ? glfwGetWin32Window(window) : nullptr;
+    if (!hwnd) {
+        return false;
+    }
+
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_EXSTYLE,
+        static_cast<LONG_PTR>(originalExtendedStyle));
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    return true;
+}
+
 inline HWND GetNativeHandle(GLFWwindow* window) {
     return window ? glfwGetWin32Window(window) : nullptr;
 }
@@ -306,6 +386,9 @@ struct CaptionThemeResult {};
 inline CaptionThemeResult Apply(GLFWwindow*) { return {}; }
 inline CaptionThemeResult Apply(GLFWwindow*, const ImVec4&, bool = true) { return {}; }
 inline CaptionThemeResult ApplyMainWindow(GLFWwindow*, const ImVec4&, const ImVec4&, const ImVec4&) { return {}; }
+inline bool SetMainWindowBorderVisible(GLFWwindow*, const ImVec4&, bool) { return false; }
+inline bool HideMainWindowUntilFirstFrame(GLFWwindow*, std::intptr_t&) { return false; }
+inline bool RevealMainWindowAfterFirstFrame(GLFWwindow*, std::intptr_t) { return false; }
 inline bool EnsureNotTopMost(GLFWwindow*) { return false; }
 inline bool SetOwner(GLFWwindow*, GLFWwindow*) { return false; }
 inline bool IsForeground(GLFWwindow*) { return false; }

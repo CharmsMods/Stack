@@ -1,11 +1,14 @@
+#include "Raw/HdrDisplayMapping.h"
 #include "ToneLayers.h"
 
 #include "Renderer/FullscreenQuad.h"
 #include "Renderer/GLStateGuards.h"
+#include "Renderer/CoverageSampling.h"
 
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -31,9 +34,6 @@ uniform sampler2D uInputTex;
 void main() {
     vec4 color = texture(uInputTex, vUV);
     float outAlpha = color.a;
-    if (outAlpha <= 0.0001 && max(color.r, max(color.g, color.b)) > 0.0001) {
-        outAlpha = 1.0;
-    }
     FragColor = vec4(color.rgb, outAlpha);
 }
 )";
@@ -91,10 +91,15 @@ in vec2 vUV;
 layout (location = 0) out vec4 FragColor;
 
 uniform sampler2D uInputTex;
+uniform ivec2 uOutputSize;
 uniform sampler2D uCurveLut;
+uniform int uSceneToneEnabled;
+uniform vec2 uSceneToneTails;
 uniform int uMode;
 uniform int uPointCurveSetEnabled;
-uniform int uLegacyLumaEnabled;
+uniform int uExtendedSceneRange;
+uniform int uTruthfulV2SignedMath;
+uniform vec3 uLumaWeights;
 uniform int uDomain;
 uniform float uLogMinEv;
 uniform float uLogMaxEv;
@@ -113,7 +118,7 @@ uniform float uFoundationBandWidth;
 uniform int uFoundationPreserveHue;
 
 float lumaOf(vec3 rgb) {
-    return max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
+    return max(0.0, dot(rgb, uLumaWeights));
 }
 
 float curve(float x) {
@@ -132,12 +137,44 @@ float sceneToCurveCoord(float x) {
     return clamp(x, 0.0, 1.0);
 }
 
+float sceneToCurveCoordUnclamped(float x) {
+    if (uDomain == 1) {
+        float ev = log2(max(x, 1.17549435e-38) / max(uMiddleGrey, 0.000001));
+        return (ev - uLogMinEv) / max(0.0001, uLogMaxEv - uLogMinEv);
+    }
+    return x;
+}
+
 float curveCoordToScene(float coord) {
     if (uDomain == 1) {
         float ev = mix(uLogMinEv, uLogMaxEv, clamp(coord, 0.0, 1.0));
         return max(uMiddleGrey, 0.000001) * exp2(ev);
     }
     return coord;
+}
+
+float curveCoordToSceneUnclamped(float coord) {
+    if (uDomain == 1) {
+        float ev = mix(uLogMinEv, uLogMaxEv, coord);
+        return max(uMiddleGrey, 0.000001) * exp2(ev);
+    }
+    return coord;
+}
+
+vec4 curveSetExtended(float coord) {
+    if (coord < 0.0) {
+        return curveSet(0.0) + vec4(coord);
+    }
+    if (coord > 1.0) {
+        return curveSet(1.0) + vec4(coord - 1.0);
+    }
+    return curveSet(coord);
+}
+
+float curveExtended(float coord) {
+    if (coord < 0.0) return curve(0.0) + coord;
+    if (coord > 1.0) return curve(1.0) + coord - 1.0;
+    return curve(coord);
 }
 
 float gaussian(float x, float center, float width) {
@@ -153,13 +190,15 @@ void accumulateBaseSample(
     float spatialWeight,
     float centerLuma) {
     vec2 sampleUv = clamp(uv + offset, vec2(0.0), vec2(1.0));
-    float sampleLuma = lumaOf(max(vec3(0.0), texture(uInputTex, sampleUv).rgb));
+    vec4 sampleValue = sampleCovered(uInputTex, sampleUv);
+    if (sampleValue.a <= 0.0) return;
+    float sampleLuma = lumaOf(max(vec3(0.0), sampleValue.rgb));
     float centerEv = log2(max(centerLuma, 0.000001));
     float sampleEv = log2(max(sampleLuma, 0.000001));
     float edgeSigma = mix(2.8, 0.55, clamp(uLocalEdgeProtection, 0.0, 1.0));
     float edgeDelta = (sampleEv - centerEv) / max(0.10, edgeSigma);
     float edgeWeight = exp(-0.5 * edgeDelta * edgeDelta);
-    float weight = spatialWeight * edgeWeight;
+    float weight = spatialWeight * edgeWeight * sampleValue.a;
     weightedLuma += sampleLuma * weight;
     totalWeight += weight;
 }
@@ -181,7 +220,7 @@ float localBaseLuma(vec2 uv, float centerLuma) {
     accumulateBaseSample(weightedLuma, totalWeight, uv, vec2(-radius.x * 0.75,  radius.y * 0.75), 0.55, centerLuma);
     accumulateBaseSample(weightedLuma, totalWeight, uv, vec2( radius.x * 0.75, -radius.y * 0.75), 0.55, centerLuma);
     accumulateBaseSample(weightedLuma, totalWeight, uv, vec2(-radius.x * 0.75, -radius.y * 0.75), 0.55, centerLuma);
-    return weightedLuma / max(0.0001, totalWeight);
+    return totalWeight > 0.0 ? weightedLuma / totalWeight : centerLuma;
 }
 
 float localBaselineGainEv(float baseLuma, float centerLuma) {
@@ -221,46 +260,85 @@ float foundationGainEvFor(float luma) {
 }
 
 float toneResponse(float x) {
+    if (uExtendedSceneRange != 0) {
+        if (x <= 0.0) return x;
+        float coord = sceneToCurveCoordUnclamped(x);
+        return curveCoordToSceneUnclamped(curveExtended(coord));
+    }
     float coord = sceneToCurveCoord(x);
     return curveCoordToScene(curve(coord));
 }
 
 void main() {
-    vec4 color = texture(uInputTex, vUV);
-    vec3 rgb = max(vec3(0.0), color.rgb);
+    vec4 color = all(equal(textureSize(uInputTex, 0), uOutputSize))
+        ? texelFetch(uInputTex, ivec2(gl_FragCoord.xy), 0)
+        : texture(uInputTex, vUV);
+    vec3 rgb = uExtendedSceneRange != 0
+        ? color.rgb
+        : max(vec3(0.0), color.rgb);
     if (uLocalBaselineEnabled != 0) {
         float localOldLuma = lumaOf(rgb);
         float localAverage = localBaseLuma(vUV, localOldLuma);
         float localGainEv = localBaselineGainEv(localAverage, localOldLuma);
         float localNewLuma = localOldLuma * exp2(localGainEv);
-        rgb = localOldLuma > 0.00001 ? rgb * (localNewLuma / localOldLuma) : vec3(localNewLuma);
+        if (localOldLuma > 0.00001) {
+            rgb *= localNewLuma / localOldLuma;
+        } else if (uTruthfulV2SignedMath == 0) {
+            rgb = vec3(localNewLuma);
+        }
     }
     float foundationOldLuma = lumaOf(rgb);
     float foundationNewLuma = foundationOldLuma * exp2(foundationGainEvFor(foundationOldLuma));
     if (uFoundationPreserveHue != 0) {
-        rgb = foundationOldLuma > 0.00001 ? rgb * (foundationNewLuma / foundationOldLuma) : vec3(foundationNewLuma);
+        if (foundationOldLuma > 0.00001) {
+            rgb *= foundationNewLuma / foundationOldLuma;
+        } else if (uTruthfulV2SignedMath == 0) {
+            rgb = vec3(foundationNewLuma);
+        }
     } else {
         rgb *= exp2(foundationGainEvFor(foundationOldLuma));
     }
-    if (uPointCurveSetEnabled != 0) {
-        if (uLegacyLumaEnabled != 0) {
-            float oldLuma = lumaOf(rgb);
-            float coord = sceneToCurveCoord(oldLuma);
-            float newLuma = curveCoordToScene(curveSet(coord).a);
-            rgb *= newLuma / max(oldLuma, 0.000001);
+    if (uSceneToneEnabled != 0) {
+        float y = dot(rgb, uLumaWeights);
+        if (y > 0.0) {
+            float ev = log2(y / 0.18);
+            float position = clamp((ev + 40.0) / 80.0, 0.0, 1.0);
+            float size = float(textureSize(uCurveLut, 0).x);
+            float mapped = texture(uCurveLut, vec2((0.5 + position * (size - 1.0)) / size, 0.5)).a;
+            if (ev < -40.0) mapped += (ev + 40.0) * uSceneToneTails.x;
+            if (ev > 40.0) mapped += (ev - 40.0) * uSceneToneTails.y;
+            rgb *= exp2(mapped - ev);
         }
-        float redCoord = sceneToCurveCoord(rgb.r);
-        float greenCoord = sceneToCurveCoord(rgb.g);
-        float blueCoord = sceneToCurveCoord(rgb.b);
-        rgb = vec3(
-            curveCoordToScene(curveSet(redCoord).r),
-            curveCoordToScene(curveSet(greenCoord).g),
-            curveCoordToScene(curveSet(blueCoord).b));
+    }
+    if (uPointCurveSetEnabled != 0) {
+        if (uExtendedSceneRange != 0) {
+            float redCoord = sceneToCurveCoordUnclamped(rgb.r);
+            float greenCoord = sceneToCurveCoordUnclamped(rgb.g);
+            float blueCoord = sceneToCurveCoordUnclamped(rgb.b);
+            vec4 redMapped = curveSetExtended(redCoord);
+            vec4 greenMapped = curveSetExtended(greenCoord);
+            vec4 blueMapped = curveSetExtended(blueCoord);
+            rgb = vec3(
+                rgb.r <= 0.0 ? rgb.r : curveCoordToSceneUnclamped(redMapped.r),
+                rgb.g <= 0.0 ? rgb.g : curveCoordToSceneUnclamped(greenMapped.g),
+                rgb.b <= 0.0 ? rgb.b : curveCoordToSceneUnclamped(blueMapped.b));
+        } else {
+            float redCoord = sceneToCurveCoord(rgb.r);
+            float greenCoord = sceneToCurveCoord(rgb.g);
+            float blueCoord = sceneToCurveCoord(rgb.b);
+            rgb = vec3(
+                curveCoordToScene(curveSet(redCoord).r),
+                curveCoordToScene(curveSet(greenCoord).g),
+                curveCoordToScene(curveSet(blueCoord).b));
+        }
     } else if (uMode == 0) {
         float oldLuma = lumaOf(rgb);
         float newLuma = toneResponse(oldLuma);
-        float gain = newLuma / max(oldLuma, 0.000001);
-        rgb = rgb * gain;
+        if (oldLuma > 0.000001) {
+            rgb *= newLuma / oldLuma;
+        } else if (uTruthfulV2SignedMath == 0) {
+            rgb *= newLuma / max(oldLuma, 0.000001);
+        }
     } else if (uMode == 1) {
         rgb = vec3(toneResponse(rgb.r), toneResponse(rgb.g), toneResponse(rgb.b));
     } else if (uMode == 2) {
@@ -271,9 +349,6 @@ void main() {
         rgb.b = toneResponse(rgb.b);
     }
     float outAlpha = color.a;
-    if (outAlpha <= 0.0001 && max(rgb.r, max(rgb.g, rgb.b)) > 0.0001) {
-        outAlpha = 1.0;
-    }
     FragColor = vec4(rgb, outAlpha);
 }
 )";
@@ -325,19 +400,17 @@ void main() {
         rgb *= exp2(gainEvFor(ev));
     }
     float outAlpha = color.a;
-    if (outAlpha <= 0.0001 && max(rgb.r, max(rgb.g, rgb.b)) > 0.0001) {
-        outAlpha = 1.0;
-    }
     FragColor = vec4(max(vec3(0.0), rgb), outAlpha);
 }
 )";
 
-const char* kViewTransformFrag = R"(
+const std::string kViewTransformFrag = std::string(R"(
 #version 330 core
 in vec2 vUV;
 layout (location = 0) out vec4 FragColor;
 
 uniform sampler2D uInputTex;
+uniform ivec2 uOutputSize;
 uniform float uExposure;
 uniform float uBlackEv;
 uniform float uWhiteEv;
@@ -345,11 +418,13 @@ uniform float uMiddleGrey;
 uniform float uShoulder;
 uniform float uToe;
 uniform float uContrast;
+uniform float uContrastPivotEv;
 uniform float uSaturation;
 uniform int uPreserveHue;
 uniform int uDebugFalseColor;
 uniform int uInputIsRec2020;
 uniform int uEncodeSrgbOutput;
+uniform int uPhotographicHdr;
 
 float lumaOf(vec3 rgb) {
     return max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
@@ -369,7 +444,12 @@ float filmicCurve(float x) {
     float white = uMiddleGrey * exp2(uWhiteEv);
     x = max(0.0, x * exp2(uExposure) - black);
     float norm = x / max(0.000001, white - black);
-    norm = pow(max(0.0, norm), max(0.05, uContrast));
+    float safeContrast = max(0.05, uContrast);
+    float pivotInput = uMiddleGrey * exp2(uContrastPivotEv);
+    float pivotNorm = max(
+        0.000001,
+        (pivotInput - black) / max(0.000001, white - black));
+    norm = pivotNorm * pow(max(0.0, norm) / pivotNorm, safeContrast);
     float toe = clamp(uToe, 0.0, 1.0);
     norm = mix(norm, (norm + toe * norm / (norm + 0.18)) / (1.0 + toe), toe);
     float shoulder = max(0.001, uShoulder);
@@ -407,33 +487,37 @@ vec3 linearToSrgb(vec3 rgb) {
     return mix(low, high, step(vec3(0.0031308), rgb));
 }
 
+)" ) + Raw::HdrDisplay::ShaderFunction() + R"(
+
+float displayCurve(float x) {
+    return uPhotographicHdr != 0 ? photographicHdrCurve(x) : filmicCurve(x);
+}
+
 void main() {
-    vec4 color = texture(uInputTex, vUV);
+    // At native size this is a pointwise color transform. Interpolated UVs
+    // can drift from pixel centers and mix a bright neighbor into dark detail.
+    vec4 color = all(equal(textureSize(uInputTex, 0), uOutputSize))
+        ? texelFetch(uInputTex, ivec2(gl_FragCoord.xy), 0)
+        : texture(uInputTex, vUV);
     vec3 rgb = uInputIsRec2020 != 0 ? rec2020ToLinearSrgb(color.rgb) : color.rgb;
     float oldLuma = lumaOf(rgb);
     if (uDebugFalseColor != 0) {
         float ev = log2(max(0.000001, oldLuma) / max(0.000001, uMiddleGrey));
         float outAlpha = color.a;
-        if (outAlpha <= 0.0001) {
-            outAlpha = 1.0;
-        }
         FragColor = vec4(falseColor(ev), outAlpha);
         return;
     }
-    float newLuma = filmicCurve(oldLuma);
+    float newLuma = displayCurve(oldLuma);
     if (uPreserveHue != 0) {
         rgb = oldLuma > 0.00001 ? rgb * (newLuma / oldLuma) : vec3(newLuma);
     } else {
-        rgb = vec3(filmicCurve(rgb.r), filmicCurve(rgb.g), filmicCurve(rgb.b));
+        rgb = vec3(displayCurve(rgb.r), displayCurve(rgb.g), displayCurve(rgb.b));
     }
     rgb = compressDisplayGamut(rgb);
     float luma = lumaOf(rgb);
     rgb = mix(vec3(luma), rgb, max(0.0, uSaturation));
     rgb = compressDisplayGamut(rgb);
     float outAlpha = color.a;
-    if (outAlpha <= 0.0001 && max(rgb.r, max(rgb.g, rgb.b)) > 0.0001) {
-        outAlpha = 1.0;
-    }
     rgb = clamp(rgb, 0.0, 1.0);
     if (uEncodeSrgbOutput != 0) {
         rgb = linearToSrgb(rgb);
@@ -539,7 +623,9 @@ ToneCurveLayer::~ToneCurveLayer() {
 }
 
 void ToneCurveLayer::InitializeGL() {
-    m_ShaderProgram = GLHelpers::CreateShaderProgram(kToneVert, kToneCurveFrag);
+    std::string fragment=kToneCurveFrag;
+    fragment.insert(fragment.find("void accumulateBaseSample("),Stack::Renderer::CoverageSamplingGlsl);
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(kToneVert, fragment.c_str());
 }
 
 void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {
@@ -592,16 +678,38 @@ void ToneCurveLayer::Execute(unsigned int inputTexture, int width, int height, F
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
+    glUniform2i(glGetUniformLocation(m_ShaderProgram, "uOutputSize"), width, height);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_LutTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uCurveLut"), 1);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uSceneToneEnabled"),
+        Stack::RawRecipe::IsSceneToneActive(m_SceneTone) ? 1 : 0);
+    glUniform2f(glGetUniformLocation(m_ShaderProgram, "uSceneToneTails"),
+        Stack::RawRecipe::EvaluateSceneToneContrast(m_SceneTone, -40),
+        Stack::RawRecipe::EvaluateSceneToneContrast(m_SceneTone, 40));
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uMode"), static_cast<int>(m_Mode));
     glUniform1i(
         glGetUniformLocation(m_ShaderProgram, "uPointCurveSetEnabled"),
         m_PointCurveSetEnabled ? 1 : 0);
     glUniform1i(
-        glGetUniformLocation(m_ShaderProgram, "uLegacyLumaEnabled"),
-        m_PointCurveSetEnabled && m_PointCurveSet.legacyLumaEnabled ? 1 : 0);
+        glGetUniformLocation(m_ShaderProgram, "uExtendedSceneRange"),
+        m_ExtendedSceneRange ? 1 : 0);
+    glUniform1i(
+        glGetUniformLocation(m_ShaderProgram, "uTruthfulV2SignedMath"),
+        m_TruthfulV2SignedMath ? 1 : 0);
+    if (m_LumaIsRec2020) {
+        glUniform3f(
+            glGetUniformLocation(m_ShaderProgram, "uLumaWeights"),
+            0.2627002f,
+            0.6779981f,
+            0.0593017f);
+    } else {
+        glUniform3f(
+            glGetUniformLocation(m_ShaderProgram, "uLumaWeights"),
+            m_ExtendedSceneRange ? 0.2126729f : 0.2126f,
+            m_ExtendedSceneRange ? 0.7151522f : 0.7152f,
+            m_ExtendedSceneRange ? 0.0721750f : 0.0722f);
+    }
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDomain"), static_cast<int>(m_Domain));
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uLogMinEv"), m_LogMinEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uLogMaxEv"), m_LogMaxEv);
@@ -639,28 +747,59 @@ void ToneCurveLayer::UpdateLut() {
     if (!m_LutDirty && m_LutTexture != 0) {
         return;
     }
-    const int sampleCount = m_PointCurveSetEnabled ? 4096 : 256;
+    const int sampleCount = (m_PointCurveSetEnabled || Stack::RawRecipe::IsSceneToneActive(m_SceneTone)) ? 4096 : 256;
     std::vector<float> lut(static_cast<std::size_t>(sampleCount) * 4u, 0.0f);
+
+    struct PreparedPointCurve {
+        std::vector<Stack::RawRecipe::RawBezierCurvePoint> basePoints;
+        std::vector<Stack::RawRecipe::RawBezierCurvePoint> points;
+    };
+    const auto preparePointCurve = [](const auto& component) {
+        PreparedPointCurve prepared;
+        if (!component.basePoints.empty()) {
+            Stack::RawRecipe::RawPointCurveComponent baseComponent;
+            baseComponent.points = component.basePoints;
+            prepared.basePoints =
+                Stack::RawRecipe::RawPointCurveBezierPoints(baseComponent);
+        }
+        prepared.points =
+            Stack::RawRecipe::RawPointCurveBezierPoints(component);
+        return prepared;
+    };
+    const auto evaluatePreparedPointCurve = [](const PreparedPointCurve& prepared,
+                                                float input) {
+        float value = std::clamp(input, 0.0f, 1.0f);
+        if (!prepared.basePoints.empty()) {
+            value = Stack::RawRecipe::EvaluateRawBezierCurve(
+                prepared.basePoints,
+                value);
+        }
+        return Stack::RawRecipe::EvaluateRawBezierCurve(
+            prepared.points,
+            value);
+    };
+    std::array<PreparedPointCurve, 4> preparedCurves;
+    if (m_PointCurveSetEnabled) {
+        for (std::size_t index = 0; index < preparedCurves.size(); ++index) {
+            preparedCurves[index] = preparePointCurve(m_PointCurveSet.curves[index]);
+        }
+    }
     for (int sample = 0; sample < sampleCount; ++sample) {
         const float input = static_cast<float>(sample) /
             static_cast<float>(std::max(1, sampleCount - 1));
         const std::size_t offset = static_cast<std::size_t>(sample) * 4u;
         if (m_PointCurveSetEnabled) {
-            const float composite = Stack::RawRecipe::EvaluateRawPointCurveComponent(
-                m_PointCurveSet.curves[static_cast<std::size_t>(
+            const float composite = evaluatePreparedPointCurve(
+                preparedCurves[static_cast<std::size_t>(
                     Stack::RawRecipe::RawPointCurveChannel::Composite)],
                 input);
             for (int channel = 0; channel < 3; ++channel) {
                 lut[offset + static_cast<std::size_t>(channel)] = Clamp01(
-                    Stack::RawRecipe::EvaluateRawPointCurveComponent(
-                        m_PointCurveSet.curves[static_cast<std::size_t>(channel + 1)],
+                    evaluatePreparedPointCurve(
+                        preparedCurves[static_cast<std::size_t>(channel + 1)],
                         composite));
             }
-            lut[offset + 3u] = m_PointCurveSet.legacyLumaEnabled
-                ? Clamp01(Stack::RawRecipe::EvaluateRawPointCurveComponent(
-                      m_PointCurveSet.legacyLuma,
-                      input))
-                : input;
+            lut[offset + 3u] = input;
         } else {
             const float value = Clamp01(EvaluateCombinedPointCurve(input));
             lut[offset] = value;
@@ -668,6 +807,11 @@ void ToneCurveLayer::UpdateLut() {
             lut[offset + 2u] = value;
             lut[offset + 3u] = value;
         }
+    }
+    if (Stack::RawRecipe::IsSceneToneActive(m_SceneTone)) {
+        for (int i = 0; i < sampleCount; ++i)
+            lut[static_cast<std::size_t>(i) * 4 + 3] = Stack::RawRecipe::EvaluateSceneToneEv(
+                m_SceneTone, -40.0f + 80.0f * i / (sampleCount - 1));
     }
     unsigned int replacement = 0;
     {
@@ -760,12 +904,10 @@ ViewTransformLayer::~ViewTransformLayer() {
 }
 
 void ViewTransformLayer::InitializeGL() {
-    m_ShaderProgram = GLHelpers::CreateShaderProgram(kToneVert, kViewTransformFrag);
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(kToneVert, kViewTransformFrag.c_str());
 }
 
 void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {
-    (void)width;
-    (void)height;
     if (m_ShaderProgram == 0) {
         InitializeGL();
     }
@@ -777,6 +919,7 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
+    glUniform2i(glGetUniformLocation(m_ShaderProgram, "uOutputSize"), width, height);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uExposure"), m_Exposure);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uBlackEv"), m_BlackEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uWhiteEv"), m_WhiteEv);
@@ -784,11 +927,15 @@ void ViewTransformLayer::Execute(unsigned int inputTexture, int width, int heigh
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uShoulder"), m_Shoulder);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uToe"), m_Toe);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uContrast"), m_Contrast);
+    glUniform1f(
+        glGetUniformLocation(m_ShaderProgram, "uContrastPivotEv"),
+        m_ContrastPivotEv);
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uSaturation"), m_Saturation);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uPreserveHue"), m_PreserveHue ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uDebugFalseColor"), m_DebugFalseColor ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputIsRec2020"), m_InputIsRec2020 ? 1 : 0);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uEncodeSrgbOutput"), m_EncodeSrgbOutput ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_ShaderProgram, "uPhotographicHdr"), m_PhotographicHdr ? 1 : 0);
     quad.Draw();
     glUseProgram(0);
 }

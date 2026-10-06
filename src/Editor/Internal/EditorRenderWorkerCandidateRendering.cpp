@@ -113,7 +113,7 @@ void EditorRenderWorker::RenderDevelopCandidateRequests(
         SetProgress(progressCompleted, totalProgressSteps, std::move(label));
     };
     auto shouldAbortStaleWork = [&]() {
-        return ShouldAbortStaleSnapshot(snapshot.generation);
+        return ShouldAbortStaleSnapshot(snapshot);
     };
     auto reportSupersededWork = [&]() {
         reportProgress("Newer render queued; skipping stale feedback...");

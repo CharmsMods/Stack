@@ -1,3 +1,4 @@
+#include "Raw/HdrDisplayMapping.h"
 #include "ToneLayers.h"
 
 #include "Editor/EditorModule.h"
@@ -476,11 +477,13 @@ void ViewTransformLayer::ResetDisplayDefaults() {
     m_Shoulder = 0.45f;
     m_Toe = 0.18f;
     m_Contrast = 1.0f;
+    m_ContrastPivotEv = 0.0f;
     m_Saturation = 1.0f;
     m_PreserveHue = true;
     m_DebugFalseColor = false;
     m_InputIsRec2020 = false;
     m_EncodeSrgbOutput = false;
+    m_PhotographicHdr = false;
 }
 
 void ViewTransformLayer::StoreProbeStats(const RenderTextureStats& stats) {
@@ -513,6 +516,7 @@ void ViewTransformLayer::ApplyAutoFromStats(const RenderTextureStats& stats) {
     m_Shoulder = stats.hdrPixelPercent > 1.0f ? 0.75f : 0.45f;
     m_Toe = 0.18f;
     m_Contrast = 1.0f;
+    m_ContrastPivotEv = 0.0f;
     m_Saturation = 1.0f;
     m_PreserveHue = true;
 }
@@ -558,6 +562,14 @@ void ViewTransformLayer::RenderExpandedNodeSurface(EditorModule* editor, const N
     ImGuiExtras::NodeSliderFloat("Highlight Shoulder", "##ViewShoulder", &m_Shoulder, 0.05f, 4.0f, "%.2f", context.safeContentWidth);
     ImGuiExtras::NodeSliderFloat("Shadow Toe", "##ViewToe", &m_Toe, 0.0f, 1.0f, "%.2f", context.safeContentWidth);
     ImGuiExtras::NodeSliderFloat("Contrast", "##ViewContrast", &m_Contrast, 0.25f, 2.5f, "%.2f", context.safeContentWidth);
+    ImGuiExtras::NodeSliderFloat(
+        "Contrast Pivot",
+        "##ViewContrastPivot",
+        &m_ContrastPivotEv,
+        std::max(-8.0f, m_BlackEv + 0.1f),
+        std::min(8.0f, m_WhiteEv - 0.1f),
+        "%+.2f EV",
+        context.safeContentWidth);
     ImGuiExtras::NodeSliderFloat("Saturation", "##ViewSaturation", &m_Saturation, 0.0f, 2.0f, "%.2f", context.safeContentWidth);
     ImGuiExtras::NodeCheckbox("Preserve Hue", "##ViewPreserveHue", &m_PreserveHue, context.safeContentWidth);
     ImGuiExtras::NodeCheckbox("EV False Color", "##ViewFalseColor", &m_DebugFalseColor, context.safeContentWidth);
@@ -589,11 +601,14 @@ json ViewTransformLayer::Serialize() const {
         { "shoulder", m_Shoulder },
         { "toe", m_Toe },
         { "contrast", m_Contrast },
+        { "contrastPivotEv", m_ContrastPivotEv },
+        { "contrastModel", Stack::RawRecipe::kViewContrastModelPivotedLogV2 },
         { "saturation", m_Saturation },
         { "preserveHue", m_PreserveHue },
         { "debugFalseColor", m_DebugFalseColor },
         { "inputWorkingSpace", m_InputIsRec2020 ? "linear-rec2020-d65" : "linear-srgb-d65" },
-        { "encodeSrgbOutput", m_EncodeSrgbOutput }
+        { "encodeSrgbOutput", m_EncodeSrgbOutput },
+        { "displayCurve", m_PhotographicHdr ? Raw::HdrDisplay::Photographic : "standard" }
     };
 }
 
@@ -605,11 +620,13 @@ void ViewTransformLayer::Deserialize(const json& j) {
     m_Shoulder = j.value("shoulder", m_Shoulder);
     m_Toe = j.value("toe", m_Toe);
     m_Contrast = j.value("contrast", m_Contrast);
+    m_ContrastPivotEv = j.value("contrastPivotEv", 0.0f);
     m_Saturation = j.value("saturation", m_Saturation);
     m_PreserveHue = j.value("preserveHue", m_PreserveHue);
     m_DebugFalseColor = j.value("debugFalseColor", m_DebugFalseColor);
     m_InputIsRec2020 = j.value("inputWorkingSpace", std::string("linear-srgb-d65")) == "linear-rec2020-d65";
     m_EncodeSrgbOutput = j.value("encodeSrgbOutput", false);
+    m_PhotographicHdr = j.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic;
 }
 
 ShadowsHighlightsLayer::ShadowsHighlightsLayer() = default;

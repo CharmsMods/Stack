@@ -16,7 +16,7 @@
 namespace Raw::Mfd {
 
 inline constexpr std::uint32_t kStreamingContractVersion = 1;
-inline constexpr std::uint32_t kFusionTileCacheFormatVersion = 1;
+inline constexpr std::uint32_t kFusionTileCacheFormatVersion = 3;
 inline constexpr const char* kStreamingContractId =
     "ra-cfa-streaming-cache-publication-v1";
 

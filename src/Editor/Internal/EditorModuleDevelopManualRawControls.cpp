@@ -158,7 +158,7 @@ bool RenderDevelopManualRawAdvancedControls(
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
     ImGui::BeginDisabled(!demosaicEnabled);
-    const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5" };
+    const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5", "Nearest Neighbor", "Hamilton-Adams" };
     int demosaicMethod = static_cast<int>(settings.demosaicMethod);
     ImGui::SetNextItemWidth(controlWidth);
     if (ImGui::Combo("Method", &demosaicMethod, demosaicLabels, IM_ARRAYSIZE(demosaicLabels))) {
@@ -166,7 +166,7 @@ bool RenderDevelopManualRawAdvancedControls(
             std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
         changed = true;
     }
-    ImGui::TextDisabled("MHC is the high-quality 5x5 linear reconstruction; Bilinear remains the fast draft option.");
+    ImGui::TextDisabled("MHC, Nearest Neighbor, and Hamilton-Adams are Stack-side CFA reconstructions.");
     ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
@@ -231,10 +231,7 @@ bool RenderDevelopManualRawAdvancedControls(
     }
     if (settings.mosaicDenoise.mode ==
         Raw::RawMosaicDenoiseMode::DngNoiseProfile) {
-        if (settings.processingVersion != Raw::RawProcessingVersion::TruthfulV1) {
-            ImGui::TextDisabled(
-                "DNG noise-aware filtering requires Truthful V1; fixed-threshold fallback is active.");
-        } else if (!metadata.hasDngNoiseProfile) {
+        if (!metadata.hasDngNoiseProfile) {
             ImGui::TextDisabled(
                 "NoiseProfile unavailable; fixed-threshold fallback is active.");
         } else {

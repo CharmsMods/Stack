@@ -118,6 +118,9 @@ typedef struct __GLsync* GLsync;
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
+#ifndef GL_LINEAR_MIPMAP_LINEAR
+#define GL_LINEAR_MIPMAP_LINEAR 0x2703
+#endif
 #ifndef GL_RED
 #define GL_RED 0x1903
 #endif
@@ -135,6 +138,12 @@ typedef struct __GLsync* GLsync;
 #endif
 #ifndef GL_RGBA16F
 #define GL_RGBA16F 0x881A
+#endif
+#ifndef GL_RG32F
+#define GL_RG32F 0x8230
+#endif
+#ifndef GL_R32F
+#define GL_R32F 0x822E
 #endif
 #ifndef GL_RGBA32F
 #define GL_RGBA32F 0x8814
@@ -275,6 +284,10 @@ extern void(APIENTRY* glUniformMatrix4fv_)(GLint location, GLsizei count, GLbool
 extern void(APIENTRY* glGenVertexArrays_)(GLsizei n, GLuint* arrays);
 extern void(APIENTRY* glDeleteVertexArrays_)(GLsizei n, const GLuint* arrays);
 extern void(APIENTRY* glBindVertexArray_)(GLuint array);
+extern void(APIENTRY* glBindSampler_)(GLuint unit, GLuint sampler);
+#ifndef GL_SAMPLER_BINDING
+#define GL_SAMPLER_BINDING 0x8919
+#endif
 
 // Buffers
 extern void(APIENTRY* glGenBuffers_)(GLsizei n, GLuint* buffers);
@@ -302,6 +315,7 @@ extern void(APIENTRY* glActiveTexture_)(GLenum texture);
 extern void(APIENTRY* glTexStorage2D_)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
 extern void(APIENTRY* glTexStorage3D_)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
 extern void(APIENTRY* glTexSubImage3D_)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
+extern void(APIENTRY* glGenerateMipmap_)(GLenum target);
 extern void(APIENTRY* glBindImageTexture_)(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
 extern void(APIENTRY* glGetIntegeri_v_)(GLenum target, GLuint index, GLint* data);
 extern void(APIENTRY* glDrawBuffers_)(GLsizei n, const GLenum* bufs);
@@ -309,6 +323,21 @@ extern void(APIENTRY* glDrawBuffers_)(GLsizei n, const GLenum* bufs);
 // Compute / synchronization
 extern void(APIENTRY* glDispatchCompute_)(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z);
 extern void(APIENTRY* glMemoryBarrier_)(GLbitfield barriers);
+#ifndef GL_TIMESTAMP
+#define GL_TIMESTAMP 0x8E28
+#define GL_QUERY_RESULT 0x8866
+#define GL_QUERY_RESULT_AVAILABLE 0x8867
+#endif
+extern void(APIENTRY* glGenQueries_)(GLsizei, GLuint*);
+extern void(APIENTRY* glDeleteQueries_)(GLsizei, const GLuint*);
+extern void(APIENTRY* glQueryCounter_)(GLuint, GLenum);
+extern void(APIENTRY* glGetQueryObjectiv_)(GLuint, GLenum, GLint*);
+extern void(APIENTRY* glGetQueryObjectui64v_)(GLuint, GLenum, GLuint64*);
+#define glGenQueries glGenQueries_
+#define glDeleteQueries glDeleteQueries_
+#define glQueryCounter glQueryCounter_
+#define glGetQueryObjectiv glGetQueryObjectiv_
+#define glGetQueryObjectui64v glGetQueryObjectui64v_
 extern GLsync(APIENTRY* glFenceSync_)(GLenum condition, GLbitfield flags);
 extern GLenum(APIENTRY* glClientWaitSync_)(GLsync sync, GLbitfield flags, GLuint64 timeout);
 extern void(APIENTRY* glDeleteSync_)(GLsync sync);
@@ -342,6 +371,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glGenVertexArrays glGenVertexArrays_
 #define glDeleteVertexArrays glDeleteVertexArrays_
 #define glBindVertexArray glBindVertexArray_
+#define glBindSampler glBindSampler_
 #define glGenBuffers glGenBuffers_
 #define glDeleteBuffers glDeleteBuffers_
 #define glBindBuffer glBindBuffer_
@@ -361,6 +391,7 @@ extern void(APIENTRY* glDeleteSync_)(GLsync sync);
 #define glTexStorage2D glTexStorage2D_
 #define glTexStorage3D glTexStorage3D_
 #define glTexSubImage3D glTexSubImage3D_
+#define glGenerateMipmap glGenerateMipmap_
 #define glBindImageTexture glBindImageTexture_
 #define glGetIntegeri_v glGetIntegeri_v_
 #define glDrawBuffers glDrawBuffers_

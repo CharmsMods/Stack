@@ -351,7 +351,7 @@ const EditorNodeGraph::CustomMaskPayload* EditorModule::GetActiveCustomMaskPaylo
     if (m_ActiveSubWindow != EditorSubWindow::ComplexNode) {
         return nullptr;
     }
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(m_ActiveComplexNodeId);
+    const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(m_ActiveComplexNodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::CustomMask) {
         return nullptr;
     }
@@ -458,15 +458,15 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     };
 
     auto commitChange = [&]() {
-        MarkRenderDirty(node.id);
-        MarkDirty();
+        MarkGraphEdited(node.id);
+        MarkGraphEdited(-1, false);
     };
 
     auto findImageSizeBackwards =
         [&](int startNodeId, int& outW, int& outH) -> bool {
         std::vector<int> pending{ startNodeId };
         std::unordered_set<int> visited;
-        visited.reserve(m_NodeGraph.GetNodes().size());
+        visited.reserve(GetNodeGraph().GetNodes().size());
         while (!pending.empty()) {
             const int currentNodeId = pending.back();
             pending.pop_back();
@@ -474,7 +474,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                 continue;
             }
             const EditorNodeGraph::Node* current =
-                m_NodeGraph.FindNode(currentNodeId);
+                GetNodeGraph().FindNode(currentNodeId);
             if (!current) {
                 continue;
             }
@@ -485,7 +485,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                 outH = current->image.height;
                 return true;
             }
-            m_NodeGraph.ForEachIncomingRenderLink(
+            GetNodeGraph().ForEachIncomingRenderLink(
                 currentNodeId,
                 [&](const EditorNodeGraph::Link& link) {
                     const bool imageInput =
@@ -518,7 +518,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     auto resolveReferenceSize = [&](int& outW, int& outH) -> bool {
         if (payload.referenceMode == EditorNodeGraph::CustomMaskReferenceMode::GraphNode &&
             payload.referenceNodeId > 0) {
-            const EditorNodeGraph::Node* reference = m_NodeGraph.FindNode(payload.referenceNodeId);
+            const EditorNodeGraph::Node* reference = GetNodeGraph().FindNode(payload.referenceNodeId);
             if (reference && reference->kind == EditorNodeGraph::NodeKind::Image &&
                 reference->image.width > 0 && reference->image.height > 0) {
                 outW = reference->image.width;
@@ -529,10 +529,10 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
 
         std::vector<int> queue{ node.id };
         std::unordered_set<int> discovered{ node.id };
-        discovered.reserve(m_NodeGraph.GetNodes().size());
+        discovered.reserve(GetNodeGraph().GetNodes().size());
         for (std::size_t i = 0; i < queue.size(); ++i) {
             const int currentId = queue[i];
-            const EditorNodeGraph::Node* current = m_NodeGraph.FindNode(currentId);
+            const EditorNodeGraph::Node* current = GetNodeGraph().FindNode(currentId);
             if (!current) {
                 continue;
             }
@@ -545,7 +545,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
             }
 
             bool resolved = false;
-            m_NodeGraph.ForEachOutgoingRenderLink(
+            GetNodeGraph().ForEachOutgoingRenderLink(
                 currentId,
                 [&](const EditorNodeGraph::Link& link) {
                     if (resolved ||
@@ -577,7 +577,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     auto resolveCanvasImage = [&]() {
         CustomMaskCanvasImage result;
         auto tryUseImageNode = [&](int imageNodeId) {
-            const EditorNodeGraph::Node* imageNode = m_NodeGraph.FindNode(imageNodeId);
+            const EditorNodeGraph::Node* imageNode = GetNodeGraph().FindNode(imageNodeId);
             if (!imageNode || imageNode->kind != EditorNodeGraph::NodeKind::Image ||
                 imageNode->image.pixels.empty() ||
                 imageNode->image.width <= 0 ||
@@ -598,11 +598,11 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
 
         std::vector<int> queue { node.id };
         std::unordered_set<int> discovered{ node.id };
-        discovered.reserve(m_NodeGraph.GetNodes().size());
+        discovered.reserve(GetNodeGraph().GetNodes().size());
         for (std::size_t index = 0; index < queue.size(); ++index) {
             const int currentId = queue[index];
             bool resolved = false;
-            m_NodeGraph.ForEachOutgoingRenderLink(
+            GetNodeGraph().ForEachOutgoingRenderLink(
                 currentId,
                 [&](const EditorNodeGraph::Link& link) {
                     if (resolved ||
@@ -610,14 +610,14 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                         return;
                     }
                     const EditorNodeGraph::Node* downstream =
-                        m_NodeGraph.FindNode(link.toNodeId);
+                        GetNodeGraph().FindNode(link.toNodeId);
                     if (!downstream) {
                         return;
                     }
                     const auto tryUseReferenceInput =
                         [&](const std::string& socketId) {
                             return tryUseImageNode(
-                                m_NodeGraph.ResolveReferenceSourceNodeId(
+                                GetNodeGraph().ResolveReferenceSourceNodeId(
                                     downstream->id,
                                     socketId));
                         };
@@ -666,7 +666,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                         downstream->kind ==
                         EditorNodeGraph::NodeKind::Output) {
                         if (tryUseImageNode(
-                                m_NodeGraph
+                                GetNodeGraph()
                                     .ResolveReferenceSourceNodeIdForOutput(
                                         downstream->id))) {
                             resolved = true;
@@ -682,7 +682,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
             }
         }
 
-        tryUseImageNode(m_NodeGraph.GetActiveImageNodeId());
+        tryUseImageNode(GetNodeGraph().GetActiveImageNodeId());
         return result;
     };
 
@@ -717,15 +717,15 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     ImGui::TextDisabled("White applies, black blocks, gray is partial.");
     ImGui::SameLine();
     if (ImGui::Checkbox("Image", &payload.showCanvasReferenceImage)) {
-        MarkDirty();
+        MarkGraphEdited(-1, false);
     }
     ImGui::SameLine();
     if (ImGui::Checkbox("Magenta", &payload.showCanvasMaskImpact)) {
-        MarkDirty();
+        MarkGraphEdited(-1, false);
     }
     ImGui::SameLine();
     if (ImGui::Checkbox("Strength", &payload.showCanvasMaskStrength)) {
-        MarkDirty();
+        MarkGraphEdited(-1, false);
     }
 
     const float undoButtonW = 58.0f;
@@ -779,7 +779,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
         }
         if (ImGui::Button(label, ImVec2(toolButtonW, 0.0f))) {
             payload.activeTool = tool;
-            MarkDirty();
+            MarkGraphEdited(-1, false);
         }
         if (selected) {
             ImGui::PopStyleColor();
@@ -911,7 +911,7 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
                 0.0f,
                 1.0f);
         }
-        MarkDirty();
+        MarkGraphEdited(-1, false);
     } else if (m_CustomMaskBrushAdjustDrag.nodeId == node.id && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         m_CustomMaskBrushAdjustDrag = {};
     }
@@ -987,13 +987,13 @@ void EditorModule::RenderCustomMaskControls(EditorNodeGraph::Node& node, float c
     if (ImGui::BeginTabBar("##CustomMaskTabs")) {
         if (ImGui::BeginTabItem("Brush")) {
             ImGui::SetNextItemWidth(fullWidth * 0.30f);
-            if (ImGui::SliderFloat("Size", &payload.brushSize, 1.0f, 512.0f, "%.0f px")) MarkDirty();
+            if (ImGui::SliderFloat("Size", &payload.brushSize, 1.0f, 512.0f, "%.0f px")) MarkGraphEdited(-1, false);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(fullWidth * 0.30f);
-            if (ImGui::SliderFloat("Softness", &payload.brushSoftness, 0.0f, 1.0f)) MarkDirty();
+            if (ImGui::SliderFloat("Softness", &payload.brushSoftness, 0.0f, 1.0f)) MarkGraphEdited(-1, false);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(fullWidth * 0.30f);
-            if (ImGui::SliderFloat("Opacity", &payload.brushOpacity, 0.0f, 1.0f)) MarkDirty();
+            if (ImGui::SliderFloat("Opacity", &payload.brushOpacity, 0.0f, 1.0f)) MarkGraphEdited(-1, false);
             ImGui::EndTabItem();
         }
 

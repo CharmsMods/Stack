@@ -1,6 +1,8 @@
+#include "CreamPalettePersistence.h"
 #include "AppearanceTheme.h"
 
 #include "App/AppPaths.h"
+#include "App/Resources/Embedded8BitFont.h"
 #include "Composite/EmbeddedCompositeFont.h"
 #include "Persistence/StackBinaryFormat.h"
 
@@ -8,6 +10,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -52,6 +55,7 @@ constexpr const char* kViewportTilingHaloPixelsKey = "haloPixels";
 constexpr const char* kViewportTilingAutoThresholdKey = "autoPixelThresholdMegapixels";
 constexpr const char* kViewportTilingProgressiveKey = "progressive";
 constexpr const char* kViewportTilingDebugOverlayKey = "debugOverlay";
+constexpr const char* kLegacySeamlessSurfacesEnabledKey = "seamlessSurfacesEnabled";
 constexpr const char* kBackgroundImageEnabledKey = "backgroundImageEnabled";
 constexpr const char* kBackgroundImagePathKey = "backgroundImagePath";
 constexpr const char* kBackgroundImagesKey = "backgroundImages";
@@ -64,6 +68,16 @@ constexpr float kMinTextScale = 0.75f;
 constexpr float kMaxTextScale = 1.60f;
 
 std::string MakeBackgroundImageIdFromPath(const std::string& storedPath);
+
+AppearanceLibrary MakeLegacyAppearanceLibraryDefaults() {
+    AppearanceLibrary library = MakeFirstRunAppearanceLibrary();
+    library.graphPanSensitivity = 0.55f;
+    library.graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
+    library.graphConnectionTextSizing = GraphConnectionTextSizing::ZoomAware;
+    library.backgroundImageStrength = 0.58f;
+    library.uiSurfaceTransparency = 0.18f;
+    return library;
+}
 
 ImVec4 MakeColor(float r, float g, float b, float a = 1.0f) {
     return ImVec4(r, g, b, a);
@@ -549,7 +563,7 @@ std::filesystem::path GetSettingsPath() {
 }
 
 std::filesystem::path GetWorkingDirectoryPath() {
-    return AppPaths::GetSettingsDirectory();
+    return AppPaths::GetBackgroundMediaDirectory();
 }
 
 std::string NormalizeExtension(std::string extension) {
@@ -744,17 +758,171 @@ ThemeDefinition BuildDarkTheme() {
     theme.displayName = "Dark";
     theme.readOnly = true;
     theme.textScale = 1.0f;
-    theme.colors.fill(MakeColor(0.08f, 0.09f, 0.10f, 1.0f));
+    theme.colors.fill(MakeColor(0.000f, 0.000f, 0.000f, 1.0f));
 
-    const ImVec4 background = MakeColor(0.043f, 0.047f, 0.057f, 1.0f);
-    const ImVec4 windowBackground = MakeColor(0.079f, 0.085f, 0.101f, 1.0f);
-    const ImVec4 surfaceBackground = MakeColor(0.094f, 0.102f, 0.121f, 1.0f);
-    const ImVec4 surfaceElevated = MakeColor(0.110f, 0.119f, 0.141f, 1.0f);
-    const ImVec4 border = MakeColor(0.182f, 0.207f, 0.258f, 0.92f);
-    const ImVec4 accent = MakeColor(0.392f, 0.612f, 0.962f, 1.0f);
-    const ImVec4 text = MakeColor(0.928f, 0.941f, 0.968f, 1.0f);
-    const ImVec4 textMuted = MakeColor(0.584f, 0.623f, 0.699f, 1.0f);
+    const ImVec4 background = MakeColor(0.000f, 0.000f, 0.000f, 1.0f);        // #000000 True 0 Black
+    const ImVec4 windowBackground = MakeColor(0.000f, 0.000f, 0.000f, 1.0f);  // #000000 True 0 Black
+    const ImVec4 surfaceBackground = MakeColor(0.059f, 0.059f, 0.059f, 1.0f); // #0F0F0F Subtle Dark Control Surface
+    const ImVec4 surfaceElevated = MakeColor(0.118f, 0.118f, 0.118f, 1.0f);   // #1E1E1E Elevated Surface
+    const ImVec4 border = MakeColor(0.145f, 0.145f, 0.145f, 0.92f);           // #252525 Subtle Crisp Border
+    const ImVec4 accent = MakeColor(0.000f, 0.898f, 1.000f, 1.0f);           // #00E5FF Vivid Electric Cyan Accent
+    const ImVec4 text = MakeColor(0.941f, 0.941f, 0.941f, 1.0f);             // #F0F0F0 High contrast white
+    const ImVec4 textMuted = MakeColor(0.500f, 0.500f, 0.500f, 1.0f);        // #808080 Medium gray text
 
+    theme.colors[ImGuiCol_Text] = text;
+    theme.colors[ImGuiCol_TextDisabled] = textMuted;
+    theme.colors[ImGuiCol_WindowBg] = windowBackground;
+    theme.colors[ImGuiCol_ChildBg] = windowBackground;
+    theme.colors[ImGuiCol_PopupBg] = windowBackground;
+    theme.colors[ImGuiCol_Border] = border;
+    theme.colors[ImGuiCol_BorderShadow] = MakeColor(0.0f, 0.0f, 0.0f, 0.0f);
+    theme.colors[ImGuiCol_FrameBg] = surfaceBackground;
+    theme.colors[ImGuiCol_FrameBgHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_FrameBgActive] = Blend(surfaceElevated, accent, 0.22f);
+    theme.colors[ImGuiCol_TitleBg] = windowBackground;
+    theme.colors[ImGuiCol_TitleBgActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TitleBgCollapsed] = windowBackground;
+    theme.colors[ImGuiCol_MenuBarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarGrab] = border;
+    theme.colors[ImGuiCol_ScrollbarGrabHovered] = accent;
+    theme.colors[ImGuiCol_ScrollbarGrabActive] = Blend(accent, surfaceElevated, 0.2f);
+    theme.colors[ImGuiCol_CheckMark] = accent;
+    theme.colors[ImGuiCol_SliderGrab] = Blend(accent, windowBackground, 0.15f);
+    theme.colors[ImGuiCol_SliderGrabActive] = accent;
+    theme.colors[ImGuiCol_Button] = surfaceBackground;
+    theme.colors[ImGuiCol_ButtonHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_ButtonActive] = Blend(surfaceElevated, accent, 0.24f);
+    theme.colors[ImGuiCol_Header] = surfaceBackground;
+    theme.colors[ImGuiCol_HeaderHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_HeaderActive] = Blend(surfaceElevated, accent, 0.20f);
+    theme.colors[ImGuiCol_Separator] = border;
+    theme.colors[ImGuiCol_SeparatorHovered] = accent;
+    theme.colors[ImGuiCol_SeparatorActive] = accent;
+    theme.colors[ImGuiCol_ResizeGrip] = border;
+    theme.colors[ImGuiCol_ResizeGripHovered] = accent;
+    theme.colors[ImGuiCol_ResizeGripActive] = accent;
+    theme.colors[ImGuiCol_Tab] = windowBackground;
+    theme.colors[ImGuiCol_TabHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_TabActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TabUnfocused] = windowBackground;
+    theme.colors[ImGuiCol_TabUnfocusedActive] = surfaceBackground;
+    theme.colors[ImGuiCol_DockingPreview] = accent;
+    theme.colors[ImGuiCol_DockingEmptyBg] = background;
+    theme.colors[ImGuiCol_PlotLines] = accent;
+    theme.colors[ImGuiCol_PlotLinesHovered] = accent;
+    theme.colors[ImGuiCol_PlotHistogram] = accent;
+    theme.colors[ImGuiCol_PlotHistogramHovered] = accent;
+    theme.colors[ImGuiCol_TableHeaderBg] = surfaceBackground;
+    theme.colors[ImGuiCol_TableBorderStrong] = border;
+    theme.colors[ImGuiCol_TableBorderLight] = Blend(border, background, 0.45f);
+    theme.colors[ImGuiCol_TableRowBg] = windowBackground;
+    theme.colors[ImGuiCol_TableRowBgAlt] = surfaceBackground;
+    theme.colors[ImGuiCol_TextSelectedBg] = Blend(accent, background, 0.82f);
+    theme.colors[ImGuiCol_DragDropTarget] = accent;
+    theme.colors[ImGuiCol_NavHighlight] = accent;
+    theme.colors[ImGuiCol_NavWindowingHighlight] = Blend(accent, background, 0.3f);
+    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.00f, 0.00f, 0.00f, 0.75f);
+    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.00f, 0.00f, 0.00f, 0.65f);
+    ApplyCommonThemeStyle(theme);
+
+    return theme;
+}
+
+ThemeDefinition BuildPhotoshopGrayscaleTheme() {
+    ThemeDefinition theme;
+    theme.id = kPhotoshopGrayscalePresetId;
+    theme.displayName = "Gray";
+    theme.readOnly = true;
+    theme.textScale = 1.0f;
+
+    const ImVec4 background = MakeColor(0.267f, 0.267f, 0.267f, 1.0f);        // #444444
+    const ImVec4 windowBackground = MakeColor(0.267f, 0.267f, 0.267f, 1.0f);  // #444444
+    const ImVec4 surfaceBackground = MakeColor(0.157f, 0.157f, 0.157f, 1.0f); // #282828 Photoshop panel background
+    const ImVec4 surfaceElevated = MakeColor(0.251f, 0.251f, 0.251f, 1.0f);   // #404040 Hover / elevated element
+    const ImVec4 border = MakeColor(0.118f, 0.118f, 0.118f, 0.92f);           // #1E1E1E Subtle dark border
+    const ImVec4 accent = MakeColor(0.231f, 0.510f, 0.965f, 1.0f);           // #3B82F6 Photoshop blue focus accent
+    const ImVec4 text = MakeColor(0.882f, 0.882f, 0.882f, 1.0f);             // #E1E1E1 Neutral text
+    const ImVec4 textMuted = MakeColor(0.549f, 0.549f, 0.549f, 1.0f);        // #8C8C8C Muted gray text
+
+    theme.colors.fill(background);
+    theme.colors[ImGuiCol_Text] = text;
+    theme.colors[ImGuiCol_TextDisabled] = textMuted;
+    theme.colors[ImGuiCol_WindowBg] = windowBackground;
+    theme.colors[ImGuiCol_ChildBg] = surfaceBackground;
+    theme.colors[ImGuiCol_PopupBg] = windowBackground;
+    theme.colors[ImGuiCol_Border] = border;
+    theme.colors[ImGuiCol_BorderShadow] = MakeColor(0.0f, 0.0f, 0.0f, 0.0f);
+    theme.colors[ImGuiCol_FrameBg] = surfaceBackground;
+    theme.colors[ImGuiCol_FrameBgHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_FrameBgActive] = Blend(surfaceElevated, accent, 0.22f);
+    theme.colors[ImGuiCol_TitleBg] = windowBackground;
+    theme.colors[ImGuiCol_TitleBgActive] = surfaceElevated;
+    theme.colors[ImGuiCol_TitleBgCollapsed] = windowBackground;
+    theme.colors[ImGuiCol_MenuBarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarGrab] = MakeColor(0.314f, 0.314f, 0.314f, 0.86f);
+    theme.colors[ImGuiCol_ScrollbarGrabHovered] = accent;
+    theme.colors[ImGuiCol_ScrollbarGrabActive] = Blend(accent, surfaceElevated, 0.2f);
+    theme.colors[ImGuiCol_CheckMark] = accent;
+    theme.colors[ImGuiCol_SliderGrab] = Blend(accent, windowBackground, 0.15f);
+    theme.colors[ImGuiCol_SliderGrabActive] = accent;
+    theme.colors[ImGuiCol_Button] = surfaceBackground;
+    theme.colors[ImGuiCol_ButtonHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_ButtonActive] = Blend(surfaceElevated, accent, 0.24f);
+    theme.colors[ImGuiCol_Header] = surfaceBackground;
+    theme.colors[ImGuiCol_HeaderHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_HeaderActive] = Blend(surfaceElevated, accent, 0.20f);
+    theme.colors[ImGuiCol_Separator] = border;
+    theme.colors[ImGuiCol_SeparatorHovered] = accent;
+    theme.colors[ImGuiCol_SeparatorActive] = accent;
+    theme.colors[ImGuiCol_ResizeGrip] = border;
+    theme.colors[ImGuiCol_ResizeGripHovered] = accent;
+    theme.colors[ImGuiCol_ResizeGripActive] = accent;
+    theme.colors[ImGuiCol_Tab] = windowBackground;
+    theme.colors[ImGuiCol_TabHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_TabActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TabUnfocused] = windowBackground;
+    theme.colors[ImGuiCol_TabUnfocusedActive] = surfaceBackground;
+    theme.colors[ImGuiCol_DockingPreview] = accent;
+    theme.colors[ImGuiCol_DockingEmptyBg] = background;
+    theme.colors[ImGuiCol_PlotLines] = accent;
+    theme.colors[ImGuiCol_PlotLinesHovered] = accent;
+    theme.colors[ImGuiCol_PlotHistogram] = accent;
+    theme.colors[ImGuiCol_PlotHistogramHovered] = accent;
+    theme.colors[ImGuiCol_TableHeaderBg] = surfaceBackground;
+    theme.colors[ImGuiCol_TableBorderStrong] = border;
+    theme.colors[ImGuiCol_TableBorderLight] = Blend(border, background, 0.45f);
+    theme.colors[ImGuiCol_TableRowBg] = windowBackground;
+    theme.colors[ImGuiCol_TableRowBgAlt] = surfaceBackground;
+    theme.colors[ImGuiCol_TextSelectedBg] = Blend(accent, background, 0.82f);
+    theme.colors[ImGuiCol_DragDropTarget] = accent;
+    theme.colors[ImGuiCol_NavHighlight] = accent;
+    theme.colors[ImGuiCol_NavWindowingHighlight] = Blend(accent, background, 0.3f);
+    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.05f, 0.05f, 0.05f, 0.65f);
+    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.05f, 0.05f, 0.05f, 0.55f);
+    ApplyCommonThemeStyle(theme);
+
+    return theme;
+}
+
+ThemeDefinition BuildNordTheme() {
+    ThemeDefinition theme;
+    theme.id = kNordPresetId;
+    theme.displayName = "Nord";
+    theme.readOnly = true;
+    theme.textScale = 1.0f;
+
+    const ImVec4 background = MakeColor(0.180f, 0.204f, 0.251f, 1.0f);        // #2E3440 Nord0
+    const ImVec4 windowBackground = MakeColor(0.231f, 0.259f, 0.322f, 1.0f);  // #3B4252 Nord1
+    const ImVec4 surfaceBackground = MakeColor(0.263f, 0.298f, 0.369f, 1.0f); // #434C5E Nord2
+    const ImVec4 surfaceElevated = MakeColor(0.298f, 0.337f, 0.416f, 1.0f);   // #4C566A Nord3
+    const ImVec4 border = MakeColor(0.298f, 0.337f, 0.416f, 0.92f);           // #4C566A
+    const ImVec4 accent = MakeColor(0.533f, 0.753f, 0.816f, 1.0f);           // #88C0D0 Nord8 Frost
+    const ImVec4 text = MakeColor(0.847f, 0.871f, 0.914f, 1.0f);             // #D8DEE9 Nord4
+    const ImVec4 textMuted = MakeColor(0.550f, 0.600f, 0.680f, 1.0f);        // #4C566A / Nord3-soft
+
+    theme.colors.fill(background);
     theme.colors[ImGuiCol_Text] = text;
     theme.colors[ImGuiCol_TextDisabled] = textMuted;
     theme.colors[ImGuiCol_WindowBg] = windowBackground;
@@ -808,8 +976,85 @@ ThemeDefinition BuildDarkTheme() {
     theme.colors[ImGuiCol_DragDropTarget] = accent;
     theme.colors[ImGuiCol_NavHighlight] = accent;
     theme.colors[ImGuiCol_NavWindowingHighlight] = Blend(accent, background, 0.3f);
-    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.02f, 0.02f, 0.03f, 0.65f);
-    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.02f, 0.02f, 0.03f, 0.55f);
+    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.08f, 0.09f, 0.12f, 0.65f);
+    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.08f, 0.09f, 0.12f, 0.55f);
+    ApplyCommonThemeStyle(theme);
+
+    return theme;
+}
+
+ThemeDefinition BuildTokyoDuskTheme() {
+    ThemeDefinition theme;
+    theme.id = kTokyoDuskPresetId;
+    theme.displayName = "Tokyo";
+    theme.readOnly = true;
+    theme.textScale = 1.0f;
+
+    const ImVec4 background = MakeColor(0.086f, 0.086f, 0.118f, 1.0f);        // #16161E Deep Tokyo Night
+    const ImVec4 windowBackground = MakeColor(0.102f, 0.106f, 0.149f, 1.0f);  // #1A1B26 Indigo Window
+    const ImVec4 surfaceBackground = MakeColor(0.141f, 0.157f, 0.231f, 1.0f); // #24283B Control Surface
+    const ImVec4 surfaceElevated = MakeColor(0.184f, 0.208f, 0.310f, 1.0f);   // #2F354F Elevated Surface
+    const ImVec4 border = MakeColor(0.243f, 0.271f, 0.392f, 0.92f);           // #3E4564 Soft Indigo Border
+    const ImVec4 accent = MakeColor(0.733f, 0.604f, 0.969f, 1.0f);           // #BB9AF7 Soft Lavender Accent
+    const ImVec4 text = MakeColor(0.753f, 0.792f, 0.961f, 1.0f);             // #C0CAF5 Tokyo text
+    const ImVec4 textMuted = MakeColor(0.337f, 0.373f, 0.537f, 1.0f);        // #565F89 Muted text
+
+    theme.colors.fill(background);
+    theme.colors[ImGuiCol_Text] = text;
+    theme.colors[ImGuiCol_TextDisabled] = textMuted;
+    theme.colors[ImGuiCol_WindowBg] = windowBackground;
+    theme.colors[ImGuiCol_ChildBg] = surfaceBackground;
+    theme.colors[ImGuiCol_PopupBg] = windowBackground;
+    theme.colors[ImGuiCol_Border] = border;
+    theme.colors[ImGuiCol_BorderShadow] = MakeColor(0.0f, 0.0f, 0.0f, 0.0f);
+    theme.colors[ImGuiCol_FrameBg] = surfaceBackground;
+    theme.colors[ImGuiCol_FrameBgHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_FrameBgActive] = Blend(surfaceElevated, accent, 0.22f);
+    theme.colors[ImGuiCol_TitleBg] = windowBackground;
+    theme.colors[ImGuiCol_TitleBgActive] = surfaceElevated;
+    theme.colors[ImGuiCol_TitleBgCollapsed] = windowBackground;
+    theme.colors[ImGuiCol_MenuBarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarBg] = windowBackground;
+    theme.colors[ImGuiCol_ScrollbarGrab] = border;
+    theme.colors[ImGuiCol_ScrollbarGrabHovered] = accent;
+    theme.colors[ImGuiCol_ScrollbarGrabActive] = Blend(accent, surfaceElevated, 0.2f);
+    theme.colors[ImGuiCol_CheckMark] = accent;
+    theme.colors[ImGuiCol_SliderGrab] = Blend(accent, windowBackground, 0.15f);
+    theme.colors[ImGuiCol_SliderGrabActive] = accent;
+    theme.colors[ImGuiCol_Button] = surfaceBackground;
+    theme.colors[ImGuiCol_ButtonHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_ButtonActive] = Blend(surfaceElevated, accent, 0.24f);
+    theme.colors[ImGuiCol_Header] = surfaceBackground;
+    theme.colors[ImGuiCol_HeaderHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_HeaderActive] = Blend(surfaceElevated, accent, 0.20f);
+    theme.colors[ImGuiCol_Separator] = border;
+    theme.colors[ImGuiCol_SeparatorHovered] = accent;
+    theme.colors[ImGuiCol_SeparatorActive] = accent;
+    theme.colors[ImGuiCol_ResizeGrip] = border;
+    theme.colors[ImGuiCol_ResizeGripHovered] = accent;
+    theme.colors[ImGuiCol_ResizeGripActive] = accent;
+    theme.colors[ImGuiCol_Tab] = windowBackground;
+    theme.colors[ImGuiCol_TabHovered] = surfaceElevated;
+    theme.colors[ImGuiCol_TabActive] = surfaceBackground;
+    theme.colors[ImGuiCol_TabUnfocused] = windowBackground;
+    theme.colors[ImGuiCol_TabUnfocusedActive] = surfaceBackground;
+    theme.colors[ImGuiCol_DockingPreview] = accent;
+    theme.colors[ImGuiCol_DockingEmptyBg] = background;
+    theme.colors[ImGuiCol_PlotLines] = accent;
+    theme.colors[ImGuiCol_PlotLinesHovered] = accent;
+    theme.colors[ImGuiCol_PlotHistogram] = accent;
+    theme.colors[ImGuiCol_PlotHistogramHovered] = accent;
+    theme.colors[ImGuiCol_TableHeaderBg] = surfaceBackground;
+    theme.colors[ImGuiCol_TableBorderStrong] = border;
+    theme.colors[ImGuiCol_TableBorderLight] = Blend(border, background, 0.45f);
+    theme.colors[ImGuiCol_TableRowBg] = windowBackground;
+    theme.colors[ImGuiCol_TableRowBgAlt] = surfaceBackground;
+    theme.colors[ImGuiCol_TextSelectedBg] = Blend(accent, background, 0.82f);
+    theme.colors[ImGuiCol_DragDropTarget] = accent;
+    theme.colors[ImGuiCol_NavHighlight] = accent;
+    theme.colors[ImGuiCol_NavWindowingHighlight] = Blend(accent, background, 0.3f);
+    theme.colors[ImGuiCol_NavWindowingDimBg] = MakeColor(0.04f, 0.04f, 0.06f, 0.65f);
+    theme.colors[ImGuiCol_ModalWindowDimBg] = MakeColor(0.04f, 0.04f, 0.06f, 0.55f);
     ApplyCommonThemeStyle(theme);
 
     return theme;
@@ -895,7 +1140,7 @@ ThemeDefinition BuildLightTheme() {
 ThemeDefinition BuildSolarizedTheme() {
     ThemeDefinition theme;
     theme.id = kSolarizedPresetId;
-    theme.displayName = "Solarized";
+    theme.displayName = "Solarized Dark";
     theme.readOnly = true;
     theme.textScale = 1.0f;
 
@@ -1261,7 +1506,17 @@ ThemeDefinition BuildYellowLightTheme() {
 }
 
 std::vector<ThemeDefinition> BuildFactoryThemesInternal() {
-    return { BuildDarkTheme(), BuildLightTheme(), BuildSolarizedTheme(), BuildSolarizedLightTheme(), BuildYellowDarkTheme(), BuildYellowLightTheme() };
+    return {
+        BuildDarkTheme(),
+        BuildPhotoshopGrayscaleTheme(),
+        BuildNordTheme(),
+        BuildTokyoDuskTheme(),
+        BuildLightTheme(),
+        BuildSolarizedTheme(),
+        BuildSolarizedLightTheme(),
+        BuildYellowDarkTheme(),
+        BuildYellowLightTheme()
+    };
 }
 
 ThemeDefinition BuildFactoryTheme() {
@@ -1303,6 +1558,10 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
     json root = json::object();
     root[kVersionKey] = kAppearanceSettingsVersion;
     root[kAppearanceKey] = json::object();
+    root[kAppearanceKey]["creamPalette"] = EncodeCreamPalette(library.savedCreamPalette);
+    root[kAppearanceKey]["creamVariants"] = json::array();
+    for (const auto& variant : library.creamVariants)
+        root[kAppearanceKey]["creamVariants"].push_back(EncodeCreamPalette(variant));
     const ViewportTilingSettings viewportTiling = RenderTiling::NormalizeSettings(library.viewportTiling);
     root[kAppearanceKey][kActivePresetIdKey] = library.activePresetId.empty() ? std::string(kDefaultPresetToken) : library.activePresetId;
     root[kAppearanceKey][kGraphVisualModeKey] = GraphVisualModeToString(library.graphVisualMode);
@@ -1352,28 +1611,7 @@ json AppearanceLibraryToJson(const AppearanceLibrary& library) {
 }
 
 bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibrary, bool* outNeedsMigration = nullptr) {
-    outLibrary = {};
-    outLibrary.activePresetId = kDefaultPresetToken;
-    outLibrary.graphVisualMode = GraphVisualMode::Classic;
-    outLibrary.graphSpotlightHaloOutlines = false;
-    outLibrary.graphDottedMaskLinks = false;
-    outLibrary.graphStraightLinks = false;
-    outLibrary.graphLineOpacity = 1.0f;
-    outLibrary.graphPanSensitivity = 0.55f;
-    outLibrary.graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
-    outLibrary.graphConnectionLabels = GraphConnectionLabelVisibility::Adaptive;
-    outLibrary.graphConnectionTextLayout = GraphConnectionTextLayout::Floating;
-    outLibrary.graphConnectionTextSize = kGraphConnectionTextSizeDefault;
-    outLibrary.graphConnectionTextSizing = GraphConnectionTextSizing::ZoomAware;
-    outLibrary.graphConnectionTextOutline = false;
-    outLibrary.experimentalIslandEnabled = false;
-    outLibrary.viewportTiling = RenderTiling::NormalizeSettings({});
-    outLibrary.backgroundImageEnabled = false;
-    outLibrary.backgroundImagePath.clear();
-    outLibrary.backgroundImageStrength = 0.58f;
-    outLibrary.uiSurfaceTransparency = 0.18f;
-    outLibrary.backgroundImages.clear();
-    outLibrary.customPresets.clear();
+    outLibrary = MakeLegacyAppearanceLibraryDefaults();
 
     if (!root.is_object()) {
         return false;
@@ -1389,20 +1627,7 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         const json appearance = root.value(kAppearanceKey, json::object());
         const std::string legacyToken = appearance.value(kLegacyThemeKey, std::string(kFactoryThemeToken));
         (void)legacyToken;
-        outLibrary.activePresetId = kDefaultPresetToken;
-        outLibrary.graphVisualMode = GraphVisualMode::Classic;
-        outLibrary.graphSpotlightHaloOutlines = false;
-        outLibrary.graphDottedMaskLinks = false;
-        outLibrary.graphStraightLinks = false;
-        outLibrary.graphLineOpacity = 1.0f;
-        outLibrary.graphPanSensitivity = 0.55f;
-        outLibrary.graphNodeSliderDragSensitivity = kGraphNodeSliderDragSensitivityDefault;
-        outLibrary.graphConnectionLabels = GraphConnectionLabelVisibility::Adaptive;
-        outLibrary.graphConnectionTextLayout = GraphConnectionTextLayout::Floating;
-        outLibrary.graphConnectionTextSize = kGraphConnectionTextSizeDefault;
-        outLibrary.graphConnectionTextSizing = GraphConnectionTextSizing::ZoomAware;
-        outLibrary.graphConnectionTextOutline = false;
-        outLibrary.viewportTiling = RenderTiling::NormalizeSettings({});
+        outLibrary.backgroundImagePath = appearance.value(kBackgroundImagePathKey, std::string());
         return true;
     }
 
@@ -1415,14 +1640,27 @@ bool LoadAppearanceLibraryFromJson(const json& root, AppearanceLibrary& outLibra
         version != 8 &&
         version != 9 &&
         version != 10 &&
+        version != 11 &&
+        version != 12 &&
+        version != 13 &&
         version != static_cast<int>(kAppearanceSettingsVersion)) {
         return false;
     }
     if (version < static_cast<int>(kAppearanceSettingsVersion) && outNeedsMigration) {
         *outNeedsMigration = true;
     }
+    if (version == static_cast<int>(kAppearanceSettingsVersion)) {
+        outLibrary = MakeFirstRunAppearanceLibrary();
+    }
 
     const json appearance = root.value(kAppearanceKey, json::object());
+    if (appearance.contains("creamPalette")) DecodeCreamPalette(appearance["creamPalette"], outLibrary.savedCreamPalette);
+    if (appearance.contains("creamVariants") && appearance["creamVariants"].is_array()) {
+        for (const auto& item : appearance["creamVariants"]) {
+            CreamPalette variant;
+            if (DecodeCreamPalette(item, variant)) outLibrary.creamVariants.push_back(std::move(variant));
+        }
+    }
     outLibrary.activePresetId = appearance.value(kActivePresetIdKey, std::string(kDefaultPresetToken));
     outLibrary.graphVisualMode = GraphVisualModeFromString(
         appearance.value(kGraphVisualModeKey, std::string(GraphVisualModeToString(GraphVisualMode::Classic))));
@@ -1568,7 +1806,52 @@ std::string GetSettingsFileToken() {
 } // namespace
 
 bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessage) {
-    AppearanceLibrary original;
+    const AppearanceLibrary factoryProfile = MakeFirstRunAppearanceLibrary();
+    const ViewportTilingSettings factoryTiling = RenderTiling::NormalizeSettings(factoryProfile.viewportTiling);
+    const std::vector<ThemeDefinition> factoryThemes = MakeFactoryThemes();
+    const auto solarizedDark = std::find_if(
+        factoryThemes.begin(),
+        factoryThemes.end(),
+        [](const ThemeDefinition& theme) { return theme.id == kSolarizedPresetId; });
+    const auto solarizedLight = std::find_if(
+        factoryThemes.begin(),
+        factoryThemes.end(),
+        [](const ThemeDefinition& theme) { return theme.id == kSolarizedLightPresetId; });
+    if (factoryProfile.activePresetId != kSolarizedPresetId ||
+        solarizedDark == factoryThemes.end() ||
+        solarizedLight == factoryThemes.end() ||
+        solarizedDark->displayName != "Solarized Dark" ||
+        Luminance(solarizedDark->colors[ImGuiCol_WindowBg]) >= 0.30f ||
+        Luminance(solarizedLight->colors[ImGuiCol_WindowBg]) <= 0.70f ||
+        factoryProfile.graphVisualMode != GraphVisualMode::Classic ||
+        factoryProfile.graphSpotlightHaloOutlines ||
+        factoryProfile.graphDottedMaskLinks ||
+        factoryProfile.graphStraightLinks ||
+        std::abs(factoryProfile.graphLineOpacity - 1.0f) > 0.0005f ||
+        std::abs(factoryProfile.graphPanSensitivity - 0.28f) > 0.0005f ||
+        std::abs(factoryProfile.graphNodeSliderDragSensitivity - 0.16f) > 0.0005f ||
+        factoryProfile.graphConnectionLabels != GraphConnectionLabelVisibility::Adaptive ||
+        factoryProfile.graphConnectionTextLayout != GraphConnectionTextLayout::Floating ||
+        std::abs(factoryProfile.graphConnectionTextSize - 11.0f) > 0.0005f ||
+        factoryProfile.graphConnectionTextSizing != GraphConnectionTextSizing::Fixed ||
+        factoryProfile.graphConnectionTextOutline ||
+        factoryProfile.experimentalIslandEnabled ||
+        factoryProfile.backgroundImageEnabled ||
+        !factoryProfile.backgroundImagePath.empty() ||
+        std::abs(factoryProfile.backgroundImageStrength - 1.0f) > 0.0005f ||
+        std::abs(factoryProfile.uiSurfaceTransparency) > 0.0005f ||
+        !factoryProfile.backgroundImages.empty() ||
+        !factoryProfile.customPresets.empty() ||
+        factoryTiling.mode != ViewportTilingMode::Off ||
+        factoryTiling.tileSize != 1024 ||
+        factoryTiling.autoPixelThresholdMegapixels != 32 ||
+        factoryTiling.progressive ||
+        factoryTiling.debugOverlay) {
+        if (errorMessage) *errorMessage = "The canonical first-run appearance profile is not curated as expected.";
+        return false;
+    }
+
+    AppearanceLibrary original = factoryProfile;
     original.graphConnectionLabels = GraphConnectionLabelVisibility::Always;
     original.graphConnectionTextLayout = GraphConnectionTextLayout::BreakLine;
     original.graphConnectionTextSize = 15.0f;
@@ -1577,7 +1860,11 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
     original.experimentalIslandEnabled = true;
     const json encoded = AppearanceLibraryToJson(original);
     if (encoded.value(kVersionKey, 0) != static_cast<int>(kAppearanceSettingsVersion)) {
-        if (errorMessage) *errorMessage = "Appearance serialization did not advance to version 11.";
+        if (errorMessage) *errorMessage = "Appearance serialization did not advance to version 13.";
+        return false;
+    }
+    if (encoded[kAppearanceKey].contains(kLegacySeamlessSurfacesEnabledKey)) {
+        if (errorMessage) *errorMessage = "Appearance serialization retained the obsolete seamless-surfaces option.";
         return false;
     }
 
@@ -1657,7 +1944,7 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         rewrittenAppearance.contains(kGraphNodeGrabAreaHeightKey)) {
         if (errorMessage) {
             *errorMessage =
-                "Legacy graph node sizing keys survived version 11 migration.";
+                "Legacy graph node sizing keys survived version 13 migration.";
         }
         return false;
     }
@@ -1676,12 +1963,176 @@ bool ValidateConnectionPresentationAppearancePersistence(std::string* errorMessa
         }
         return false;
     }
+
+    json versionElevenWithBackground = encoded;
+    versionElevenWithBackground[kVersionKey] = 11;
+    versionElevenWithBackground[kAppearanceKey][kBackgroundImagePathKey] = "legacy-background.png";
+    migrated = {};
+    needsMigration = false;
+    if (!LoadAppearanceLibraryFromJson(versionElevenWithBackground, migrated, &needsMigration) ||
+        !needsMigration) {
+        if (errorMessage) {
+            *errorMessage = "Version 11 settings with a selected background did not migrate.";
+        }
+        return false;
+    }
+
+    json versionElevenWithoutBackground = encoded;
+    versionElevenWithoutBackground[kVersionKey] = 11;
+    versionElevenWithoutBackground[kAppearanceKey][kBackgroundImagePathKey] = "";
+    migrated = {};
+    needsMigration = false;
+    if (!LoadAppearanceLibraryFromJson(versionElevenWithoutBackground, migrated, &needsMigration) ||
+        !needsMigration) {
+        if (errorMessage) {
+            *errorMessage = "Version 11 settings without a selected background did not migrate.";
+        }
+        return false;
+    }
+
+    json explicitVersionTwelve = encoded;
+    explicitVersionTwelve[kVersionKey] = 12;
+    explicitVersionTwelve[kAppearanceKey][kLegacySeamlessSurfacesEnabledKey] = false;
+    explicitVersionTwelve[kAppearanceKey][kBackgroundImagePathKey] = "independent-background.png";
+    explicitVersionTwelve[kAppearanceKey][kBackgroundImagesKey] = json::array({
+        {
+            {kIdKey, "independent-background"},
+            {kNameKey, "Independent Background"},
+            {kBackgroundImagePathKey, "independent-background.png"}
+        }
+    });
+    migrated = {};
+    needsMigration = false;
+    if (!LoadAppearanceLibraryFromJson(explicitVersionTwelve, migrated, &needsMigration) ||
+        !needsMigration ||
+        migrated.backgroundImagePath != "independent-background.png") {
+        if (errorMessage) {
+            *errorMessage = "Version 12 settings did not migrate while preserving background selection.";
+        }
+        return false;
+    }
+    const json rewrittenVersionTwelve = AppearanceLibraryToJson(migrated);
+    if (rewrittenVersionTwelve[kAppearanceKey].contains(kLegacySeamlessSurfacesEnabledKey)) {
+        if (errorMessage) {
+            *errorMessage = "Version 12 migration retained the obsolete seamless-surfaces option.";
+        }
+        return false;
+    }
+
+    AppearanceLibrary creamLibrary=factoryProfile;
+    creamLibrary.savedCreamPalette=FactoryCreamPalettes()[1];
+    creamLibrary.savedCreamPalette.numberAccent=NodeAccent::Olive;
+    creamLibrary.savedCreamPalette.resetAccent=NodeAccent::Blue;
+    creamLibrary.creamVariants.push_back(FactoryCreamPalettes()[2]);
+    creamLibrary.customPresets.push_back(BuildDarkTheme());
+    creamLibrary.backgroundImageStrength=0.37f;
+    AppearanceLibrary creamDecoded;
+    if (!LoadAppearanceLibraryFromJson(AppearanceLibraryToJson(creamLibrary),creamDecoded) ||
+        !EqualCreamPalettes(creamDecoded.savedCreamPalette,creamLibrary.savedCreamPalette) ||
+        creamDecoded.creamVariants.size()!=1 || creamDecoded.customPresets.size()!=1 ||
+        creamDecoded.backgroundImageStrength!=0.37f) {
+        if (errorMessage) *errorMessage="Cream settings did not round-trip with legacy presets and wallpaper.";
+        return false;
+    }
+    auto legacyCream=AppearanceLibraryToJson(creamLibrary);
+    legacyCream[kVersionKey]=13;
+    legacyCream[kAppearanceKey].erase("creamPalette");
+    legacyCream[kAppearanceKey].erase("creamVariants");
+    needsMigration=false;
+    if (!LoadAppearanceLibraryFromJson(legacyCream,creamDecoded,&needsMigration) || !needsMigration ||
+        creamDecoded.savedCreamPalette.id!="harvest-cream" || creamDecoded.customPresets.size()!=1 ||
+        creamDecoded.backgroundImageStrength!=0.37f) {
+        if (errorMessage) *errorMessage="Legacy appearance did not migrate to cream without losing saved choices.";
+        return false;
+    }
+    AppearanceManager previewAppearance;
+    previewAppearance.PreviewCreamPalette(FactoryCreamPalettes()[1]);
+    if (!previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetLibrary().savedCreamPalette.id!="harvest-cream") {
+        if (errorMessage) *errorMessage="Palette preview modified saved settings.";
+        return false;
+    }
+    previewAppearance.RevertCreamPalette();
+    if (previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetRuntimeSurfacePalette().controlSurface.w!=1 ||
+        previewAppearance.GetUiSurfaceAlphaMultiplier()!=1) {
+        if (errorMessage) *errorMessage="Palette revert or opaque control invariant failed.";
+        return false;
+    }
+    auto accentPreview=previewAppearance.GetCreamPalette();
+    accentPreview.numberAccent=NodeAccent::Olive;
+    accentPreview.resetAccent=NodeAccent::Blue;
+    previewAppearance.PreviewCreamPalette(accentPreview);
+    if (!previewAppearance.HasCreamPaletteChanges() || previewAppearance.GetCreamPalette().numberAccent!=NodeAccent::Olive ||
+        previewAppearance.GetLibrary().savedCreamPalette.numberAccent!=NodeAccent::Blue) {
+        if (errorMessage) *errorMessage="Node accent preview did not stay independent of saved settings.";
+        return false;
+    }
+    previewAppearance.RevertCreamPalette();
+    if (previewAppearance.GetCreamPalette().numberAccent!=NodeAccent::Blue || previewAppearance.GetCreamPalette().resetAccent!=NodeAccent::Teal) {
+        if (errorMessage) *errorMessage="Node accents did not revert.";
+        return false;
+    }
+    AppearanceManager invariantAppearance;
+    if (!invariantAppearance.GetSeamlessSurfaceStylingEnabled()) {
+        if (errorMessage) *errorMessage = "Seamless workspace styling is not an application invariant.";
+        return false;
+    }
+    const auto factoryPalettes=FactoryCreamPalettes();
+    const auto monochromeIt=std::find_if(factoryPalettes.begin(),factoryPalettes.end(),[](const CreamPalette& palette) {
+        return palette.id==kMonochromeDarkPaletteId;
+    });
+    if (monochromeIt==factoryPalettes.end() || monochromeIt->name!="Dark" ||
+        monochromeIt->colorPolicy!=PaletteColorPolicy::Monochrome) {
+        if (errorMessage) *errorMessage="The Dark factory palette is missing or has an invalid identity.";
+        return false;
+    }
+    const ResolvedCreamPalette monochrome=ResolveCreamPalette(*monochromeIt);
+    for (const ImVec4& color : monochrome.colors) {
+        if (!IsMonochrome(color)) {
+            if (errorMessage) *errorMessage="The Dark factory palette contains a colored ImGui role.";
+            return false;
+        }
+    }
+    for (const ImVec4 color : {monochrome.canvas,monochrome.surface,monochrome.text,monochrome.mutedText,
+            monochrome.border,monochrome.focus,monochrome.error,monochrome.imageSocket,monochrome.maskSocket,
+            monochrome.analysisSocket,monochrome.valueSocket,monochrome.rawSocket}) {
+        if (!IsMonochrome(color)) {
+            if (errorMessage) *errorMessage="The Dark factory palette contains a colored semantic role.";
+            return false;
+        }
+    }
+    if (!CreamPaletteHasReadableText(monochrome)) {
+        if (errorMessage) *errorMessage="The Dark factory palette does not meet text contrast requirements.";
+        return false;
+    }
+    CreamPalette decodedMonochrome;
+    if (!DecodeCreamPalette(EncodeCreamPalette(*monochromeIt),decodedMonochrome) ||
+        decodedMonochrome.colorPolicy!=PaletteColorPolicy::Monochrome ||
+        !EqualCreamPalettes(*monochromeIt,decodedMonochrome)) {
+        if (errorMessage) *errorMessage="The Dark palette color policy did not survive serialization.";
+        return false;
+    }
+    auto legacyPaletteJson=EncodeCreamPalette(CreamPalette{});
+    legacyPaletteJson.erase("colorPolicy");
+    CreamPalette decodedLegacy;
+    if (!DecodeCreamPalette(legacyPaletteJson,decodedLegacy) ||
+        decodedLegacy.colorPolicy!=PaletteColorPolicy::FullColor) {
+        if (errorMessage) *errorMessage="A legacy palette did not default to full color.";
+        return false;
+    }
     if (errorMessage) errorMessage->clear();
     return true;
 }
 
 ThemeDefinition MakeFactoryPremiumDarkStudioTheme() {
     return BuildFactoryTheme();
+}
+
+AppearanceLibrary MakeFirstRunAppearanceLibrary() {
+    AppearanceLibrary library;
+    library.viewportTiling = RenderTiling::NormalizeSettings(library.viewportTiling);
+    library.backgroundImages.clear();
+    library.customPresets.clear();
+    return library;
 }
 
 const char* GraphVisualModeLabel(GraphVisualMode mode) {
@@ -1746,9 +2197,7 @@ ThemeDefinition* FindPresetById(AppearanceLibrary& library, const std::string& p
 }
 
 bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary) {
-    outLibrary = {};
-    outLibrary.activePresetId = kDefaultPresetToken;
-    outLibrary.customPresets.clear();
+    outLibrary = MakeFirstRunAppearanceLibrary();
 
     const std::filesystem::path settingsPath = GetSettingsPath();
     std::error_code ec;
@@ -1778,26 +2227,16 @@ bool LoadAppearanceLibrary(AppearanceLibrary& outLibrary) {
     return true;
 }
 
-bool SaveAppearanceLibrary(const AppearanceLibrary& library) {
-    const std::filesystem::path settingsPath = GetSettingsPath();
-    std::error_code ec;
-    const std::filesystem::path parentPath = settingsPath.parent_path();
-    if (!parentPath.empty()) {
-        std::filesystem::create_directories(parentPath, ec);
-        if (ec) {
-            return false;
-        }
+bool SaveAppearanceLibrary(const AppearanceLibrary& library, std::string* errorMessage) {
+    if (errorMessage) errorMessage->clear();
+    try {
+        return WriteAppearanceAtomically(GetSettingsPath(), AppearanceLibraryToJson(library), errorMessage);
+    } catch (const std::exception& error) {
+        if (errorMessage) *errorMessage = std::string("Could not prepare settings for saving. ") + error.what();
+    } catch (...) {
+        if (errorMessage) *errorMessage = "Could not prepare settings for saving.";
     }
-
-    const json root = AppearanceLibraryToJson(library);
-
-    std::ofstream file(settingsPath, std::ios::trunc);
-    if (!file.is_open()) {
-        return false;
-    }
-
-    file << root.dump(2) << '\n';
-    return file.good();
+    return false;
 }
 
 bool LoadThemePresetFile(const std::filesystem::path& path, ThemeDefinition& outTheme, std::string* errorMessage) {
@@ -1877,58 +2316,54 @@ bool UseDarkIconsForCurrentTheme(const AppearanceManager* appearance) {
 }
 
 ImU32 ResolveThemedMonochromeIconTint(const AppearanceManager* appearance, bool emphasized, bool hovered) {
-    if (UseDarkIconsForCurrentTheme(appearance)) {
-        return emphasized
-            ? IM_COL32(18, 22, 26, 255)
-            : (hovered ? IM_COL32(48, 54, 60, 232) : IM_COL32(104, 110, 118, 188));
-    }
-    return emphasized
-        ? IM_COL32(255, 255, 255, 255)
-        : (hovered ? IM_COL32(220, 220, 220, 230) : IM_COL32(150, 150, 150, 165));
+    const auto palette = appearance ? appearance->GetResolvedCreamPalette() : ResolveCreamPalette(CreamPalette{});
+    return ImGui::ColorConvertFloat4ToU32(emphasized || hovered ? palette.text : palette.mutedText);
 }
 
 AppearanceManager::AppearanceManager()
     : m_FactoryTheme(),
       m_WorkingTheme(),
       m_Library() {
-    m_FactoryThemes = MakeFactoryThemes();
+    m_FactoryThemes = MakeCreamThemes(FactoryCreamPalettes());
     if (!m_FactoryThemes.empty()) {
         m_FactoryTheme = m_FactoryThemes.front();
     } else {
         m_FactoryTheme = MakeFactoryPremiumDarkStudioTheme();
     }
-    m_Library = {};
-    m_WorkingTheme = ResolveActiveTheme(m_Library, m_FactoryTheme);
+    m_Library = MakeFirstRunAppearanceLibrary();
+    m_CreamVariantThemes=MakeCreamThemes(m_Library.creamVariants);
+    PreviewCreamPalette(m_Library.savedCreamPalette);
 }
 
 bool AppearanceManager::Load() {
-    m_FactoryThemes = MakeFactoryThemes();
+    m_FactoryThemes = MakeCreamThemes(FactoryCreamPalettes());
     m_FactoryTheme = m_FactoryThemes.front();
     m_WorkingTheme = m_FactoryTheme;
-    m_Library = {};
+    m_Library = MakeFirstRunAppearanceLibrary();
     m_BackgroundImageRevision = 0;
     m_BackgroundImageRuntimeStatus.clear();
     m_ThemeTransitionActive = false;
 
     if (!LoadAppearanceLibrary(m_Library)) {
-        m_Library = {};
-        m_Library.activePresetId = kDefaultPresetToken;
-        m_Library.customPresets.clear();
-        m_WorkingTheme = ResolveActiveTheme(m_Library, m_FactoryTheme);
+        m_Library = MakeFirstRunAppearanceLibrary();
+        m_CreamVariantThemes=MakeCreamThemes(m_Library.creamVariants);
+    PreviewCreamPalette(m_Library.savedCreamPalette);
         TouchRevision();
         return false;
     }
 
-    m_WorkingTheme = ResolveActiveTheme(m_Library, m_FactoryTheme);
+    m_CreamVariantThemes=MakeCreamThemes(m_Library.creamVariants);
+    PreviewCreamPalette(m_Library.savedCreamPalette);
     TouchRevision();
     return true;
 }
 
-bool AppearanceManager::Save() const {
-    return SaveAppearanceLibrary(m_Library);
+bool AppearanceManager::Save(std::string* errorMessage) const {
+    return SaveAppearanceLibrary(m_Library, errorMessage);
 }
 
 void AppearanceManager::TouchRevision() {
+    m_CreamCacheValid = false;
     ++m_Revision;
     if (m_Revision == 0) {
         m_Revision = 1;
@@ -1988,6 +2423,7 @@ const ThemeDefinition& AppearanceManager::GetWorkingTheme() const {
 }
 
 ThemeDefinition& AppearanceManager::EditWorkingTheme() {
+    m_CreamCacheValid = false;
     return m_WorkingTheme;
 }
 
@@ -1996,20 +2432,17 @@ const AppearanceLibrary& AppearanceManager::GetLibrary() const {
 }
 
 const ThemeDefinition* AppearanceManager::GetPresetById(const std::string& presetId) const {
-    for (const ThemeDefinition& preset : m_FactoryThemes) {
-        if (preset.id == presetId) {
-            return &preset;
-        }
-    }
-    return FindPresetById(m_Library, presetId);
+    for (const auto& preset : m_FactoryThemes) if (preset.id==presetId) return &preset;
+    for (const auto& preset : m_CreamVariantThemes) if (preset.id==presetId) return &preset;
+    return nullptr;
 }
 
 const ThemeDefinition* AppearanceManager::GetActivePreset() const {
-    return GetPresetById(m_Library.activePresetId);
+    return &m_WorkingTheme;
 }
 
 const std::string& AppearanceManager::GetActivePresetId() const {
-    return m_Library.activePresetId;
+    return m_WorkingTheme.id;
 }
 
 std::string AppearanceManager::GetActivePresetDisplayName() const {
@@ -2017,7 +2450,7 @@ std::string AppearanceManager::GetActivePresetDisplayName() const {
 }
 
 GraphVisualMode AppearanceManager::GetGraphVisualMode() const {
-    return m_Library.graphVisualMode;
+    return GraphVisualMode::Classic;
 }
 
 bool AppearanceManager::GetGraphSpotlightHaloOutlines() const {
@@ -2077,7 +2510,7 @@ bool AppearanceManager::GetBackgroundImageEnabled() const {
 }
 
 bool AppearanceManager::GetSeamlessSurfaceStylingEnabled() const {
-    return !m_Library.backgroundImagePath.empty();
+    return true;
 }
 
 const std::string& AppearanceManager::GetBackgroundImagePath() const {
@@ -2093,18 +2526,16 @@ float AppearanceManager::GetBackgroundImageStrength() const {
 }
 
 float AppearanceManager::GetUiSurfaceTransparency() const {
-    return ClampUnit(m_Library.uiSurfaceTransparency);
+    return 0.0f;
 }
 
 float AppearanceManager::GetUiSurfaceAlphaMultiplier() const {
-    if (!GetSeamlessSurfaceStylingEnabled()) {
-        return 1.0f;
-    }
-    return ComputeSurfaceAlphaMultiplier(m_Library.uiSurfaceTransparency);
+    return 1.0f;
 }
 
 RuntimeSurfacePalette AppearanceManager::GetRuntimeSurfacePalette() const {
-    return BuildRuntimeSurfacePalette(m_WorkingTheme, m_Library.uiSurfaceTransparency, GetSeamlessSurfaceStylingEnabled());
+    GetResolvedCreamPalette();
+    return m_CreamSurfaces;
 }
 
 std::uint64_t AppearanceManager::GetRevision() const {
@@ -2143,26 +2574,14 @@ bool AppearanceManager::ActivePresetIsFactory() const {
 }
 
 bool AppearanceManager::HasUnsavedChanges() const {
-    const ThemeDefinition* activePreset = GetActivePreset();
-    if (activePreset == nullptr) {
-        return true;
-    }
-    return !AreThemesEquivalent(m_WorkingTheme, *activePreset);
+    return HasCreamPaletteChanges();
 }
 
 bool AppearanceManager::SelectPresetById(const std::string& presetId) {
-    const ThemeDefinition* preset = GetPresetById(presetId);
-    if (preset == nullptr) {
-        return false;
-    }
-
-    if (preset->id == m_Library.activePresetId) {
-        return true;
-    }
-
-    m_Library.activePresetId = preset->id;
-    StartThemeTransition(*preset, ImGui::GetTime());
-    return Save();
+    const auto* preset=GetPresetById(presetId);
+    if (!preset) return false;
+    PreviewCreamPalette(preset->creamPalette);
+    return true;
 }
 
 bool AppearanceManager::SetGraphVisualMode(GraphVisualMode mode) {
@@ -2211,14 +2630,21 @@ bool AppearanceManager::SetGraphLineOpacity(float opacity) {
     return Save();
 }
 
-bool AppearanceManager::SetGraphPanSensitivity(float sensitivity) {
-    const float clamped = ClampUnit(sensitivity);
-    if (std::abs(m_Library.graphPanSensitivity - clamped) < 0.0005f) {
-        return true;
+PreferenceMutationResult AppearanceManager::SetGraphPanSensitivity(float sensitivity) {
+    if (std::isnan(sensitivity)) {
+        return {false, false, "Graph pan sensitivity must be a number."};
     }
-    m_Library.graphPanSensitivity = clamped;
-    TouchRevision();
-    return Save();
+    const float clamped = ClampUnit(sensitivity);
+    if (!(std::abs(m_Library.graphPanSensitivity - clamped) < 0.0005f)) {
+        m_Library.graphPanSensitivity = clamped;
+        TouchRevision();
+    }
+    PreferenceMutationResult result;
+    result.applied = true;
+    // Repeating the current value retries a failed save without changing its
+    // runtime value or revision. A no-op alone cannot establish persistence.
+    result.persisted = Save(&result.error);
+    return result;
 }
 
 bool AppearanceManager::SetGraphNodeSliderDragSensitivity(float sensitivity) {
@@ -2480,54 +2906,16 @@ void AppearanceManager::SetBackgroundImageRuntimeStatus(std::string statusMessag
 }
 
 bool AppearanceManager::ResetWorkingTheme() {
-    const ThemeDefinition* activePreset = GetActivePreset();
-    if (activePreset == nullptr) {
-        m_WorkingTheme = m_FactoryTheme;
-        m_ThemeTransitionActive = false;
-        TouchRevision();
-        return true;
-    }
-
-    m_WorkingTheme = *activePreset;
-    m_ThemeTransitionActive = false;
-    TouchRevision();
+    RevertCreamPalette();
     return true;
 }
 
 bool AppearanceManager::SaveWorkingTheme() {
-    if (ActivePresetIsFactory()) {
-        return false;
-    }
-
-    ThemeDefinition* preset = FindPresetById(m_Library, m_Library.activePresetId);
-    if (preset == nullptr) {
-        return false;
-    }
-
-    m_WorkingTheme.readOnly = false;
-    m_ThemeTransitionActive = false;
-    *preset = m_WorkingTheme;
-    preset->id = m_Library.activePresetId;
-    preset->readOnly = false;
-    TouchRevision();
-    return Save();
+    return SaveCreamPalette();
 }
 
 bool AppearanceManager::SaveWorkingThemeAsNew(std::string displayName) {
-    displayName = MakeUniquePresetName(displayName, m_Library);
-    const std::string presetId = MakePresetIdFromName(displayName, m_Library);
-
-    ThemeDefinition preset = m_WorkingTheme;
-    preset.id = presetId;
-    preset.displayName = displayName;
-    preset.readOnly = false;
-
-    m_Library.customPresets.push_back(preset);
-    m_Library.activePresetId = presetId;
-    m_WorkingTheme = preset;
-    m_ThemeTransitionActive = false;
-    TouchRevision();
-    return Save();
+    return SaveCreamPalette(displayName);
 }
 
 bool AppearanceManager::DuplicateWorkingTheme() {
@@ -2545,8 +2933,6 @@ bool AppearanceManager::ImportPreset(const std::filesystem::path& path, std::str
     importedTheme.readOnly = false;
 
     m_Library.customPresets.push_back(importedTheme);
-    m_Library.activePresetId = importedTheme.id;
-    m_WorkingTheme = importedTheme;
     m_ThemeTransitionActive = false;
     TouchRevision();
     return Save();
@@ -2558,8 +2944,6 @@ bool AppearanceManager::ExportWorkingTheme(const std::filesystem::path& path, st
 
 void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const {
     ImGui::StyleColorsDark(&style);
-    const RuntimeSurfacePalette palette = GetRuntimeSurfacePalette();
-    const bool seamlessSurfaceStylingEnabled = GetSeamlessSurfaceStylingEnabled();
 
     // Premium hardcoded style values for a clean, consistent modern look
     style.Alpha = 1.0f;
@@ -2595,23 +2979,6 @@ void AppearanceManager::ApplyCurrentTheme(ImGuiIO& io, ImGuiStyle& style) const 
         style.Colors[index] = m_WorkingTheme.colors[static_cast<std::size_t>(index)];
     }
 
-    if (seamlessSurfaceStylingEnabled) {
-        style.Colors[ImGuiCol_WindowBg] = palette.appSurface;
-        style.Colors[ImGuiCol_ChildBg] = palette.panelSurface;
-        style.Colors[ImGuiCol_PopupBg] = palette.popupSurface;
-        style.Colors[ImGuiCol_Header] = palette.chromeSurface;
-        style.Colors[ImGuiCol_HeaderHovered] = palette.controlSurfaceHovered;
-        style.Colors[ImGuiCol_HeaderActive] = palette.controlSurfaceActive;
-        style.Colors[ImGuiCol_FrameBg] = palette.controlSurface;
-        style.Colors[ImGuiCol_FrameBgHovered] = palette.controlSurfaceHovered;
-        style.Colors[ImGuiCol_FrameBgActive] = palette.controlSurfaceActive;
-        style.Colors[ImGuiCol_Border] = palette.border;
-        style.Colors[ImGuiCol_Separator] = palette.separator;
-        style.Colors[ImGuiCol_SeparatorHovered] = palette.border;
-        style.Colors[ImGuiCol_SeparatorActive] = palette.border;
-        style.Colors[ImGuiCol_DockingEmptyBg] = palette.appSurface;
-    }
-
     io.FontGlobalScale = 1.0f; // Hardcode global font scale for consistent typography
 }
 
@@ -2642,6 +3009,24 @@ void AppearanceManager::SetupFonts(ImGuiIO& io) const {
     }
 
     io.FontDefault = font;
+
+    ImFontConfig retroFontConfig;
+    retroFontConfig.OversampleH = 1;
+    retroFontConfig.OversampleV = 1;
+    retroFontConfig.PixelSnapH = true;
+    retroFontConfig.FontDataOwnedByAtlas = false;
+
+    io.Fonts->AddFontFromMemoryTTF(
+        const_cast<unsigned char*>(Embedded8BitFont::kPressStart2PTtf),
+        static_cast<int>(Embedded8BitFont::kPressStart2PTtfSize),
+        12.0f,
+        &retroFontConfig);
+
+    io.Fonts->AddFontFromMemoryTTF(
+        const_cast<unsigned char*>(Embedded8BitFont::kSilkscreenTtf),
+        static_cast<int>(Embedded8BitFont::kSilkscreenTtfSize),
+        12.0f,
+        &retroFontConfig);
 }
 
 ImVec4 AppearanceManager::GetClearColor() const {

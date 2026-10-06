@@ -2,6 +2,7 @@
 
 #include "Editor/NodeGraph/SocketPresentation.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
+#include "Editor/NodeGraph/UI/NodeNumericDefaults.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -232,6 +233,7 @@ EditorNodeGraphUI::BuildLogicalNodeLayout(
     spec.width = nodeSize.x;
     spec.height = nodeSize.y;
     spec.expanded = node.expanded;
+    spec.sharedIdentityRow = SharesIdentityWithParameter(node);
     spec.framelessMedia =
         profile.kind == NodePresentationKind::FramelessMedia;
     spec.headerInsetX = metrics.headerInsetX;

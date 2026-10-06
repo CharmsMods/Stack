@@ -31,6 +31,11 @@ uniform float uBloom;
 uniform float uSmooth;
 uniform float uBlend;
 
+vec4 coveredNeighbor(vec2 uv) {
+    vec4 value = texture(uInputTex, uv);
+    return value.a > 0.0 ? value : texture(uInputTex, vUV);
+}
+
 float getLuma(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
@@ -40,14 +45,14 @@ void main() {
     float x = texel.x;
     float y = texel.y;
 
-    float m00 = getLuma(texture(uInputTex, vUV + vec2(-x, -y)).rgb);
-    float m01 = getLuma(texture(uInputTex, vUV + vec2( 0, -y)).rgb);
-    float m02 = getLuma(texture(uInputTex, vUV + vec2( x, -y)).rgb);
-    float m10 = getLuma(texture(uInputTex, vUV + vec2(-x,  0)).rgb);
-    float m12 = getLuma(texture(uInputTex, vUV + vec2( x,  0)).rgb);
-    float m20 = getLuma(texture(uInputTex, vUV + vec2(-x,  y)).rgb);
-    float m21 = getLuma(texture(uInputTex, vUV + vec2( 0,  y)).rgb);
-    float m22 = getLuma(texture(uInputTex, vUV + vec2( x,  y)).rgb);
+    float m00 = getLuma(coveredNeighbor(vUV + vec2(-x, -y)).rgb);
+    float m01 = getLuma(coveredNeighbor(vUV + vec2( 0, -y)).rgb);
+    float m02 = getLuma(coveredNeighbor(vUV + vec2( x, -y)).rgb);
+    float m10 = getLuma(coveredNeighbor(vUV + vec2(-x,  0)).rgb);
+    float m12 = getLuma(coveredNeighbor(vUV + vec2( x,  0)).rgb);
+    float m20 = getLuma(coveredNeighbor(vUV + vec2(-x,  y)).rgb);
+    float m21 = getLuma(coveredNeighbor(vUV + vec2( 0,  y)).rgb);
+    float m22 = getLuma(coveredNeighbor(vUV + vec2( x,  y)).rgb);
 
     float gx = (m02 + 2.0 * m12 + m22) - (m00 + 2.0 * m10 + m20);
     float gy = (m00 + 2.0 * m01 + m02) - (m20 + 2.0 * m21 + m22);
@@ -71,9 +76,9 @@ void main() {
             float theta = fi * 2.39996323;
             vec2 offset = vec2(cos(theta), sin(theta)) * r * texel;
 
-            float neighborLuma = getLuma(texture(uInputTex, vUV + offset).rgb);
-            float neighborLumaX = getLuma(texture(uInputTex, vUV + offset + vec2(x, 0.0)).rgb);
-            float neighborLumaY = getLuma(texture(uInputTex, vUV + offset + vec2(0.0, y)).rgb);
+            float neighborLuma = getLuma(coveredNeighbor(vUV + offset).rgb);
+            float neighborLumaX = getLuma(coveredNeighbor(vUV + offset + vec2(x, 0.0)).rgb);
+            float neighborLumaY = getLuma(coveredNeighbor(vUV + offset + vec2(0.0, y)).rgb);
             float neighborEdge = abs(neighborLumaX - neighborLuma) + abs(neighborLumaY - neighborLuma);
             neighborEdge = smoothstep(uTolerance / 100.0, (uTolerance + 10.0) / 100.0, neighborEdge * 4.0) * (uStrength / 100.0);
 

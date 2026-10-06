@@ -8,7 +8,7 @@ unsigned int RenderPipeline::GenerateMaskTexture(const RenderMaskSource& mask) {
         return 0;
     }
 
-    unsigned int texture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    unsigned int texture = CreateGraphRenderTargetTexture();
     if (texture == 0) {
         return 0;
     }
@@ -24,6 +24,7 @@ unsigned int RenderPipeline::GenerateMaskTexture(const RenderMaskSource& mask) {
             glUniform1f(glGetUniformLocation(m_MaskProgram, "uScale"), mask.settings.scale);
             glUniform2f(glGetUniformLocation(m_MaskProgram, "uCenter"), mask.settings.centerX, mask.settings.centerY);
             glUniform1f(glGetUniformLocation(m_MaskProgram, "uRadius"), mask.settings.radius);
+            glUniform1f(glGetUniformLocation(m_MaskProgram, "uRadiusY"), mask.settings.radiusY);
             glUniform1f(glGetUniformLocation(m_MaskProgram, "uFeather"), mask.settings.feather);
             glUniform1i(glGetUniformLocation(m_MaskProgram, "uInvert"), mask.settings.invert ? 1 : 0);
             m_Quad.Draw();
@@ -62,6 +63,136 @@ bool RenderPipeline::RenderMaskBlend(unsigned int originalTexture, unsigned int 
 
     glActiveTexture(GL_TEXTURE0);
     return true;
+}
+
+unsigned int RenderPipeline::RenderRawGradientBlend(
+    unsigned int originalTexture, unsigned int processedTexture,
+    const Stack::RawRecipe::RawGradientMask& mask,
+    unsigned int evReferenceTexture, int evMode, unsigned int coverageTexture) {
+    if (!originalTexture || !processedTexture || m_Width <= 0 || m_Height <= 0)
+        return 0;
+    if (!m_RawGradientBlendProgram) {
+        static const char* vertex = R"(
+            #version 330 core
+            layout(location = 0) in vec2 aPos;
+            layout(location = 1) in vec2 aTex;
+            out vec2 vTexCoord;
+            void main() { vTexCoord = aTex; gl_Position = vec4(aPos, 0.0, 1.0); }
+        )";
+        static const char* fragment = R"(
+            #version 330 core
+            in vec2 vTexCoord;
+            out vec4 FragColor;
+            uniform sampler2D uOriginal;
+            uniform sampler2D uProcessed;
+            uniform sampler2D uEvReference;
+            uniform int uEvMode;
+            uniform sampler2D uCoverage;
+            uniform int uHasCoverage;
+            uniform int uEnabled;
+            uniform vec4 uImageRect;
+            uniform float uAspect;
+            uniform vec2 uCenter;
+            uniform float uAngle;
+            uniform vec2 uLinearBounds;
+            uniform vec2 uRadii;
+            uniform float uInnerScale;
+            uniform int uShape;
+            uniform int uInvert;
+            void main() {
+                vec2 uv = vec2(uImageRect.x + vTexCoord.x * uImageRect.z,
+                    uImageRect.y + (1.0 - vTexCoord.y) * uImageRect.w);
+                vec2 p = vec2((uv.x - uCenter.x) * uAspect, uv.y - uCenter.y);
+                float cs = cos(uAngle), sn = sin(uAngle);
+                float t;
+                if (uShape == 0) {
+                    float d = dot(p, vec2(cs, sn));
+                    t = clamp((d - uLinearBounds.x) /
+                        max(uLinearBounds.y - uLinearBounds.x, 0.0001), 0.0, 1.0);
+                } else {
+                    vec2 q = vec2(p.x * cs + p.y * sn, -p.x * sn + p.y * cs);
+                    float radius = length(q / max(uRadii, vec2(0.0001)));
+                    t = clamp((radius - uInnerScale) /
+                        max(1.0 - uInnerScale, 0.0001), 0.0, 1.0);
+                }
+                float weight = 1.0 - t * t * (3.0 - 2.0 * t);
+                if (uInvert != 0) weight = 1.0 - weight;
+                if (uHasCoverage != 0) weight = clamp(texture(uCoverage, vTexCoord).r, 0.0, 1.0);
+                if (uEnabled == 0) weight = 0.0;
+                if (uEvMode == 4) { FragColor = vec4(weight, weight, weight, 1.0); return; }
+                vec4 original = texture(uOriginal, vTexCoord);
+                vec4 processed = texture(uProcessed, vTexCoord);
+                if (uEvMode == 3) {
+                    FragColor = vec4(original.rgb * exp2(clamp(processed.r, -24.0, 24.0)), original.a);
+                } else if (uEvMode != 0) {
+                    vec3 reference = max(texture(uEvReference, vTexCoord).rgb, vec3(0.0));
+                    float baseSum = reference.r + reference.g + reference.b;
+                    float adjustedSum = max(processed.r, 0.0) +
+                        max(processed.g, 0.0) + max(processed.b, 0.0);
+                    float deltaEv = baseSum > 0.0
+                        ? log2(max(adjustedSum / baseSum, 0.00000001)) : 0.0;
+                    float accumulatedEv = uEvMode == 1 ? 0.0 : original.r;
+                    FragColor = vec4(accumulatedEv + deltaEv * weight, 0.0, 0.0, 1.0);
+                } else {
+                    FragColor = mix(original, processed, weight);
+                }
+            }
+        )";
+        m_RawGradientBlendProgram = GLHelpers::CreateShaderProgram(vertex, fragment);
+    }
+    if (!m_RawGradientBlendProgram) return 0;
+    const unsigned int output = m_RawZoneAreasFloatOutput
+        ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
+        : CreateGraphRenderTargetTexture();
+    if (!output) return 0;
+    const bool rendered = RenderIntoGraphTargetTexture(output, [&](unsigned int) {
+        glUseProgram(m_RawGradientBlendProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, originalTexture);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uOriginal"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, processedTexture);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uProcessed"), 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, evReferenceTexture);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uEvReference"), 2);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uEvMode"), evMode);
+        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, coverageTexture);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uCoverage"), 3);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uHasCoverage"), coverageTexture ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uEnabled"), mask.enabled ? 1 : 0);
+        const auto& region = m_RawViewportAppliedRegion;
+        if (region.Valid()) {
+            glUniform4f(glGetUniformLocation(m_RawGradientBlendProgram, "uImageRect"),
+                float(region.x) / region.fullWidth, float(region.y) / region.fullHeight,
+                float(region.width) / region.fullWidth, float(region.height) / region.fullHeight);
+        } else {
+            glUniform4f(glGetUniformLocation(m_RawGradientBlendProgram, "uImageRect"),
+                0.0f, 0.0f, 1.0f, 1.0f);
+        }
+        const float aspect = region.Valid()
+            ? float(region.fullWidth) / region.fullHeight : float(m_Width) / m_Height;
+        glUniform1f(glGetUniformLocation(m_RawGradientBlendProgram, "uAspect"), aspect);
+        glUniform2f(glGetUniformLocation(m_RawGradientBlendProgram, "uCenter"),
+            mask.centerU, mask.centerV);
+        glUniform1f(glGetUniformLocation(m_RawGradientBlendProgram, "uAngle"),
+            mask.angleRadians);
+        glUniform2f(glGetUniformLocation(m_RawGradientBlendProgram, "uLinearBounds"),
+            mask.lowBoundary, mask.highBoundary);
+        glUniform2f(glGetUniformLocation(m_RawGradientBlendProgram, "uRadii"),
+            mask.radiusX, mask.radiusY);
+        glUniform1f(glGetUniformLocation(m_RawGradientBlendProgram, "uInnerScale"),
+            mask.innerScale);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uShape"),
+            mask.shape == Stack::RawRecipe::RawGradientShape::Linear ? 0 : 1);
+        glUniform1i(glGetUniformLocation(m_RawGradientBlendProgram, "uInvert"),
+            mask.inverted ? 1 : 0);
+        m_Quad.Draw();
+        glActiveTexture(GL_TEXTURE0);
+        glUseProgram(0);
+    });
+    if (!rendered) { glDeleteTextures(1, &output); return 0; }
+    return output;
 }
 
 bool RenderPipeline::RenderMaskCombine(unsigned int maskA, unsigned int maskB, RenderMaskCombineMode mode, unsigned int targetFBO) {

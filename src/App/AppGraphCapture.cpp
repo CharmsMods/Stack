@@ -10,6 +10,7 @@
 #include "App/AppShell.h"
 
 #include "Async/TaskSystem.h"
+#include "Notifications/AsyncActivity.h"
 #include "Editor/GraphCapture.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Renderer/GLHelpers.h"
@@ -138,9 +139,19 @@ std::string BuildCaptureCompletionMessage(
 
 } // namespace
 
-void AppShell::ProcessGraphCaptureRequest() {
+void AppShell::ProcessGraphCaptureRequest(EditorModule* captureOwner) {
+    if (!captureOwner) return;
     GraphCapture::Request request;
-    if (!m_Editor.ConsumeGraphCaptureRequest(request)) {
+    if (!captureOwner->ConsumeGraphCaptureRequest(request)) {
+        return;
+    }
+    const auto notifier = captureOwner->GetNotifier();
+    const auto activity = captureOwner->GetGraphCaptureActivity();
+    const auto completionLease = Stack::Notifications::RetainAsyncActivity(notifier, activity);
+    if (activity && !notifier.IsOperationCurrent(activity.operationId)) {
+        GraphCapture::Result cancelled;
+        cancelled.message = "The graph changed before capture could begin.";
+        captureOwner->CompleteGraphCapture(std::move(cancelled));
         return;
     }
 
@@ -156,7 +167,7 @@ void AppShell::ProcessGraphCaptureRequest() {
         immediateFailure.message = resolutionError.empty()
             ? "The graph capture viewport is no longer available."
             : resolutionError;
-        m_Editor.CompleteGraphCapture(std::move(immediateFailure));
+        captureOwner->CompleteGraphCapture(std::move(immediateFailure));
         return;
     }
 
@@ -184,6 +195,7 @@ void AppShell::ProcessGraphCaptureRequest() {
 
     ImGuiContext* mainContext = ImGui::GetCurrentContext();
     ImGuiContext* captureContext = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
     bool captureBackendInitialized = false;
     unsigned int captureTexture = 0;
     unsigned int captureFbo = 0;
@@ -231,7 +243,7 @@ void AppShell::ProcessGraphCaptureRequest() {
         GraphCapture::Result result;
         result.targetPath = request.targetPath;
         result.message = message;
-        m_Editor.CompleteGraphCapture(std::move(result));
+        captureOwner->CompleteGraphCapture(std::move(result));
     };
 
     if (!captureContext) {
@@ -257,7 +269,7 @@ void AppShell::ProcessGraphCaptureRequest() {
     captureRenderer = std::make_unique<EditorNodeGraphUI>();
     captureRenderer->Initialize();
 
-    EditorNodeGraph::Graph captureGraph = m_Editor.GetNodeGraph();
+    EditorNodeGraph::Graph captureGraph = captureOwner->GetNodeGraph();
     captureGraph.ClearSelection();
     if (request.settings.scope == GraphCapture::Scope::EntireGraph) {
         GraphCapture::ApplyNodeStatePreset(captureGraph, request.settings.nodeState);
@@ -292,7 +304,7 @@ void AppShell::ProcessGraphCaptureRequest() {
             m_BackgroundImageWidth,
             m_BackgroundImageHeight,
             logicalSize);
-        m_Editor.RenderGraphCaptureCanvas(
+        captureOwner->RenderGraphCaptureCanvas(
             *captureRenderer,
             captureGraph,
             &captureAppearance,
@@ -358,10 +370,14 @@ void AppShell::ProcessGraphCaptureRequest() {
     }
 
     restoreMainState();
-    m_Editor.SetGraphCaptureProgress("Encoding and saving graph image...");
+    EditorModule* const owner = captureOwner;
+    owner->SetGraphCaptureProgress("Encoding and saving graph image...");
 
-    Async::TaskSystem::Get().SubmitHighPriority([
+    const bool submitted = owner->ProjectTasks().SubmitHighPriority(
+        Stack::Notifications::ForAsyncActivity(notifier, activity, "Capturing graph"), [
         this,
+        owner,
+        notifier, activity, completionLease,
         request = std::move(request),
         pixels = std::move(pixels),
         outputWidth,
@@ -379,7 +395,18 @@ void AppShell::ProcessGraphCaptureRequest() {
         }
 
         std::string saveError;
-        const bool fileSaved = diskEncoded &&
+        std::error_code targetError;
+        const bool targetUnchanged = request.targetApproval.path.lexically_normal() ==
+            std::filesystem::u8path(request.targetPath).lexically_normal() &&
+            Stack::FileSave::TargetApprovalStillMatches(request.targetApproval, targetError);
+        if (!targetUnchanged) {
+            saveError = targetError
+                ? "The graph image destination could not be checked: " + targetError.message()
+                : "The destination changed after confirmation. Choose the image path again to save.";
+        }
+        const bool operationCurrent = !activity || notifier.IsOperationCurrent(activity.operationId);
+        if (!operationCurrent) saveError = "The graph capture was cancelled before saving.";
+        const bool fileSaved = diskEncoded && targetUnchanged && operationCurrent &&
             GraphCapture::WriteEncodedFile(request.targetPath, diskBytes, &saveError);
         if (!diskEncoded && saveError.empty()) {
             saveError = request.settings.format == GraphCapture::Format::Bmp
@@ -387,8 +414,10 @@ void AppShell::ProcessGraphCaptureRequest() {
                 : "PNG encoding failed.";
         }
 
-        Async::TaskSystem::Get().PostToMain([
+        owner->ProjectTasks().PostToMain([
             this,
+            owner,
+            notifier, activity, completionLease,
             request = std::move(request),
             pixels = std::move(pixels),
             pngBytes = std::move(pngBytes),
@@ -396,7 +425,15 @@ void AppShell::ProcessGraphCaptureRequest() {
             saveError = std::move(saveError),
             outputWidth,
             outputHeight]() mutable {
-            m_Editor.SetGraphCaptureProgress("Copying graph image to the Windows clipboard...");
+            if (activity && !notifier.IsOperationCurrent(activity.operationId)) {
+                GraphCapture::Result result;
+                result.fileSaved = fileSaved;
+                result.targetPath = request.targetPath;
+                result.message = fileSaved ? "Graph image saved. Clipboard copy was cancelled." : "Graph capture cancelled.";
+                owner->CompleteGraphCapture(std::move(result));
+                return;
+            }
+            owner->SetGraphCaptureProgress("Copying graph image to the Windows clipboard...");
             void* ownerWindow = nullptr;
 #if defined(_WIN32)
             ownerWindow = m_Window ? static_cast<void*>(glfwGetWin32Window(m_Window)) : nullptr;
@@ -409,6 +446,7 @@ void AppShell::ProcessGraphCaptureRequest() {
                 pngBytes);
 
             GraphCapture::Result result;
+            result.clipboardRequested = true;
             result.fileSaved = fileSaved;
             result.clipboardDibV5Published = clipboard.dibV5Published;
             result.clipboardPngPublished = clipboard.pngPublished;
@@ -419,7 +457,12 @@ void AppShell::ProcessGraphCaptureRequest() {
                 clipboard.pngPublished,
                 saveError,
                 clipboard.error);
-            m_Editor.CompleteGraphCapture(std::move(result));
+            owner->CompleteGraphCapture(std::move(result));
         });
     });
+    if (!submitted) {
+        GraphCapture::Result result;
+        result.message = "The graph image could not be queued for saving.";
+        owner->CompleteGraphCapture(std::move(result));
+    }
 }

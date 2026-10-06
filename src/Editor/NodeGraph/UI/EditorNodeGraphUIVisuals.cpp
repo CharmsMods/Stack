@@ -1,8 +1,12 @@
+#include "Editor/LayerRegistry.h"
+#include "ContinuousLinkStroke.h"
 #include "Editor/NodeGraph/UI/EditorNodeGraphUIVisuals.h"
 
 #include "App/settings/AppearanceTheme.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 #include "Editor/NodeGraph/EditorNodeGraphUIMetrics.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
+#include "Editor/NodeGraph/UI/NodeNumericDefaults.h"
 
 #include <algorithm>
 #include <cmath>
@@ -147,12 +151,12 @@ ImVec4 BrightenedSelectionFill(ImVec4 fill, const ImVec4& accent, const GraphSty
 }
 
 ImVec4 FamilyAccent(NodeFamily family, const GraphStyleTokens& tokens) {
-    const ImVec4 slate = tokens.light ? ImVec4(0.30f, 0.42f, 0.54f, 1.0f) : ImVec4(0.64f, 0.78f, 0.92f, 1.0f);
-    const ImVec4 green = tokens.light ? ImVec4(0.16f, 0.58f, 0.42f, 1.0f) : ImVec4(0.44f, 0.90f, 0.62f, 1.0f);
-    const ImVec4 violet = tokens.light ? ImVec4(0.54f, 0.32f, 0.76f, 1.0f) : ImVec4(0.82f, 0.62f, 1.0f, 1.0f);
-    const ImVec4 amber = tokens.light ? ImVec4(0.72f, 0.46f, 0.10f, 1.0f) : ImVec4(1.0f, 0.74f, 0.34f, 1.0f);
-    const ImVec4 blue = tokens.light ? ImVec4(0.16f, 0.46f, 0.84f, 1.0f) : ImVec4(0.36f, 0.72f, 1.0f, 1.0f);
-    const ImVec4 cyan = tokens.light ? ImVec4(0.02f, 0.58f, 0.66f, 1.0f) : ImVec4(0.30f, 0.92f, 1.0f, 1.0f);
+    const ImVec4 slate = tokens.mutedText;
+    const ImVec4 green = tokens.socketImage;
+    const ImVec4 violet = tokens.socketMask;
+    const ImVec4 amber = tokens.socketAnalysis;
+    const ImVec4 blue = tokens.socketRaw;
+    const ImVec4 cyan = tokens.socketValue;
 
     switch (family) {
         case NodeFamily::Gray: return slate;
@@ -167,110 +171,29 @@ ImVec4 FamilyAccent(NodeFamily family, const GraphStyleTokens& tokens) {
 }
 
 GraphStyleTokens BuildGraphStyleTokens(EditorModule* editor) {
-    GraphStyleTokens tokens;
-    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
-    tokens.mode = appearance ? appearance->GetGraphVisualMode() : StackAppearance::GraphVisualMode::Classic;
-    tokens.enabled = tokens.mode != StackAppearance::GraphVisualMode::Classic;
-    tokens.spotlightSurface = tokens.mode == StackAppearance::GraphVisualMode::SpotlightPrototype;
-    tokens.haloOutlines = appearance ? (tokens.spotlightSurface && appearance->GetGraphSpotlightHaloOutlines()) : false;
-    tokens.gridLineOpacity = appearance ? appearance->GetGraphLineOpacity() : 1.0f;
-
-    const ImGuiStyle& imguiStyle = ImGui::GetStyle();
-    const StackAppearance::ThemeDefinition* theme = appearance ? &appearance->GetWorkingTheme() : nullptr;
-    const ImVec4 window = theme ? theme->colors[ImGuiCol_WindowBg] : imguiStyle.Colors[ImGuiCol_WindowBg];
-    const ImVec4 accent = theme ? theme->colors[ImGuiCol_CheckMark] : imguiStyle.Colors[ImGuiCol_CheckMark];
-    tokens.text = theme ? theme->colors[ImGuiCol_Text] : imguiStyle.Colors[ImGuiCol_Text];
-    tokens.mutedText = theme ? theme->colors[ImGuiCol_TextDisabled] : imguiStyle.Colors[ImGuiCol_TextDisabled];
-    tokens.light = ColorLuminance(window) >= 0.52f;
-
-    if (!tokens.enabled) {
-        tokens.canvas = window;
-        tokens.nodeSurface = window;
-        tokens.nodeSurfaceCollapsed = window;
-        tokens.spotlightHalo = imguiStyle.Colors[ImGuiCol_Border];
-        tokens.selectionGlow = accent;
-        tokens.selected = accent;
-        return tokens;
-    }
-
-    if (tokens.mode == StackAppearance::GraphVisualMode::BlackNodes) {
-        tokens.canvas = window;
-        tokens.light = false;
-        tokens.text = ImVec4(0.94f, 0.96f, 0.98f, 1.0f);
-        tokens.mutedText = ImVec4(0.67f, 0.72f, 0.77f, 1.0f);
-        tokens.nodeSurface = WithAlpha(BlendColor(ImVec4(0.02f, 0.025f, 0.03f, 1.0f), accent, 0.03f), 0.97f);
-        tokens.nodeSurfaceCollapsed = WithAlpha(BlendColor(ImVec4(0.035f, 0.04f, 0.045f, 1.0f), accent, 0.02f), 0.99f);
-        tokens.spotlightCenter = tokens.nodeSurface;
-        tokens.spotlightEdge = WithAlpha(tokens.canvas, 0.0f);
-        tokens.spotlightHalo = WithAlpha(BlendColor(accent, tokens.text, 0.22f), 0.22f);
-        tokens.selectionGlow = WithAlpha(BlendColor(accent, tokens.text, 0.30f), 0.54f);
-        tokens.selected = WithAlpha(BlendColor(accent, tokens.text, 0.40f), 0.96f);
-
-        tokens.socketImage = ImVec4(0.44f, 0.80f, 1.0f, 1.0f);
-        tokens.socketMask = ImVec4(0.82f, 0.58f, 1.0f, 1.0f);
-        tokens.socketAnalysis = ImVec4(1.0f, 0.72f, 0.34f, 1.0f);
-        tokens.socketValue = ImVec4(0.46f, 0.94f, 0.94f, 1.0f);
-        tokens.socketRaw = ImVec4(0.48f, 0.94f, 0.62f, 1.0f);
-
-        tokens.linkImage = WithAlpha(tokens.socketImage, 0.92f);
-        tokens.linkMask = WithAlpha(BlendColor(tokens.socketMask, tokens.socketRaw, 0.14f), 0.90f);
-        tokens.linkAnalysis = WithAlpha(tokens.socketAnalysis, 0.88f);
-        tokens.linkUnderlay = ImVec4(0.0f, 0.0f, 0.0f, 0.62f);
-        tokens.groupFill = ImVec4(0.02f, 0.03f, 0.04f, 0.46f);
-        tokens.groupHeader = WithAlpha(BlendColor(tokens.groupFill, accent, 0.10f), 0.72f);
-        tokens.groupBorder = WithAlpha(BlendColor(accent, tokens.text, 0.18f), 0.48f);
-        return tokens;
-    }
-
-    const ImVec4 coolDark(0.00f, 0.10f, 0.13f, 1.0f);
-    const ImVec4 coolLight(0.86f, 0.96f, 1.0f, 1.0f);
-    tokens.canvas = tokens.light
-        ? BlendColor(window, coolLight, 0.20f)
-        : BlendColor(window, coolDark, 0.36f);
-    const float canvasLuminance = ColorLuminance(tokens.canvas);
-    const ImVec4 canvasGray(canvasLuminance, canvasLuminance, canvasLuminance, 1.0f);
-    const ImVec4 desaturatedCanvas = BlendColor(tokens.canvas, canvasGray, tokens.light ? 0.24f : 0.34f);
-    const ImVec4 shiftedCanvas = tokens.light
-        ? BlendColor(desaturatedCanvas, ImVec4(0.0f, 0.0f, 0.0f, 1.0f), 0.18f)
-        : BlendColor(desaturatedCanvas, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.32f);
-    tokens.spotlightCenter = WithAlpha(shiftedCanvas, tokens.light ? 0.68f : 0.84f);
-    tokens.spotlightEdge = WithAlpha(tokens.canvas, 0.0f);
-    tokens.spotlightHalo = WithAlpha(BlendColor(accent, tokens.text, tokens.light ? 0.10f : 0.18f), tokens.light ? 0.34f : 0.40f);
-    tokens.selectionGlow = WithAlpha(BlendColor(accent, tokens.text, 0.22f), tokens.light ? 0.56f : 0.68f);
-    tokens.nodeSurface = tokens.spotlightCenter;
-    tokens.nodeSurfaceCollapsed = WithAlpha(tokens.spotlightCenter, tokens.light ? 0.56f : 0.72f);
-    tokens.selected = WithAlpha(BlendColor(accent, tokens.text, 0.18f), 0.95f);
-
-    tokens.socketImage = tokens.light ? ImVec4(0.08f, 0.42f, 0.80f, 1.0f) : ImVec4(0.42f, 0.78f, 1.0f, 1.0f);
-    tokens.socketMask = tokens.light ? ImVec4(0.56f, 0.28f, 0.76f, 1.0f) : ImVec4(0.82f, 0.56f, 1.0f, 1.0f);
-    tokens.socketAnalysis = tokens.light ? ImVec4(0.76f, 0.44f, 0.08f, 1.0f) : ImVec4(1.0f, 0.72f, 0.34f, 1.0f);
-    tokens.socketValue = tokens.light ? ImVec4(0.02f, 0.54f, 0.60f, 1.0f) : ImVec4(0.44f, 0.90f, 0.92f, 1.0f);
-    tokens.socketRaw = tokens.light ? ImVec4(0.12f, 0.56f, 0.32f, 1.0f) : ImVec4(0.48f, 0.94f, 0.62f, 1.0f);
-
-    tokens.linkImage = WithAlpha(tokens.socketImage, 0.86f);
-    tokens.linkMask = WithAlpha(BlendColor(tokens.socketMask, tokens.socketRaw, 0.18f), 0.88f);
-    tokens.linkAnalysis = WithAlpha(tokens.socketAnalysis, 0.82f);
-    tokens.linkUnderlay = tokens.light ? ImVec4(0.0f, 0.08f, 0.12f, 0.16f) : ImVec4(0.0f, 0.0f, 0.0f, 0.44f);
-    tokens.groupFill = tokens.light ? ImVec4(0.82f, 0.94f, 0.98f, 0.28f) : ImVec4(0.02f, 0.12f, 0.16f, 0.34f);
-    tokens.groupHeader = WithAlpha(BlendColor(tokens.groupFill, accent, 0.18f), tokens.light ? 0.42f : 0.48f);
-    tokens.groupBorder = WithAlpha(BlendColor(accent, tokens.text, 0.16f), tokens.light ? 0.42f : 0.52f);
-    return tokens;
+    GraphStyleTokens t{};
+    const auto* appearance=editor ? editor->GetAppearance() : nullptr;
+    static const auto fallback=StackAppearance::ResolveCreamPalette(StackAppearance::CreamPalette{});
+    const auto& p=appearance ? appearance->GetResolvedCreamPalette() : fallback;
+    t.nodeAppearance=p.nodeAppearance;
+    t.enabled=true; t.light=ColorLuminance(p.workspace.background)>=0.52f;
+    t.monochrome=p.colorPolicy==StackAppearance::PaletteColorPolicy::Monochrome;
+    t.gridLineOpacity=appearance ? appearance->GetGraphLineOpacity() : 1;
+    t.canvas=p.workspace.background; t.nodeSurface=t.nodeSurfaceCollapsed=p.nodeAppearance.surface;
+    t.text=p.node.foreground; t.mutedText=p.node.mutedForeground;
+    t.spotlightCenter=p.surface; t.spotlightEdge=WithAlpha(p.surface,0);
+    t.spotlightHalo=p.border; t.selectionGlow=WithAlpha(p.focus,0); t.selected=p.nodeAppearance.selection;
+    t.socketImage=p.imageSocket; t.socketMask=p.maskSocket; t.socketAnalysis=p.analysisSocket;
+    t.socketValue=p.valueSocket; t.socketRaw=p.rawSocket;
+    t.linkImage=p.imageSocket; t.linkMask=p.maskSocket; t.linkAnalysis=p.analysisSocket;
+    t.linkUnderlay=WithAlpha(p.canvas,0.65f);
+    t.groupFill=WithAlpha(p.surface,0.30f); t.groupHeader=p.surface; t.groupBorder=p.border;
+    return t;
 }
 
 GraphZoomDialStyle BuildGraphZoomDialStyle(EditorModule* editor, const GraphStyleTokens& tokens) {
     GraphZoomDialStyle style {};
-    const StackAppearance::AppearanceManager* appearance = editor ? editor->GetAppearance() : nullptr;
-    const std::string presetId = appearance ? appearance->GetActivePresetId() : std::string();
-
-    ImVec4 baseColor = tokens.text;
-    if (presetId == StackAppearance::kSolarizedPresetId) {
-        baseColor = ImVec4(0.965f, 0.925f, 0.820f, 1.0f);
-    } else if (presetId == StackAppearance::kDarkPresetId) {
-        baseColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-    } else if (presetId == StackAppearance::kSolarizedLightPresetId) {
-        baseColor = ImVec4(0.408f, 0.329f, 0.251f, 1.0f);
-    }
-
+    const ImVec4 baseColor = tokens.text;
     const float tickAlpha = tokens.light ? 0.82f : 0.90f;
     const float glowAlpha = tokens.light ? 0.12f : 0.18f;
     style.tick = WithAlpha(baseColor, tickAlpha);
@@ -366,7 +289,7 @@ NodePresentationProfile BuildNodePresentationProfile(
                 profile.inlineControls = false;
             } else {
                 profile.kind = NodePresentationKind::CompactControls;
-                profile.showTitle = node.kind != EditorNodeGraph::NodeKind::Layer;
+                profile.showTitle = !SharesIdentityWithParameter(node);
             }
             break;
     }
@@ -374,90 +297,25 @@ NodePresentationProfile BuildNodePresentationProfile(
 }
 
 NodeFamilyStyle StyleForFamily(NodeFamily family, const GraphStyleTokens& tokens) {
-    NodeFamilyStyle style = StyleForFamily(family);
-    if (!tokens.enabled) {
-        return style;
-    }
-
-    const ImVec4 accent = FamilyAccent(family, tokens);
-    if (!tokens.spotlightSurface) {
-        style.fill = WithAlpha(BlendColor(tokens.nodeSurface, accent, 0.028f), tokens.nodeSurface.w);
-        style.border = WithAlpha(BlendColor(tokens.spotlightHalo, accent, 0.10f), 0.72f);
-        style.accent = accent;
-        style.text = tokens.text;
-        style.mutedText = BlendColor(tokens.mutedText, accent, 0.05f);
-        return style;
-    }
-
-    style.fill = WithAlpha(BlendColor(tokens.nodeSurface, accent, tokens.light ? 0.04f : 0.06f), tokens.nodeSurface.w);
-    style.border = WithAlpha(BlendColor(tokens.spotlightHalo, accent, 0.28f), tokens.light ? 0.30f : 0.36f);
-    style.accent = accent;
-    style.text = tokens.text;
-    style.mutedText = BlendColor(tokens.mutedText, accent, tokens.light ? 0.08f : 0.12f);
-    return style;
+    const auto& n=tokens.nodeAppearance;
+    return {n.surface,tokens.light ? tokens.groupBorder : ImVec4(0.32f,0.32f,0.32f,1.0f),n.number,n.text,n.mutedText};
 }
 
 const NodeFamilyStyle& StyleForFamily(NodeFamily family) {
-    static const NodeFamilyStyle kGray {
-        ImVec4(0.31f, 0.34f, 0.36f, 0.93f),
-        ImVec4(0.44f, 0.47f, 0.49f, 0.96f),
-        ImVec4(0.56f, 0.60f, 0.62f, 1.0f),
-        ImVec4(0.92f, 0.94f, 0.95f, 1.0f),
-        ImVec4(0.76f, 0.79f, 0.81f, 1.0f)
-    };
-    static const NodeFamilyStyle kLayer {
-        ImVec4(0.30f, 0.35f, 0.33f, 0.93f),
-        ImVec4(0.42f, 0.49f, 0.45f, 0.96f),
-        ImVec4(0.55f, 0.66f, 0.60f, 1.0f),
-        ImVec4(0.92f, 0.95f, 0.93f, 1.0f),
-        ImVec4(0.76f, 0.82f, 0.79f, 1.0f)
-    };
-    static const NodeFamilyStyle kPreview {
-        ImVec4(0.36f, 0.35f, 0.28f, 0.93f),
-        ImVec4(0.50f, 0.48f, 0.39f, 0.96f),
-        ImVec4(0.68f, 0.65f, 0.50f, 1.0f),
-        ImVec4(0.97f, 0.96f, 0.90f, 1.0f),
-        ImVec4(0.84f, 0.82f, 0.72f, 1.0f)
-    };
-    static const NodeFamilyStyle kMask {
-        ImVec4(0.34f, 0.30f, 0.38f, 0.93f),
-        ImVec4(0.48f, 0.42f, 0.54f, 0.96f),
-        ImVec4(0.66f, 0.58f, 0.76f, 1.0f),
-        ImVec4(0.95f, 0.93f, 0.98f, 1.0f),
-        ImVec4(0.82f, 0.79f, 0.88f, 1.0f)
-    };
-    static const NodeFamilyStyle kScope {
-        ImVec4(0.38f, 0.31f, 0.26f, 0.93f),
-        ImVec4(0.53f, 0.42f, 0.35f, 0.96f),
-        ImVec4(0.73f, 0.57f, 0.45f, 1.0f),
-        ImVec4(0.98f, 0.94f, 0.90f, 1.0f),
-        ImVec4(0.87f, 0.78f, 0.72f, 1.0f)
-    };
-    static const NodeFamilyStyle kGenerator {
-        ImVec4(0.27f, 0.32f, 0.37f, 0.93f),
-        ImVec4(0.39f, 0.46f, 0.54f, 0.96f),
-        ImVec4(0.53f, 0.64f, 0.76f, 1.0f),
-        ImVec4(0.92f, 0.95f, 0.98f, 1.0f),
-        ImVec4(0.77f, 0.82f, 0.88f, 1.0f)
-    };
-    static const NodeFamilyStyle kMerge {
-        ImVec4(0.24f, 0.35f, 0.36f, 0.93f),
-        ImVec4(0.35f, 0.50f, 0.51f, 0.96f),
-        ImVec4(0.49f, 0.69f, 0.70f, 1.0f),
-        ImVec4(0.91f, 0.97f, 0.97f, 1.0f),
-        ImVec4(0.75f, 0.85f, 0.85f, 1.0f)
-    };
-
-    switch (family) {
-        case NodeFamily::Gray: return kGray;
-        case NodeFamily::Layer: return kLayer;
-        case NodeFamily::Preview: return kPreview;
-        case NodeFamily::Mask: return kMask;
-        case NodeFamily::Scope: return kScope;
-        case NodeFamily::Generator: return kGenerator;
-        case NodeFamily::Merge: return kMerge;
+    // Compatibility overload for drawing without an editor. The graph itself
+    // supplies its cached palette through the overload above.
+    static const auto palette=StackAppearance::ResolveCreamPalette(StackAppearance::CreamPalette{});
+    static std::array<NodeFamilyStyle,7> styles;
+    auto& style=styles[static_cast<size_t>(family)];
+    style={palette.surface,palette.border,palette.focus,palette.text,palette.mutedText};
+    if (ImGui::GetCurrentContext()) {
+        style.fill=ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+        style.text=ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        style.mutedText=ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+        style.border=ImGui::GetStyleColorVec4(ImGuiCol_Border);
+        style.accent=ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
     }
-    return kGray;
+    return style;
 }
 
 NodeLayoutMetrics MetricsForNode(const EditorNodeGraph::Node& node) {
@@ -657,7 +515,12 @@ void ApplyCanonicalNodeMetrics(
     const NodeWidthClass widthClass =
         ResolveNodeWidthClass(ui, editor, node);
     metrics.width = WidthForClass(widthClass);
+    if (widthClass == NodeWidthClass::Compact || widthClass == NodeWidthClass::Standard)
+        metrics.width = CompactControlNodeWidth(node).value_or(metrics.width);
+    if (node.kind == EditorNodeGraph::NodeKind::MaskUtility &&
+        node.maskUtilityKind == EditorNodeGraph::MaskUtilityKind::Invert) metrics.minExpandedHeight = 72.0f;
     metrics.collapsedHeight = kCollapsedNodeHeight;
+    if (SharesIdentityWithParameter(node)) metrics.minExpandedHeight = kCollapsedNodeHeight;
     metrics.contentLaneWidth = std::max(48.0f, metrics.width - 24.0f);
     metrics.previewWidth = std::min(
         std::max(1.0f, metrics.previewWidth),
@@ -852,54 +715,28 @@ LinkVisualStyle ResolveLinkVisualStyle(
     int fromNodeId,
     const std::string& fromSocketId,
     int toNodeId,
-    const std::string& toSocketId) {
+    const std::string& toSocketId,
+    EditorModule* editor) {
     LinkVisualStyle style;
-    EditorNodeGraph::SocketDefinition fromSocket;
-    EditorNodeGraph::SocketDefinition toSocket;
-    if (!graph.FindSocket(fromNodeId, fromSocketId, &fromSocket) ||
-        !graph.FindSocket(toNodeId, toSocketId, &toSocket)) {
-        if (IsChannelSocketId(fromSocketId)) {
-            style.channel = fromSocketId;
-        } else if (IsChannelSocketId(toSocketId)) {
-            style.channel = toSocketId;
-        }
-        return style;
+    EditorNodeGraph::GraphOutputDescription local;
+    const auto* output = editor ? editor->GetGraphOutputDescription(fromNodeId, fromSocketId) : nullptr;
+    if (!output) {
+        local = EditorNodeGraph::DescribeGraphOutput(graph, fromNodeId, fromSocketId);
+        output = &local;
     }
-
-    style.channel = graph.ResolveSocketChannel(fromNodeId, fromSocketId);
-    if (style.channel.empty() && IsChannelSocketId(toSocketId)) {
-        style.channel = toSocketId;
-    }
-    style.scalarStream = fromSocket.type == EditorNodeGraph::SocketType::Mask ||
-        fromSocket.type == EditorNodeGraph::SocketType::ScalarField ||
-        fromSocket.type == EditorNodeGraph::SocketType::Channel ||
-        graph.IsScalarSocketStream(fromNodeId, fromSocketId);
-
-    const EditorNodeGraph::Link probeLink { fromNodeId, fromSocketId, toNodeId, toSocketId };
-    if (graph.GetLinkRole(probeLink) == EditorNodeGraph::LinkRole::Scope) {
-        style.kind = LinkVisualKind::Analysis;
-        return style;
-    }
-    if (fromSocket.type == EditorNodeGraph::SocketType::Raw ||
-        toSocket.type == EditorNodeGraph::SocketType::Raw) {
-        style.kind = LinkVisualKind::Raw;
-        return style;
-    }
-    if (fromSocket.type == EditorNodeGraph::SocketType::Mask ||
-        toSocket.type == EditorNodeGraph::SocketType::Mask ||
-        fromSocket.type == EditorNodeGraph::SocketType::ScalarField ||
-        toSocket.type == EditorNodeGraph::SocketType::ScalarField) {
-        style.kind = LinkVisualKind::MaskEndpoint;
-        style.dotted = true;
-        return style;
-    }
+    style.channel = EditorNodeGraph::OutputChannelColor(*output);
+    style.scalarStream = EditorNodeGraph::IsSingleChannelValue(output->descriptor.logicalType);
+    style.dotted = style.scalarStream;
+    if (output->descriptor.logicalType == Stack::NodeMath::LogicalValueType::Raw) style.kind = LinkVisualKind::Raw;
+    else if (output->descriptor.logicalType == Stack::NodeMath::LogicalValueType::Analysis) style.kind = LinkVisualKind::Analysis;
     return style;
 }
 
 LinkVisualStyle ResolveLinkVisualStyle(
     const EditorNodeGraph::Graph& graph,
-    const EditorNodeGraph::Link& link) {
-    return ResolveLinkVisualStyle(graph, link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId);
+    const EditorNodeGraph::Link& link,
+    EditorModule* editor) {
+    return ResolveLinkVisualStyle(graph, link.fromNodeId, link.fromSocketId, link.toNodeId, link.toSocketId, editor);
 }
 
 LinkVisualStyle ResolvePendingLinkVisualStyle(
@@ -916,41 +753,60 @@ LinkVisualStyle ResolvePendingLinkVisualStyle(
     int nodeId,
     const std::string& socketId,
     EditorNodeGraph::SocketDirection direction) {
-    LinkVisualStyle style;
-    EditorNodeGraph::SocketDefinition socket;
-    if (!graph.FindSocket(nodeId, socketId, &socket)) {
-        if (IsChannelSocketId(socketId)) {
-            style.channel = socketId;
-        }
-        return style;
+    if (direction == EditorNodeGraph::SocketDirection::Output) {
+        return ResolveLinkVisualStyle(graph, nodeId, socketId, 0, {}, nullptr);
+    }
+    return {};
+}
+
+EditorNodeGraph::SocketDefinition ResolveSocketDisplayDefinition(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::SocketDefinition& socket,
+    EditorModule* editor) {
+    using Type = EditorNodeGraph::SocketType;
+    using Direction = EditorNodeGraph::SocketDirection;
+    using LogicalType = Stack::NodeMath::LogicalValueType;
+
+    const bool isMainImageInput =
+        socket.direction == Direction::Input &&
+        socket.id != EditorNodeGraph::kMaskInputSocketId &&
+        (socket.type == Type::Image || socket.type == Type::ImageOrChannel);
+    if (!isMainImageInput) {
+        return socket;
     }
 
-    style.channel = IsChannelSocketId(socketId) ? socketId : graph.ResolveSocketChannel(nodeId, socketId);
-    style.scalarStream = direction == EditorNodeGraph::SocketDirection::Output &&
-        (socket.type == EditorNodeGraph::SocketType::Mask ||
-         socket.type == EditorNodeGraph::SocketType::ScalarField ||
-         socket.type == EditorNodeGraph::SocketType::Channel ||
-         graph.IsScalarSocketStream(nodeId, socketId));
+    const EditorNodeGraph::Link* link = graph.FindInputLink(socket.nodeId, socket.id);
+    if (!link) {
+        return socket;
+    }
 
-    if (socket.type == EditorNodeGraph::SocketType::Analysis) {
-        style.kind = LinkVisualKind::Analysis;
-        return style;
+    EditorNodeGraph::GraphOutputDescription localOutput;
+    const EditorNodeGraph::GraphOutputDescription* output =
+        editor && &graph == &editor->GetNodeGraph()
+            ? editor->GetGraphOutputDescription(link->fromNodeId, link->fromSocketId)
+            : nullptr;
+    if (!output) {
+        localOutput = EditorNodeGraph::DescribeGraphOutput(
+            graph, link->fromNodeId, link->fromSocketId);
+        output = &localOutput;
     }
-    if (socket.type == EditorNodeGraph::SocketType::Raw) {
-        style.kind = LinkVisualKind::Raw;
-        return style;
+    if (output->descriptor.logicalType != LogicalType::Mask) {
+        return socket;
     }
-    if (socket.type == EditorNodeGraph::SocketType::Mask ||
-        socket.type == EditorNodeGraph::SocketType::ScalarField) {
-        style.kind = LinkVisualKind::MaskEndpoint;
-        style.dotted = true;
-        return style;
-    }
-    return style;
+
+    EditorNodeGraph::SocketDefinition displaySocket = socket;
+    displaySocket.type = Type::Mask;
+    return displaySocket;
 }
 
 ImVec4 ChannelColorVec(const std::string& channel, const GraphStyleTokens& tokens) {
     const bool light = tokens.enabled && tokens.light;
+    if (tokens.monochrome) {
+        if (channel == "r") return ImVec4(0.90f,0.90f,0.90f,1.0f);
+        if (channel == "g") return ImVec4(0.75f,0.75f,0.75f,1.0f);
+        if (channel == "b") return ImVec4(0.60f,0.60f,0.60f,1.0f);
+        if (channel == "a") return ImVec4(0.48f,0.48f,0.48f,1.0f);
+    }
     if (channel == "r") return light ? ImVec4(0.82f, 0.12f, 0.12f, 1.0f) : ImVec4(1.0f, 0.24f, 0.24f, 1.0f);
     if (channel == "g") return light ? ImVec4(0.05f, 0.62f, 0.24f, 1.0f) : ImVec4(0.32f, 1.0f, 0.42f, 1.0f);
     if (channel == "b") return light ? ImVec4(0.10f, 0.34f, 0.92f, 1.0f) : ImVec4(0.34f, 0.56f, 1.0f, 1.0f);
@@ -969,20 +825,17 @@ ImVec4 SocketColorVec(
         return ImGui::ColorConvertU32ToFloat4(TypedSocketColor(socket.type, familyStyle));
     }
     switch (socket.type) {
-        case EditorNodeGraph::SocketType::Image: return BlendColor(tokens.socketImage, familyStyle.accent, 0.16f);
+        case EditorNodeGraph::SocketType::Image: return tokens.socketImage;
         case EditorNodeGraph::SocketType::ImageOrChannel:
-            return BlendColor(
-                BlendColor(tokens.socketImage, ImVec4(0.40f, 0.82f, 0.76f, 1.0f), 0.5f),
-                familyStyle.accent,
-                0.14f);
-        case EditorNodeGraph::SocketType::Channel: return BlendColor(ImVec4(0.40f, 0.82f, 0.76f, 1.0f), familyStyle.accent, 0.12f);
+            return tokens.socketImage;
+        case EditorNodeGraph::SocketType::Channel: return tokens.socketImage;
         case EditorNodeGraph::SocketType::Spectrum:
         case EditorNodeGraph::SocketType::SpectrumMagnitude:
-        case EditorNodeGraph::SocketType::SpectrumPhase: return BlendColor(ImVec4(0.76f, 0.48f, 0.96f, 1.0f), familyStyle.accent, 0.12f);
-        case EditorNodeGraph::SocketType::FrequencyResponse: return BlendColor(ImVec4(0.96f, 0.68f, 0.28f, 1.0f), familyStyle.accent, 0.12f);
+        case EditorNodeGraph::SocketType::SpectrumPhase: return tokens.socketAnalysis;
+        case EditorNodeGraph::SocketType::FrequencyResponse: return tokens.socketValue;
         case EditorNodeGraph::SocketType::Mask:
-        case EditorNodeGraph::SocketType::ScalarField: return BlendColor(tokens.socketMask, familyStyle.accent, 0.12f);
-        case EditorNodeGraph::SocketType::Analysis: return BlendColor(tokens.socketAnalysis, familyStyle.accent, 0.10f);
+        case EditorNodeGraph::SocketType::ScalarField: return tokens.socketMask;
+        case EditorNodeGraph::SocketType::Analysis: return tokens.socketAnalysis;
         case EditorNodeGraph::SocketType::Value:
         case EditorNodeGraph::SocketType::Boolean:
         case EditorNodeGraph::SocketType::Integer:
@@ -997,8 +850,8 @@ ImVec4 SocketColorVec(
         case EditorNodeGraph::SocketType::Histogram:
         case EditorNodeGraph::SocketType::Statistics:
         case EditorNodeGraph::SocketType::Metadata:
-        case EditorNodeGraph::SocketType::Handle: return BlendColor(tokens.socketValue, familyStyle.accent, 0.10f);
-        case EditorNodeGraph::SocketType::Raw: return BlendColor(tokens.socketRaw, familyStyle.accent, 0.12f);
+        case EditorNodeGraph::SocketType::Handle: return tokens.socketValue;
+        case EditorNodeGraph::SocketType::Raw: return tokens.socketRaw;
     }
     return tokens.socketImage;
 }
@@ -1011,20 +864,9 @@ ImU32 SocketColor(
 }
 
 ImVec4 LinkColorVec(const LinkVisualStyle& style, const GraphStyleTokens& tokens) {
-    if (!style.channel.empty()) {
-        return WithAlpha(ChannelColorVec(style.channel, tokens), 0.88f);
-    }
-
-    switch (style.kind) {
-        case LinkVisualKind::Analysis:
-            return tokens.enabled ? tokens.linkAnalysis : ImVec4(0.51f, 0.90f, 0.67f, 0.90f);
-        case LinkVisualKind::MaskEndpoint:
-            return tokens.enabled ? tokens.linkMask : ImVec4(0.51f, 0.90f, 0.67f, 0.90f);
-        case LinkVisualKind::Raw:
-        case LinkVisualKind::Image:
-            return tokens.enabled ? tokens.linkImage : ImVec4(0.47f, 0.67f, 1.0f, 0.90f);
-    }
-    return tokens.enabled ? tokens.linkImage : ImVec4(0.47f, 0.67f, 1.0f, 0.90f);
+    if (!style.channel.empty()) return WithAlpha(ChannelColorVec(style.channel, tokens), 0.95f);
+    if (style.scalarStream) return tokens.mutedText;
+    return tokens.enabled ? WithAlpha(tokens.text, 0.9f) : ImVec4(0.94f, 0.94f, 0.94f, 0.9f);
 }
 
 ImU32 LinkColorClassic(const LinkVisualStyle& style, bool selected) {
@@ -1038,15 +880,8 @@ ImU32 LinkColorClassic(const LinkVisualStyle& style, bool selected) {
         if (style.channel == "a") return ApplyStyleAlpha(IM_COL32(220, 220, 220, 210));
     }
 
-    switch (style.kind) {
-        case LinkVisualKind::Analysis:
-        case LinkVisualKind::MaskEndpoint:
-            return ApplyStyleAlpha(IM_COL32(130, 230, 170, 230));
-        case LinkVisualKind::Raw:
-        case LinkVisualKind::Image:
-            return ApplyStyleAlpha(IM_COL32(120, 170, 255, 230));
-    }
-    return ApplyStyleAlpha(IM_COL32(120, 170, 255, 230));
+    return style.scalarStream ? ApplyStyleAlpha(IM_COL32(166, 166, 166, 230))
+        : ApplyStyleAlpha(IM_COL32(240, 240, 240, 230));
 }
 
 void DrawDottedBezierStroke(
@@ -1057,24 +892,13 @@ void DrawDottedBezierStroke(
     const ImVec2& p3,
     ImU32 color,
     float thickness) {
-    auto pointDistance = [](const ImVec2& a, const ImVec2& b) {
-        const float dx = b.x - a.x;
-        const float dy = b.y - a.y;
-        return std::sqrt((dx * dx) + (dy * dy));
-    };
     const float radius = std::max(0.25f, thickness * 0.5f);
     const float spacing = std::max(1.4f, radius * 2.6f);
-    const float estimate =
-        pointDistance(p0, p1) +
-        pointDistance(p1, p2) +
-        pointDistance(p2, p3);
-    const int sampleCount = std::clamp(static_cast<int>(estimate / 6.0f), 24, 128);
-
+    const auto samples=SampleLinkCurve(p0,p1,p2,p3);
     ImVec2 previous = p0;
     float distanceToNextDot = 0.0f;
-    for (int index = 1; index <= sampleCount; ++index) {
-        const float t = static_cast<float>(index) / static_cast<float>(sampleCount);
-        const ImVec2 current = CubicBezierPoint(p0, p1, p2, p3, t);
+    for (size_t index = 1; index < samples.size(); ++index) {
+        const ImVec2 current = samples[index].point;
         const ImVec2 delta(current.x - previous.x, current.y - previous.y);
         const float segmentLength = std::sqrt((delta.x * delta.x) + (delta.y * delta.y));
         if (segmentLength <= 1e-4f) {
@@ -1109,7 +933,7 @@ void DrawBezierLinkStroke(
         DrawDottedBezierStroke(drawList, p0, p1, p2, p3, color, thickness);
         return;
     }
-    drawList->AddBezierCubic(p0, p1, p2, p3, color, thickness);
+    DrawContinuousLinkStroke(drawList,p0,p1,p2,p3,color,thickness,false,{}, {},0);
 }
 
 ImVec2 SuperellipsePoint(const ImVec2& center, float radiusX, float radiusY, float angle, float exponent) {
@@ -1217,109 +1041,6 @@ void DrawSoftSpotlightHalo(
     drawList->AddPolyline(points, kSegments, color, thickness, ImDrawFlags_Closed);
 }
 
-void DrawGraphNodeSpotlightSurface(
-    ImDrawList* drawList,
-    const ImVec2& min,
-    const ImVec2& max,
-    const ImVec4& fillColor,
-    const ImVec4& borderColor,
-    const ImVec4& accentColor,
-    const GraphStyleTokens& tokens,
-    bool selected,
-    bool expanded,
-    float uiScale,
-    float rounding,
-    float borderThickness) {
-    const ImVec4 surfaceFill = selected
-        ? BrightenedSelectionFill(fillColor, accentColor, tokens)
-        : fillColor;
-    if (!tokens.enabled) {
-        drawList->AddRectFilled(min, max, ColorToU32(surfaceFill), rounding);
-        drawList->AddRect(min, max, ColorToU32(borderColor), rounding, 0, borderThickness);
-        return;
-    }
-
-    if (!tokens.spotlightSurface) {
-        drawList->AddRectFilled(min, max, ColorToU32(surfaceFill), rounding);
-        drawList->AddRect(min, max, ColorToU32(borderColor), rounding, 0, borderThickness);
-        return;
-    }
-
-    const float width = std::max(1.0f, max.x - min.x);
-    const float height = std::max(1.0f, max.y - min.y);
-    const float feather = std::clamp(std::min(width, height) * 0.20f, 12.0f * uiScale, 32.0f * uiScale);
-    const float coreRatioX = (width * 0.5f) / ((width * 0.5f) + feather);
-    const float coreRatioY = (height * 0.5f) / ((height * 0.5f) + feather);
-    const float contentCoreRatio = std::clamp(std::max(coreRatioX, coreRatioY) + 0.025f, 0.64f, 0.86f);
-    const ImVec4 familySpot = selected
-        ? BrightenedSelectionFill(WithAlpha(BlendColor(tokens.spotlightCenter, accentColor, tokens.light ? 0.035f : 0.055f), expanded ? tokens.spotlightCenter.w : tokens.nodeSurfaceCollapsed.w), accentColor, tokens)
-        : WithAlpha(BlendColor(tokens.spotlightCenter, accentColor, tokens.light ? 0.035f : 0.055f), expanded ? tokens.spotlightCenter.w : tokens.nodeSurfaceCollapsed.w);
-    const ImVec4 familyEdge = WithAlpha(BlendColor(tokens.spotlightEdge, accentColor, tokens.light ? 0.025f : 0.04f), tokens.spotlightEdge.w);
-
-    DrawSoftSpotlightBlob(drawList, min, max, familySpot, familyEdge, feather, 3.2f, contentCoreRatio, 1.45f);
-
-    if (tokens.haloOutlines) {
-        DrawSoftSpotlightHalo(
-            drawList,
-            min,
-            max,
-            ColorWithAlpha(tokens.spotlightHalo, 0.28f),
-            feather * 0.42f,
-            0.85f * uiScale,
-            3.2f);
-    }
-}
-
-void DrawSocketPin(
-    ImDrawList* drawList,
-    const ImVec2& pin,
-    float radius,
-    ImU32 baseColor,
-    const GraphStyleTokens& tokens,
-    bool hovered,
-    float interactionEmphasis) {
-    if (!tokens.enabled) {
-        drawList->AddCircleFilled(pin, radius, hovered ? ApplyStyleAlpha(IM_COL32(255, 255, 255, 255)) : baseColor);
-        return;
-    }
-
-    const ImVec4 baseVec = ImGui::ColorConvertU32ToFloat4(baseColor);
-    const float emphasis = std::clamp(interactionEmphasis, 0.0f, 1.0f);
-    const float hoverBoost = hovered ? 1.0f : 0.0f;
-    const float activePulse = (hovered || emphasis > 0.001f)
-        ? (0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.0f))
-        : 0.0f;
-    const float outerRadiusScale = 1.55f + emphasis * 0.34f + hoverBoost * 0.27f + activePulse * (0.10f + emphasis * 0.12f);
-    const float outerAlpha = 0.18f + emphasis * 0.18f + hoverBoost * 0.06f + activePulse * (0.02f + emphasis * 0.04f);
-    const float coreRadiusScale = 0.78f + hoverBoost * 0.08f + emphasis * 0.10f + activePulse * (0.02f + emphasis * 0.03f);
-    const float ringRadiusScale = 1.14f + emphasis * 0.06f + activePulse * (0.02f + emphasis * 0.02f);
-    const ImVec4 highlightColor = BlendColor(baseVec, tokens.selected, 0.32f + emphasis * 0.30f);
-    drawList->AddCircleFilled(
-        pin,
-        radius * outerRadiusScale,
-        ColorWithAlpha(hovered || emphasis > 0.001f ? highlightColor : baseVec, outerAlpha));
-    drawList->AddCircleFilled(pin, radius * 1.14f, ColorWithAlpha(tokens.canvas, 0.86f));
-    drawList->AddCircleFilled(
-        pin,
-        radius * coreRadiusScale,
-        ColorToU32(BlendColor(baseVec, tokens.text, hoverBoost * 0.18f + emphasis * 0.22f + activePulse * emphasis * 0.08f)));
-    drawList->AddCircle(
-        pin,
-        radius * ringRadiusScale,
-        ColorWithAlpha(hovered || emphasis > 0.001f ? tokens.selected : tokens.spotlightHalo, 0.52f + emphasis * 0.22f + hoverBoost * 0.20f + activePulse * emphasis * 0.16f),
-        16,
-        radius *
-            (0.18f + emphasis * 0.03f + hoverBoost * 0.02f));
-    if (emphasis > 0.01f) {
-        drawList->AddCircle(
-            pin,
-            radius * (1.34f + emphasis * 0.16f + activePulse * 0.05f),
-            ColorWithAlpha(tokens.selected, 0.12f + emphasis * 0.20f),
-            18,
-            radius * 0.12f);
-    }
-}
-
 void DrawPreviewFrame(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const GraphStyleTokens& tokens, float uiScale) {
     if (!tokens.enabled || max.x <= min.x || max.y <= min.y) {
         return;
@@ -1374,8 +1095,9 @@ float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayout
                     return headerBlock + sectionGap + row + gap + sliderRow + bottomPadding;
                 case EditorNodeGraph::MaskGeneratorKind::LinearGradient:
                     return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
+                case EditorNodeGraph::MaskGeneratorKind::Square:
                 case EditorNodeGraph::MaskGeneratorKind::RadialGradient:
-                    return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
+                    return headerBlock + sectionGap + 6 * (row + gap + sliderRow + gap) + checkboxRow + bottomPadding;
                 case EditorNodeGraph::MaskGeneratorKind::Noise:
                     return headerBlock + sectionGap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + row + gap + sliderRow + gap + checkboxRow + bottomPadding;
             }
@@ -1639,6 +1361,7 @@ const char* MaskLabel(EditorNodeGraph::MaskGeneratorKind kind) {
         case EditorNodeGraph::MaskGeneratorKind::LinearGradient: return "Linear Gradient Mask";
         case EditorNodeGraph::MaskGeneratorKind::RadialGradient: return "Radial Gradient Mask";
         case EditorNodeGraph::MaskGeneratorKind::Noise: return "Noise Mask";
+        case EditorNodeGraph::MaskGeneratorKind::Square: return "Square Mask";
     }
     return "Mask";
 }
@@ -1694,10 +1417,11 @@ const char* DataMathLabel(EditorNodeGraph::DataMathMode mode) {
 }
 
 std::string PrimaryNodeTitle(const EditorNodeGraph::Node& node) {
+    if (!node.title.empty() && node.kind != EditorNodeGraph::NodeKind::Layer)
+        return node.title;
     switch (node.kind) {
         case EditorNodeGraph::NodeKind::Layer:
-            return std::to_string(node.layerIndex + 1) + ". " +
-                (node.title.empty() ? "Layer" : node.title);
+            return node.title.empty() ? "Layer" : node.title;
         case EditorNodeGraph::NodeKind::MaskGenerator:
             return MaskLabel(node.maskKind);
         case EditorNodeGraph::NodeKind::CustomMask:

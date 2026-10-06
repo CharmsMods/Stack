@@ -1,5 +1,7 @@
 #include "ClassicalRgbDenoiseLayer.h"
 
+#include "App/AppPaths.h"
+
 #include "Editor/EditorModule.h"
 #include "Renderer/FullscreenQuad.h"
 #include "Renderer/GLStateGuards.h"
@@ -194,10 +196,8 @@ void HashCombineFloat(std::uint64_t& seed, const float value) {
 }
 
 std::filesystem::path StatusPathForNode(const int nodeId) {
-    std::error_code ec;
-    const std::filesystem::path cwd = std::filesystem::current_path(ec);
-    const std::filesystem::path root = ec ? std::filesystem::path(".") : cwd;
-    return root / ("classical_rgb_denoise_node_" + std::to_string(nodeId) + ".status");
+    return AppPaths::GetLogsDirectory() /
+        ("classical_rgb_denoise_node_" + std::to_string(nodeId) + ".status");
 }
 
 ClassicalRgbDenoiseLayer::FloatImage ResizeToMaxEdge(
@@ -336,6 +336,7 @@ ClassicalRgbDenoiseLayer::FloatImage BilateralChroma(
                         continue;
                     }
                     const std::size_t sampleIndex = PixelIndex(source, x + xx, y + yy);
+                    if (source.rgba[sampleIndex + 3] <= 0.0f) continue;
                     const auto sampleYcc = RgbToYcc(source.rgba[sampleIndex + 0], source.rgba[sampleIndex + 1], source.rgba[sampleIndex + 2]);
                     const float dy = sampleYcc[0] - centerYcc[0];
                     const float weight = std::exp(-dist2 / twoSigmaS) * std::exp(-(dy * dy) / twoSigmaL);
@@ -380,6 +381,7 @@ ClassicalRgbDenoiseLayer::FloatImage MicroGrain(
             for (int yy = -2; yy <= 2; ++yy) {
                 for (int xx = -2; xx <= 2; ++xx) {
                     const std::size_t sampleIndex = PixelIndex(source, x + xx, y + yy);
+                    if (source.rgba[sampleIndex + 3] <= 0.0f) continue;
                     const auto sampleYcc = RgbToYcc(source.rgba[sampleIndex + 0], source.rgba[sampleIndex + 1], source.rgba[sampleIndex + 2]);
                     const float dist2 = static_cast<float>(xx * xx + yy * yy);
                     const float dy = sampleYcc[0] - centerYcc[0];
@@ -443,6 +445,7 @@ ClassicalRgbDenoiseLayer::FloatImage BilateralLuma(
                     if (dist2 > static_cast<float>(radius * radius)) {
                         continue;
                     }
+                    if (source.rgba[PixelIndex(source, x + xx, y + yy) + 3] <= 0.0f) continue;
                     const float sampleLuma = LuminanceAt(source, x + xx, y + yy);
                     const float dy = sampleLuma - centerYcc[0];
                     const float weight = std::exp(-dist2 / twoSigmaS) * std::exp(-(dy * dy) / twoSigmaL);

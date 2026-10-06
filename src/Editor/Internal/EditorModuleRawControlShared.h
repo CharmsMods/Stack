@@ -64,37 +64,22 @@ inline bool RenderManualWhiteBalanceModeCombo(
     Raw::WhiteBalanceMode& mode,
     float controlWidth) {
     ImGui::SetNextItemWidth(controlWidth);
-    if (mode == Raw::WhiteBalanceMode::Auto) {
-        const char* legacyLabels[] = {
-            "Auto WB (legacy)",
-            "Camera WB",
-            "Neutral",
-            "Manual"
-        };
-        int legacyIndex = 0;
-        if (!ImGui::Combo(label, &legacyIndex, legacyLabels, 4) || legacyIndex == 0) {
-            return false;
-        }
-        mode = legacyIndex == 1
-            ? Raw::WhiteBalanceMode::AsShot
-            : (legacyIndex == 2
-                ? Raw::WhiteBalanceMode::Neutral
-                : Raw::WhiteBalanceMode::Manual);
-        return true;
-    }
-
-    const char* manualLabels[] = { "Camera WB", "Neutral", "Manual" };
-    int manualIndex = mode == Raw::WhiteBalanceMode::Neutral
-        ? 1
-        : (mode == Raw::WhiteBalanceMode::Manual ? 2 : 0);
-    if (!ImGui::Combo(label, &manualIndex, manualLabels, 3)) {
+    const char* labels[] = { "Auto WB", "Camera WB", "Neutral", "Manual" };
+    int index = mode == Raw::WhiteBalanceMode::Auto
+        ? 0
+        : (mode == Raw::WhiteBalanceMode::Neutral
+            ? 2
+            : (mode == Raw::WhiteBalanceMode::Manual ? 3 : 1));
+    if (!ImGui::Combo(label, &index, labels, 4)) {
         return false;
     }
-    mode = manualIndex == 1
-        ? Raw::WhiteBalanceMode::Neutral
-        : (manualIndex == 2
-            ? Raw::WhiteBalanceMode::Manual
-            : Raw::WhiteBalanceMode::AsShot);
+    mode = index == 0
+        ? Raw::WhiteBalanceMode::Auto
+        : (index == 2
+            ? Raw::WhiteBalanceMode::Neutral
+            : (index == 3
+                ? Raw::WhiteBalanceMode::Manual
+                : Raw::WhiteBalanceMode::AsShot));
     return true;
 }
 

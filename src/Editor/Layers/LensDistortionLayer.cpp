@@ -1,3 +1,5 @@
+#include "Renderer/CoverageSampling.h"
+#include <string>
 #include "LensDistortionLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
@@ -31,11 +33,11 @@ void main() {
     vec2 uv = (distorted + 1.0) * 0.5;
 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        FragColor = vec4(0.0);
         return;
     }
 
-    FragColor = texture(uInputTex, uv);
+    FragColor = sampleCovered(uInputTex, uv);
 }
 )";
 
@@ -46,7 +48,9 @@ LensDistortionLayer::~LensDistortionLayer() {
 }
 
 void LensDistortionLayer::InitializeGL() {
-    m_ShaderProgram = GLHelpers::CreateShaderProgram(s_LensDistortionVert, s_LensDistortionFrag);
+    std::string fragment=s_LensDistortionFrag;
+    fragment.insert(fragment.find("void main()"),Stack::Renderer::CoverageSamplingGlsl);
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(s_LensDistortionVert, fragment.c_str());
 }
 
 void LensDistortionLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {

@@ -240,6 +240,9 @@ void ToneCurveLayer::UpdateAutoSceneAnalysis(unsigned int inputTexture, int widt
         for (int x = 0; x < statsWidth; ++x) {
             const std::size_t idx = static_cast<std::size_t>(y * statsWidth + x);
             const std::size_t pixelIndex = idx * 4u;
+            // The analysis blit can touch an outline. Exclude those mixed
+            // samples as well as empty pixels instead of counting black fill.
+            if (pixels[pixelIndex + 3] < 0.999f) continue;
             const float r = std::max(0.0f, pixels[pixelIndex + 0]);
             const float g = std::max(0.0f, pixels[pixelIndex + 1]);
             const float b = std::max(0.0f, pixels[pixelIndex + 2]);
@@ -266,18 +269,21 @@ void ToneCurveLayer::UpdateAutoSceneAnalysis(unsigned int inputTexture, int widt
     float textureSum = 0.0f;
     float darkTextureSum = 0.0f;
     float darkCount = 0.0f;
+    std::size_t coveredCount = 0;
     for (int y = 0; y < statsHeight; ++y) {
         for (int x = 0; x < statsWidth; ++x) {
             const std::size_t idx = static_cast<std::size_t>(y * statsWidth + x);
+            if (pixels[idx * 4u + 3] < 0.999f) continue;
+            ++coveredCount;
             const int left = std::max(0, x - 1);
             const int right = std::min(statsWidth - 1, x + 1);
             const int up = std::max(0, y - 1);
             const int down = std::min(statsHeight - 1, y + 1);
             const float centerLum = std::max(0.000001f, lumGrid[idx]);
-            const float gx = std::abs(SafeLog2(std::max(0.000001f, lumGrid[static_cast<std::size_t>(y * statsWidth + right)])) -
-                                      SafeLog2(std::max(0.000001f, lumGrid[static_cast<std::size_t>(y * statsWidth + left)])));
-            const float gy = std::abs(SafeLog2(std::max(0.000001f, lumGrid[static_cast<std::size_t>(down * statsWidth + x)])) -
-                                      SafeLog2(std::max(0.000001f, lumGrid[static_cast<std::size_t>(up * statsWidth + x)])));
+            const auto neighbor=[&](int px,int py){const auto p=static_cast<std::size_t>(py*statsWidth+px);
+                return SafeLog2(std::max(0.000001f,pixels[p*4+3]>=0.999f?lumGrid[p]:centerLum));};
+            const float gx = std::abs(neighbor(right,y)-neighbor(left,y));
+            const float gy = std::abs(neighbor(x,down)-neighbor(x,up));
             const float textureProxy = Clamp01((gx + gy) * 0.5f);
             textureSum += textureProxy;
             if (centerLum < 0.08f) {
@@ -301,7 +307,7 @@ void ToneCurveLayer::UpdateAutoSceneAnalysis(unsigned int inputTexture, int widt
     const float p90 = std::max(PercentileFromSorted(lumas, 0.90f), 0.000001f);
     m_AutoSceneClippingRatio = Clamp01(clipped / count);
     const float saturationRatio = Clamp01(saturated / count);
-    m_AutoSceneTextureConfidence = Clamp01(textureSum / static_cast<float>(statsWidth * statsHeight));
+    m_AutoSceneTextureConfidence = Clamp01(textureSum / static_cast<float>(std::max<std::size_t>(1,coveredCount)));
     const float darkTexture = darkCount > 0.0f ? darkTextureSum / darkCount : m_AutoSceneTextureConfidence;
     const float estimatedNoiseFloor = std::clamp(
         std::max(p01, p05 * 0.52f) * (1.0f + darkTexture * 2.85f),

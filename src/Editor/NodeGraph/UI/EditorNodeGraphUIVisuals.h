@@ -38,9 +38,11 @@ struct NodeFamilyStyle {
 };
 
 struct GraphStyleTokens {
+    StackAppearance::NodeAppearance nodeAppearance;
     StackAppearance::GraphVisualMode mode = StackAppearance::GraphVisualMode::Classic;
     bool enabled = false;
     bool light = false;
+    bool monochrome = false;
     bool haloOutlines = false;
     bool spotlightSurface = false;
     float gridLineOpacity = 1.0f;
@@ -210,10 +212,12 @@ LinkVisualStyle ResolveLinkVisualStyle(
     int fromNodeId,
     const std::string& fromSocketId,
     int toNodeId,
-    const std::string& toSocketId);
+    const std::string& toSocketId,
+    EditorModule* editor = nullptr);
 LinkVisualStyle ResolveLinkVisualStyle(
     const EditorNodeGraph::Graph& graph,
-    const EditorNodeGraph::Link& link);
+    const EditorNodeGraph::Link& link,
+    EditorModule* editor = nullptr);
 LinkVisualStyle ResolvePendingLinkVisualStyle(
     const EditorNodeGraph::Graph& graph,
     int outputNodeId,
@@ -225,6 +229,10 @@ LinkVisualStyle ResolvePendingLinkVisualStyle(
     int nodeId,
     const std::string& socketId,
     EditorNodeGraph::SocketDirection direction);
+EditorNodeGraph::SocketDefinition ResolveSocketDisplayDefinition(
+    const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::SocketDefinition& socket,
+    EditorModule* editor = nullptr);
 ImVec4 ChannelColorVec(const std::string& channel, const GraphStyleTokens& tokens);
 ImVec4 SocketColorVec(
     const EditorNodeGraph::SocketDefinition& socket,
@@ -276,7 +284,8 @@ void DrawGraphNodeSpotlightSurface(
     bool expanded,
     float uiScale,
     float rounding,
-    float borderThickness);
+    float borderThickness,
+    float selectionAlpha = -1.0f);
 void DrawSocketPin(
     ImDrawList* drawList,
     const ImVec2& pin,
@@ -284,7 +293,10 @@ void DrawSocketPin(
     ImU32 baseColor,
     const GraphStyleTokens& tokens,
     bool hovered,
-    float interactionEmphasis = 0.0f);
+    const EditorNodeGraph::SocketDefinition& socket,
+    bool connected,
+    float interactionEmphasis = 0.0f,
+    unsigned int imageSocketIconTexture = 0);
 void DrawPreviewFrame(ImDrawList* drawList, const ImVec2& min, const ImVec2& max, const GraphStyleTokens& tokens, float uiScale);
 float ChannelLaneOffset(const std::string& channel, float zoom);
 float ExpandedContractHeight(const EditorNodeGraph::Node& node, const NodeLayoutMetrics& metrics, float measuredLayerHeight = 0.0f);

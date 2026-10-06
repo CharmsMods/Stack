@@ -189,7 +189,8 @@ void RenderUserPresetSection(
     EditorModule* editor,
     const std::vector<std::shared_ptr<PresetEntry>>& presets,
     float rowWidth,
-    const std::string& activePreviewId) {
+    const std::string& activePreviewId,
+    char (&renameBuffer)[128]) {
     if (presets.empty()) {
         ImGui::TextWrapped("Select one or more nodes, right-click, then choose Save As Preset.");
         return;
@@ -266,12 +267,38 @@ void RenderUserPresetSection(
             }
         }
         ImGui::SameLine(0.0f, 18.0f);
-        if (RenderFlatTextButton("Delete")) {
-            ImGui::OpenPopup("Delete Preset");
+        if (RenderFlatTextButton("Delete", editor != nullptr)) {
+            namespace N = Stack::Notifications;
+            const auto id = preset->id;
+            const auto revision = BuildPresetRevisionToken(*preset);
+            N::NoticeSpec notice;
+            notice.title = "Delete preset?";
+            notice.message = "Delete \"" + preset->displayName + "\"?";
+            notice.route = N::Route::Center;
+            notice.foreground = true;
+            notice.operationId = editor->GetNotifier().NewOperation();
+            N::ActionSpec remove;
+            remove.label = "Delete";
+            remove.destructive = true;
+            remove.canInvoke = [id, revision] {
+                const auto* current = FindPresetById(PresetManager::Get().GetUserPresets(), id);
+                return current && BuildPresetRevisionToken(*current) == revision;
+            };
+            remove.invoke = [preset] {
+                std::string error;
+                return PresetManager::Get().DeleteUserPreset(*preset, &error)
+                    ? N::ActionResult::Success()
+                    : N::ActionResult::Failure(error.empty() ? "The preset could not be deleted." : error);
+            };
+            N::ActionSpec cancel;
+            cancel.label = "Cancel";
+            cancel.safeCancel = true;
+            cancel.invoke = [] { return N::ActionResult::Success(); };
+            notice.actions = {std::move(remove), std::move(cancel)};
+            editor->RequestNotificationDecision(std::move(notice));
         }
 
         if (ImGui::BeginPopupModal("Rename Preset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static char renameBuffer[128] = {};
             if (ImGui::IsWindowAppearing()) {
                 strncpy_s(renameBuffer, preset->displayName.c_str(), sizeof(renameBuffer) - 1);
                 renameBuffer[sizeof(renameBuffer) - 1] = '\0';
@@ -287,28 +314,6 @@ void RenderUserPresetSection(
                         editor,
                         UiNotificationSeverity::Error,
                         error.empty() ? "Preset rename failed." : error,
-                        "editor-node-graph-preset");
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-
-        if (ImGui::BeginPopupModal("Delete Preset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextWrapped("Delete \"%s\"?", preset->displayName.c_str());
-            if (ImGui::Button("Delete", ImVec2(110.0f, 0.0f))) {
-                std::string error;
-                if (PresetManager::Get().DeleteUserPreset(*preset, &error)) {
-                    PostNodeGraphPresetNotification(editor, UiNotificationSeverity::Success, "Preset deleted.", "editor-node-graph-preset");
-                    ImGui::CloseCurrentPopup();
-                } else {
-                    PostNodeGraphPresetNotification(
-                        editor,
-                        UiNotificationSeverity::Error,
-                        error.empty() ? "Preset delete failed." : error,
                         "editor-node-graph-preset");
                 }
             }
@@ -522,5 +527,6 @@ void EditorNodeGraphUI::RenderPresetsPanel(EditorModule* editor, float available
 
     ImGui::TextDisabled("SAVED PRESETS");
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
-    RenderUserPresetSection(this, editor, userPresets, rowWidth, m_DisplayedPresetPreviewId);
+    RenderUserPresetSection(this, editor, userPresets, rowWidth,
+        m_DisplayedPresetPreviewId, m_RenamePresetBuffer);
 }

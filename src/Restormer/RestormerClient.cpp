@@ -19,6 +19,10 @@
 #include <windows.h>
 #endif
 
+#ifndef STACK_ENABLE_RESTORMER_EXECUTION
+#define STACK_ENABLE_RESTORMER_EXECUTION 0
+#endif
+
 namespace Stack::Restormer {
 namespace {
 
@@ -204,6 +208,10 @@ Client& Client::Instance() {
     return client;
 }
 
+bool IsExecutionEnabled() {
+    return STACK_ENABLE_RESTORMER_EXECUTION != 0;
+}
+
 Client::~Client() {
     Shutdown();
     delete m_Impl;
@@ -213,6 +221,13 @@ Client::~Client() {
 ValidationResult Client::Validate(
     const RawRecipe::RawRgbDenoiseRecipe& requestedSettings,
     bool allowUnpinnedDevelopmentSelection) {
+    if (!IsExecutionEnabled()) {
+        ValidationResult disabled;
+        disabled.error =
+            "Restormer package execution is disabled in this build. "
+            "Select Classical Multiscale instead.";
+        return disabled;
+    }
     if (m_Impl == nullptr) {
         m_Impl = new Impl();
     }
@@ -238,7 +253,7 @@ ValidationResult Client::Validate(
     }
 
     const std::filesystem::path root =
-        ResolvePackageRoot(AppPaths::GetExecutableDirectory());
+        ResolvePackageRoot(AppPaths::GetResourcesDirectory());
     const std::string cacheKey = ValidationCacheKey(root, settings);
     std::error_code ec;
     const std::filesystem::file_time_type manifestWriteTime =

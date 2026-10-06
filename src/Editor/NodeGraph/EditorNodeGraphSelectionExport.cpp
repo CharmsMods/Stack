@@ -3,6 +3,7 @@
 #include "Editor/EditorModule.h"
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/Timeline/TimelinePersistence.h"
 
 #include <algorithm>
 #include <memory>
@@ -223,6 +224,18 @@ ExportResult BuildExport(
     if (layoutMode == LayoutMode::Omit) {
         EditorNodeGraph::RemoveGraphLayoutFromPayload(serializedPayload);
     }
+    const auto context = editor->GetGraphEditorContext();
+    serializedPayload["graphId"] = context.graphId;
+    Stack::Timeline::TimelineDocumentState timeline;
+    if (includeState && context.animation) {
+        for (const auto& track : context.animation->tracks) {
+            const auto found = std::find_if(exportGraph.GetNodes().begin(), exportGraph.GetNodes().end(),
+                [&](const auto& node) { return node.instanceUuid == track.target.nodeUuid; });
+            if (found != exportGraph.GetNodes().end()) timeline.animation.tracks.push_back(track);
+        }
+    }
+    timeline.durationFrames = std::max(120, Stack::Timeline::FindLastTimelineKeyframeFrame(timeline.animation) + 1);
+    serializedPayload["graphAnimation"] = Stack::Timeline::SerializeTimelineDocument(timeline);
     result.clipboardPayload["payload"] = std::move(serializedPayload);
     result.exportedGraph = exportGraph;
     return result;

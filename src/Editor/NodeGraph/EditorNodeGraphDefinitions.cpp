@@ -21,6 +21,9 @@ const char* MaskTitle(EditorNodeGraph::MaskGeneratorKind kind) {
         case EditorNodeGraph::MaskGeneratorKind::LinearGradient: return "Linear Gradient Mask";
         case EditorNodeGraph::MaskGeneratorKind::RadialGradient: return "Radial Gradient Mask";
         case EditorNodeGraph::MaskGeneratorKind::Noise: return "Noise Mask";
+        case EditorNodeGraph::MaskGeneratorKind::Square: return "Square Mask";
+        case EditorNodeGraph::MaskGeneratorKind::RawGradient: return "Photo gradient mask";
+        case EditorNodeGraph::MaskGeneratorKind::PaintedArea: return "Painted area mask";
     }
     return "Mask";
 }
@@ -214,6 +217,7 @@ std::string BuildPreviewKey(EditorNodeGraph::NodeKind kind, int value) {
         case EditorNodeGraph::NodeKind::Mfsr: return "mfsr";
         case EditorNodeGraph::NodeKind::RawProjectFrame: return "raw-project-frame";
         case EditorNodeGraph::NodeKind::MultiFrameDenoise: return "multi-frame-denoise";
+        case EditorNodeGraph::NodeKind::MultiFrameHdr: return "multi-frame-hdr";
         case EditorNodeGraph::NodeKind::RawProjectSourceSet: return "raw-project-source-set";
         case EditorNodeGraph::NodeKind::Lut: return "lut";
         case EditorNodeGraph::NodeKind::CustomMask: return "custom-mask";
@@ -232,6 +236,9 @@ std::string BuildPreviewKey(EditorNodeGraph::NodeKind kind, int value) {
                 case EditorNodeGraph::MaskGeneratorKind::LinearGradient: return "mask:linear-gradient";
                 case EditorNodeGraph::MaskGeneratorKind::RadialGradient: return "mask:radial-gradient";
                 case EditorNodeGraph::MaskGeneratorKind::Noise: return "mask:noise";
+                case EditorNodeGraph::MaskGeneratorKind::Square: return "mask:square";
+                case EditorNodeGraph::MaskGeneratorKind::RawGradient: return "mask:photo-gradient";
+                case EditorNodeGraph::MaskGeneratorKind::PaintedArea: return "mask:painted-area";
             }
             return "mask";
         case EditorNodeGraph::NodeKind::MaskCombine:
@@ -285,6 +292,8 @@ std::string BuildPreviewKey(EditorNodeGraph::NodeKind kind, int value) {
                     static_cast<Stack::NodeMath::LogicalValueType>(value))).value("logicalType", "invalid");
         case EditorNodeGraph::NodeKind::FieldMean: return "analysis:field-mean";
         case EditorNodeGraph::NodeKind::Reformat: return "geometry:reformat";
+        case EditorNodeGraph::NodeKind::RawOperation:
+            return std::string("raw-operation:") + Stack::RawRecipe::GraphOperationId(static_cast<Stack::RawRecipe::GraphOperationKind>(value));
         case EditorNodeGraph::NodeKind::TechnicalImage:
             return std::string("technical-image:") +
                 Stack::NodeMath::TechnicalOperationIdentity(
@@ -399,12 +408,20 @@ void ApplyNodeMetadata(EditorNodeGraph::Node& node) {
             node.title = "MFD";
             node.expanded = true;
             break;
+        case EditorNodeGraph::NodeKind::MultiFrameHdr:
+            node.title = "Multi-Frame HDR";
+            node.expanded = true;
+            break;
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
             node.title = "RAW Project Source Set";
             node.expanded = false;
             break;
         case EditorNodeGraph::NodeKind::Lut:
             node.title = "LUT";
+            break;
+        case EditorNodeGraph::NodeKind::RawOperation:
+            node.title = Stack::RawRecipe::GraphOperationLabel(node.rawOperation.kind);
+            node.expanded = true;
             break;
         case EditorNodeGraph::NodeKind::Layer: {
             const LayerDescriptor* descriptor = LayerRegistry::GetDescriptor(node.layerType);
@@ -608,12 +625,45 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             }
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Developed result", false, true);
             break;
+        case EditorNodeGraph::NodeKind::MultiFrameHdr:
+            for (const EditorNodeGraph::MfdFrameBinding& binding :
+                 node.multiFrameHdr.frameBindings) {
+                const std::string socketId = binding.socketId.empty()
+                    ? EditorNodeGraph::MfdFrameInputSocketId(binding.frameId)
+                    : binding.socketId;
+                std::string label = binding.label;
+                if (binding.reference) label = "Geometric reference - " + label;
+                if (binding.frameId == node.multiFrameHdr.radiometricAnchorFrameId)
+                    label = "Radiometric anchor - " + label;
+                add(socketId.c_str(), EditorNodeGraph::SocketDirection::Input,
+                    EditorNodeGraph::SocketType::Raw,
+                    label.empty() ? "RAW Frame" : label.c_str(), false, true);
+            }
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output,
+                EditorNodeGraph::SocketType::Image, "Scene-linear HDR", false, true);
+            break;
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Result unavailable", false, true);
             break;
         case EditorNodeGraph::NodeKind::Lut:
             add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
             add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Mask", true, true);
+            add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            break;
+        case EditorNodeGraph::NodeKind::RawOperation:
+            add(EditorNodeGraph::kImageInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Image", false, true);
+            add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Mask", true, true);
+            add("inputImageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Operation input", false, true);
+            if (node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::LocalEv) {
+                add("referenceIn", EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Measurement reference", true, true);
+                add("measurementImageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Measurement image", false, true);
+                for (const auto& gradient : node.rawOperation.parameters.value("evGradients", nlohmann::json::array()))
+                    add(("gradient:" + gradient.at("mask").value("id", std::string{})).c_str(), EditorNodeGraph::SocketDirection::Input,
+                        EditorNodeGraph::SocketType::Mask, "Gradient coverage", true, true);
+                for (const auto& area : node.rawOperation.parameters.value("localRange", nlohmann::json::object()).value("areas", nlohmann::json::array()))
+                    add(("area:" + area.value("id", std::string{})).c_str(), EditorNodeGraph::SocketDirection::Input,
+                        EditorNodeGraph::SocketType::Mask, "Area coverage", true, true);
+            }
             add(EditorNodeGraph::kImageOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Image", false, true);
             break;
         case EditorNodeGraph::NodeKind::Layer:
@@ -633,6 +683,7 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
             add(EditorNodeGraph::kPreviewInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Analysis, "Image / Mask", false, true);
             break;
         case EditorNodeGraph::NodeKind::MaskGenerator:
+            add(EditorNodeGraph::kMatchExtentInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Image, "Reference image", true, true);
             add(EditorNodeGraph::kMaskOutputSocketId, EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Mask, "Mask", false, true);
             break;
         case EditorNodeGraph::NodeKind::CustomMask:
@@ -790,6 +841,7 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::FrequencyFilter:
         case EditorNodeGraph::NodeKind::FrequencyFft:
         case EditorNodeGraph::NodeKind::MagnitudePhase:
+        case EditorNodeGraph::NodeKind::RawOperation:
         case EditorNodeGraph::NodeKind::TechnicalImage:
         case EditorNodeGraph::NodeKind::Reformat:
             return node.kind == EditorNodeGraph::NodeKind::FrequencyFilter ||
@@ -821,6 +873,13 @@ std::string DefaultInputSocket(const EditorNodeGraph::Node& node) {
                     ? EditorNodeGraph::MfdFrameInputSocketId(
                         node.multiFrameDenoise.frameBindings.front().frameId)
                     : node.multiFrameDenoise.frameBindings.front().socketId);
+        case EditorNodeGraph::NodeKind::MultiFrameHdr:
+            return node.multiFrameHdr.frameBindings.empty()
+                ? std::string()
+                : (node.multiFrameHdr.frameBindings.front().socketId.empty()
+                    ? EditorNodeGraph::MfdFrameInputSocketId(
+                        node.multiFrameHdr.frameBindings.front().frameId)
+                    : node.multiFrameHdr.frameBindings.front().socketId);
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop:
         case EditorNodeGraph::NodeKind::RawNeuralDenoise:
@@ -870,6 +929,7 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::HdrMerge:
         case EditorNodeGraph::NodeKind::Mfsr:
         case EditorNodeGraph::NodeKind::MultiFrameDenoise:
+        case EditorNodeGraph::NodeKind::MultiFrameHdr:
         case EditorNodeGraph::NodeKind::RawProjectSourceSet:
         case EditorNodeGraph::NodeKind::Lut:
         case EditorNodeGraph::NodeKind::Layer:
@@ -879,6 +939,7 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
         case EditorNodeGraph::NodeKind::DataMath:
         case EditorNodeGraph::NodeKind::SpectrumView:
         case EditorNodeGraph::NodeKind::SpectrumMath:
+        case EditorNodeGraph::NodeKind::RawOperation:
         case EditorNodeGraph::NodeKind::TechnicalImage:
         case EditorNodeGraph::NodeKind::Reformat:
             return EditorNodeGraph::kImageOutputSocketId;
@@ -926,6 +987,10 @@ std::string DefaultOutputSocket(const EditorNodeGraph::Node& node) {
 
 std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     std::vector<NodeCatalogEntry> entries;
+    for (int i = 0; i < static_cast<int>(Stack::RawRecipe::GraphOperationKind::Count); ++i)
+        entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::RawOperation, i,
+            Stack::RawRecipe::GraphOperationLabel(static_cast<Stack::RawRecipe::GraphOperationKind>(i)), "RAW / Photo"));
+
     entries.push_back(MakeCatalogEntry(
         EditorNodeGraph::NodeKind::Output,
         0,
@@ -980,6 +1045,9 @@ std::vector<NodeCatalogEntry> BuildNodeCatalogEntries() {
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::LinearGradient), "Linear Gradient Mask", "Masks"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RadialGradient), "Radial Gradient Mask", "Masks"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Noise), "Noise Mask", "Masks"));
+    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::Square), "Square Mask", "Masks"));
+    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::RawGradient), "Photo gradient mask", "Masks"));
+    entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskGenerator, static_cast<int>(EditorNodeGraph::MaskGeneratorKind::PaintedArea), "Painted area mask", "Masks"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Add), "Add Mask", "Mask / Math"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Subtract), "Subtract Mask", "Mask / Math"));
     entries.push_back(MakeCatalogEntry(EditorNodeGraph::NodeKind::MaskCombine, static_cast<int>(EditorNodeGraph::MaskCombineMode::Intersect), "Intersect Mask", "Mask / Math"));
@@ -1092,6 +1160,9 @@ EditorNodeGraph::Node BuildPrototypeNode(const NodeCatalogEntry& entry) {
             break;
         case EditorNodeGraph::NodeKind::Value:
             node.value.value = DefaultValue(static_cast<Stack::NodeMath::LogicalValueType>(entry.value));
+            break;
+        case EditorNodeGraph::NodeKind::RawOperation:
+            node.rawOperation = Stack::RawRecipe::MakeGraphOperation(static_cast<Stack::RawRecipe::GraphOperationKind>(entry.value));
             break;
         case EditorNodeGraph::NodeKind::TechnicalImage:
             node.technicalImageSettings.operation =

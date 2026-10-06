@@ -26,7 +26,7 @@ void LibraryManager::RequestSaveCompositeProject(
         if (!composite || !composite->HasLayers()) {
             m_SaveTaskState = Async::TaskState::Failed;
             m_SaveStatusText = "Add at least one layer before saving a composite project.";
-            QueueUiNotification(UiNotificationSeverity::Error, "Add at least one layer before saving a composite project.", "library-save-composite");
+            PostNotification(UiNotificationSeverity::Error, "Add at least one layer before saving a composite project.", "library-save-composite");
         }
         if (onComplete) onComplete(false);
         return;
@@ -40,7 +40,8 @@ void LibraryManager::RequestSaveCompositeProject(
     if (!composite->BuildProjectDocumentForSave(trimmedName, document)) {
         m_SaveTaskState = Async::TaskState::Failed;
         m_SaveStatusText = "Could not rasterize the composite for saving.";
-        QueueUiNotification(UiNotificationSeverity::Error, "Could not rasterize the composite for saving.", "library-save-composite");
+        PostNotification(UiNotificationSeverity::Error, "Could not rasterize the composite for saving.", "library-save-composite");
+        if (onComplete) onComplete(false);
         return;
     }
 
@@ -56,47 +57,38 @@ void LibraryManager::RequestSaveCompositeProject(
         fileName,
         fallbackStem,
         StackFormat::kCompositeProjectKind);
-    const std::string legacyProjectFileToDelete =
-        (!existingFileName.empty() &&
-         existingFileName != fileName &&
-         std::filesystem::path(existingFileName).extension() == ".stack")
-            ? existingFileName
-            : std::string();
-
     ++m_SaveGeneration;
     const std::uint64_t generation = m_SaveGeneration;
     m_SaveTaskState = Async::TaskState::Running;
     m_SaveStatusText = "Writing composite project files in the background...";
 
-    Async::TaskSystem::Get().Submit([this,
+    const bool submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Saving"), [this,
                                      generation,
                                      fileName,
-                                     legacyProjectFileToDelete,
                                      trimmedName,
                                      document = std::move(document),
                                      composite,
-                                     onComplete = std::move(onComplete)]() mutable {
+                                     onComplete]() mutable {
         bool wroteProject = false;
 
         try {
             wroteProject = StackFormat::WriteProjectFile(m_LibraryPath / fileName, document);
-            if (wroteProject && !legacyProjectFileToDelete.empty()) {
-                std::error_code ec;
-                std::filesystem::remove(m_LibraryPath / legacyProjectFileToDelete, ec);
-            }
         } catch (...) {
             wroteProject = false;
         }
 
         Async::TaskSystem::Get().PostToMain([this, generation, wroteProject, fileName, trimmedName, composite, onComplete = std::move(onComplete)]() {
             if (generation != m_SaveGeneration) {
+                if (onComplete) onComplete(false);
                 return;
             }
 
+            bool completionSuccess = false;
+            try {
             if (wroteProject) {
                 m_SaveTaskState = Async::TaskState::Idle;
                 m_SaveStatusText = "Composite project saved to the library.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Composite project saved to the library.", "library-save-composite");
+                PostNotification(UiNotificationSeverity::Success, "Composite project saved to the library.", "library-save-composite");
                 m_LastLibrarySignature = 0;
                 RequestRefreshLibraryAsync();
                 QueueSavedProjectEvent(fileName, StackFormat::kCompositeProjectKind);
@@ -105,15 +97,29 @@ void LibraryManager::RequestSaveCompositeProject(
                     composite->SetCurrentProjectFileName(fileName);
                     composite->ClearDirty();
                 }
-                if (onComplete) onComplete(true);
+                completionSuccess = true;
             } else {
                 m_SaveTaskState = Async::TaskState::Failed;
                 m_SaveStatusText = "Failed to save the composite project to the library.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to save the composite project to the library.", "library-save-composite");
-                if (onComplete) onComplete(false);
+                PostNotification(UiNotificationSeverity::Error, "Failed to save the composite project to the library.", "library-save-composite");
             }
+            } catch (...) {
+                m_SaveTaskState = Async::TaskState::Failed;
+                m_SaveStatusText = "The composite project save finalization failed.";
+                PostNotification(UiNotificationSeverity::Error, m_SaveStatusText, "library-save-composite");
+            }
+            if (onComplete) onComplete(completionSuccess);
         });
     });
+    if (!submitted) {
+        m_SaveTaskState = Async::TaskState::Failed;
+        m_SaveStatusText = "The composite project save could not be queued.";
+        PostNotification(
+            UiNotificationSeverity::Error,
+            m_SaveStatusText,
+            "library-save-composite");
+        if (onComplete) onComplete(false);
+    }
 }
 
 void LibraryManager::RequestLoadCompositeProject(
@@ -121,7 +127,7 @@ void LibraryManager::RequestLoadCompositeProject(
     CompositeModule* composite,
     std::function<void(bool)> onComplete) {
     if (fileName.empty() || !composite) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the composite project.", "library-load-composite");
+        PostNotification(UiNotificationSeverity::Error, "Failed to load the composite project.", "library-load-composite");
         if (onComplete) onComplete(false);
         return;
     }
@@ -131,7 +137,7 @@ void LibraryManager::RequestLoadCompositeProject(
     m_ProjectLoadTaskState = Async::TaskState::Queued;
     m_ProjectLoadStatusText = "Loading composite project...";
 
-    Async::TaskSystem::Get().Submit([this, generation, fileName, composite, onComplete = std::move(onComplete)]() mutable {
+    Async::TaskSystem::Get().Submit(MakeActivityMetadata("Loading project"), [this, generation, fileName, composite, onComplete = std::move(onComplete)]() mutable {
         StackFormat::ProjectLoadOptions options;
         options.includeThumbnail = false;
         options.includeSourceImage = true;
@@ -158,7 +164,7 @@ void LibraryManager::RequestLoadCompositeProject(
             if (!success) {
                 m_ProjectLoadTaskState = Async::TaskState::Failed;
                 m_ProjectLoadStatusText = "Failed to load the composite project.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the composite project.", "library-load-composite");
+                PostNotification(UiNotificationSeverity::Error, "Failed to load the composite project.", "library-load-composite");
                 if (onComplete) onComplete(false);
                 return;
             }
@@ -172,11 +178,11 @@ void LibraryManager::RequestLoadCompositeProject(
                 composite->SetCurrentProjectName(document.metadata.projectName);
                 m_ProjectLoadTaskState = Async::TaskState::Idle;
                 m_ProjectLoadStatusText = "Composite project loaded.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Composite project loaded.", "library-load-composite");
+                PostNotification(UiNotificationSeverity::Success, "Composite project loaded.", "library-load-composite");
             } else {
                 m_ProjectLoadTaskState = Async::TaskState::Failed;
                 m_ProjectLoadStatusText = "Failed to apply composite project data.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to apply composite project data.", "library-load-composite");
+                PostNotification(UiNotificationSeverity::Error, "Failed to apply composite project data.", "library-load-composite");
             }
 
             if (onComplete) onComplete(applied);
@@ -189,7 +195,7 @@ void LibraryManager::RequestLoadCompositeProjectFromPath(
     CompositeModule* composite,
     std::function<void(bool)> onComplete) {
     if (absolutePath.empty() || !composite) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to load composite project from disk.", "library-load-composite-path");
+        PostNotification(UiNotificationSeverity::Error, "Failed to load composite project from disk.", "library-load-composite-path");
         if (onComplete) onComplete(false);
         return;
     }
@@ -199,7 +205,7 @@ void LibraryManager::RequestLoadCompositeProjectFromPath(
     m_ProjectLoadTaskState = Async::TaskState::Queued;
     m_ProjectLoadStatusText = "Loading composite project from disk...";
 
-    Async::TaskSystem::Get().Submit([this, generation, absolutePath, composite, onComplete = std::move(onComplete)]() mutable {
+    Async::TaskSystem::Get().Submit(MakeActivityMetadata("Loading project"), [this, generation, absolutePath, composite, onComplete = std::move(onComplete)]() mutable {
         StackFormat::ProjectLoadOptions options;
         options.includeThumbnail = false;
         options.includeSourceImage = true;
@@ -231,7 +237,7 @@ void LibraryManager::RequestLoadCompositeProjectFromPath(
             if (!success) {
                 m_ProjectLoadTaskState = Async::TaskState::Failed;
                 m_ProjectLoadStatusText = "Failed to load composite project from disk.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to load composite project from disk.", "library-load-composite-path");
+                PostNotification(UiNotificationSeverity::Error, "Failed to load composite project from disk.", "library-load-composite-path");
                 if (onComplete) onComplete(false);
                 return;
             }
@@ -245,11 +251,11 @@ void LibraryManager::RequestLoadCompositeProjectFromPath(
                 composite->SetCurrentProjectName(document.metadata.projectName);
                 m_ProjectLoadTaskState = Async::TaskState::Idle;
                 m_ProjectLoadStatusText = "Composite project loaded.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Composite project loaded.", "library-load-composite-path");
+                PostNotification(UiNotificationSeverity::Success, "Composite project loaded.", "library-load-composite-path");
             } else {
                 m_ProjectLoadTaskState = Async::TaskState::Failed;
                 m_ProjectLoadStatusText = "Failed to apply composite project data.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to apply composite project data.", "library-load-composite-path");
+                PostNotification(UiNotificationSeverity::Error, "Failed to apply composite project data.", "library-load-composite-path");
             }
 
             if (onComplete) onComplete(applied);

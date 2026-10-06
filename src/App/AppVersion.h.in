@@ -8,10 +8,16 @@ inline constexpr int kPatch = @STACK_VERSION_PATCH@;
 inline constexpr const char* kVersionString = "@STACK_VERSION@";
 inline constexpr const char* kVersionTag = "@STACK_VERSION_TAG@";
 inline constexpr const char* kPublisher = "@STACK_PUBLISHER@";
+inline constexpr const char* kCopyright = "Copyright (c) 2024-2026 Darynn Ho";
+inline constexpr const char* kProductBrand = "Stack by CharmsMods";
 inline constexpr const char* kGitHubOwner = "CharmsMods";
 inline constexpr const char* kGitHubRepo = "Stack";
 inline constexpr const char* kReleaseApiUrl = "https://api.github.com/repos/CharmsMods/Stack/releases/latest";
 inline constexpr const char* kReleasesPageUrl = "https://github.com/CharmsMods/Stack/releases";
 inline constexpr const char* kWebsiteDownloadPageUrl = "https://charmsmods.github.io/Stack/website/index.html";
+inline constexpr const char* kSourceLicenseUrl = "https://github.com/CharmsMods/Stack/blob/main/LICENSE";
+inline constexpr const char* kEulaUrl = "https://github.com/CharmsMods/Stack/blob/main/legal/EULA.txt";
+inline constexpr const char* kPrivacyUrl = "https://github.com/CharmsMods/Stack/blob/main/legal/PRIVACY.md";
+inline constexpr const char* kIssuesUrl = "https://github.com/CharmsMods/Stack/issues";
 
 } // namespace AppVersion

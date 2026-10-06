@@ -3,6 +3,8 @@
 #include "AppPaths.h"
 #include "AppVersion.h"
 #include "PlatformHelpers.h"
+#include "UpdateDownloadStorage.h"
+#include "UpdateJson.h"
 #include "Async/TaskSystem.h"
 #include "ThirdParty/json.hpp"
 
@@ -19,6 +21,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -186,6 +189,11 @@ int ScoreInstallerAsset(const ReleaseAsset& asset, const std::string& versionTex
     if (!NameContains(lowered, ".exe") || lowered.find(".exe") == std::string::npos) {
         return -1000;
     }
+    if (lowered.find("local-test") != std::string::npos ||
+        lowered.find("unsigned") != std::string::npos ||
+        lowered.find("legal-draft") != std::string::npos) {
+        return -1000;
+    }
 
     int score = 0;
     if (lowered.find("stacksetup") != std::string::npos) {
@@ -234,6 +242,17 @@ bool TryExtractHashForAsset(const std::string& shaText, const std::string& asset
 }
 
 #if defined(_WIN32)
+class InternetHandle {
+public:
+    InternetHandle(HINTERNET handle) : m_Handle(handle) {}
+    ~InternetHandle() { if (m_Handle) WinHttpCloseHandle(m_Handle); }
+    InternetHandle(const InternetHandle&) = delete;
+    InternetHandle& operator=(const InternetHandle&) = delete;
+    operator HINTERNET() const { return m_Handle; }
+private:
+    HINTERNET m_Handle;
+};
+
 struct HttpResponse {
     bool ok = false;
     DWORD statusCode = 0;
@@ -274,22 +293,20 @@ HttpResponse HttpGetText(const std::string& url, const std::vector<std::wstring>
         return response;
     }
 
-    HINTERNET session = WinHttpOpen(L"StackUpdater/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    InternetHandle session = WinHttpOpen(L"StackUpdater/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         return response;
     }
+    WinHttpSetTimeouts(session, 5000, 10000, 30000, 30000);
 
-    HINTERNET connection = WinHttpConnect(session, host.c_str(), port, 0);
+    InternetHandle connection = WinHttpConnect(session, host.c_str(), port, 0);
     if (!connection) {
-        WinHttpCloseHandle(session);
         return response;
     }
 
     const DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET request = WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    InternetHandle request = WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!request) {
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
         return response;
     }
 
@@ -307,9 +324,6 @@ HttpResponse HttpGetText(const std::string& url, const std::vector<std::wstring>
         0,
         0);
     if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
         return response;
     }
 
@@ -319,27 +333,28 @@ HttpResponse HttpGetText(const std::string& url, const std::vector<std::wstring>
     response.statusCode = statusCode;
 
     std::string body;
+    std::array<char, 64 * 1024> chunk;
+    constexpr std::size_t maximumResponseBytes = 8 * 1024 * 1024;
+    bool readOk = true;
     for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
-            break;
-        }
-
-        std::string chunk(static_cast<std::size_t>(available), '\0');
         DWORD downloaded = 0;
-        if (!WinHttpReadData(request, chunk.data(), available, &downloaded)) {
+        if (!WinHttpReadData(request, chunk.data(), static_cast<DWORD>(chunk.size()), &downloaded)) {
+            readOk = false;
             break;
         }
-        chunk.resize(static_cast<std::size_t>(downloaded));
-        body += chunk;
+        if (downloaded == 0) {
+            break;
+        }
+        if (downloaded > maximumResponseBytes - body.size()) {
+            readOk = false;
+            break;
+        }
+        body.append(chunk.data(), downloaded);
     }
 
-    response.ok = statusCode >= 200 && statusCode < 300;
+    response.ok = readOk && statusCode >= 200 && statusCode < 300;
     response.body = std::move(body);
 
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
     return response;
 }
 
@@ -353,24 +368,22 @@ bool DownloadUrlToFile(const std::string& url, const std::filesystem::path& dest
         return false;
     }
 
-    HINTERNET session = WinHttpOpen(L"StackUpdater/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    InternetHandle session = WinHttpOpen(L"StackUpdater/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         outError = "Stack could not start the download session.";
         return false;
     }
+    WinHttpSetTimeouts(session, 5000, 10000, 30000, 30000);
 
-    HINTERNET connection = WinHttpConnect(session, host.c_str(), port, 0);
+    InternetHandle connection = WinHttpConnect(session, host.c_str(), port, 0);
     if (!connection) {
-        WinHttpCloseHandle(session);
         outError = "Stack could not connect to the download server.";
         return false;
     }
 
     const DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET request = WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    InternetHandle request = WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!request) {
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
         outError = "Stack could not open the update download request.";
         return false;
     }
@@ -378,9 +391,6 @@ bool DownloadUrlToFile(const std::string& url, const std::filesystem::path& dest
     const std::wstring headers = L"Accept: application/octet-stream\r\nUser-Agent: StackUpdater\r\n";
     const BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
         outError = "The update download failed before any data was received.";
         return false;
     }
@@ -389,9 +399,6 @@ bool DownloadUrlToFile(const std::string& url, const std::filesystem::path& dest
     DWORD statusSize = sizeof(statusCode);
     WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &statusCode, &statusSize, nullptr);
     if (statusCode < 200 || statusCode >= 300) {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
         outError = "GitHub returned an unexpected response while downloading the update.";
         return false;
     }
@@ -400,28 +407,19 @@ bool DownloadUrlToFile(const std::string& url, const std::filesystem::path& dest
     std::filesystem::create_directories(destinationPath.parent_path(), ec);
     std::ofstream output(destinationPath, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
         outError = "Stack could not create the local update cache folder.";
         return false;
     }
 
     bool readOk = true;
+    std::array<char, 64 * 1024> chunk;
     for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available)) {
-            readOk = false;
-            break;
-        }
-        if (available == 0) {
-            break;
-        }
-
-        std::vector<char> chunk(static_cast<std::size_t>(available));
         DWORD downloaded = 0;
-        if (!WinHttpReadData(request, chunk.data(), available, &downloaded)) {
+        if (!WinHttpReadData(request, chunk.data(), static_cast<DWORD>(chunk.size()), &downloaded)) {
             readOk = false;
+            break;
+        }
+        if (downloaded == 0) {
             break;
         }
 
@@ -434,9 +432,10 @@ bool DownloadUrlToFile(const std::string& url, const std::filesystem::path& dest
     }
 
     output.close();
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
+    if (output.fail()) {
+        readOk = false;
+        outError = "Stack could not finish writing the downloaded update file.";
+    }
 
     if (!readOk) {
         std::filesystem::remove(destinationPath, ec);
@@ -455,47 +454,49 @@ bool ComputeFileSha256(const std::filesystem::path& path, std::string& outDigest
         return false;
     }
 
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
+    // The hash object refers to this buffer until BCryptDestroyHash returns.
+    std::vector<unsigned char> objectBuffer;
+    struct HashState {
+        BCRYPT_ALG_HANDLE algorithm = nullptr;
+        BCRYPT_HASH_HANDLE hash = nullptr;
+        ~HashState() {
+            if (hash) BCryptDestroyHash(hash);
+            if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+        }
+    } state;
     DWORD objectLength = 0;
     DWORD bytesWritten = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) {
+    if (BCryptOpenAlgorithmProvider(&state.algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) {
         return false;
     }
 
-    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength), &bytesWritten, 0) != 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (BCryptGetProperty(state.algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength), &bytesWritten, 0) != 0) {
         return false;
     }
 
-    std::vector<unsigned char> objectBuffer(static_cast<std::size_t>(objectLength));
-    if (BCryptCreateHash(algorithm, &hash, objectBuffer.data(), objectLength, nullptr, 0, 0) != 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
+    objectBuffer.resize(static_cast<std::size_t>(objectLength));
+    if (BCryptCreateHash(state.algorithm, &state.hash, objectBuffer.data(), objectLength, nullptr, 0, 0) != 0) {
         return false;
     }
 
-    std::vector<char> buffer(64 * 1024);
+    std::array<char, 64 * 1024> buffer;
     while (file.good()) {
         file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize count = file.gcount();
         if (count > 0) {
-            if (BCryptHashData(hash, reinterpret_cast<PUCHAR>(buffer.data()), static_cast<ULONG>(count), 0) != 0) {
-                BCryptDestroyHash(hash);
-                BCryptCloseAlgorithmProvider(algorithm, 0);
+            if (BCryptHashData(state.hash, reinterpret_cast<PUCHAR>(buffer.data()), static_cast<ULONG>(count), 0) != 0) {
                 return false;
             }
         }
     }
 
-    unsigned char digest[32] = {};
-    if (BCryptFinishHash(hash, digest, sizeof(digest), 0) != 0) {
-        BCryptDestroyHash(hash);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (file.bad() || !file.eof()) {
         return false;
     }
-
-    BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
+    unsigned char digest[32] = {};
+    if (BCryptFinishHash(state.hash, digest, sizeof(digest), 0) != 0) {
+        return false;
+    }
 
     std::ostringstream output;
     output << std::hex;
@@ -540,16 +541,16 @@ ReleaseInfo FetchLatestRelease() {
         return result;
     }
 
-    if (root.value("draft", false) || root.value("prerelease", false)) {
+    if (ReadUpdateField(root, "draft", false) || ReadUpdateField(root, "prerelease", false)) {
         result.errorMessage = "No normal release is currently available.";
         return result;
     }
 
-    result.releaseName = root.value("name", std::string());
-    result.releaseSummary = BuildReleaseSummary(root.value("body", std::string()));
-    result.releasePageUrl = root.value("html_url", std::string(AppVersion::kReleasesPageUrl));
+    result.releaseName = ReadUpdateField(root, "name", std::string());
+    result.releaseSummary = BuildReleaseSummary(ReadUpdateField(root, "body", std::string()));
+    result.releasePageUrl = ReadUpdateField(root, "html_url", std::string(AppVersion::kReleasesPageUrl));
 
-    const std::string tagName = root.value("tag_name", std::string());
+    const std::string tagName = ReadUpdateField(root, "tag_name", std::string());
     SemanticVersion latestVersion;
     if (!ParseSemanticVersion(tagName, latestVersion)) {
         result.errorMessage = "The latest release tag is not a valid semantic version.";
@@ -573,9 +574,9 @@ ReleaseInfo FetchLatestRelease() {
             }
 
             ReleaseAsset asset;
-            asset.name = assetJson.value("name", std::string());
-            asset.url = assetJson.value("browser_download_url", std::string());
-            asset.digest = assetJson.value("digest", std::string());
+            asset.name = ReadUpdateField(assetJson, "name", std::string());
+            asset.url = ReadUpdateField(assetJson, "browser_download_url", std::string());
+            asset.digest = ReadUpdateField(assetJson, "digest", std::string());
             if (asset.name.empty() || asset.url.empty()) {
                 continue;
             }
@@ -669,15 +670,12 @@ DownloadTaskResult DownloadReleaseInstaller(
         result.selectedDigest = expectedDigest;
     }
 
-    std::filesystem::remove(finalPath, ec);
-    std::filesystem::rename(tempPath, finalPath, ec);
-    if (ec) {
-        std::filesystem::copy_file(tempPath, finalPath, std::filesystem::copy_options::overwrite_existing, ec);
-        std::filesystem::remove(tempPath, ec);
+    if (!CommitDownloadedInstaller(tempPath, finalPath, result.errorMessage)) {
+        return result;
     }
 
     result.ok = true;
-    result.downloadedFilePath = finalPath.string();
+    result.downloadedFilePath = finalPath.u8string();
     return result;
 }
 
@@ -708,6 +706,7 @@ UpdateManager::UpdateManager(NotificationSink notificationSink, CloseRequest clo
     , m_CloseRequest(std::move(closeRequest)) {
     m_Snapshot.currentVersion = AppVersion::kVersionString;
     m_Snapshot.isInstalledBuild = AppPaths::IsInstalledBuild();
+    m_Snapshot.isLocalTestBuild = AppPaths::IsLocalTestBuild();
     m_ReleasePageUrl = AppVersion::kReleasesPageUrl;
     m_WebsiteDownloadPageUrl = AppVersion::kWebsiteDownloadPageUrl;
 }
@@ -715,6 +714,9 @@ UpdateManager::UpdateManager(NotificationSink notificationSink, CloseRequest clo
 void UpdateManager::Initialize() {
     AppPaths::EnsureRuntimeDirectories();
     LoadPersistentState();
+    if (m_Snapshot.isLocalTestBuild) {
+        m_Snapshot.statusMessage = "Update checks are disabled in conspicuously labeled local-test builds.";
+    }
 }
 
 const Snapshot& UpdateManager::GetSnapshot() const {
@@ -722,7 +724,8 @@ const Snapshot& UpdateManager::GetSnapshot() const {
 }
 
 bool UpdateManager::CanCheckForUpdates() const {
-    return m_Snapshot.state != UpdateState::Checking &&
+    return !m_Snapshot.isLocalTestBuild &&
+           m_Snapshot.state != UpdateState::Checking &&
            m_Snapshot.state != UpdateState::Downloading &&
            m_Snapshot.state != UpdateState::Verifying &&
            m_Snapshot.state != UpdateState::Installing;
@@ -740,6 +743,18 @@ bool UpdateManager::CanInstallUpdate() const {
     return m_Snapshot.downloadReady && !m_Snapshot.downloadedFilePath.empty();
 }
 
+bool UpdateManager::IsAutomaticStartupCheckEnabled() const {
+    return m_Snapshot.automaticStartupCheckEnabled;
+}
+
+void UpdateManager::SetAutomaticStartupCheckEnabled(bool enabled) {
+    if (m_Snapshot.automaticStartupCheckEnabled == enabled) {
+        return;
+    }
+    m_Snapshot.automaticStartupCheckEnabled = enabled;
+    SavePersistentState();
+}
+
 void UpdateManager::QueueNotification(
     UiNotificationSeverity severity,
     const std::string& message,
@@ -750,7 +765,7 @@ void UpdateManager::QueueNotification(
 }
 
 void UpdateManager::StartBackgroundCheck() {
-    if (!CanCheckForUpdates()) {
+    if (!m_Snapshot.automaticStartupCheckEnabled || !CanCheckForUpdates()) {
         return;
     }
 
@@ -922,7 +937,8 @@ bool UpdateManager::InstallAndRestart(std::string* errorMessage) {
     m_Snapshot.state = UpdateState::Installing;
     m_Snapshot.statusMessage = "Stack needs permission to install the update.";
 
-    if (!PlatformHelpers::LaunchElevatedInstaller(m_Snapshot.downloadedFilePath, L"", errorMessage)) {
+    if (!PlatformHelpers::LaunchElevatedInstaller(
+            std::filesystem::u8path(m_Snapshot.downloadedFilePath), L"", errorMessage)) {
         m_Snapshot.state = UpdateState::InstallFailed;
         m_Snapshot.statusMessage = errorMessage != nullptr && !errorMessage->empty()
             ? *errorMessage
@@ -954,12 +970,14 @@ bool UpdateManager::RevealDownloadedUpdate(std::string* errorMessage) const {
         return false;
     }
 
-    return PlatformHelpers::RevealPathInExplorer(m_Snapshot.downloadedFilePath, errorMessage);
+    return PlatformHelpers::RevealPathInExplorer(
+        std::filesystem::u8path(m_Snapshot.downloadedFilePath), errorMessage);
 }
 
 void UpdateManager::SavePersistentState() const {
     json root = json::object();
-    root["version"] = 1;
+    root["version"] = 2;
+    root["automaticStartupCheck"] = m_Snapshot.automaticStartupCheckEnabled;
     root["lastCheckUnixSeconds"] = m_LastCheckUnixSeconds;
     root["releasePageUrl"] = m_ReleasePageUrl;
     root["websiteDownloadPageUrl"] = m_WebsiteDownloadPageUrl;
@@ -980,7 +998,9 @@ void UpdateManager::SavePersistentState() const {
         { "updateAvailable", m_Snapshot.updateAvailable },
         { "downloadReady", m_Snapshot.downloadReady },
         { "verificationAvailable", m_Snapshot.verificationAvailable },
-        { "verificationPassed", m_Snapshot.verificationPassed }
+        { "verificationPassed", m_Snapshot.verificationPassed },
+        { "automaticStartupCheckEnabled", m_Snapshot.automaticStartupCheckEnabled },
+        { "isLocalTestBuild", m_Snapshot.isLocalTestBuild }
     };
 
     std::ofstream file(GetPersistentStatePath(), std::ios::trunc);
@@ -992,6 +1012,8 @@ void UpdateManager::SavePersistentState() const {
 void UpdateManager::LoadPersistentState() {
     m_Snapshot.currentVersion = AppVersion::kVersionString;
     m_Snapshot.isInstalledBuild = AppPaths::IsInstalledBuild();
+    m_Snapshot.isLocalTestBuild = AppPaths::IsLocalTestBuild();
+    m_Snapshot.automaticStartupCheckEnabled = true;
     m_Snapshot.lastCheckDisplay = "Never";
 
     std::ifstream file(GetPersistentStatePath());
@@ -1004,34 +1026,36 @@ void UpdateManager::LoadPersistentState() {
         return;
     }
 
-    m_LastCheckUnixSeconds = root.value("lastCheckUnixSeconds", std::uint64_t { 0 });
-    m_ReleasePageUrl = root.value("releasePageUrl", std::string(AppVersion::kReleasesPageUrl));
-    m_WebsiteDownloadPageUrl = root.value("websiteDownloadPageUrl", std::string(AppVersion::kWebsiteDownloadPageUrl));
-    m_SelectedAssetUrl = root.value("selectedAssetUrl", std::string());
-    m_SelectedAssetDigest = root.value("selectedAssetDigest", std::string());
-    m_SelectedHashAssetUrl = root.value("selectedHashAssetUrl", std::string());
+    m_Snapshot.automaticStartupCheckEnabled = ReadUpdateField(root, "automaticStartupCheck", true);
+
+    m_LastCheckUnixSeconds = ReadUpdateField(root, "lastCheckUnixSeconds", std::uint64_t { 0 });
+    m_ReleasePageUrl = ReadUpdateField(root, "releasePageUrl", std::string(AppVersion::kReleasesPageUrl));
+    m_WebsiteDownloadPageUrl = ReadUpdateField(root, "websiteDownloadPageUrl", std::string(AppVersion::kWebsiteDownloadPageUrl));
+    m_SelectedAssetUrl = ReadUpdateField(root, "selectedAssetUrl", std::string());
+    m_SelectedAssetDigest = ReadUpdateField(root, "selectedAssetDigest", std::string());
+    m_SelectedHashAssetUrl = ReadUpdateField(root, "selectedHashAssetUrl", std::string());
     m_Snapshot.lastCheckDisplay = FormatLocalTimestamp(m_LastCheckUnixSeconds);
 
-    const json snapshot = root.value("snapshot", json::object());
+    const json snapshot = ReadUpdateField(root, "snapshot", json::object());
     if (!snapshot.is_object()) {
         return;
     }
 
-    m_Snapshot.latestVersion = snapshot.value("latestVersion", std::string());
-    m_Snapshot.releaseName = snapshot.value("releaseName", std::string());
-    m_Snapshot.releaseSummary = snapshot.value("releaseSummary", std::string());
-    m_Snapshot.statusMessage = snapshot.value("statusMessage", std::string());
-    m_Snapshot.selectedAssetName = snapshot.value("selectedAssetName", std::string());
-    m_Snapshot.downloadedFilePath = snapshot.value("downloadedFilePath", std::string());
-    m_Snapshot.updateAvailable = snapshot.value("updateAvailable", false);
-    m_Snapshot.downloadReady = snapshot.value("downloadReady", false);
-    m_Snapshot.verificationAvailable = snapshot.value("verificationAvailable", false);
-    m_Snapshot.verificationPassed = snapshot.value("verificationPassed", false);
+    m_Snapshot.latestVersion = ReadUpdateField(snapshot, "latestVersion", std::string());
+    m_Snapshot.releaseName = ReadUpdateField(snapshot, "releaseName", std::string());
+    m_Snapshot.releaseSummary = ReadUpdateField(snapshot, "releaseSummary", std::string());
+    m_Snapshot.statusMessage = ReadUpdateField(snapshot, "statusMessage", std::string());
+    m_Snapshot.selectedAssetName = ReadUpdateField(snapshot, "selectedAssetName", std::string());
+    m_Snapshot.downloadedFilePath = ReadUpdateField(snapshot, "downloadedFilePath", std::string());
+    m_Snapshot.updateAvailable = ReadUpdateField(snapshot, "updateAvailable", false);
+    m_Snapshot.downloadReady = ReadUpdateField(snapshot, "downloadReady", false);
+    m_Snapshot.verificationAvailable = ReadUpdateField(snapshot, "verificationAvailable", false);
+    m_Snapshot.verificationPassed = ReadUpdateField(snapshot, "verificationPassed", false);
 
     std::error_code ec;
     if (m_Snapshot.downloadReady &&
         !m_Snapshot.downloadedFilePath.empty() &&
-        std::filesystem::exists(m_Snapshot.downloadedFilePath, ec) &&
+        std::filesystem::is_regular_file(std::filesystem::u8path(m_Snapshot.downloadedFilePath), ec) &&
         !ec) {
         m_Snapshot.state = m_Snapshot.verificationPassed ? UpdateState::ReadyToInstall : UpdateState::Downloaded;
     } else {

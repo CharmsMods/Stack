@@ -27,6 +27,12 @@ float NormalizeStoredSample(
     int sensorX,
     int sensorY,
     std::uint16_t storedSample);
+float SampleDngGainMap(
+    const DngGainMapOpcode& map,
+    int imageWidth,
+    int imageHeight,
+    int imageX,
+    int imageY);
 
 bool ResolveDngNoiseProfile(
     const RawMetadata& metadata,
@@ -60,6 +66,20 @@ bool ApplyWhiteBalanceToCfaMosaic(
     std::string* error = nullptr);
 
 std::array<float, 3> DemosaicMalvarHeCutlerAt(
+    const std::vector<float>& mosaic,
+    int width,
+    int height,
+    CfaPattern pattern,
+    int x,
+    int y);
+std::array<float, 3> DemosaicNearestNeighborAt(
+    const std::vector<float>& mosaic,
+    int width,
+    int height,
+    CfaPattern pattern,
+    int x,
+    int y);
+std::array<float, 3> DemosaicHamiltonAdamsAt(
     const std::vector<float>& mosaic,
     int width,
     int height,

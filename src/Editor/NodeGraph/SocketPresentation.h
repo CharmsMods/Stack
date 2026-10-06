@@ -41,6 +41,14 @@ inline Stack::NodeMath::LogicalValueType LogicalTypeForSocketType(SocketType typ
     return Logical::Invalid;
 }
 
+inline SocketType SocketTypeForLogicalType(Stack::NodeMath::LogicalValueType type) {
+    for (int i=0;i<=static_cast<int>(SocketType::Raw);++i) {
+        const auto candidate=static_cast<SocketType>(i);
+        if (candidate != SocketType::ImageOrChannel && LogicalTypeForSocketType(candidate)==type) return candidate;
+    }
+    return SocketType::Image;
+}
+
 inline std::string RoleKeyFromSocket(const SocketDefinition& socket) {
     if (socket.type == SocketType::ImageOrChannel) return "result";
     if (socket.id == kImageInputSocketId || socket.id == kImageOutputSocketId) return "image";

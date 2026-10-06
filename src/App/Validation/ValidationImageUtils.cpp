@@ -219,9 +219,9 @@ std::filesystem::path ResolveValidationInputPath(const char* rawPath) {
     if (std::filesystem::exists(path, ec)) {
         return path;
     }
-#ifdef _WIN32
-    const std::filesystem::path fromWorkspace = std::filesystem::current_path(ec).parent_path() / path;
-    if (!ec && std::filesystem::exists(fromWorkspace, ec)) {
+#ifdef STACK_SOURCE_DIR
+    const std::filesystem::path fromWorkspace = std::filesystem::path(STACK_SOURCE_DIR) / path;
+    if (std::filesystem::exists(fromWorkspace, ec)) {
         return fromWorkspace;
     }
 #endif

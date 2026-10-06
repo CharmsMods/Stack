@@ -1,8 +1,11 @@
+#include "App/Validation/Suites/RawViewportValidationFixture.h"
 #include "App/Validation/Suites/EditorRenderWorkerPreviewValidation.h"
 
 #include "Editor/EditorRenderWorker.h"
+#include "Raw/RawViewportCalibration.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Renderer/GLLoader.h"
+#include "Renderer/RawGraphViewportWorkload.h"
 #include "Utils/SharedPixelBuffer.h"
 
 #include <chrono>
@@ -384,6 +387,194 @@ bool ValidateTransactionalOutputUpload() {
            "replacement preserved the prior texture and valid "
            "replacement committed atomically.\n";
     return true;
+}
+
+bool ValidateRawViewportCalibration(GLFWwindow* sharedWindow) {
+    EditorRenderWorker::Snapshot snapshot;
+    snapshot.generation = 1;
+    snapshot.width = 512; snapshot.height = 384;
+    snapshot.channels = 4;
+    snapshot.outputConnected = true;
+    snapshot.rawRenderPurpose = RawRenderPurpose::ViewportCalibration;
+    snapshot.previewMaxDimension = 512;
+    snapshot.rawWorkspace.sourceKey = "validation-calibration";
+    snapshot.rawWorkspace.fullFrameWidth = 512; snapshot.rawWorkspace.fullFrameHeight = 384;
+    snapshot.rawWorkspace.hasRecipe = true;
+    snapshot.rawWorkspace.analysisRequested = false;
+    snapshot.rawWorkspace.recipe = RawRecipe::MakeDefaultRecipe("viewport-region-validation");
+    auto source = PreviewNode(1, RenderGraphNodeKind::RawDevelopment, "validation:calibration/source");
+    source.rawDevelopment.embeddedRawData = MakeViewportValidationRaw();
+    source.rawDevelopment.recipe = snapshot.rawWorkspace.recipe;
+    snapshot.graph.nodes.push_back(std::move(source));
+    snapshot.graph.nodes.push_back(PreviewNode(2, RenderGraphNodeKind::Output, "validation:calibration/output"));
+    snapshot.graph.links.push_back(RenderGraphLink { 1, EditorNodeGraph::kImageOutputSocketId,
+        2, EditorNodeGraph::kImageInputSocketId });
+    snapshot.graph.outputNodeId = 2;
+    snapshot.graph.outputSocketId = EditorNodeGraph::kImageOutputSocketId;
+    EditorRenderWorker worker;
+    if (!worker.Initialize(sharedWindow) || !worker.Submit(snapshot)) return false;
+    EditorRenderWorker::Result result;
+    const bool measured = WaitForResult(worker, result) && result.success &&
+        result.calibration.renderMs > 0.0 && result.calibration.startupMs > 0.0 &&
+        result.calibration.native && result.mainGraphStats.rawStageCacheMisses > 0 &&
+        result.outputTexture.texture == 0 && result.pixels.empty();
+    snapshot.generation = 2;
+    const bool queued = worker.Submit(snapshot);
+    snapshot.generation = 3;
+    snapshot.rawRenderPurpose = RawRenderPurpose::InteractivePresentation;
+    const bool submitted = worker.Submit(snapshot);
+    result = {};
+    const bool foreground = WaitForResult(worker, result) && result.generation == 3 && result.success;
+    ReleaseSharedResultResources(result);
+    // A small visible patch of a camera-sized source must reuse its full
+    // upstream dependency across repeated EV changes at a fixed resolution.
+    snapshot.rawWorkspace.recipe.source.sourcePath = "viewport-large-validation";
+    snapshot.width = snapshot.rawWorkspace.fullFrameWidth = 5496;
+    snapshot.height = snapshot.rawWorkspace.fullFrameHeight = 3672;
+    snapshot.rawWorkspace.recipe.rgbDenoise.enabled = false;
+    snapshot.rawWorkspace.recipe.finishTone.layerJson["localBaselineEnabled"] = false;
+    snapshot.rawWorkspace.recipe.finishTone.layerJson["foundationAdaptiveAssist"] = false;
+    snapshot.graph.nodes[0].rawDevelopment.embeddedRawData = MakeViewportValidationRaw(5496,3672);
+    snapshot.rawWorkspace.viewport = {{5496,3672,2200,1500,256,256},1.0,1};
+    snapshot.telemetry.interactionActive = true;
+    snapshot.rawWorkspace.editStage = Raw::ViewportStage::RawPlacement;
+    snapshot.rawWorkspace.preferredCacheInputStage = Raw::ViewportStage::NeutralPlacement;
+    snapshot.rawWorkspace.gpuWorkingBudgetBytes = 2ull*1024*1024*1024;
+    snapshot.rawWorkspace.gpuCacheBudgetBytes = 1024ull*1024*1024;
+    for (bool zoomed : {true,false}) {
+    snapshot.rawWorkspace.viewport = zoomed ? Raw::ViewportRequest{{5496,3672,2200,1500,256,256},1.0,1}
+        : Raw::ViewportRequest{{5496,3672,0,0,5496,3672},1.0,2};
+    for (int edge : {512,2048,5496}) {
+        snapshot.previewMaxDimension = edge;
+        double total = 0, minimum = 1e9, maximum = 0;
+        Raw::ViewportStageCosts costs {};
+        Raw::ViewportTimingBank observedBank;
+        double predictionError=0; int predictions=0;
+        for (int frame = 0; frame < 8; ++frame) {
+            ++snapshot.generation;
+            snapshot.rawWorkspace.recipe.preToneExposureEv = 0.25f + frame * 0.01f;
+            snapshot.graph.nodes[0].rawDevelopment.recipe = snapshot.rawWorkspace.recipe;
+            if (!worker.Submit(snapshot) || !WaitForResult(worker,result) || !result.success) return false;
+            const auto expected = Raw::ScaleViewportRegion(snapshot.rawWorkspace.viewport.visible,
+                result.rawWorkspace.viewportRegion.fullWidth, result.rawWorkspace.viewportRegion.fullHeight);
+            if (zoomed && (!expected.Valid() || result.outputTexture.width != expected.width || result.outputTexture.height != expected.height)) {
+                std::cerr << "RAW worker ignored the requested visible area.\n";
+                return false;
+            }
+            EditorRenderWorker::Result evidence;
+            bool hasTiming=false;
+            const auto timingDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+            while (!hasTiming && std::chrono::steady_clock::now()<timingDeadline) {
+                while (worker.TryConsumeViewportTiming(evidence))
+                    if (evidence.generation==snapshot.generation) { hasTiming=true; break; }
+                if (!hasTiming) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (!hasTiming || evidence.telemetry.completedServiceMs<=0 || evidence.telemetry.gpuServiceMs<=0 ||
+                evidence.outputTexture.texture || evidence.timingOutputWidth!=result.outputTexture.width) {
+                std::cerr << "RAW asynchronous timing lost its completion, dimensions or numeric-only ownership.\n";
+                return false;
+            }
+            if (frame > 0) {
+                Raw::ViewportCalibrationSample observation;
+                observation.edge=edge;
+                observation.renderMs=observation.startupMs=evidence.telemetry.completedServiceMs;
+                observation.stages=evidence.stageCosts;
+                observation.firstMeasuredStage=evidence.firstMeasuredStage;
+                for (std::size_t i=0;i<std::min(observation.firstMeasuredStage,observation.stages.size());++i) observation.stages[i]=0;
+                observation.changingStage=std::size_t(snapshot.rawWorkspace.editStage);
+                bool known=false;
+                const auto first=Raw::ViewportStage(observation.firstMeasuredStage);
+                const double predicted=observedBank.Cost(evidence.workloadKeys,edge,first,false,&known,1.0,8,observation.changingStage);
+                if (known && predicted>0) { predictionError+=std::abs(predicted-observation.renderMs)/observation.renderMs; ++predictions; }
+                observedBank.Record(evidence.workloadKeys,observation);
+                total += evidence.telemetry.completedServiceMs;
+                minimum = std::min(minimum,evidence.telemetry.completedServiceMs);
+                maximum = std::max(maximum,evidence.telemetry.completedServiceMs);
+                for (std::size_t i = 0; i < costs.size(); ++i) costs[i] += evidence.stageCosts[i]/7;
+                if (result.mainGraphStats.rawGpuPreprocessDispatches || result.mainGraphStats.rawStageCacheHits == 0) {
+                    std::cerr << "RAW repeated EV upstream reuse check failed: edge " << edge << ", frame " << frame
+                        << ", zoomed " << zoomed << ", GPU preprocess dispatches " << result.mainGraphStats.rawGpuPreprocessDispatches
+                        << ", RAW stage hits " << result.mainGraphStats.rawStageCacheHits
+                        << ", image hits " << result.mainGraphStats.imageCacheHits
+                        << ", image misses " << result.mainGraphStats.imageCacheMisses << ".\n";
+                    return false;
+                }
+            }
+            ReleaseSharedResultResources(result);
+        }
+        std::cout << "RAW repeated EV, source 5496x3672, " << (zoomed ? "visible 256x256" : "whole image") << ", edge " << edge
+            << ": completed service mean/min/max " << total/7 << "/" << minimum << "/" << maximum << " ms; stages";
+        for (double cost : costs) std::cout << " " << cost;
+        std::cout << "; recent prediction mean absolute error " << (predictions ? predictionError*100/predictions : 0) << "%\n";
+    }
+    }
+    RenderGraphNode downstream;
+    downstream.nodeId=3; downstream.kind=RenderGraphNodeKind::TechnicalImage;
+    downstream.technicalImageOperation=Stack::NodeMath::TechnicalImageOperation::Exposure;
+    downstream.technicalExposureValue=0.25f;
+    snapshot.graph.nodes.push_back(downstream);
+    snapshot.graph.links={{1,"imageOut",3,"imageIn"},{3,"imageOut",2,"imageIn"}};
+    snapshot.rawWorkspace.viewport.visible={};
+    snapshot.previewMaxDimension=512;
+    ++snapshot.generation;
+    if (!worker.Submit(snapshot) || !WaitForResult(worker,result) || !result.success ||
+        result.rawWorkspace.viewportRegion.Partial() || result.outputTexture.width!=512) {
+        std::cerr << "Graph-backed RAW presentation did not retain its full output extent.\n";
+        return false;
+    }
+    ReleaseSharedResultResources(result);
+    std::cout << "Graph-backed RAW complete-output render passed.\n";
+    // Repeat the same checks through the unified operation adapter. The
+    // technical source recipe stays neutral while Exposure owns its setting.
+    snapshot.graph.nodes[0].rawDevelopment.recipe=RawRecipe::BuildTechnicalSourceRecipe(snapshot.rawWorkspace.recipe);
+    snapshot.rawWorkspace.recipe=snapshot.graph.nodes[0].rawDevelopment.recipe;
+    auto& graphExposure=snapshot.graph.nodes.back();
+    graphExposure.kind=RenderGraphNodeKind::RawOperation;
+    graphExposure.rawOperation=RawRecipe::MakeGraphOperation(RawRecipe::GraphOperationKind::Exposure);
+    snapshot.graph.rawLayerBackgroundNodeId=1;
+    snapshot.rawWorkspace.preferredCacheInputStage=Raw::ViewportStage::RawPlacement;
+    for (int edge : {512,1024,5496}) {
+        snapshot.previewMaxDimension=edge;
+        double completeMs=0;
+        for (int frame=0;frame<4;++frame) {
+            ++snapshot.generation;
+            graphExposure.rawOperation.parameters["ev"]=.5f+frame*.05f;
+            snapshot.rawWorkspace.graphWorkloadKeys=Renderer::BuildRawGraphViewportWorkloadKeys(
+                snapshot.rawWorkspace.recipe,snapshot.graph,3);
+            if (!worker.Submit(snapshot) || !WaitForResult(worker,result) || !result.success ||
+                result.outputTexture.width!=edge || result.rawWorkspace.viewportRegion.Partial() ||
+                (frame>0 && result.mainGraphStats.rawGpuPreprocessDispatches)) {
+                std::cerr << "Unified Exposure did not reuse the prepared source, edge " << edge
+                    << ", frame " << frame << ", preprocessing dispatches "
+                    << result.mainGraphStats.rawGpuPreprocessDispatches << "\n";
+                return false;
+            }
+            EditorRenderWorker::Result evidence;
+            bool ready=false;
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+            while (!ready && std::chrono::steady_clock::now()<deadline) {
+                while (worker.TryConsumeViewportTiming(evidence))
+                    if (evidence.generation==snapshot.generation) {ready=true;break;}
+                if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (!ready || evidence.workloadKeys!=snapshot.rawWorkspace.graphWorkloadKeys ||
+                evidence.telemetry.completedServiceMs<=0) {
+                std::cerr << "Unified graph completion lost its complete workload timing.\n";
+                return false;
+            }
+            if (frame>0) completeMs+=evidence.telemetry.completedServiceMs;
+            ReleaseSharedResultResources(result);
+        }
+        std::cout << "Unified Exposure, source 5496x3672, edge " << edge
+            << ": completed service mean " << completeMs/3 << " ms.\n";
+    }
+    worker.Shutdown();
+    if (!measured || !queued || !submitted || !foreground) {
+        std::cerr << "RAW viewport calibration validation failed.\n";
+        return false;
+    }
+    std::cout << "RAW viewport calibration GPU validation passed.\n";
+    return ValidateRawViewportInteraction(sharedWindow);
 }
 
 } // namespace Stack::Validation

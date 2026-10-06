@@ -5,11 +5,17 @@
 
 namespace Stack::Validation {
 
+bool ValidateRawZoneAreaPipeline();
+bool ValidateRawGradingScopes();
+bool ValidateRawGradingScopeGpu();
+bool ValidateRawLabColorWheel();
+bool ValidateRawDecodeCancellation(const std::string& path);
 bool ValidateToneCurveAutoIntegration();
 bool ValidateNodeMathPhase4Integration();
 bool ValidateNodeMathPhase5Integration();
-bool ValidateNodeMathPhase6Integration();
+bool ValidateNodeMathPhase6Integration(bool calibrationOnly = false, bool transactionsOnly = false);
 bool ValidateEditorGraphTransactions();
+bool ValidateProjectWorkspaces(const std::string& projectPath);
 bool ValidateMultiSourceProjectFoundation();
 bool ValidateMfdProjectFoundation();
 bool ValidateMfdPhase0Contracts();
@@ -36,8 +42,25 @@ bool RunMfdCorpusEntry(
     const std::string& outputDirectory,
     std::uint64_t memoryBudgetBytes,
     std::uint32_t workerCount,
+    const std::string& backendId,
+    const std::string& alignmentModeId,
     std::string* errorMessage = nullptr);
 bool ValidateMfdEndToEndProcessor();
+bool ValidateHdrContractsAndOverrange();
+bool ValidateHdrCalibrationAndMixedIso();
+bool ValidateHdrTranslationAndFusion();
+bool ValidateHdrProjectFoundation();
+bool ValidateHdrEndToEndProcessor();
+bool ValidateManualHdrFusion();
+bool ValidateHdrGpuFusion();
+bool ValidateUnifiedMultiFrameContracts();
+bool ValidateUnifiedMultiFramePhase0();
+bool ValidateUnifiedMultiFrameEstimator();
+bool ValidateUnifiedMultiFramePreparedTiles();
+bool ValidateSharedBurstV1();
+bool ValidateSharedBurstEndToEndProcessor();
+bool ValidateSharedBurstGpuFusion();
+bool ValidateRawRgbDenoiseGpuShaders();
 bool WriteNodeSocketCatalog(const std::string& outputPath, std::string* errorMessage = nullptr);
 bool ValidateDevelopAutoSolveBehavior();
 bool ValidateDevelopNodeSmoke();

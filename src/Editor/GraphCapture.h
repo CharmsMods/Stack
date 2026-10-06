@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/settings/AppearanceTheme.h"
+#include "Utils/SavePathConfirmation.h"
 
 #include <cstdint>
 #include <string>
@@ -80,11 +81,13 @@ struct Request {
     Settings settings;
     GraphViewportSnapshot viewport;
     std::string targetPath;
+    Stack::FileSave::TargetApproval targetApproval;
     StackAppearance::ThemeDefinition theme;
 };
 
 struct Result {
     bool fileSaved = false;
+    bool clipboardRequested = false;
     bool clipboardDibV5Published = false;
     bool clipboardPngPublished = false;
     std::string targetPath;

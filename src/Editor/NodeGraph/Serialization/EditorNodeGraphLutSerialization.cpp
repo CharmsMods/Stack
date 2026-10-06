@@ -21,7 +21,7 @@ std::string LutImportFormatToString(ColorLut::LutImportFormat format) {
 
 ColorLut::LutImportFormat LutImportFormatFromString(const std::string& value) {
     if (value == "Cube") return ColorLut::LutImportFormat::Cube;
-    if (value == "3dl" || value == "Format3dl") return ColorLut::LutImportFormat::Format3dl;
+    if (value == "3dl") return ColorLut::LutImportFormat::Format3dl;
     if (value == "Spi1d") return ColorLut::LutImportFormat::Spi1d;
     if (value == "Spi3d") return ColorLut::LutImportFormat::Spi3d;
     return ColorLut::LutImportFormat::Unknown;

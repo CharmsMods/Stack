@@ -52,10 +52,7 @@ inline bool IsChannelProcessingBridge(
             return false;
         }
 
-        const bool scalarStream =
-            graph.IsScalarSocketStream(fromNodeId, fromSocketId);
-        return !scalarStream ||
-            !graph.ResolveSocketChannel(fromNodeId, fromSocketId).empty();
+        return true;
     }
 
     const bool channelToLayer =
@@ -66,6 +63,14 @@ inline bool IsChannelProcessingBridge(
     if (channelToLayer) {
         return true;
     }
+    const bool channelToDataProcessor =
+        fromSocket.type == SocketType::Channel &&
+        toSocket.type == SocketType::Image &&
+        ((to.kind == NodeKind::DataMath && to.dataMathMode != DataMathMode::ImageAverage &&
+          (IsDataMathInputSocketId(toSocketId) || toSocketId == kDataMathBaseInputSocketId)) ||
+         (to.kind == NodeKind::Mix && (toSocketId == kMixInputASocketId || toSocketId == kMixInputBSocketId)) ||
+         (to.kind == NodeKind::Reformat && toSocketId == kImageInputSocketId));
+    if (channelToDataProcessor) return true;
 
     const bool channelAssemblyTarget = namedChannelAssemblyTarget;
     const bool extentReferenceTarget =
@@ -77,10 +82,7 @@ inline bool IsChannelProcessingBridge(
          !extentReferenceTarget)) {
         return false;
     }
-    const std::string channel =
-        graph.ResolveSocketChannel(fromNodeId, fromSocketId);
-    return !channel.empty() &&
-        (extentReferenceTarget || channel == toSocketId);
+    return graph.IsScalarSocketStream(fromNodeId, fromSocketId);
 }
 
 } // namespace EditorNodeGraph::ConnectionRules

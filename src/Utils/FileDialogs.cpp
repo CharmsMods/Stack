@@ -1,6 +1,7 @@
 #include "FileDialogs.h"
 
 #include "App/AppPaths.h"
+#include "Utils/ScopedComApartment.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -111,6 +112,7 @@ void TraceFileDialog(
            << " error=" << error
            << " hr=0x" << std::hex << static_cast<unsigned long>(hr) << std::dec
            << '\n';
+    stream.flush();
 }
 
 void PrepareDialogOwnerWindow(HWND owner) {
@@ -368,6 +370,7 @@ RasterImageSaveResult SaveGraphImageFileDialog(
             : RasterImageFormat::Png;
         std::filesystem::path normalized(filename);
         normalized.replace_extension(result.format == RasterImageFormat::Bmp ? ".bmp" : ".png");
+        result.selectedPath = filename;
         result.path = normalized.string();
     }
 #else
@@ -549,9 +552,9 @@ std::string OpenStackProjectFileDialog(const char* title) {
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFilter =
-        "Stack Projects\0*.stack;project.stackmanifest\0"
-        "Portable Stack Project\0*.stack\0"
-        "Stack Bundle Manifest\0project.stackmanifest\0";
+        "Stack Projects\0*.stack\0"
+        "Working Project Document\0project.stack\0"
+        "Packed Stack Project\0*.stack\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
@@ -603,20 +606,28 @@ std::string SaveProjectBundleDialog(
     if (defaultFileName && defaultFileName[0]) {
         strncpy_s(filename, defaultFileName, _TRUNCATE);
     } else {
-        strncpy_s(filename, "project.stackbundle", _TRUNCATE);
+        strncpy_s(filename, "Project", _TRUNCATE);
     }
 
     OPENFILENAMEA ofn;
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "Stack Project Bundle\0*.stackbundle\0All Files\0*.*\0";
+    ofn.lpstrFilter = "Stack Working Project Folder\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     ofn.lpstrTitle = title;
-    ofn.lpstrDefExt = "stackbundle";
+    ofn.lpstrDefExt = nullptr;
 
     if (RunSaveFileDialog(ofn, "SaveProjectBundleDialog", title)) {
+        if (IsFileDialogTraceEnabled()) {
+            std::ofstream& stream = FileDialogTraceStream();
+            if (stream.is_open()) {
+                stream << "event=selection kind=SaveProjectBundleDialog path=\""
+                       << filename << "\"\n";
+                stream.flush();
+            }
+        }
         return std::string(filename);
     }
 #else
@@ -679,6 +690,8 @@ std::string SaveThemePresetFileDialog(const char* title, const char* defaultFile
 std::string OpenFolderDialog(const char* title) {
 #ifdef _WIN32
     std::string result = "";
+    Stack::Win32::ScopedComApartment apartment;
+    if (!apartment) return result;
     IFileOpenDialog *pfd = nullptr;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
         DWORD dwOptions;
@@ -721,6 +734,8 @@ std::string OpenFolderDialog(const char* title) {
 std::vector<std::string> OpenMultipleFilesDialog(const char* title, const char* filter) {
     std::vector<std::string> result;
 #ifdef _WIN32
+    Stack::Win32::ScopedComApartment apartment;
+    if (!apartment) return result;
     IFileOpenDialog *pfd = nullptr;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
         DWORD dwOptions;

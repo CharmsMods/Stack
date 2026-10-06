@@ -1,3 +1,5 @@
+#include "Utils/GraphCursor.h"
+#include "Utils/GraphNumericControls.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
@@ -136,71 +138,12 @@ bool InsertNewNodeOnExistingLink(
         return false;
     }
 
-    if (editor->GraphLinkRequiresManagedRawConfirmation(
-            link.fromNodeId,
-            link.fromSocketId,
-            link.toNodeId,
-            link.toSocketId)) {
-        editor->RemoveGraphNode(newNodeId);
-        editor->ShowUiNotification(
-            UiNotificationSeverity::Info,
-            "Insertion was not applied because this link belongs to the managed RAW chain. Switch the image to Custom Graph Mode before inserting a node here.",
-            "editor-node-graph-managed-insert");
-        return false;
-    }
-
-    bool connectedFirst = false;
-    bool connectedSecond = false;
-    try {
-        // Keep the original link live until the second connection commits.
-        // Graph input replacement publishes its prepared Link only after all
-        // allocations succeed, so either bridge can fail without first
-        // disconnecting the user's existing chain.
-        connectedFirst =
-            EditorNodeGraphUI::ConnectOutputToBestInput(
-                editor,
-                link.fromNodeId,
-                link.fromSocketId,
-                newNodeId);
-        connectedSecond = connectedFirst
-            ? EditorNodeGraphUI::ConnectBestOutputToInput(
-                editor,
-                newNodeId,
-                link.toNodeId,
-                link.toSocketId)
-            : false;
-    } catch (const std::bad_alloc&) {
-        connectedSecond = false;
-    } catch (const std::length_error&) {
-        connectedSecond = false;
-    }
-    if (connectedFirst && connectedSecond) {
-        return true;
-    }
-
-    editor->RemoveGraphNode(newNodeId);
-    EditorNodeGraph::Graph& graph = editor->GetNodeGraph();
-    if (!graph.HasLink(
-            link.fromNodeId,
-            link.fromSocketId,
-            link.toNodeId,
-            link.toSocketId)) {
-        std::string restoreError;
-        if (!editor->ConnectGraphSockets(
-                link.fromNodeId,
-                link.fromSocketId,
-                link.toNodeId,
-                link.toSocketId,
-                &restoreError)) {
-            editor->ShowUiNotification(
-                UiNotificationSeverity::Error,
-                restoreError.empty()
-                    ? "The node could not be inserted and the original link could not be restored."
-                    : "The node could not be inserted: " +
-                        restoreError,
-                "editor-node-graph-insert-rollback");
-        }
-    }
+    auto context = editor->GetGraphEditorContext();
+    auto proposal = Stack::GraphModel::ProposeInsertion(*context.graph,context.revision,newNodeId,link);
+    std::string error;
+    if (context.applyEdit(std::move(proposal),error)) return true;
+    editor->RemoveGraphNode(newNodeId,false);
+    editor->ShowUiNotification(UiNotificationSeverity::Warning,error,"editor-node-graph-insert");
     return false;
 }
 
@@ -255,6 +198,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Reformat:
             editor->AddReformatNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawOperation:
+            editor->AddRawOperationNodeAt(static_cast<Stack::RawRecipe::GraphOperationKind>(entry.value), graphPos);
             break;
         case EditorNodeGraph::NodeKind::TechnicalImage:
             editor->AddTechnicalImageNodeAt(
@@ -354,7 +300,12 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
 
 void EditorNodeGraphUI::Render(EditorModule* editor) {
     m_ActiveEditor = editor;
-    EditorNodeGraph::Graph& graph = GetActiveGraph(editor);
+    auto context = editor->GetGraphEditorContext();
+    if (context.documentId != m_GraphContext.documentId || context.graphId != m_GraphContext.graphId ||
+        context.documentRevision != m_GraphContext.documentRevision || context.revision != m_GraphContext.revision)
+        m_ConnectionCapabilityCache.clear();
+    m_GraphContext = context;
+    EditorNodeGraph::Graph& graph = *context.graph;
     const std::uint64_t structureRevision = graph.GetStructureRevision();
     bool syncVisualCaches = false;
     if (m_LastGraphStructureRevision == 0) {
@@ -477,7 +428,8 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     bool graphHovered = options.interactive && IsGraphCanvasHovered();
     if (graphHovered) {
         ImVec2 mousePos = ImGui::GetIO().MousePos;
-        float drawersWidth = std::max(editor->GetLeftPanelWidthAnim(), editor->GetNodesPanelWidthAnim());
+        float drawersWidth = std::max(editor->GetLeftPanelWidthAnim(),
+            HasCatalogHost() ? 0.0f : editor->GetNodesPanelWidthAnim());
         if (mousePos.x >= canvasMin.x && mousePos.x <= canvasMin.x + drawersWidth) {
             graphHovered = false;
         }
@@ -502,7 +454,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     }
 
     if (options.interactive) {
-        static bool lastTabDown = false;
+        auto& lastTabDown = m_LastTabDown;
         bool tabPressed = false;
         if (ImGui::IsKeyDown(ImGuiKey_Tab)) {
             if (!lastTabDown) {
@@ -513,10 +465,20 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             lastTabDown = false;
         }
 
-        if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && tabPressed && !ImGui::GetIO().KeyCtrl) {
-            if (IsNodeBrowserOpen()) {
+        const auto& tabIo = ImGui::GetIO();
+        const bool catalogShortcutAvailable = HasCatalogHost() && !tabIo.WantTextInput &&
+            !ImGui::IsAnyItemActive() && !ImGui::IsAnyMouseDown();
+        if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && tabPressed &&
+            !tabIo.KeyCtrl && !tabIo.KeyAlt && !tabIo.KeyShift && !tabIo.KeySuper) {
+            if (IsCatalogDocked()) {
+                if ((editor->CanConsumeEditorCommandKeys() || m_NodeBrowserSearchFocused || catalogShortcutAvailable) &&
+                    !ImGui::IsAnyMouseDown() &&
+                    (graphHovered || m_NodeBrowserSearchFocused || catalogShortcutAvailable || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)))
+                    m_NodeBrowserFocusSearch = true;
+            } else if (IsNodeBrowserOpen()) {
                 CloseNodeBrowser();
-            } else if (editor->CanConsumeEditorCommandKeys() && (graphHovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))) {
+            } else if (catalogShortcutAvailable || (editor->CanConsumeEditorCommandKeys() &&
+                (graphHovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)))) {
                 const std::vector<int>& selectedIds = graph.GetSelectedNodeIds();
                 if (selectedIds.size() == 1) {
                     int selectedNodeId = selectedIds.front();
@@ -573,9 +535,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     const ImVec4 canvasBg = graphStyle.enabled ? graphStyle.canvas : workspaceBg;
     const ImVec2 fadeMin = canvasMin;
     const ImVec2 fadeMax = canvasMax;
-    const float wallpaperEdgeFadeDistance = wallpaperSurfaces
-        ? std::min(144.0f, std::max(72.0f, std::min(canvasSize.x, canvasSize.y) * 0.14f))
-        : 0.0f;
+    const float wallpaperEdgeFadeDistance = wallpaperSurfaces ? 132.0f : 0.0f;
     const bool drawCanvasBackground =
         options.background == Stack::EditorGraphCapture::Background::SolidTheme ||
         (options.background == Stack::EditorGraphCapture::Background::CurrentAppearance && !wallpaperSurfaces);
@@ -589,10 +549,10 @@ void EditorNodeGraphUI::RenderGraphCanvas(
         const float gridOpacity = std::clamp(graphStyle.gridLineOpacity, 0.0f, 1.0f);
         const ImU32 gridColor = wallpaperSurfaces
             ? ((luminance < 0.5f)
-                ? ApplyStyleAlpha(IM_COL32(255, 255, 255, static_cast<int>(12.0f * gridOpacity)))
+                ? ApplyStyleAlpha(IM_COL32(255, 255, 255, static_cast<int>(28.0f * gridOpacity)))
                 : ApplyStyleAlpha(IM_COL32(0, 0, 0, static_cast<int>(10.0f * gridOpacity))))
             : ((luminance < 0.5f)
-                ? ApplyStyleAlpha(IM_COL32(255, 255, 255, static_cast<int>(20.0f * gridOpacity)))  // Dark background: soft light grid
+                ? ApplyStyleAlpha(IM_COL32(255, 255, 255, static_cast<int>(36.0f * gridOpacity)))  // Dark background: soft light grid
                 : ApplyStyleAlpha(IM_COL32(0, 0, 0, static_cast<int>(18.0f * gridOpacity))));      // Light background: soft dark grid
         for (float x = std::fmod(m_Pan.x, gridStep); x < canvasSize.x; x += gridStep) {
             DrawStraightLineWithEdgeFade(
@@ -640,6 +600,13 @@ void EditorNodeGraphUI::RenderGraphCanvas(
             rect.min.y <= canvasMax.y + graphElementCullMargin;
     };
 
+    if (options.interactive) {
+        const auto* cursorAppearance=editor->GetAppearance();
+        static const auto fallback=StackAppearance::ResolveCreamPalette(StackAppearance::CreamPalette{});
+        ImGuiExtras::ConfigureGraphCursor(&graph,canvasMin,ImVec2(canvasMin.x+canvasSize.x,canvasMin.y+canvasSize.y),
+            graphHovered,cursorAppearance ? cursorAppearance->GetResolvedCreamPalette() : fallback,ImGui::GetWindowViewport());
+    }
+    ImGuiExtras::BeginGraphWheelFrame(&graph, options.interactive);
     ImDrawListSplitter graphSplitter;
     graphSplitter.Split(drawList, 2);
     graphSplitter.SetCurrentChannel(drawList, 1);
@@ -649,6 +616,7 @@ void EditorNodeGraphUI::RenderGraphCanvas(
     for (int nodeId : nodeRenderOrder) {
         const NodeLayoutCache* layout = FindNodeLayoutCache(nodeId);
         const bool forceRenderForInteraction =
+            nodeId == ImGuiExtras::GraphWheelTargetNode(&graph) ||
             nodeId == m_DragNodeId ||
             nodeId == m_DragOutputNodeId ||
             nodeId == m_DragInputNodeId;

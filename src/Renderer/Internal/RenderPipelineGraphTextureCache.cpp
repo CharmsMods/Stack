@@ -48,7 +48,9 @@ unsigned int RenderPipeline::CloneTextureForGraphCache(unsigned int sourceTextur
         return 0;
     }
 
-    unsigned int copyTexture = GLHelpers::CreateEmptyTexture(width, height);
+    unsigned int copyTexture = m_GraphFloat32Targets
+        ? GLHelpers::CreateStorageTexture(width, height, GL_RGBA32F)
+        : GLHelpers::CreateEmptyTexture(width, height);
     if (copyTexture == 0) {
         return 0;
     }
@@ -92,13 +94,14 @@ bool RenderPipeline::StoreGraphCacheEntry(
     std::size_t fingerprint,
     bool owned) {
     CachedGraphTexture replacement;
+    replacement.viewportRegion = m_RawViewportAppliedRegion;
     replacement.texture = texture;
     replacement.fingerprint = fingerprint;
     replacement.width = m_Width;
     replacement.height = m_Height;
     replacement.owned = owned;
     replacement.bytes = owned
-        ? Stack::Renderer::GraphExecution::EstimateRawDevelopStageCacheTextureBytes(m_Width, m_Height)
+        ? EstimateGraphTargetBytes(m_Width, m_Height)
         : 0;
     replacement.lastUseSerial = ++m_GraphResourceUseSerial;
 
@@ -241,7 +244,7 @@ void RenderPipeline::TrimGraphPersistentCachesToBudget() {
     };
 
     std::uint64_t totalBytes = GraphPersistentCacheBytes();
-    while (totalBytes > kGraphPersistentCacheSoftByteBudget) {
+    while (totalBytes > m_GraphPersistentCacheBudgetBytes) {
         CacheKind victimKind = CacheKind::None;
         const std::string* victimKey = nullptr;
         std::uint64_t victimBytes = 0;
@@ -335,4 +338,13 @@ void RenderPipeline::PruneInactiveGraphCache(
             ++it;
         }
     }
+}
+
+std::uint64_t RenderPipeline::GetGraphResidentCacheBytes() const {
+    const auto add = [](std::uint64_t a, std::uint64_t b) {
+        return b > std::numeric_limits<std::uint64_t>::max() - a
+            ? std::numeric_limits<std::uint64_t>::max() : a + b;
+    };
+    return add(add(GraphPersistentCacheBytes(), RawDevelopStageCacheTotalBytes()),
+        GraphTransientTargetBytes());
 }

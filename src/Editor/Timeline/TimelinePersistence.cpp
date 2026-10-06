@@ -7,7 +7,7 @@
 namespace Stack::Timeline {
 namespace {
 
-constexpr int kTimelinePersistenceSchemaVersion = 1;
+constexpr int kTimelinePersistenceSchemaVersion = 2;
 
 const char* TimelineInterpolationToken(TimelineInterpolation interpolation) {
     switch (interpolation) {
@@ -58,7 +58,8 @@ nlohmann::json SerializeTimelineDocument(const TimelineDocumentState& document) 
         tracks.push_back({
             { "target", {
                 { "nodeId", track.target.nodeId },
-                { "parameterId", track.target.parameterId }
+                { "parameterId", track.target.parameterId },
+                { "graphId", track.target.graphId }, { "nodeUuid", track.target.nodeUuid }
             } },
             { "keyframes", std::move(keyframes) }
         });
@@ -82,7 +83,7 @@ TimelineDocumentState DeserializeTimelineDocument(
     }
 
     const int schemaVersion = value.value("schemaVersion", 0);
-    if (schemaVersion <= 0 || schemaVersion > kTimelinePersistenceSchemaVersion) {
+    if (schemaVersion != kTimelinePersistenceSchemaVersion) {
         return document;
     }
 
@@ -111,6 +112,8 @@ TimelineDocumentState DeserializeTimelineDocument(
 
         AnimatableParameterTarget target;
         target.nodeId = targetJson.value("nodeId", -1);
+        target.graphId = targetJson.at("graphId").get<std::string>();
+        target.nodeUuid = targetJson.at("nodeUuid").get<std::string>();
         target.parameterId = targetJson.value("parameterId", std::string());
         if (!IsValidTarget(target)) {
             continue;

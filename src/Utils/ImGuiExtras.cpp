@@ -1,4 +1,6 @@
+#include "GraphCursor.h"
 #include "ImGuiExtras.h"
+#include "Utils/GraphNumericControls.h"
 #include <imgui_internal.h>
 #include <array>
 #include <algorithm>
@@ -21,6 +23,7 @@ bool g_SliderWheelModifierActive = false;
 bool g_SliderWheelConsumed = false;
 int g_GraphNodeControlScopeDepth = 0;
 GraphNodeControlScopeConfig g_GraphNodeControlScopeConfig;
+std::optional<double> g_NextNumericDefault;
 
 enum class GraphSliderValueKind {
     Float,
@@ -906,6 +909,7 @@ float EaseOutCubic(float value) {
 }
 
 void BeginFrameInputRouting() {
+    BeginGraphCursorFrame();
     ImGuiIO& io = ImGui::GetIO();
     PruneGraphSliderStates();
     g_HasPendingCursorCaptureRequest = false;
@@ -927,154 +931,16 @@ float GetSliderWheelDelta() {
     return g_SliderWheelModifierActive ? g_RoutedMouseWheel : 0.0f;
 }
 
-void DrawSpinner(const char* label, float radius, int thickness, ImU32 color) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const ImVec2 size(radius * 2.0f, (radius * 2.0f) + ImGui::GetStyle().ItemInnerSpacing.y + ImGui::GetTextLineHeight());
-    ImGui::Dummy(size);
-    const ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
-
-    const float time = static_cast<float>(ImGui::GetTime());
-    const float pulse = 0.94f + (0.06f * std::sin(time * 2.35f));
-    const float start = std::abs(std::sin(time * 1.8f)) * 6.0f;
-    const float aMin = IM_PI * 2.0f * (start / 8.0f);
-    const float aMax = IM_PI * 2.0f * ((start + 6.0f) / 8.0f);
-    const ImVec2 center(bb.Min.x + radius, bb.Min.y + radius);
-
-    window->DrawList->PathClear();
-    window->DrawList->PathArcTo(center, radius * pulse, aMin, aMax, 24);
-    window->DrawList->PathStroke(color, false, static_cast<float>(thickness));
-
-    const ImVec2 textSize = ImGui::CalcTextSize(label);
-    const ImVec2 textPos(bb.Min.x + (size.x - textSize.x) * 0.5f, bb.Min.y + radius * 2.0f + ImGui::GetStyle().ItemInnerSpacing.y);
-    window->DrawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_TextDisabled), label);
+void SetNextNodeNumericDefault(double value) {
+    g_NextNumericDefault = value;
 }
 
-void DrawSpinnerOnly(float radius, int thickness, ImU32 color) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const ImVec2 size(radius * 2.0f, radius * 2.0f);
-    ImGui::Dummy(size);
-    const ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
-
-    const float time = static_cast<float>(ImGui::GetTime());
-    const float pulse = 0.94f + (0.06f * std::sin(time * 2.35f));
-    const float start = std::abs(std::sin(time * 1.8f)) * 6.0f;
-    const float aMin = IM_PI * 2.0f * (start / 8.0f);
-    const float aMax = IM_PI * 2.0f * ((start + 6.0f) / 8.0f);
-    const ImVec2 center(bb.Min.x + radius, bb.Min.y + radius);
-
-    window->DrawList->PathClear();
-    window->DrawList->PathArcTo(center, radius * pulse, aMin, aMax, 24);
-    window->DrawList->PathStroke(color, false, static_cast<float>(thickness));
-}
-
-void RenderSpinnerOnlyOverlay(float alpha) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    alpha = std::clamp(alpha, 0.0f, 1.0f);
-    if (alpha <= 0.001f) {
-        return;
-    }
-
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    ImVec2 min = ImGui::GetWindowPos();
-    ImVec2 max = ImVec2(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
-
-    ImGui::SetCursorScreenPos(min);
-    ImGui::PushID("##SpinnerOnlyOverlayBlocker");
-    ImGui::InvisibleButton("##Blocker", ImGui::GetWindowSize());
-    ImGui::PopID();
-
-    const float radius = 24.0f;
-    const ImVec2 centerPos(
-        min.x + (max.x - min.x) * 0.5f - radius,
-        min.y + (max.y - min.y) * 0.5f - radius);
-
-    ImGui::SetCursorScreenPos(centerPos);
-    DrawSpinnerOnly(radius, 4, IM_COL32(255, 255, 255, static_cast<int>(240.0f * alpha)));
-}
-
-void RenderBusyOverlay(const char* message) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    ImVec2 min = ImGui::GetWindowPos();
-    ImVec2 max = ImVec2(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
-
-    // Draw the overlay background
-    drawList->AddRectFilled(min, max, IM_COL32(20, 20, 20, 180));
-
-    // Block interaction for the window by drawing an invisible button
-    // We need to push a clip rect to allow the button to be drawn outside of normal flow if necessary, 
-    // but SetCursorScreenPos is usually enough.
-    ImGui::SetCursorScreenPos(min);
-    ImGui::PushID("##BusyOverlayBlocker");
-    ImGui::InvisibleButton("##Blocker", ImGui::GetWindowSize());
-    ImGui::PopID();
-
-    // Compute center and set cursor for spinner
-    float radius = 24.0f;
-    float totalHeight = (radius * 2.0f) + ImGui::GetStyle().ItemInnerSpacing.y + ImGui::GetTextLineHeight();
-    
-    ImVec2 centerPos = ImVec2(
-        min.x + (max.x - min.x) * 0.5f - radius,
-        min.y + (max.y - min.y) * 0.5f - (totalHeight * 0.5f)
-    );
-
-    ImGui::SetCursorScreenPos(centerPos);
-    DrawSpinner(message, radius, 4, IM_COL32(255, 255, 255, 240));
-}
-
-void RenderProgressOverlay(const char* message, float progress) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const ImVec2 windowMin = ImGui::GetWindowPos();
-    const ImVec2 windowSize = ImGui::GetWindowSize();
-    const float panelWidth = std::min(340.0f, std::max(220.0f, windowSize.x - 32.0f));
-    const float panelHeight = 58.0f;
-    const ImVec2 panelMin(
-        windowMin.x + windowSize.x - panelWidth - 18.0f,
-        windowMin.y + windowSize.y - panelHeight - 18.0f);
-    const ImVec2 panelMax(panelMin.x + panelWidth, panelMin.y + panelHeight);
-    const float clampedProgress = std::clamp(progress, 0.0f, 1.0f);
-
-    drawList->AddRectFilled(panelMin, panelMax, IM_COL32(9, 23, 28, 220), 8.0f);
-    drawList->AddRect(panelMin, panelMax, IM_COL32(110, 176, 190, 120), 8.0f);
-
-    const float padding = 12.0f;
-    const ImVec2 textMin(panelMin.x + padding, panelMin.y + 9.0f);
-    const ImVec2 textMax(panelMax.x - padding, panelMin.y + 29.0f);
-    drawList->PushClipRect(textMin, textMax, true);
-    drawList->AddText(textMin, IM_COL32(228, 246, 250, 245), message && message[0] ? message : "Rendering...");
-    drawList->PopClipRect();
-
-    char percentText[16];
-    std::snprintf(percentText, sizeof(percentText), "%d%%", static_cast<int>(std::round(clampedProgress * 100.0f)));
-    const ImVec2 percentSize = ImGui::CalcTextSize(percentText);
-    drawList->AddText(
-        ImVec2(panelMax.x - padding - percentSize.x, panelMin.y + 9.0f),
-        IM_COL32(170, 214, 224, 230),
-        percentText);
-
-    const ImVec2 barMin(panelMin.x + padding, panelMax.y - 18.0f);
-    const ImVec2 barMax(panelMax.x - padding, panelMax.y - 10.0f);
-    drawList->AddRectFilled(barMin, barMax, IM_COL32(42, 70, 78, 245), 4.0f);
-    const float fillX = barMin.x + (barMax.x - barMin.x) * clampedProgress;
-    if (fillX > barMin.x) {
-        drawList->AddRectFilled(barMin, ImVec2(fillX, barMax.y), IM_COL32(88, 192, 211, 245), 4.0f);
-    }
+void ConsumeSliderWheel() {
+    g_SliderWheelConsumed = true;
 }
 
 void ResetNodeControlState() {
+    g_NextNumericDefault.reset();
     g_NodeControlState = {};
 }
 
@@ -1166,6 +1032,16 @@ void RichColorSwatchRow(
 }
 
 bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, float v_max, const char* format, float controlWidth) {
+    if (IsGraphNodeControlScopeActive() && g_GraphNodeControlScopeConfig.useScrubHandles) {
+        auto defaultValue = g_NextNumericDefault;
+        g_NextNumericDefault.reset();
+        if (!defaultValue && g_GraphNodeControlScopeConfig.numericDefault)
+            defaultValue = g_GraphNodeControlScopeConfig.numericDefault(label, id, v_min, v_max, format);
+        auto config = g_GraphNodeControlScopeConfig;
+        config.dragReferenceWidth = BuildNodeControlLayout(controlWidth, true).widgetWidth;
+        return GraphNumericFloat(label, id, v, v_min, v_max, format, controlWidth,
+            config, defaultValue, CaptureNodeControlItem);
+    }
     ImGui::PushID(id);
     const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, true);
     if (IsGraphNodeControlScopeActive()) {
@@ -1199,6 +1075,16 @@ bool NodeSliderFloat(const char* label, const char* id, float* v, float v_min, f
 }
 
 bool NodeSliderInt(const char* label, const char* id, int* v, int v_min, int v_max, const char* format, float controlWidth) {
+    if (IsGraphNodeControlScopeActive() && g_GraphNodeControlScopeConfig.useScrubHandles) {
+        auto defaultValue = g_NextNumericDefault;
+        g_NextNumericDefault.reset();
+        if (!defaultValue && g_GraphNodeControlScopeConfig.numericDefault)
+            defaultValue = g_GraphNodeControlScopeConfig.numericDefault(label, id, v_min, v_max, format);
+        auto config = g_GraphNodeControlScopeConfig;
+        config.dragReferenceWidth = BuildNodeControlLayout(controlWidth, true).widgetWidth;
+        return GraphNumericInt(label, id, v, v_min, v_max, format, controlWidth,
+            config, defaultValue, CaptureNodeControlItem);
+    }
     ImGui::PushID(id);
     const NodeControlLayout layout = BuildNodeControlLayout(controlWidth, true);
     if (IsGraphNodeControlScopeActive()) {
@@ -1307,6 +1193,7 @@ bool NodeInputFloat(const char* label, const char* id, float* v, float step, flo
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
     ImGui::SetNextItemWidth(layout.widgetWidth);
+    GraphNumericValueStyle numericStyle;
     const bool changed = ImGui::InputFloat("##input", v, step, step_fast, format ? format : "%.3f");
     CaptureNodeControlItem();
 
@@ -1322,6 +1209,7 @@ bool NodeInputInt(const char* label, const char* id, int* v, int step, int step_
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::SetCursorPosX(layout.startX + layout.labelWidth + layout.spacing);
     ImGui::SetNextItemWidth(layout.widgetWidth);
+    GraphNumericValueStyle numericStyle;
     const bool changed = ImGui::InputInt("##input", v, step, step_fast);
     CaptureNodeControlItem();
 

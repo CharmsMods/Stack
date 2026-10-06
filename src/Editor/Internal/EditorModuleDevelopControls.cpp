@@ -26,8 +26,8 @@ void EditorModule::RenderRawDevelopControls(EditorNodeGraph::Node& node, float c
         node.title = "Develop";
     }
 
-    const EditorNodeGraph::Link* rawInput = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kRawInputSocketId);
-    const EditorNodeGraph::Node* rawSourceNode = rawInput ? m_NodeGraph.FindNode(rawInput->fromNodeId) : nullptr;
+    const EditorNodeGraph::Link* rawInput = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kRawInputSocketId);
+    const EditorNodeGraph::Node* rawSourceNode = rawInput ? m_Project->graph.FindNode(rawInput->fromNodeId) : nullptr;
     const Raw::RawMetadata emptyMetadata;
     const Raw::RawMetadata& metadata =
         (rawSourceNode && rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource)

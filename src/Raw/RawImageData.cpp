@@ -44,16 +44,17 @@ const char* WhiteBalanceModeName(WhiteBalanceMode mode) {
 
 const char* RawProcessingVersionName(RawProcessingVersion version) {
     switch (version) {
-        case RawProcessingVersion::LegacyV1: return "Legacy V1";
-        case RawProcessingVersion::TruthfulV1: return "Truthful V1";
+        case RawProcessingVersion::TruthfulV2: return "Truthful V2";
     }
-    return "Legacy V1";
+    return "Truthful V2";
 }
 
 const char* DemosaicMethodName(DemosaicMethod method) {
     switch (method) {
         case DemosaicMethod::Bilinear: return "Fast / Bilinear (preview-safe)";
         case DemosaicMethod::MalvarHeCutler: return "Malvar-He-Cutler 5x5";
+        case DemosaicMethod::NearestNeighbor: return "Nearest Neighbor";
+        case DemosaicMethod::HamiltonAdams: return "Hamilton-Adams";
     }
     return "Fast / Bilinear (preview-safe)";
 }
@@ -84,6 +85,21 @@ const char* RawSampleFormatName(RawSampleFormat format) {
         default:
             return "Unknown";
     }
+}
+
+const char* NormalizedMosaicInputContractName(
+    NormalizedMosaicInputContract contract) {
+    switch (contract) {
+        case NormalizedMosaicInputContract::None:
+            return "none";
+        case NormalizedMosaicInputContract::MfdReferencePreGain:
+            return "mfd-reference-pre-gain";
+        case NormalizedMosaicInputContract::HdrVirtualAnchorPreGain:
+            return "hdr-virtual-anchor-pre-gain";
+        case NormalizedMosaicInputContract::BracketingPreGain:
+            return "bracketing-pre-gain-v1";
+    }
+    return "none";
 }
 
 const char* RawDebugViewName(RawDebugView view) {

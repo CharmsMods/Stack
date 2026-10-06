@@ -252,6 +252,56 @@ bool ValidateCapsAndExactFallback() {
     return ok;
 }
 
+bool ValidateWeightedAverageStrength() {
+    bool ok = true;
+    const auto reference = MakeReference(0.20, 0.04);
+    std::vector<Raw::Mfd::FusionCandidateSample> candidates(
+        4u,
+        MakeCandidate(0.20, 0.04));
+    for (auto& candidate : candidates) {
+        candidate.reliability = 0.15;
+    }
+
+    Raw::Mfd::Parameters robustParameters;
+    robustParameters.fusion.method = "robust";
+    Raw::Mfd::FusionPixelResult robust;
+    ok &= Fuse(reference, candidates, robust, robustParameters);
+
+    Raw::Mfd::Parameters weightedParameters;
+    weightedParameters.fusion.method = "weighted-average";
+    weightedParameters.fusion.smoothing = 0.70;
+    Raw::Mfd::FusionPixelResult weighted;
+    ok &= Fuse(reference, candidates, weighted, weightedParameters);
+    ok &= Check(
+        weighted.diagnostics.contributingAlternateCount == 4u &&
+            weighted.diagnostics.effectiveSampleCount >
+                robust.diagnostics.effectiveSampleCount + 1.5 &&
+            weighted.diagnostics.effectiveSampleCount <= 5.0,
+        "weighted-average smoothing did not turn safe coverage into stronger effective averaging");
+
+    const auto outlierReference = MakeReference(0.20, 1.0e-4);
+    std::vector<Raw::Mfd::FusionCandidateSample> protectedCandidates(
+        4u,
+        MakeCandidate(0.20, 1.0e-4));
+    for (auto& candidate : protectedCandidates) {
+        candidate.reliability = 0.15;
+    }
+    protectedCandidates.push_back(MakeCandidate(0.80, 1.0e-4));
+    Raw::Mfd::FusionPixelResult protectedResult;
+    ok &= Fuse(
+        outlierReference,
+        protectedCandidates,
+        protectedResult,
+        weightedParameters);
+    ok &= Check(
+        protectedResult.diagnostics.contributingAlternateCount == 4u &&
+            protectedResult.diagnostics.dominantRejectionReason ==
+                Raw::Mfd::FusionRejectReason::PixelOutlier &&
+            NearlyEqual(protectedResult.normalizedValue, 0.20),
+        "weighted-average smoothing bypassed the per-pixel motion/outlier gate");
+    return ok;
+}
+
 bool ValidateReferenceDefectException() {
     bool ok = true;
     auto reference = MakeReference(0.20, 0.01);
@@ -396,6 +446,7 @@ bool ValidateMfdPhase7Fusion() {
     bool ok = true;
     ok &= ValidateEqualAndUnequalNoise();
     ok &= ValidateCapsAndExactFallback();
+    ok &= ValidateWeightedAverageStrength();
     ok &= ValidateReferenceDefectException();
     ok &= ValidateStableOrderAndTileDiagnostics();
     if (ok) {

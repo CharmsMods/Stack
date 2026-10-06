@@ -121,8 +121,9 @@ inline std::string DeclaredChannelRole(const Input& input) {
             !role.empty()) {
             return role;
         }
+        return {}; // Known neutral is authoritative.
     }
-    return SocketRole(input.sourceSocket);
+    return {};
 }
 
 inline std::string FormatNumber(double value) {
@@ -177,7 +178,7 @@ inline std::string ExtentFor(
         spatial.value.dataWindow.width <= 0 || spatial.value.dataWindow.height <= 0) {
         return {};
     }
-    return std::to_string(spatial.value.dataWindow.width) + " x " +
+    return std::to_string(spatial.value.dataWindow.width) + " \xC3\x97 " +
         std::to_string(spatial.value.dataWindow.height);
 }
 
@@ -196,6 +197,8 @@ inline std::string ImageComponents(const Input& input) {
                     if (!result.empty()) result += ", ";
                     result += component;
                 }
+                if (result == "R, G, B") return "RGB";
+                if (result == "R, G, B, A") return "RGBA";
                 return result;
             }
         } else if (input.descriptor.presentImageComponents.state == KnowledgeState::Unknown) {
@@ -266,11 +269,13 @@ inline std::string AlphaFor(const Stack::NodeMath::ValueDescriptor& descriptor) 
 inline Stack::NodeMath::LogicalValueType LogicalTypeFor(const Input& input) {
     using Stack::NodeMath::LogicalValueType;
     if (input.value.has_value() &&
-        input.value->logicalType != LogicalValueType::Invalid) {
+        input.value->logicalType != LogicalValueType::Invalid &&
+        input.value->logicalType != LogicalValueType::Failure) {
         return input.value->logicalType;
     }
     if (input.hasDescriptor &&
-        input.descriptor.logicalType != LogicalValueType::Invalid) {
+        input.descriptor.logicalType != LogicalValueType::Invalid &&
+        input.descriptor.logicalType != LogicalValueType::Failure) {
         return input.descriptor.logicalType;
     }
     return input.sourceSocket.logicalType;
@@ -367,8 +372,7 @@ inline std::string DataSummary(const std::optional<Stack::NodeMath::FirstClassVa
 }
 
 inline std::string CompactDiagnosticText(const Stack::NodeMath::Diagnostic& diagnostic) {
-    std::string result = diagnostic.suggestedRepair.empty()
-        ? diagnostic.message : diagnostic.suggestedRepair;
+    std::string result = diagnostic.message;
     const std::size_t sentenceEnd = result.find_first_of(".!?");
     if (sentenceEnd != std::string::npos) result.resize(sentenceEnd);
     constexpr std::size_t kMaximumLength = 64;
@@ -385,13 +389,13 @@ inline std::pair<Attention, std::string> SourceAttention(const Input& input) {
             ? "Source value is unavailable" : input.value->message };
     }
     for (const Diagnostic& diagnostic : input.sourceDiagnostics) {
-        if (diagnostic.severity == DiagnosticSeverity::HardError) {
+        if (diagnostic.severity == DiagnosticSeverity::HardError ||
+            diagnostic.severity == DiagnosticSeverity::RuntimeFault) {
             return { Attention::Error, CompactDiagnosticText(diagnostic) };
         }
     }
     for (const Diagnostic& diagnostic : input.sourceDiagnostics) {
-        if (diagnostic.severity == DiagnosticSeverity::Warning &&
-            !diagnostic.suggestedRepair.empty()) {
+        if (diagnostic.severity == DiagnosticSeverity::Warning) {
             return { Attention::Warning, CompactDiagnosticText(diagnostic) };
         }
     }
@@ -404,23 +408,13 @@ inline Readout Build(const Input& input) {
     Readout result;
     switch (type) {
         case LogicalValueType::ColorImage:
-            result.primary = "Image" + std::string(kSeparator) + ImageComponents(input);
-            result.secondary = input.hasDescriptor
-                ? JoinFacts({ ColorIdentityFor(input.descriptor.color),
-                    TransferAndReferenceFor(input.descriptor), AlphaFor(input.descriptor) })
-                : "Unknown image state";
+            result.primary = ImageComponents(input);
             break;
-        case LogicalValueType::Channel: {
-            result.primary = "Channel";
-            if (const std::string role = DeclaredChannelRole(input); !role.empty()) {
-                result.primary += std::string(kSeparator) + role;
-            }
-            break;
-        }
+        case LogicalValueType::Channel:
         case LogicalValueType::Mask:
-            result.primary = "Channel" + std::string(kSeparator) + "Mask";
-            break;
         case LogicalValueType::ScalarField:
+            result.primary = "1 channel";
+            break;
         case LogicalValueType::Vector2Field:
         case LogicalValueType::Vector3Field:
         case LogicalValueType::Vector4Field:
@@ -475,8 +469,8 @@ inline Readout Build(const Input& input) {
             result.secondary = "Specialized resource";
             break;
         case LogicalValueType::Failure:
-            result.primary = "Failed value";
-            result.secondary = "Source failed";
+            result.primary = "Value";
+            result.secondary = "Metadata unavailable";
             break;
         case LogicalValueType::Invalid:
             result.primary = "Unknown value";
@@ -498,24 +492,29 @@ inline Readout Build(const Input& input) {
         type == LogicalValueType::Vector3Field ||
         type == LogicalValueType::Vector4Field ||
         type == LogicalValueType::DataImage;
-    if (fieldLike && result.secondary.empty()) {
-        SemanticField<UnitDescriptor> units = input.sourceSocket.declaredUnits;
-        SemanticField<NumericRange> range;
-        SemanticField<SpatialDescriptor> spatial;
-        if (input.hasDescriptor) {
-            if (input.descriptor.units.state != KnowledgeState::NotApplicable) {
-                units = input.descriptor.units;
+    const bool singleChannel = type == LogicalValueType::Channel || type == LogicalValueType::Mask || type == LogicalValueType::ScalarField;
+    if ((fieldLike || type == LogicalValueType::ColorImage) && input.hasDescriptor) {
+        const std::string extent = ExtentFor(input.descriptor.spatial);
+        if (singleChannel && !extent.empty()) result.primary += std::string(kSeparator) + extent;
+        std::vector<std::string> facts;
+        if (type == LogicalValueType::ColorImage && input.descriptor.presentImageComponents.state == KnowledgeState::Known) {
+            const auto count = ImageComponentCount(input.descriptor.presentImageComponents.value);
+            facts.push_back(std::to_string(count) + (count == 1 ? " channel" : " channels"));
+        }
+        if (!singleChannel && !extent.empty()) facts.push_back(extent);
+        if (input.descriptor.precision.state == KnowledgeState::Known) {
+            switch (input.descriptor.precision.value) {
+                case LogicalPrecision::UInt8: facts.push_back("8-bit integer"); break;
+                case LogicalPrecision::UInt16: facts.push_back("16-bit integer"); break;
+                case LogicalPrecision::Float16: facts.push_back("16-bit float"); break;
+                case LogicalPrecision::Float32: facts.push_back("32-bit float"); break;
+                case LogicalPrecision::Float64: facts.push_back("64-bit float"); break;
             }
-            range = input.descriptor.range;
-            spatial = input.descriptor.spatial;
         }
-        const std::string unitText = SocketPresentation::UnitName(units);
-        const std::string rangeText = RangeFor(range);
-        result.secondary = JoinFacts({ unitText, rangeText });
-        if (result.secondary.empty()) {
-            result.secondary = ExtentFor(spatial);
-        }
-        if (result.secondary.empty()) result.secondary = "Per-pixel field";
+        result.secondary = JoinFacts(facts);
+    }
+    if ((fieldLike || type == LogicalValueType::ColorImage) && result.secondary.empty()) {
+        result.secondary = "Metadata unavailable";
     }
     if (IsUniformValueType(type) && result.secondary.empty()) {
         if (input.value.has_value()) {
@@ -549,6 +548,14 @@ inline Readout Build(const Input& input) {
     result.detailFacts.push_back({ "Carried value", result.primary });
     result.detailFacts.push_back({ "Current state", result.secondary });
     if (input.hasDescriptor) {
+        if (type == LogicalValueType::ColorImage) {
+            result.detailFacts.push_back({ "Color", ColorIdentityFor(input.descriptor.color) });
+            result.detailFacts.push_back({ "Encoding", TransferAndReferenceFor(input.descriptor) });
+            result.detailFacts.push_back({ "Alpha", AlphaFor(input.descriptor) });
+        }
+        const auto units = SocketPresentation::UnitName(input.descriptor.units);
+        if (!units.empty()) result.detailFacts.push_back({ "Units", units });
+        for (const auto& diagnostic : input.sourceDiagnostics) result.detailFacts.push_back({ "Diagnostic", diagnostic.message });
         if (const std::string extent = ExtentFor(input.descriptor.spatial); !extent.empty()) {
             result.detailFacts.push_back({ "Extent", extent });
         }

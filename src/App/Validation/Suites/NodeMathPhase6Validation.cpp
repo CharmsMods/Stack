@@ -1,6 +1,8 @@
+#include "App/Validation/Suites/ProjectGraphSnapshotValidation.h"
 #include "App/Validation/ValidationSuites.h"
 #include "App/Validation/Suites/EditorRenderWorkerPreviewValidation.h"
 #include "App/Validation/Suites/NodeMathMultiTreeValidation.h"
+#include "Async/TaskSystem.h"
 
 #include "Editor/EditorModule.h"
 #include "NodeMath/TechnicalImageMath.h"
@@ -2116,6 +2118,7 @@ bool RunPhase6ValidationWithContext() {
     ok &= ValidateEditorRenderWorkerTileBatch(
         glfwGetCurrentContext());
     ok &= ValidateTransactionalOutputUpload();
+    ok &= ValidateRawViewportCalibration(glfwGetCurrentContext());
     ok &= ValidateEditorGraphTransactions();
     if (ok) {
         std::cout << "Phase 6 live validation passed: pointwise, geometry, neighborhood, "
@@ -2128,7 +2131,7 @@ bool RunPhase6ValidationWithContext() {
 
 } // namespace
 
-bool ValidateNodeMathPhase6Integration() {
+bool ValidateNodeMathPhase6Integration(bool calibrationOnly, bool transactionsOnly) {
     if (!glfwInit()) {
         std::cerr << "Phase 6 validation failed: glfwInit failed.\n";
         return false;
@@ -2152,7 +2155,26 @@ bool ValidateNodeMathPhase6Integration() {
         glfwTerminate();
         return false;
     }
-    const bool result = RunPhase6ValidationWithContext();
+    if (transactionsOnly) ValidateProjectGraphSnapshotBuilder();
+    bool result = false;
+    if (calibrationOnly) {
+        result = ValidateRawViewportCalibration(window);
+        // Worker lifetime checks may change the current context. Direct
+        // pipeline checks must explicitly restore their owning context.
+        glfwMakeContextCurrent(window);
+        if (!result) std::cerr << "RAW viewport worker validation failed.\n";
+        if (result) {
+            result = ValidateRawViewportRegions();
+            if (!result) std::cerr << "RAW viewport region validation failed.\n";
+        }
+        if (result) {
+            result = ValidateRawViewportTransitions();
+            if (!result) std::cerr << "RAW viewport transition validation failed.\n";
+        }
+    } else result = transactionsOnly ? ValidateEditorGraphTransactions() : RunPhase6ValidationWithContext();
+    // Save checks can start shared catalog work as well as project-owned jobs.
+    // Stop that work while store registries and the GL context still exist.
+    Async::TaskSystem::Get().Shutdown();
     glfwMakeContextCurrent(nullptr);
     glfwDestroyWindow(window);
     glfwTerminate();

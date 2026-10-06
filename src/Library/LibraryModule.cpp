@@ -1,10 +1,12 @@
 #include "LibraryModule.h"
 #include "App/AppPaths.h"
+#include "App/Resources/EmbeddedTabIcons.h"
 #include "App/settings/AppearanceTheme.h"
 #include "LibraryManager.h"
 #include "Library/Internal/LibraryModuleUIHelpers.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "Async/TaskSystem.h"
+#include "Editor/EditorModule.h"
 
 #include "Utils/ImGuiExtras.h"
 #include "Renderer/GLLoader.h"
@@ -23,6 +25,15 @@ namespace {
 
 constexpr float kLibraryViewScaleMin = 0.55f;
 constexpr float kLibraryViewScaleMax = 1.80f;
+
+ImVec4 BlendColor(const ImVec4& from, const ImVec4& to, float t) {
+    const float clamped = std::clamp(t, 0.0f, 1.0f);
+    return ImVec4(
+        from.x + (to.x - from.x) * clamped,
+        from.y + (to.y - from.y) * clamped,
+        from.z + (to.z - from.z) * clamped,
+        from.w + (to.w - from.w) * clamped);
+}
 
 std::filesystem::path GetLibraryViewStatePath() {
     return AppPaths::GetSettingsDirectory() / "LibraryViewState.json";
@@ -44,11 +55,44 @@ LibraryModule::~LibraryModule() {
         glDeleteTextures(1, &m_AssetsIconTex);
         m_AssetsIconTex = 0;
     }
+    const unsigned int fileMenuTextures[] = {
+        m_FileNewIconTex, m_FileOpenIconTex, m_FileSaveIconTex, m_FileFolderIconTex,
+        m_SearchIconTex, m_RawWorkspaceIconTex, m_ZoomMinusIconTex, m_ZoomPlusIconTex,
+        m_ReloadIconTex, m_ChevronIconTex
+    };
+    for (const unsigned int texture : fileMenuTextures) {
+        if (texture) {
+            glDeleteTextures(1, &texture);
+        }
+    }
 }
 
 void LibraryModule::Initialize() {
     LoadViewState();
     LibraryManager::Get().RequestRefreshLibraryAsync();
+}
+
+void LibraryModule::AdjustViewScale(float steps) {
+    if (std::abs(steps) < 0.0001f) {
+        return;
+    }
+    const float previousScale = m_LibraryViewScale;
+    m_LibraryViewScale = std::clamp(
+        previousScale * std::pow(1.10f, steps),
+        kLibraryViewScaleMin,
+        kLibraryViewScaleMax);
+    if (std::abs(m_LibraryViewScale - previousScale) > 0.0001f) {
+        m_CachedLayoutKey.clear();
+        SaveViewState();
+    }
+}
+
+bool LibraryModule::CanZoomOut() const {
+    return m_LibraryViewScale > kLibraryViewScaleMin + 0.0001f;
+}
+
+bool LibraryModule::CanZoomIn() const {
+    return m_LibraryViewScale < kLibraryViewScaleMax - 0.0001f;
 }
 
 void LibraryModule::LoadViewState() {
@@ -173,13 +217,56 @@ void LibraryModule::RenderUI(
     int rawWorkspaceTabId,
     std::function<void(const std::string&)> onLoadEditorProject) {
     if (m_OptionsIconTex == 0) {
-        m_OptionsIconTex = LoadIconTexture("options.png");
+        m_OptionsIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibraryOptions_png_data, EmbeddedTabIcons::LibraryOptions_png_size);
     }
     if (m_AllProjectsIconTex == 0) {
-        m_AllProjectsIconTex = LoadIconTexture("all projects.png");
+        m_AllProjectsIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibraryProjects_png_data, EmbeddedTabIcons::LibraryProjects_png_size);
     }
     if (m_AssetsIconTex == 0) {
-        m_AssetsIconTex = LoadIconTexture("assets.png");
+        m_AssetsIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibraryAssets_png_data, EmbeddedTabIcons::LibraryAssets_png_size);
+    }
+    if (m_SearchIconTex == 0) {
+        m_SearchIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibrarySearch_png_data, EmbeddedTabIcons::LibrarySearch_png_size);
+    }
+    if (m_RawWorkspaceIconTex == 0) {
+        m_RawWorkspaceIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibraryRawWorkspace_png_data, EmbeddedTabIcons::LibraryRawWorkspace_png_size);
+    }
+    if (m_FileNewIconTex == 0) {
+        m_FileNewIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::FileNew_png_data, EmbeddedTabIcons::FileNew_png_size);
+    }
+    if (m_FileOpenIconTex == 0) {
+        m_FileOpenIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::FileOpenProject_png_data, EmbeddedTabIcons::FileOpenProject_png_size);
+    }
+    if (m_FileSaveIconTex == 0) {
+        m_FileSaveIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::FileSave_png_data, EmbeddedTabIcons::FileSave_png_size);
+    }
+    if (m_FileFolderIconTex == 0) {
+        m_FileFolderIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::FileFolder_png_data, EmbeddedTabIcons::FileFolder_png_size);
+    }
+    if (m_ZoomMinusIconTex == 0) {
+        m_ZoomMinusIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibraryZoomMinus_png_data, EmbeddedTabIcons::LibraryZoomMinus_png_size);
+    }
+    if (m_ZoomPlusIconTex == 0) {
+        m_ZoomPlusIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::LibraryZoomPlus_png_data, EmbeddedTabIcons::LibraryZoomPlus_png_size);
+    }
+    if (m_ReloadIconTex == 0) {
+        m_ReloadIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::Reload_png_data, EmbeddedTabIcons::Reload_png_size);
+    }
+    if (m_ChevronIconTex == 0) {
+        m_ChevronIconTex = LoadIconTextureFromMemory(
+            EmbeddedTabIcons::Chevron_png_data, EmbeddedTabIcons::Chevron_png_size);
     }
 
     m_CachedEditor = editor;
@@ -194,6 +281,11 @@ void LibraryModule::RenderUI(
         appearance ? appearance->GetRuntimeSurfacePalette() : StackAppearance::RuntimeSurfacePalette{};
     m_LastRenderStats = {};
 
+    // The Library is the saved-project index. Unedited RAW sources live only
+    // in RAW Lab's Gallery and are never presented as a competing Library tab.
+    m_ShowRawWorkspace = false;
+    m_ShowAssets = false;
+
     if (!m_PreviewProject && !m_PreviewAsset) {
         const auto autoRefreshStarted = std::chrono::steady_clock::now();
         m_LastRenderStats.autoRefresh = LibraryManager::Get().TickAutoRefresh();
@@ -203,8 +295,8 @@ void LibraryModule::RenderUI(
 
     const bool importBusy = Async::IsBusy(LibraryManager::Get().GetImportTaskState());
     const bool exportBusy = Async::IsBusy(LibraryManager::Get().GetExportTaskState());
-    const bool saveBusy = Async::IsBusy(LibraryManager::Get().GetSaveTaskState());
-    const bool loadBusy = Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState());
+    const bool saveBusy = Async::IsBusy(LibraryManager::Get().GetSaveTaskState(m_CachedEditor));
+    const bool loadBusy = Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState(m_CachedEditor));
     const LibraryRefreshSnapshot refreshSnapshot = LibraryManager::Get().GetRefreshSnapshot();
     const bool refreshBusy = Async::IsBusy(refreshSnapshot.state);
     const bool refreshFailed = refreshSnapshot.state == Async::TaskState::Failed;
@@ -222,12 +314,12 @@ void LibraryModule::RenderUI(
         kStatusMotionSpeed);
     m_SaveStatusAlpha = ImGuiExtras::AnimateTowards(
         m_SaveStatusAlpha,
-        (saveBusy || !LibraryManager::Get().GetSaveStatusText().empty()) ? 1.0f : 0.0f,
+        (saveBusy || !LibraryManager::Get().GetSaveStatusText(m_CachedEditor).empty()) ? 1.0f : 0.0f,
         dt,
         kStatusMotionSpeed);
     m_LoadStatusAlpha = ImGuiExtras::AnimateTowards(
         m_LoadStatusAlpha,
-        (loadBusy || !LibraryManager::Get().GetProjectLoadStatusText().empty()) ? 1.0f : 0.0f,
+        (loadBusy || !LibraryManager::Get().GetProjectLoadStatusText(m_CachedEditor).empty()) ? 1.0f : 0.0f,
         dt,
         kStatusMotionSpeed);
 
@@ -266,7 +358,137 @@ void LibraryModule::RenderUI(
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(80.0f, 32.0f));
+    const float libraryHeaderHeight = 44.0f;
+    const ImVec4 headerSurface = appearance
+        ? surfacePalette.chromeSurface
+        : ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, headerSurface);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 0.0f));
+    ImGui::BeginChild(
+        "LibraryPrimaryHeader",
+        ImVec2(0.0f, libraryHeaderHeight),
+        ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    constexpr float controlTopY = 9.0f;
+    const float projTabWidth = ImGui::CalcTextSize("Projects").x + 16.0f;
+    const float tabsWidth = projTabWidth;
+
+    const auto renderPrimaryTab = [&](const char* id, const char* label, bool selected) {
+        const ImVec2 textSize = ImGui::CalcTextSize(label);
+        const ImVec2 tabSize(textSize.x + 16.0f, 24.0f);
+        ImGui::PushID(id);
+        ImGui::InvisibleButton("##LibraryPrimaryTab", tabSize);
+        const bool clicked = ImGui::IsItemClicked();
+        const bool hovered = ImGui::IsItemHovered();
+        const ImVec2 itemMin = ImGui::GetItemRectMin();
+        if (selected || hovered)
+            ImGui::GetWindowDrawList()->AddRectFilled(itemMin, ImGui::GetItemRectMax(),
+                ImGui::GetColorU32(selected ? ImGuiCol_TabSelected : ImGuiCol_TabHovered), 4.0f);
+        ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        if (selected) {
+            textColor = ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline);
+        } else if (!hovered) {
+            textColor.w *= 0.68f;
+        }
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(
+                itemMin.x + (tabSize.x - textSize.x) * 0.5f,
+                itemMin.y + (tabSize.y - textSize.y) * 0.5f - 0.5f),
+            ImGui::GetColorU32(textColor),
+            label);
+        ImGui::PopID();
+        return clicked;
+    };
+
+    if (!m_SectionPanelHosted) {
+        ImGui::SetCursorPos(ImVec2(
+            std::max(0.0f, (ImGui::GetWindowSize().x - tabsWidth) * 0.5f),
+            controlTopY));
+        if (renderPrimaryTab("Projects", "Projects", !m_ShowRawWorkspace)) {
+            m_ShowRawWorkspace = false;
+            m_ShowAssets = false;
+            m_SelectedAssets.clear();
+            m_PreviewAsset = nullptr;
+            LibraryManager::Get().CancelAssetPreviewRequests();
+        }
+        if (ImGui::IsItemHovered()) {
+            const std::string projectsHint =
+                "Saved projects in " + AppPaths::GetProjectsDirectory().string();
+            ImGui::SetTooltip("%s", projectsHint.c_str());
+        }
+    }
+    {
+        constexpr float zoomHitSize = 24.0f;
+        constexpr float zoomIconSize = 14.0f;
+        constexpr float zoomGap = 4.0f;
+
+        const auto renderZoomButton = [&](const char* id, const char* tooltip, unsigned int texture, bool enabled) {
+            const ImVec2 cursor = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(id, ImVec2(zoomHitSize, zoomHitSize));
+            const bool hovered = enabled && ImGui::IsItemHovered();
+            const bool held = enabled && ImGui::IsItemActive();
+            ImVec4 tint = enabled
+                ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+                : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            if (held) {
+                tint = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+            } else if (hovered) {
+                tint = BlendColor(tint, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark), 0.72f);
+            } else if (enabled) {
+                tint.w *= 0.58f;
+            } else {
+                tint.w *= 0.25f;
+            }
+            if (texture != 0) {
+                const ImVec2 iconMin(
+                    cursor.x + (zoomHitSize - zoomIconSize) * 0.5f,
+                    cursor.y + (zoomHitSize - zoomIconSize) * 0.5f);
+                ImGui::GetWindowDrawList()->AddImage(
+                    (ImTextureID)(intptr_t)texture,
+                    iconMin,
+                    ImVec2(iconMin.x + zoomIconSize, iconMin.y + zoomIconSize),
+                    ImVec2(0.0f, 0.0f),
+                    ImVec2(1.0f, 1.0f),
+                    ImGui::GetColorU32(tint));
+            }
+            if (hovered) {
+                ImGui::SetTooltip("%s", tooltip);
+            }
+            return enabled && ImGui::IsItemClicked();
+        };
+
+        if (m_SectionPanelHosted) ImGui::SetCursorPos(ImVec2(22.0f, controlTopY));
+        else {
+            ImGui::SameLine(0.0f, 10.0f);
+            ImGui::SetCursorPosY(controlTopY);
+        }
+        if (renderZoomButton("##LibraryZoomOut", "Zoom Out", m_ZoomMinusIconTex, CanZoomOut())) {
+            AdjustViewScale(-1.0f);
+        }
+        ImGui::SameLine(0.0f, zoomGap);
+        ImGui::SetCursorPosY(controlTopY);
+        if (renderZoomButton("##LibraryZoomIn", "Zoom In", m_ZoomPlusIconTex, CanZoomIn())) {
+            AdjustViewScale(1.0f);
+        }
+        if (m_SectionPanelHosted) {
+            ImGui::SameLine(0.0f, 12.0f);
+            if (renderZoomButton("##LibraryOptions", "Library options", m_OptionsIconTex, true))
+                ImGui::OpenPopup("LibraryHeaderOptions");
+            if (ImGui::BeginPopup("LibraryHeaderOptions")) {
+                RenderLibraryMenuOptions(importBusy, exportBusy);
+                ImGui::EndPopup();
+            }
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    // The two views add their own inset; this padding separates their content
+    // from the shared Library chrome without leaving room for the old overlay.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 18.0f));
     ImGui::BeginChild("LibraryTabContainer", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
     ImGui::PopStyleVar();
 
@@ -319,8 +541,8 @@ void LibraryModule::RenderUI(
 
             renderInlineStatus(LibraryManager::Get().GetImportStatusText().c_str(), m_ImportStatusAlpha);
             renderInlineStatus(LibraryManager::Get().GetExportStatusText().c_str(), m_ExportStatusAlpha);
-            renderInlineStatus(LibraryManager::Get().GetSaveStatusText().c_str(), m_SaveStatusAlpha);
-            renderInlineStatus(LibraryManager::Get().GetProjectLoadStatusText().c_str(), m_LoadStatusAlpha);
+            renderInlineStatus(LibraryManager::Get().GetSaveStatusText(m_CachedEditor).c_str(), m_SaveStatusAlpha);
+            renderInlineStatus(LibraryManager::Get().GetProjectLoadStatusText(m_CachedEditor).c_str(), m_LoadStatusAlpha);
             renderInlineStatus(refreshSnapshot.statusText.c_str(), refreshStatusAlpha);
         }
         ImGui::EndChild();
@@ -331,11 +553,8 @@ void LibraryModule::RenderUI(
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
     }
 
-    if (m_ShowRawWorkspace) {
-        RenderRawWorkspaceView(editor, activeTab, rawWorkspaceTabId);
-    } else {
-        RenderLibraryGrid(editor, appearance, wallpaperSurfaces, surfacePalette, refreshSnapshot, refreshBusy, importBusy, exportBusy, dt);
-    }
+    RenderLibraryGrid(editor, appearance, wallpaperSurfaces, surfacePalette,
+        refreshSnapshot, refreshBusy, importBusy, exportBusy, dt);
     ImGui::EndChild(); // End LibraryTabContainer
 
     ImGui::PopStyleColor(8);
@@ -347,15 +566,6 @@ void LibraryModule::RenderUI(
         RenderAssetPreviewPopup(editor, composite, activeTab);
     }
 
-    if (importBusy) {
-        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetImportStatusText().c_str());
-    } else if (exportBusy) {
-        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetExportStatusText().c_str());
-    } else if (saveBusy) {
-        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetSaveStatusText().c_str());
-    } else if (loadBusy) {
-        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetProjectLoadStatusText().c_str());
-    }
 }
 
 void LibraryModule::RequestOpenEditorProject(const std::string& projectFileName) {

@@ -2,6 +2,7 @@
 
 #include "Persistence/RawProjectModel.h"
 #include "Raw/MultiFrameDenoise/Contracts.h"
+#include "Raw/MultiFrameDenoise/SharedBurst.h"
 
 #include <array>
 #include <cmath>
@@ -280,6 +281,10 @@ bool ValidateContractsAndParameters() {
     ok &= Check(
         Raw::Mfd::ValidateParameters(defaults, &error),
         "default RA-CFA V1 parameters are invalid: " + error);
+    ok &= Check(
+        defaults.fusion.method == "weighted-average" &&
+            defaults.fusion.smoothing == 0.70,
+        "default MFD fusion does not select the stronger weighted-average mode");
     const nlohmann::json serialized = Raw::Mfd::SerializeParameters(defaults);
     Raw::Mfd::Parameters restored;
     error.clear();
@@ -290,55 +295,14 @@ bool ValidateContractsAndParameters() {
         Raw::Mfd::SerializeParameters(restored).dump() == serialized.dump(),
         "RA-CFA V1 parameter serialization is not a stable logical round trip");
 
-    nlohmann::json legacy = serialized;
-    legacy["schemaVersion"] = Raw::Mfd::kLegacyParameterSchemaVersion;
-    for (const char* key : {
-            "minimumTileValidFraction",
-            "minimumStructuredSamples",
-            "localHessianConditionLimit",
-            "localHessianAbsoluteDamping",
-            "localCovarianceRegularization",
-            "localNumericalVarianceFloor",
-            "subpixelConvergencePlanePixels",
-            "maximumSubpixelCostIncreases",
-            "cappedResidualSquared",
-            "flatSafeUnobservableSigmaRawPixels",
-            "covarianceResidualScaleFloor",
-            "candidateTieTolerance",
-            "interpolationWeightEpsilon" }) {
-        legacy["registration"].erase(key);
+    for (std::uint32_t oldVersion = 1; oldVersion < Raw::Mfd::kParameterSchemaVersion; ++oldVersion) {
+        nlohmann::json oldParameters = serialized;
+        oldParameters["schemaVersion"] = oldVersion;
+        error.clear();
+        ok &= Check(
+            !Raw::Mfd::DeserializeParameters(oldParameters, restored, &error),
+            "an obsolete MFD parameter schema was accepted");
     }
-    for (const char* key : {
-            "storageTileCells",
-            "frameUsableReliabilityThreshold",
-            "frameUsableMaximumFraction",
-            "frameUsableMinimumCells",
-            "frameUsableMinimumFraction" }) {
-        legacy["reliability"].erase(key);
-    }
-    error.clear();
-    ok &= Check(
-        Raw::Mfd::DeserializeParameters(legacy, restored, &error) &&
-            restored.schemaVersion == Raw::Mfd::kParameterSchemaVersion &&
-            restored.registration.minimumTileValidFraction == 0.70,
-        "schema-1 MFD parameters did not migrate to the current MFD schema: " + error);
-
-    nlohmann::json phase5 = serialized;
-    phase5["schemaVersion"] = Raw::Mfd::kPhase5ParameterSchemaVersion;
-    for (const char* key : {
-            "storageTileCells",
-            "frameUsableReliabilityThreshold",
-            "frameUsableMaximumFraction",
-            "frameUsableMinimumCells",
-            "frameUsableMinimumFraction" }) {
-        phase5["reliability"].erase(key);
-    }
-    error.clear();
-    ok &= Check(
-        Raw::Mfd::DeserializeParameters(phase5, restored, &error) &&
-            restored.schemaVersion == Raw::Mfd::kParameterSchemaVersion &&
-            restored.reliability.storageTileCells == 256u,
-        "schema-2 MFD parameters did not migrate to the Phase 6 schema: " + error);
 
     nlohmann::json missing = serialized;
     missing["registration"].erase("keysBicubicParameter");
@@ -357,13 +321,18 @@ bool ValidateContractsAndParameters() {
     const nlohmann::json operation = Project::MakeDefaultMfdOperationSettings();
     ok &= Check(
         operation.value("schemaVersion", 0u) == Project::kMfdOperationSchemaVersion &&
-            operation.value("algorithmId", std::string()) == Raw::Mfd::kAlgorithmId &&
-            operation.value("algorithmVersion", 0u) == Raw::Mfd::kAlgorithmVersion &&
+            operation.value("algorithmId", std::string()) ==
+                Raw::Mfd::kSharedBurstAlgorithmId &&
+            operation.value("algorithmVersion", 0u) ==
+                Raw::Mfd::kSharedBurstAlgorithmVersion &&
+            operation.value("sharedBurstSettings", nlohmann::json()).is_object() &&
+            operation.value("frameTrust", nlohmann::json()).is_object() &&
             operation.value("experimentalAlignmentMode", std::string()) ==
                 "full" &&
             operation.value("experimentalMemoryBudgetGiB", -1.0) == 0.0 &&
+            operation.value("sharedPreMfdRecipe", nlohmann::json()).is_object() &&
             !operation.value("processingImplemented", true),
-        "new MFD project settings do not pin RA-CFA V1 with full alignment, automatic memory budgeting, and unavailable graph output");
+        "new MFD project settings do not pin Shared Burst V1 with full alignment, automatic memory budgeting, and unavailable graph output");
     return ok;
 }
 

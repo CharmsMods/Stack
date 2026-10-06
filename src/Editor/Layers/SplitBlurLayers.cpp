@@ -42,12 +42,14 @@ void main() {
                 weight = exp(-distSq / (2.0 * uAmount * uAmount / 4.0));
             }
 
-            result += texture(uInputTex, vUV + offset) * weight;
+            vec4 sampleColor = texture(uInputTex, vUV + offset);
+            weight *= sampleColor.a;
+            result += sampleColor * weight;
             count += weight;
         }
     }
 
-    FragColor = result / count;
+    FragColor = vec4(result.rgb / max(count, 0.000001), texture(uInputTex, vUV).a);
 }
 )";
 

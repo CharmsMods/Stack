@@ -1,10 +1,22 @@
+#include "Utils/UiBusyState.h"
 #include "Editor/EditorModule.h"
+
+#include "App/AppPaths.h"
+#include "Async/TaskSystem.h"
+#include "Raw/MultiFrame/GraphExecution.h"
+#include "Persistence/BracketingProject.h"
+#include "Persistence/BracketingResultStore.h"
+#include "Persistence/MultiFrameProjectCreation.h"
+#include "Editor/Bracketing/BracketingSession.h"
 
 #include "App/PlatformHelpers.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Library/LibraryManager.h"
+#include "Persistence/RawProjectEditPipeline.h"
+#include "Persistence/ProjectIndex.h"
 #include "Raw/MultiFrameDenoise/Contracts.h"
 #include "Raw/MultiFrameDenoise/MemoryPolicy.h"
+#include "Raw/MultiFrameHdr/Contracts.h"
 #include "Raw/RawLoader.h"
 #include "Raw/RawTechnicalEvidence.h"
 #include "Utils/FileDialogs.h"
@@ -12,8 +24,10 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cctype>
+#include <exception>
 #include <filesystem>
 #include <sstream>
 #include <unordered_map>
@@ -28,6 +42,35 @@ using Stack::Project::MultiFrameSourceSet;
 using Stack::Project::RawCaptureCompatibilitySummary;
 using Stack::Project::RawProjectSnapshot;
 using Stack::Project::SourceSetFrame;
+
+RawProjectSnapshot CopyProjectSnapshotWithoutPipeline(
+    const RawProjectSnapshot& source) {
+    RawProjectSnapshot copy;
+    copy.schemaVersion = source.schemaVersion;
+    copy.projectId = source.projectId;
+    copy.projectName = source.projectName;
+    copy.projectKindHint = source.projectKindHint;
+    copy.lifecycle = source.lifecycle;
+    copy.embeddedAssets = source.embeddedAssets;
+    copy.sourceSets = source.sourceSets;
+    copy.multiFrameGraph = source.multiFrameGraph;
+    copy.rawWorkspaceData = source.rawWorkspaceData;
+    copy.coverThumbnailBytes = source.coverThumbnailBytes;
+    copy.activeSourceSetId = source.activeSourceSetId;
+    copy.activeFrameId = source.activeFrameId;
+    copy.mfdInputRevision = source.mfdInputRevision;
+    copy.hdrInputRevision = source.hdrInputRevision;
+    copy.postRecipeRevision = source.postRecipeRevision;
+    copy.dirtyRevision = source.dirtyRevision;
+    copy.persistedStorageRevision = source.persistedStorageRevision;
+    copy.timestamp = source.timestamp;
+    copy.sourceWidth = source.sourceWidth;
+    copy.sourceHeight = source.sourceHeight;
+    copy.adoptedFrom = source.adoptedFrom;
+    copy.sourceAssetId = source.sourceAssetId;
+    copy.nodeBrowserThumbnails = source.nodeBrowserThumbnails;
+    return copy;
+}
 
 bool Finish(std::string* output, const std::string& message, bool result) {
     if (output) *output = message;
@@ -86,12 +129,13 @@ RawCaptureCompatibilitySummary BuildMfdCaptureSummary(
     return Stack::Project::BuildRawCaptureCompatibilitySummary(metadata);
 }
 
-bool ProbeMfdSources(
+bool ProbeRawBurstSources(
     const RawProjectSnapshot& snapshot,
     const MultiFrameSourceSet& sourceSet,
     const std::vector<std::filesystem::path>& sourcePaths,
     std::vector<nlohmann::json>& captureSummaries,
-    std::string& error) {
+    std::string& error,
+    const std::function<bool()>& shouldCancel = {}) {
     captureSummaries.clear();
     captureSummaries.reserve(sourcePaths.size());
     RawCaptureCompatibilitySummary reference;
@@ -107,13 +151,14 @@ bool ProbeMfdSources(
     }
     std::unordered_set<std::string> normalizedPaths;
     for (const std::filesystem::path& path : sourcePaths) {
+        if(shouldCancel && shouldCancel()) {error="Canceled.";return false;}
         std::error_code pathError;
         const std::filesystem::path normalized =
             std::filesystem::weakly_canonical(path, pathError);
         const std::string pathKey = Lower(
             (pathError ? path.lexically_normal() : normalized).string());
         if (!normalizedPaths.insert(pathKey).second) {
-            error = "The same source file cannot be selected twice for one MFD burst.";
+            error = "The same source file cannot be selected twice for one RAW burst.";
             return false;
         }
         Raw::RawMetadata metadata;
@@ -130,8 +175,16 @@ bool ProbeMfdSources(
         }
         if (haveReference) {
             std::string compatibilityReason;
-            if (!Stack::Project::AreMfdCapturesStructurallyCompatible(
-                    reference, candidate, &compatibilityReason)) {
+            auto comparison = candidate;
+            if (sourceSet.operationIntent == MultiFrameOperationIntent::RawCaptureSet ||
+                Stack::Project::IsBracketing(sourceSet)) comparison.orientation = reference.orientation;
+            const bool compatible =
+                sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstHdr
+                ? Stack::Project::AreHdrCapturesStructurallyCompatible(
+                    reference, comparison, &compatibilityReason, nullptr)
+                : Stack::Project::AreMfdCapturesStructurallyCompatible(
+                    reference, comparison, &compatibilityReason);
+            if (!compatible) {
                 error = path.filename().string() + ": " + compatibilityReason;
                 return false;
             }
@@ -142,11 +195,46 @@ bool ProbeMfdSources(
         captureSummaries.push_back(
             Stack::Project::SerializeRawCaptureCompatibilitySummary(candidate));
     }
+    if (sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        !Stack::Project::IsBracketing(sourceSet)) {
+        std::vector<double> exposures;
+        for (const nlohmann::json& value : captureSummaries) {
+            RawCaptureCompatibilitySummary summary;
+            if (!Stack::Project::DeserializeRawCaptureCompatibilitySummary(
+                    value, summary, nullptr)) continue;
+            if (summary.exposureTimeSeconds <= 0.0) continue;
+            const double shutter = summary.exposureTimeSeconds;
+            const double iso = summary.isoSpeed > 0.0 ? summary.isoSpeed : 100.0;
+            const double aperture = summary.apertureFNumber > 0.0
+                ? summary.apertureFNumber : 1.0;
+            exposures.push_back(shutter * iso / (aperture * aperture));
+        }
+        if (exposures.size() >= 2u) {
+            const auto limits = std::minmax_element(exposures.begin(), exposures.end());
+            const double spanEv = std::log2(*limits.second / std::max(1.0e-12, *limits.first));
+            if (!std::isfinite(spanEv) || spanEv < 0.5) {
+                error = "The selected frames span less than 0.5 EV. Reopen this selection as Multi-Frame Denoise.";
+                return false;
+            }
+        }
+    }
     return true;
 }
 
 nlohmann::json DefaultMfdSettings() {
     return Stack::Project::MakeDefaultMfdOperationSettings();
+}
+
+nlohmann::json DefaultHdrSettings() {
+    return Stack::Project::MakeDefaultHdrOperationSettings();
+}
+
+nlohmann::json DefaultCaptureSetSettings() {
+    return {
+        { "schemaVersion", Stack::Project::kMultiFrameOperationSchemaVersion },
+        { "inputDomain", "mosaic-cfa" },
+        { "processingNode", nullptr }
+    };
 }
 
 void EnsureMfdPostRecipe(MultiFrameSourceSet& sourceSet) {
@@ -168,6 +256,29 @@ void EnsureMfdPostRecipe(MultiFrameSourceSet& sourceSet) {
         Stack::RawRecipe::SerializeRecipe(recipe);
 }
 
+void EnsureHdrPostRecipe(MultiFrameSourceSet& sourceSet) {
+    const auto existing = sourceSet.settings.find("sharedPostHdrRecipe");
+    if (existing != sourceSet.settings.end() && existing->is_object() &&
+        existing->contains("rawRecipeVersion")) {
+        Stack::RawRecipe::RawDevelopmentRecipe recipe =
+            Stack::RawRecipe::DeserializeRecipe(*existing);
+        if (recipe.technical.applyBaselineExposure) {
+            recipe.technical.applyBaselineExposure = false;
+            sourceSet.settings["sharedPostHdrRecipe"] =
+                Stack::RawRecipe::SerializeRecipe(recipe);
+        }
+        return;
+    }
+    Stack::RawRecipe::RawDevelopmentRecipe recipe =
+        Stack::RawRecipe::MakeDefaultRecipe(
+            "hdr://source-set/" + sourceSet.sourceSetId,
+            sourceSet.name + " HDR result");
+    recipe.technical.applyBaselineExposure = false;
+    recipe.technical.mosaicDenoise.enabled = false;
+    sourceSet.settings["sharedPostHdrRecipe"] =
+        Stack::RawRecipe::SerializeRecipe(recipe);
+}
+
 bool StageFrames(
     const Stack::Project::ProjectStoreHandle& store,
     const Stack::Project::ProjectStoreTransaction& transaction,
@@ -175,22 +286,37 @@ bool StageFrames(
     MultiFrameSourceSet& sourceSet,
     const std::vector<std::filesystem::path>& sourcePaths,
     bool requireExistingFamily,
-    std::string& error) {
+    std::string& error,
+    const std::function<bool()>& shouldCancel = {},
+    Stack::Project::ProjectCreationFailure* failure = nullptr) {
     if (!store || !transaction) {
         error = "The project store transaction is unavailable.";
         return false;
     }
     std::vector<nlohmann::json> captureSummaries;
-    if (sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
-        !ProbeMfdSources(
-            snapshot, sourceSet, sourcePaths, captureSummaries, error)) {
+    const bool rawBurst =
+        sourceSet.operationIntent == MultiFrameOperationIntent::RawCaptureSet ||
+        sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstDenoise ||
+        sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstHdr;
+    if (rawBurst && !ProbeRawBurstSources(
+            snapshot, sourceSet, sourcePaths, captureSummaries, error, shouldCancel)) {
         return false;
     }
     std::unordered_set<std::string> setAssetIds;
+    std::unordered_map<std::string, std::string> assetLabels;
     for (const SourceSetFrame& frame : sourceSet.frames) {
         setAssetIds.insert(frame.assetId);
+        const EmbeddedAssetRecord* asset =
+            Stack::Project::FindEmbeddedAsset(snapshot, frame.assetId);
+        assetLabels[frame.assetId] = asset && !asset->originalFilename.empty()
+            ? asset->originalFilename
+            : frame.userLabel;
     }
+    const bool excludeIdenticalCopies =
+        sourceSet.operationIntent == MultiFrameOperationIntent::RawCaptureSet ||
+        sourceSet.settings.contains("bracketing");
     for (std::size_t sourceIndex = 0; sourceIndex < sourcePaths.size(); ++sourceIndex) {
+        if(shouldCancel && shouldCancel()) {error="Canceled.";return false;}
         const std::filesystem::path& path = sourcePaths[sourceIndex];
         MultiFrameInputFamily family;
         if (!ClassifySourcePath(path, family, error)) return false;
@@ -204,7 +330,7 @@ bool StageFrames(
         }
         EmbeddedAssetRecord asset;
         const nlohmann::json captureSummary =
-            sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstDenoise
+            rawBurst
             ? captureSummaries[sourceIndex]
             : nlohmann::json::object();
         if (!store->StageAssetFile(
@@ -214,12 +340,25 @@ bool StageFrames(
                 captureSummary,
                 asset,
                 &error)) {
+            if (failure) *failure = Stack::Project::ProjectCreationFailure::Storage;
             return false;
         }
         if (!setAssetIds.insert(asset.assetId).second) {
+            if (excludeIdenticalCopies) {
+                nlohmann::json& exclusions =
+                    sourceSet.settings["identicalCaptureExclusions"];
+                if (!exclusions.is_array()) exclusions = nlohmann::json::array();
+                exclusions.push_back({
+                    { "excluded", path.filename().string() },
+                    { "kept", assetLabels[asset.assetId] },
+                    { "assetId", asset.assetId }
+                });
+                continue;
+            }
             error = "The same original cannot appear twice in one source set.";
             return false;
         }
+        assetLabels[asset.assetId] = path.filename().string();
         if (!Stack::Project::FindEmbeddedAsset(snapshot, asset.assetId)) {
             snapshot.embeddedAssets.push_back(asset);
         }
@@ -246,11 +385,42 @@ nlohmann::json PipelineForGraph(
     nlohmann::json pipeline =
         EditorNodeGraph::SerializeGraphPayload(layerArray, graph);
     if (existingPipeline.is_object()) {
-        for (const char* key : { "editorComposite", "editorTimeline" }) {
+        for (const char* key : { "editorComposite", "editorTimeline", "rawLayerStack", "rawLayerSourceNodeUuid" }) {
             if (existingPipeline.contains(key)) pipeline[key] = existingPipeline[key];
         }
     }
+    if (!pipeline.contains("rawLayerStack"))
+        pipeline["rawLayerStack"] = Stack::Project::SerializeRawLayerStack(Stack::Project::RawLayerStackState{});
     return pipeline;
+}
+
+void ApplyManagedGraphImageReferences(
+    EditorNodeGraph::Graph& graph,
+    const nlohmann::json& pipeline) {
+    if (!pipeline.is_object() ||
+        !pipeline.contains("nodeGraph") ||
+        !pipeline["nodeGraph"].is_object() ||
+        !pipeline["nodeGraph"].contains("nodes") ||
+        !pipeline["nodeGraph"]["nodes"].is_array()) {
+        return;
+    }
+    for (const nlohmann::json& value : pipeline["nodeGraph"]["nodes"]) {
+        if (!value.is_object() ||
+            value.value("kind", std::string()) != "Image") {
+            continue;
+        }
+        const std::string assetId =
+            value.value("managedAssetId", std::string());
+        if (assetId.empty()) continue;
+        EditorNodeGraph::Node* node =
+            graph.FindNode(value.value("id", 0));
+        if (!node || node->kind != EditorNodeGraph::NodeKind::Image) {
+            continue;
+        }
+        node->image.managedAssetId = assetId;
+        node->image.projectAssetPath =
+            value.value("projectAssetPath", std::string());
+    }
 }
 
 EditorNodeGraph::Node* FindSourceSetNode(
@@ -307,6 +477,18 @@ EditorNodeGraph::Node* FindMfdNode(
     return nullptr;
 }
 
+EditorNodeGraph::Node* FindHdrNode(
+    EditorNodeGraph::Graph& graph,
+    const std::string& sourceSetId,
+    const std::string& graphBindingNodeId = {}) {
+    for (EditorNodeGraph::Node& node : graph.GetNodes()) {
+        if (node.kind != EditorNodeGraph::NodeKind::MultiFrameHdr) continue;
+        if ((!graphBindingNodeId.empty() && node.instanceUuid == graphBindingNodeId) ||
+            node.multiFrameHdr.sourceSetId == sourceSetId) return &node;
+    }
+    return nullptr;
+}
+
 EditorNodeGraph::Node* FindMfdFrameNode(
     EditorNodeGraph::Graph& graph,
     const std::string& sourceSetId,
@@ -334,7 +516,7 @@ EditorNodeGraph::MfdFrameBinding BuildMfdFrameBinding(
         Stack::Project::FindEmbeddedAsset(snapshot, frame.assetId);
     binding.label = !frame.userLabel.empty()
         ? frame.userLabel
-        : (asset ? asset->originalFileName : std::string("RAW Frame"));
+        : (asset ? asset->originalFilename : std::string("RAW Frame"));
     binding.enabled = frame.enabled;
     binding.reference = sourceSet.referenceFrameId == frame.frameId;
     return binding;
@@ -377,7 +559,7 @@ bool SyncMfdGraphTopology(
             return false;
         }
     }
-    mfd->title = "MFD - " + sourceSet.name;
+    mfd->title = "Shared Burst - " + sourceSet.name;
     mfd->multiFrameDenoise.sourceSetId = sourceSet.sourceSetId;
     mfd->multiFrameDenoise.managed = true;
     mfd->multiFrameDenoise.quarantined = false;
@@ -490,13 +672,133 @@ bool SyncMfdGraphTopology(
     return true;
 }
 
+bool SyncHdrGraphTopology(
+    EditorNodeGraph::Graph& graph,
+    const RawProjectSnapshot& snapshot,
+    MultiFrameSourceSet& sourceSet,
+    bool ensureOutput,
+    std::string& error) {
+    EditorNodeGraph::Node* hdr = FindHdrNode(
+        graph, sourceSet.sourceSetId, sourceSet.graphBindingNodeId);
+    if (!hdr) {
+        EditorNodeGraph::MultiFrameHdrPayload payload;
+        payload.sourceSetId = sourceSet.sourceSetId;
+        hdr = graph.AddMultiFrameHdrNode(std::move(payload), { 760.0f, 180.0f });
+        if (!hdr) {
+            error = "Could not create the managed Multi-Frame HDR graph node.";
+            return false;
+        }
+    }
+    hdr->title = "HDR - " + sourceSet.name;
+    hdr->multiFrameHdr.sourceSetId = sourceSet.sourceSetId;
+    hdr->multiFrameHdr.managed = true;
+    hdr->multiFrameHdr.quarantined = false;
+    const nlohmann::json resultState = sourceSet.settings.value(
+        "result", nlohmann::json::object());
+    const bool resultCurrent = resultState.is_object() &&
+        resultState.value("state", std::string()) == "ready" &&
+        resultState.value("inputRevision", std::uint64_t { 0 }) ==
+            snapshot.hdrInputRevision;
+    hdr->multiFrameHdr.presentationStatus = resultCurrent
+        ? "Scene-linear HDR result ready."
+        : EditorNodeGraph::kHdrAwaitingProcessingStatus;
+    hdr->multiFrameHdr.resultState = resultCurrent ? "ready" : "unavailable";
+    hdr->multiFrameHdr.internalViewTransformEnabled =
+        sourceSet.settings.value(
+            "viewTransformPlacement", std::string("internal")) != "graph";
+    const nlohmann::json anchor = sourceSet.settings.value(
+        "radiometricAnchorFrameId", nlohmann::json(nullptr));
+    hdr->multiFrameHdr.radiometricAnchorFrameId =
+        anchor.is_string() ? anchor.get<std::string>() : std::string();
+    hdr->multiFrameHdr.frameBindings.clear();
+    sourceSet.graphBindingNodeId = hdr->instanceUuid;
+    const int hdrNodeId = hdr->id;
+
+    std::unordered_set<std::string> currentFrameIds;
+    for (std::size_t index = 0; index < sourceSet.frames.size(); ++index) {
+        const SourceSetFrame& frame = sourceSet.frames[index];
+        currentFrameIds.insert(frame.frameId);
+        EditorNodeGraph::Node* frameNode = FindMfdFrameNode(
+            graph, sourceSet.sourceSetId, frame.frameId);
+        if (!frameNode) {
+            EditorNodeGraph::RawProjectFramePayload payload;
+            payload.sourceSetId = sourceSet.sourceSetId;
+            payload.frameId = frame.frameId;
+            payload.assetId = frame.assetId;
+            payload.displayLabel = frame.userLabel;
+            const float column = static_cast<float>(index % 3u);
+            const float row = static_cast<float>(index / 3u);
+            frameNode = graph.AddRawProjectFrameNode(
+                std::move(payload),
+                { 40.0f + column * 220.0f, 70.0f + row * 170.0f });
+            if (!frameNode) {
+                error = "Could not create a managed HDR frame graph node.";
+                return false;
+            }
+        }
+        frameNode->rawProjectFrame.assetId = frame.assetId;
+        frameNode->rawProjectFrame.displayLabel = frame.userLabel;
+        frameNode->rawProjectFrame.enabled = frame.enabled;
+        frameNode->rawProjectFrame.reference =
+            sourceSet.referenceFrameId == frame.frameId;
+        frameNode->rawProjectFrame.compatibilityStatus = frame.enabled
+            ? "Mosaic CFA HDR bracket - embedded"
+            : "Excluded from HDR";
+        frameNode->title = frame.userLabel.empty() ? "RAW Frame" : frame.userLabel;
+        hdr = graph.FindNode(hdrNodeId);
+        if (!hdr) {
+            error = "The managed HDR node disappeared while building the graph.";
+            return false;
+        }
+        hdr->multiFrameHdr.frameBindings.push_back(
+            BuildMfdFrameBinding(snapshot, sourceSet, frame));
+    }
+
+    std::vector<int> staleFrameNodes;
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::RawProjectFrame &&
+            node.rawProjectFrame.sourceSetId == sourceSet.sourceSetId &&
+            node.rawProjectFrame.managed && !node.rawProjectFrame.quarantined &&
+            currentFrameIds.find(node.rawProjectFrame.frameId) == currentFrameIds.end()) {
+            staleFrameNodes.push_back(node.id);
+        }
+    }
+    for (int nodeId : staleFrameNodes) graph.RemoveNode(nodeId);
+    std::vector<EditorNodeGraph::Link>& links = graph.EditLinks();
+    links.erase(std::remove_if(links.begin(), links.end(), [&](const EditorNodeGraph::Link& link) {
+        return link.toNodeId == hdrNodeId &&
+            link.ownership == EditorNodeGraph::Link::Ownership::ManagedSourceBinding;
+    }), links.end());
+    for (const SourceSetFrame& frame : sourceSet.frames) {
+        EditorNodeGraph::Node* frameNode = FindMfdFrameNode(
+            graph, sourceSet.sourceSetId, frame.frameId);
+        if (!frameNode) continue;
+        const std::string socketId = EditorNodeGraph::MfdFrameInputSocketId(frame.frameId);
+        if (!graph.TryConnectSockets(frameNode->id, EditorNodeGraph::kRawOutputSocketId,
+                hdrNodeId, socketId, &error)) return false;
+        MarkManagedMfdLink(graph, frameNode->id, hdrNodeId, socketId, frame.frameId);
+    }
+    if (ensureOutput) {
+        EditorNodeGraph::Node* output = graph.EnsureOutputNode();
+        if (!output) {
+            error = "Could not create the HDR project Output node.";
+            return false;
+        }
+        if (!graph.FindInputLink(output->id, EditorNodeGraph::kImageInputSocketId) &&
+            !graph.TryConnectSockets(hdrNodeId, EditorNodeGraph::kImageOutputSocketId,
+                output->id, EditorNodeGraph::kImageInputSocketId, &error)) return false;
+    }
+    return true;
+}
+
 void UpdateWorkspaceManifestFields(RawProjectSnapshot& snapshot) {
     if (!snapshot.rawWorkspaceData.is_object()) {
         snapshot.rawWorkspaceData = nlohmann::json::object();
     }
     snapshot.rawWorkspaceData["schema"] = "stack.rawWorkspace.project";
-    snapshot.rawWorkspaceData["schemaVersion"] = 3;
-    snapshot.rawWorkspaceData["rawWorkspaceSchemaVersion"] = 3;
+    snapshot.rawWorkspaceData["schemaVersion"] =
+        Stack::Project::kRawWorkspaceProjectSchemaVersion;
+    snapshot.rawWorkspaceData.erase("rawWorkspaceSchemaVersion");
     snapshot.rawWorkspaceData["rawProjectModel"] =
         Stack::Project::kRawProjectModelSourceSets;
     snapshot.rawWorkspaceData["projectId"] = snapshot.projectId;
@@ -506,43 +808,60 @@ void UpdateWorkspaceManifestFields(RawProjectSnapshot& snapshot) {
 
 } // namespace
 
-bool EditorModule::CreateMultiFrameRawProject(
-    const std::filesystem::path& requestedPath,
-    Stack::Project::ProjectStorageKind storageKind,
-    const std::string& projectName,
-    const std::string& sourceSetName,
-    MultiFrameOperationIntent operationIntent,
-    const std::vector<std::filesystem::path>& sourcePaths,
-    std::size_t referenceFrameIndex,
-    std::string* errorMessage) {
+Stack::Project::ProjectStoreOpenResult Stack::Project::CreateMultiFrameProject(
+    const MultiFrameProjectCreation& request, ProjectCreationFailure* failure) {
+    if (failure) *failure = ProjectCreationFailure::Input;
+    const auto& requestedPath=request.path;
+    const auto storageKind=request.storageKind;
+    const auto& projectName=request.projectName;
+    const auto& sourceSetName=request.sourceSetName;
+    auto operationIntent=request.operationIntent;
+    const auto& sourcePaths=request.sources;
+    const auto referenceFrameIndex=request.referenceFrameIndex;
+    const auto& orientationOverrides=request.orientationOverrides;
+    const auto fail=[](const std::string& error) {
+        ProjectStoreOpenResult result; result.message=error; return result;
+    };
+    if(request.shouldCancel && request.shouldCancel()) return fail("Canceled.");
     if (requestedPath.empty() || projectName.empty() || sourceSetName.empty()) {
-        return Finish(errorMessage, "Project path, project name, and source-set name are required.", false);
-    }
-    if (m_Dirty && !m_RawWorkspaceReplacementAuthorized) {
-        return Finish(errorMessage, "Save or discard the current project before replacing it.", false);
+        return fail("Project path, project name, and source-set name are required.");
     }
 
-    std::filesystem::path path = requestedPath;
-    const std::string requiredExtension =
-        storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle
-        ? ".stackbundle"
-        : ".stack";
-    if (Lower(path.extension().string()) != requiredExtension) {
-        path += requiredExtension;
+    std::filesystem::path path = requestedPath.lexically_normal();
+    if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
+        const std::string extension = Lower(path.extension().string());
+        const std::string fileName = Lower(path.filename().string());
+        if (fileName == "project.stack") {
+            path = path.parent_path();
+        } else if (extension == ".stack" || extension == ".stackbundle") {
+            path = path.parent_path() / path.stem();
+        }
+    } else if (Lower(path.extension().string()) != ".stack") {
+        path += ".stack";
     }
     std::error_code filesystemError;
+    ProjectStoreOpenResult created;
     if (std::filesystem::exists(path, filesystemError)) {
-        return Finish(errorMessage, "A project already exists at that path.", false);
+        if (request.resumeEmptyProject) created = OpenProjectStore(path);
+        if (!created || request.projectId.empty() || created.snapshot.projectId != request.projectId ||
+            created.snapshot.dirtyRevision != 0 || !created.snapshot.sourceSets.empty() ||
+            !created.snapshot.embeddedAssets.empty())
+            return fail("A project already exists at that path.");
     }
 
     RawProjectSnapshot bootstrap;
-    bootstrap.projectId = Stack::Project::GenerateStableUuid();
+    bootstrap.projectId = request.projectId.empty() ? Stack::Project::GenerateStableUuid() : request.projectId;
     bootstrap.projectName = projectName;
+    bootstrap.projectKindHint = StackBinaryFormat::kRawProjectKind;
+    bootstrap.lifecycle.creationOrigin =
+        Stack::Project::ProjectCreationOrigin::MultiSelection;
     bootstrap.pipelineData = nlohmann::json::object();
     UpdateWorkspaceManifestFields(bootstrap);
-    Stack::Project::ProjectStoreOpenResult created =
-        Stack::Project::CreateProjectStore(path, storageKind, bootstrap);
-    if (!created) return Finish(errorMessage, created.message, false);
+    if (!created) created = Stack::Project::CreateProjectStore(path, storageKind, bootstrap);
+    if (!created) {
+        if (failure) *failure = ProjectCreationFailure::Storage;
+        return fail(created.message);
+    }
 
     const auto cleanupCreatedStore = [&]() {
         created.store.reset();
@@ -562,21 +881,39 @@ bool EditorModule::CreateMultiFrameRawProject(
     sourceSet.sourceSetId = Stack::Project::GenerateStableUuid();
     sourceSet.name = sourceSetName;
     sourceSet.operationIntent = operationIntent;
-    if (operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
+    if (operationIntent == MultiFrameOperationIntent::RawCaptureSet) {
+        if (sourcePaths.empty()) {
+            cleanupCreatedStore();
+            return fail("Select at least one RAW capture.");
+        }
+        sourceSet.operationSchemaVersion =
+            Stack::Project::kMultiFrameOperationSchemaVersion;
+        sourceSet.settings = DefaultCaptureSetSettings();
+    } else if (operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         if (sourcePaths.size() < 2u) {
             cleanupCreatedStore();
-            return Finish(errorMessage, "Select at least two RAW frames for an MFD project.", false);
+            return fail("Select at least two RAW frames for an MFD project.");
         }
         sourceSet.operationSchemaVersion = Stack::Project::kMfdOperationSchemaVersion;
         sourceSet.settings = DefaultMfdSettings();
         EnsureMfdPostRecipe(sourceSet);
+    } else if (operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        if (sourcePaths.size() < Raw::Hdr::kMinimumFrameCount ||
+            sourcePaths.size() > Raw::Hdr::kMaximumFrameCount) {
+            cleanupCreatedStore();
+            return fail("Select between two and twenty RAW frames for an HDR project.");
+        }
+        sourceSet.operationSchemaVersion = Stack::Project::kHdrOperationSchemaVersion;
+        sourceSet.settings = DefaultHdrSettings();
+        EnsureHdrPostRecipe(sourceSet);
     }
 
     const Stack::Project::ProjectStoreTransaction transaction =
         created.store->BeginTransaction(snapshot.persistedStorageRevision);
     if (!transaction) {
         cleanupCreatedStore();
-        return Finish(errorMessage, "Could not begin source ingestion.", false);
+        if (failure) *failure = ProjectCreationFailure::Storage;
+        return fail("Could not begin source ingestion.");
     }
     std::string error;
     if (!StageFrames(
@@ -586,21 +923,32 @@ bool EditorModule::CreateMultiFrameRawProject(
             sourceSet,
             sourcePaths,
             false,
-            error)) {
+            error, request.shouldCancel, failure)) {
         created.store->Abort(transaction);
         cleanupCreatedStore();
-        return Finish(errorMessage, error, false);
+        return fail(error);
     }
-    if (sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
+    if ((sourceSet.operationIntent == MultiFrameOperationIntent::RawCaptureSet ||
+         sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstDenoise ||
+         sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstHdr) &&
         sourceSet.inputFamily != MultiFrameInputFamily::Raw) {
         created.store->Abort(transaction);
         cleanupCreatedStore();
-        return Finish(errorMessage, "Burst Denoise accepts RAW source sets only.", false);
+        return fail("MultiFrame capture sets accept RAW sources only.");
     }
     if (!sourceSet.frames.empty()) {
         const std::size_t clampedReference = std::min(
             referenceFrameIndex, sourceSet.frames.size() - 1u);
         sourceSet.referenceFrameId = sourceSet.frames[clampedReference].frameId;
+    }
+
+    if (operationIntent == MultiFrameOperationIntent::RawCaptureSet) {
+        Stack::Project::InitializeBracketing(sourceSet, snapshot);
+        auto bracket = Stack::Project::SuggestBracketingGroups(snapshot, sourceSet);
+        bracket.orientationOverrides = orientationOverrides;
+        sourceSet.settings["bracketing"] = Raw::Bracketing::Serialize(bracket);
+        operationIntent = MultiFrameOperationIntent::RawBurstHdr;
+        EnsureHdrPostRecipe(sourceSet);
     }
 
     EditorNodeGraph::Graph graph;
@@ -609,7 +957,13 @@ bool EditorModule::CreateMultiFrameRawProject(
         if (!SyncMfdGraphTopology(graph, snapshot, sourceSet, true, error)) {
             created.store->Abort(transaction);
             cleanupCreatedStore();
-            return Finish(errorMessage, error, false);
+            return fail(error);
+        }
+    } else if (operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        if (!SyncHdrGraphTopology(graph, snapshot, sourceSet, true, error)) {
+            created.store->Abort(transaction);
+            cleanupCreatedStore();
+            return fail(error);
         }
     } else {
         EditorNodeGraph::RawProjectSourceSetPayload payload;
@@ -619,32 +973,70 @@ bool EditorModule::CreateMultiFrameRawProject(
         if (!node) {
             created.store->Abort(transaction);
             cleanupCreatedStore();
-            return Finish(errorMessage, "Could not create the managed source-set graph node.", false);
+            return fail("Could not create the managed source-set graph node.");
         }
         node->title = "RAW Project Source Set - " + sourceSet.name;
         sourceSet.graphBindingNodeId = node->instanceUuid;
     }
     snapshot.sourceSets.push_back(std::move(sourceSet));
+    snapshot.lifecycle.initialAssetIds.clear();
+    for (const EmbeddedAssetRecord& asset : snapshot.embeddedAssets) {
+        snapshot.lifecycle.initialAssetIds.push_back(asset.assetId);
+    }
     snapshot.activeSourceSetId = snapshot.sourceSets.front().sourceSetId;
     snapshot.activeFrameId = snapshot.sourceSets.front().referenceFrameId;
+    if (!Stack::Project::IsBracketing(snapshot.sourceSets.front()))
+        snapshot.multiFrameGraph = Stack::Project::BuildOperationMultiFrameGraph(snapshot);
     snapshot.mfdInputRevision =
         operationIntent == MultiFrameOperationIntent::RawBurstDenoise ? 1u : 0u;
+    snapshot.hdrInputRevision =
+        operationIntent == MultiFrameOperationIntent::RawBurstHdr ? 1u : 0u;
     snapshot.dirtyRevision = 1;
     snapshot.pipelineData = PipelineForGraph(graph, {}, nlohmann::json::object());
+    snapshot.pipelineData["rawLayerSourceNodeUuid"] = snapshot.sourceSets.front().graphBindingNodeId;
     UpdateWorkspaceManifestFields(snapshot);
     const Stack::Project::ProjectStoreCommitResult commit =
         created.store->Commit(transaction, snapshot);
     if (!commit) {
         created.store->Abort(transaction);
         cleanupCreatedStore();
-        return Finish(errorMessage, commit.message, false);
+        if (failure) *failure = ProjectCreationFailure::Storage;
+        return fail(commit.message);
     }
     snapshot.persistedStorageRevision = commit.committedStorageRevision;
 
+    created.snapshot=std::move(snapshot);
+    return created;
+}
+
+bool EditorModule::CreateMultiFrameRawProject(
+    const std::filesystem::path& requestedPath,
+    Stack::Project::ProjectStorageKind storageKind,
+    const std::string& projectName,
+    const std::string& sourceSetName,
+    MultiFrameOperationIntent operationIntent,
+    const std::vector<std::filesystem::path>& sourcePaths,
+    std::size_t referenceFrameIndex,
+    std::string* errorMessage,
+    const std::map<int, int>& orientationOverrides) {
+    if (IsDirty() && !m_RawWorkspaceReplacementAuthorized) {
+        return Finish(errorMessage, "Save or discard the current project before replacing it.", false);
+    }
+    Stack::Project::MultiFrameProjectCreation request;
+    request.path=requestedPath; request.storageKind=storageKind;
+    request.projectName=projectName; request.sourceSetName=sourceSetName;
+    request.operationIntent=operationIntent; request.sources=sourcePaths;
+    request.referenceFrameIndex=referenceFrameIndex;
+    request.orientationOverrides=orientationOverrides;
+    auto created=Stack::Project::CreateMultiFrameProject(request);
+    if(!created) return Finish(errorMessage,created.message,false);
+    const auto path=created.store->StoragePath();
+    auto snapshot=std::move(created.snapshot);
     auto loaded = std::make_shared<LoadedProjectData>();
-    loaded->sourcePixels.assign(4, 0);
-    loaded->width = 1;
-    loaded->height = 1;
+    loaded->sourceState = ProjectSourceState::LazyAsset;
+    loaded->sourcePixels.clear();
+    loaded->width = 0;
+    loaded->height = 0;
     loaded->channels = 4;
     loaded->pipelineData = snapshot.pipelineData;
     loaded->rawWorkspaceData = snapshot.rawWorkspaceData;
@@ -663,195 +1055,6 @@ bool EditorModule::CreateMultiFrameRawProject(
     return Finish(errorMessage, std::string(), true);
 }
 
-bool EditorModule::UpgradeActiveLegacyRawProjectToMultiFrame(
-    const std::filesystem::path& requestedDestination,
-    std::string* errorMessage) {
-    if (!IsRawWorkspaceProjectActive() || IsMultiFrameRawProjectActive() ||
-        m_ActiveRawWorkspaceProjectPath.empty()) {
-        return Finish(errorMessage, "An active legacy RAW project is required.", false);
-    }
-    if (requestedDestination.empty()) {
-        return Finish(errorMessage, "Choose a destination for the upgraded copy.", false);
-    }
-
-    StackBinaryFormat::ProjectDocument legacy;
-    StackBinaryFormat::ProjectLoadOptions options;
-    options.includeThumbnail = true;
-    options.includeSourceImage = false;
-    options.includePipelineData = true;
-    options.includeNodeBrowserThumbnails = false;
-    options.includeRawWorkspaceData = true;
-    if (!StackBinaryFormat::ReadProjectFile(
-            m_ActiveRawWorkspaceProjectPath, legacy, options)) {
-        return Finish(errorMessage, "The legacy project could not be read for upgrade.", false);
-    }
-
-    std::filesystem::path destination = requestedDestination;
-    if (Lower(destination.extension().string()) != ".stackbundle") {
-        destination += ".stackbundle";
-    }
-    std::error_code filesystemError;
-    if (std::filesystem::exists(destination, filesystemError)) {
-        return Finish(errorMessage, "An upgraded project already exists at that path.", false);
-    }
-
-    RawProjectSnapshot bootstrap;
-    bootstrap.projectId = Stack::Project::GenerateStableUuid();
-    bootstrap.projectName = m_CurrentProjectName.empty()
-        ? legacy.metadata.projectName + " Upgraded"
-        : m_CurrentProjectName + " Upgraded";
-    bootstrap.rawWorkspaceData = legacy.rawWorkspaceData.is_object()
-        ? legacy.rawWorkspaceData
-        : nlohmann::json::object();
-    bootstrap.rawWorkspaceData.erase("embeddedRaw");
-    bootstrap.rawWorkspaceData.erase("rawSourceRef");
-    bootstrap.rawWorkspaceData["legacyUpgrade"] = {
-        { "sourceProjectPath", m_ActiveRawWorkspaceProjectPath.string() },
-        { "sourceSchemaVersion", legacy.rawWorkspaceData.value(
-            "rawWorkspaceSchemaVersion", 1) }
-    };
-    UpdateWorkspaceManifestFields(bootstrap);
-    Stack::Project::ProjectStoreOpenResult created =
-        Stack::Project::CreateProjectStore(
-            destination,
-            Stack::Project::ProjectStorageKind::DirectoryBundle,
-            bootstrap);
-    if (!created) return Finish(errorMessage, created.message, false);
-
-    const auto cleanupCreatedStore = [&]() {
-        created.store.reset();
-        std::error_code cleanupError;
-        std::filesystem::remove_all(destination, cleanupError);
-    };
-    RawProjectSnapshot snapshot = created.snapshot;
-    const auto transaction = created.store->BeginTransaction(
-        snapshot.persistedStorageRevision);
-    if (!transaction) {
-        cleanupCreatedStore();
-        return Finish(errorMessage, "Could not begin the upgrade transaction.", false);
-    }
-
-    EmbeddedAssetRecord asset;
-    std::string error;
-    bool staged = false;
-    const nlohmann::json embedded = legacy.rawWorkspaceData.value(
-        "embeddedRaw", nlohmann::json::object());
-    const auto embeddedBytes = embedded.find("bytes");
-    if (embedded.value("present", false) &&
-        embeddedBytes != embedded.end() && embeddedBytes->is_binary()) {
-        const auto& binary = embeddedBytes->get_binary();
-        std::vector<unsigned char> bytes(binary.begin(), binary.end());
-        const Stack::RawEvidence::SourceIdentity identity =
-            Stack::RawEvidence::ComputeSourceIdentity(bytes);
-        if (identity.valid) {
-            asset.sha256 = identity.sha256;
-            asset.byteLength = identity.byteSize;
-            asset.assetId = Stack::Project::MakeAssetId(
-                asset.sha256, asset.byteLength);
-            asset.originalFileName = embedded.value(
-                "fileName", m_ActiveRawWorkspaceRecipe.source.displayName);
-            asset.originalExtension =
-                std::filesystem::path(asset.originalFileName).extension().string();
-            asset.inputFamily = MultiFrameInputFamily::Raw;
-            asset.informationalOriginPath =
-                m_ActiveRawWorkspaceRecipe.source.sourcePath;
-            const std::string byteString(
-                reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            std::istringstream input(
-                byteString, std::ios::in | std::ios::binary);
-            staged = created.store->StageAssetStream(
-                transaction, input, asset, &error);
-        }
-    } else {
-        const std::filesystem::path sourcePath =
-            m_ActiveRawWorkspaceRecipe.source.sourcePath;
-        if (sourcePath.empty() ||
-            !std::filesystem::is_regular_file(sourcePath, filesystemError)) {
-            created.store->Abort(transaction);
-            cleanupCreatedStore();
-            return Finish(
-                errorMessage,
-                "The linked legacy RAW source is missing. Relink it before upgrading.",
-                false);
-        }
-        staged = created.store->StageAssetFile(
-            transaction,
-            sourcePath,
-            MultiFrameInputFamily::Raw,
-            nlohmann::json::object(),
-            asset,
-            &error);
-    }
-    if (!staged) {
-        created.store->Abort(transaction);
-        cleanupCreatedStore();
-        return Finish(errorMessage,
-            error.empty() ? "The legacy original could not be embedded." : error,
-            false);
-    }
-
-    MultiFrameSourceSet sourceSet;
-    sourceSet.sourceSetId = Stack::Project::GenerateStableUuid();
-    sourceSet.name = "Legacy RAW Source";
-    sourceSet.inputFamily = MultiFrameInputFamily::Raw;
-    sourceSet.operationIntent = MultiFrameOperationIntent::Mfsr;
-    SourceSetFrame frame;
-    frame.frameId = Stack::Project::GenerateStableUuid();
-    frame.assetId = asset.assetId;
-    frame.userLabel = asset.originalFileName;
-    sourceSet.frames.push_back(frame);
-    sourceSet.referenceFrameId = frame.frameId;
-
-    EditorNodeGraph::Graph graph = m_NodeGraph;
-    EditorNodeGraph::RawProjectSourceSetPayload payload;
-    payload.sourceSetId = sourceSet.sourceSetId;
-    EditorNodeGraph::Node* node = graph.AddRawProjectSourceSetNode(
-        std::move(payload), { 80.0f, 120.0f });
-    if (!node) {
-        created.store->Abort(transaction);
-        cleanupCreatedStore();
-        return Finish(errorMessage, "The upgraded graph binding could not be created.", false);
-    }
-    node->title = "RAW Project Source Set - " + sourceSet.name;
-    sourceSet.graphBindingNodeId = node->instanceUuid;
-    snapshot.embeddedAssets.push_back(asset);
-    snapshot.sourceSets.push_back(std::move(sourceSet));
-    snapshot.activeSourceSetId = snapshot.sourceSets.front().sourceSetId;
-    snapshot.pipelineData = PipelineForGraph(graph, m_Layers, legacy.pipelineData);
-    snapshot.coverThumbnailBytes = legacy.thumbnailBytes;
-    snapshot.dirtyRevision = 1u;
-    UpdateWorkspaceManifestFields(snapshot);
-    const Stack::Project::ProjectStoreCommitResult commit =
-        created.store->Commit(transaction, snapshot);
-    if (!commit) {
-        created.store->Abort(transaction);
-        cleanupCreatedStore();
-        return Finish(errorMessage, commit.message, false);
-    }
-    snapshot.persistedStorageRevision = commit.committedStorageRevision;
-
-    LoadedProjectData loaded;
-    loaded.sourcePixels.assign(4, 0);
-    loaded.width = 1;
-    loaded.height = 1;
-    loaded.channels = 4;
-    loaded.pipelineData = snapshot.pipelineData;
-    loaded.rawWorkspaceData = snapshot.rawWorkspaceData;
-    loaded.projectKind = StackBinaryFormat::kRawProjectKind;
-    loaded.projectName = snapshot.projectName;
-    loaded.projectFileName = destination.lexically_normal().string();
-    loaded.projectStore = created.store;
-    loaded.rawProjectSnapshot =
-        std::make_shared<RawProjectSnapshot>(snapshot);
-    if (!ApplyLoadedProject(loaded)) {
-        return Finish(
-            errorMessage,
-            "The upgraded copy was written safely, but could not be activated.",
-            false);
-    }
-    return Finish(errorMessage, std::string(), true);
-}
-
 bool EditorModule::CommitActiveMultiFrameMutation(
     RawProjectSnapshot snapshot,
     EditorNodeGraph::Graph graph,
@@ -859,44 +1062,96 @@ bool EditorModule::CommitActiveMultiFrameMutation(
     bool importInProgress,
     std::string* outError,
     bool noteEdit) {
-    if (!m_ActiveRawProjectStore || !m_ActiveRawProjectSnapshot || !transaction) {
+    if (!m_Project->store || !m_Project->snapshot || !transaction) {
         return Finish(outError, "No multi-frame RAW project transaction is active.", false);
     }
     snapshot.pipelineData = PipelineForGraph(
-        graph, m_Layers, SerializePipeline());
+        graph, m_Project->layers, SerializePipeline());
+    if (const auto* active = Stack::Project::FindSourceSet(snapshot,snapshot.activeSourceSetId))
+        snapshot.pipelineData["rawLayerSourceNodeUuid"] = active->graphBindingNodeId;
     UpdateWorkspaceManifestFields(snapshot);
+    if (!StackBinaryFormat::ExternalizeManagedProjectAssets(
+            m_Project->store, transaction, snapshot)) {
+        m_Project->store->Abort(transaction);
+        if (importInProgress) {
+            m_Project->lifecycle.CompleteImport(false);
+        }
+        return Finish(
+            outError,
+            "Could not stage the project's managed image assets.",
+            false);
+    }
+    if(m_Bracketing && m_Bracketing->result &&
+        m_Bracketing->projectId==snapshot.projectId && m_Bracketing->completedRevision==snapshot.hdrInputRevision) {
+        auto* resultSet=Stack::Project::FindSourceSet(snapshot,m_Bracketing->setId);
+        std::string resultError;
+        if(resultSet && resultSet->settings["bracketing"].dump()==m_Bracketing->completedRecipe &&
+            !Stack::Project::StageBracketingResult(m_Project->store,transaction,snapshot,m_Bracketing->setId,
+                *m_Bracketing->result,{},resultError)) {
+            m_Project->store->Abort(transaction);return Finish(outError,resultError,false);
+        }
+    }
     const Stack::Project::ModelValidationResult validation =
         Stack::Project::ValidateRawProjectSnapshot(snapshot);
     if (!validation.valid) {
-        m_ActiveRawProjectStore->Abort(transaction);
-        if (importInProgress) m_ProjectSessionController.CompleteImport(false);
+        m_Project->store->Abort(transaction);
+        if (importInProgress) m_Project->lifecycle.CompleteImport(false);
         return Finish(
             outError,
             validation.errors.empty() ? "The source-set change is invalid."
                                       : validation.errors.front(),
             false);
     }
+
+    if (!importInProgress && noteEdit) {
+        // Ordinary UI edits are in-memory document revisions. Assets were not
+        // staged by these mutations, so there is nothing to publish yet; the
+        // shared save coordinator will persist the newest coalesced revision.
+        m_Project->store->Abort(transaction);
+        m_Project->graph = std::move(graph);
+        m_Project->snapshot =
+            std::make_shared<RawProjectSnapshot>(std::move(snapshot));
+        MarkDirty();
+        if (m_MfdAdoptedRawResult &&
+            (m_MfdAdoptedRawResult->projectId !=
+                 m_Project->snapshot->projectId ||
+             m_MfdAdoptedRawResult->inputRevision !=
+                 m_Project->snapshot->mfdInputRevision)) {
+            m_MfdAdoptedRawResult.reset();
+        }
+        if (m_HdrAdoptedRawResult &&
+            (m_HdrAdoptedRawResult->projectId !=
+                 m_Project->snapshot->projectId ||
+             (!IsBracketingActive() && m_HdrAdoptedRawResult->inputRevision !=
+                 m_Project->snapshot->hdrInputRevision))) {
+            m_HdrAdoptedRawResult.reset();
+        }
+        RefreshGraphLayerMetadata();
+        ApplyGraphLayerOrder();
+        MarkRenderRefreshDirty();
+        return Finish(outError, std::string(), true);
+    }
     snapshot.dirtyRevision = noteEdit
-        ? m_ProjectSessionController.NoteEdit()
-        : m_ProjectSessionController.DirtyRevision();
+        ? m_Project->lifecycle.NoteEdit()
+        : m_Project->lifecycle.DirtyRevision();
 
     Stack::Project::ProjectSaveToken saveToken;
     if (!importInProgress) {
-        saveToken = m_ProjectSessionController.BeginSave();
+        saveToken = m_Project->lifecycle.BeginSave();
         if (!saveToken) {
-            m_ActiveRawProjectStore->Abort(transaction);
+            m_Project->store->Abort(transaction);
             return Finish(outError, "The project is not ready to save this change.", false);
         }
     }
     const Stack::Project::ProjectStoreCommitResult commit =
-        m_ActiveRawProjectStore->Commit(transaction, snapshot);
+        m_Project->store->Commit(transaction, snapshot);
     if (!commit) {
-        m_ActiveRawProjectStore->Abort(transaction);
+        m_Project->store->Abort(transaction);
         if (importInProgress) {
-            m_ProjectSessionController.CompleteImport(false);
-            m_Dirty = m_ProjectSessionController.IsDirty();
+            m_Project->lifecycle.CompleteImport(false);
+            m_Project->dirty = m_Project->lifecycle.IsDirty();
         } else {
-            m_ProjectSessionController.CompleteSave(
+            m_Project->lifecycle.CompleteSave(
                 saveToken,
                 false,
                 snapshot.persistedStorageRevision,
@@ -904,51 +1159,75 @@ bool EditorModule::CommitActiveMultiFrameMutation(
             // Non-import mutations remain valid in memory when persistence
             // fails, so preserve them for retry or Save Copy. Imports cannot
             // do this because their staged originals were never published.
-            m_NodeGraph = std::move(graph);
-            m_ActiveRawProjectSnapshot =
+            m_Project->graph = std::move(graph);
+            m_Project->snapshot =
                 std::make_shared<RawProjectSnapshot>(std::move(snapshot));
             if (m_MfdAdoptedRawResult &&
                 (m_MfdAdoptedRawResult->projectId !=
-                     m_ActiveRawProjectSnapshot->projectId ||
+                     m_Project->snapshot->projectId ||
                  m_MfdAdoptedRawResult->inputRevision !=
-                     m_ActiveRawProjectSnapshot->mfdInputRevision ||
+                     m_Project->snapshot->mfdInputRevision ||
                  !Stack::Project::FindSourceSet(
-                     *m_ActiveRawProjectSnapshot,
+                     *m_Project->snapshot,
                      m_MfdAdoptedRawResult->sourceSetId))) {
                 m_MfdAdoptedRawResult.reset();
+            }
+            if (m_HdrAdoptedRawResult &&
+                (m_HdrAdoptedRawResult->projectId !=
+                     m_Project->snapshot->projectId ||
+                 (!IsBracketingActive() && m_HdrAdoptedRawResult->inputRevision !=
+                     m_Project->snapshot->hdrInputRevision) ||
+                 !Stack::Project::FindSourceSet(
+                     *m_Project->snapshot,
+                     m_HdrAdoptedRawResult->sourceSetId))) {
+                m_HdrAdoptedRawResult.reset();
             }
             RefreshGraphLayerMetadata();
             ApplyGraphLayerOrder();
             MarkRenderDirty();
-            m_Dirty = true;
+            m_Project->dirty = true;
         }
         return Finish(outError, commit.message, false);
     }
 
     snapshot.persistedStorageRevision = commit.committedStorageRevision;
-    m_NodeGraph = std::move(graph);
-    m_ActiveRawProjectSnapshot =
+    m_Project->graph = std::move(graph);
+    m_Project->snapshot =
         std::make_shared<RawProjectSnapshot>(std::move(snapshot));
     if (m_MfdAdoptedRawResult &&
         (m_MfdAdoptedRawResult->projectId !=
-             m_ActiveRawProjectSnapshot->projectId ||
+             m_Project->snapshot->projectId ||
          m_MfdAdoptedRawResult->inputRevision !=
-             m_ActiveRawProjectSnapshot->mfdInputRevision ||
+             m_Project->snapshot->mfdInputRevision ||
          !Stack::Project::FindSourceSet(
-             *m_ActiveRawProjectSnapshot,
+             *m_Project->snapshot,
              m_MfdAdoptedRawResult->sourceSetId))) {
         m_MfdAdoptedRawResult.reset();
     }
-    if (importInProgress) {
-        m_ProjectSessionController.CompleteImport(true);
-        saveToken = m_ProjectSessionController.BeginSave();
+    if (m_HdrAdoptedRawResult &&
+        (m_HdrAdoptedRawResult->projectId !=
+             m_Project->snapshot->projectId ||
+         (!IsBracketingActive() && m_HdrAdoptedRawResult->inputRevision !=
+             m_Project->snapshot->hdrInputRevision) ||
+         !Stack::Project::FindSourceSet(
+             *m_Project->snapshot,
+             m_HdrAdoptedRawResult->sourceSetId))) {
+        m_HdrAdoptedRawResult.reset();
     }
-    m_ProjectSessionController.CompleteSave(
+    if (importInProgress) {
+        m_Project->lifecycle.CompleteImport(true);
+        saveToken = m_Project->lifecycle.BeginSave();
+    }
+    m_Project->lifecycle.CompleteSave(
         saveToken, true, commit.committedStorageRevision, false);
-    m_Dirty = m_ProjectSessionController.IsDirty();
+    m_Project->dirty = m_Project->lifecycle.IsDirty();
     RefreshGraphLayerMetadata();
     ApplyGraphLayerOrder();
-    MarkRenderDirty();
+    // Publishing a project mutation changes the rendered result, but the
+    // successful commit above is already the authoritative saved revision.
+    // MarkRenderDirty() also marks the Editor project dirty, which used to
+    // make every successful RAW save immediately look unsaved again.
+    MarkRenderRefreshDirty();
     return Finish(outError, std::string(), true);
 }
 
@@ -963,15 +1242,15 @@ bool EditorModule::AddMultiFrameSourceSet(
     if (sourceSetName.empty()) {
         return Finish(errorMessage, "Source-set name is required.", false);
     }
-    if (!m_ProjectSessionController.BeginImport()) {
+    if (!m_Project->lifecycle.BeginImport()) {
         return Finish(errorMessage, "The project is currently busy or read-only.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     const Stack::Project::ProjectStoreTransaction transaction =
-        m_ActiveRawProjectStore->BeginTransaction(snapshot.persistedStorageRevision);
+        m_Project->store->BeginTransaction(snapshot.persistedStorageRevision);
     if (!transaction) {
-        m_ProjectSessionController.CompleteImport(false);
+        m_Project->lifecycle.CompleteImport(false);
         return Finish(errorMessage, "Could not begin source ingestion.", false);
     }
 
@@ -983,31 +1262,49 @@ bool EditorModule::AddMultiFrameSourceSet(
         sourceSet.operationSchemaVersion = Stack::Project::kMfdOperationSchemaVersion;
         sourceSet.settings = DefaultMfdSettings();
         EnsureMfdPostRecipe(sourceSet);
+    } else if (operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        if (sourcePaths.size() < Raw::Hdr::kMinimumFrameCount ||
+            sourcePaths.size() > Raw::Hdr::kMaximumFrameCount) {
+            m_Project->store->Abort(transaction);
+            m_Project->lifecycle.CompleteImport(false);
+            return Finish(errorMessage, "HDR source sets require two to twenty frames.", false);
+        }
+        sourceSet.operationSchemaVersion = Stack::Project::kHdrOperationSchemaVersion;
+        sourceSet.settings = DefaultHdrSettings();
+        EnsureHdrPostRecipe(sourceSet);
     }
     std::string error;
     if (!StageFrames(
-            m_ActiveRawProjectStore,
+            m_Project->store,
             transaction,
             snapshot,
             sourceSet,
             sourcePaths,
             false,
             error) ||
-        (operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
+        ((operationIntent == MultiFrameOperationIntent::RawBurstDenoise ||
+          operationIntent == MultiFrameOperationIntent::RawBurstHdr) &&
          sourceSet.inputFamily != MultiFrameInputFamily::Raw)) {
-        m_ActiveRawProjectStore->Abort(transaction);
-        m_ProjectSessionController.CompleteImport(false);
-        if (error.empty()) error = "Burst Denoise accepts RAW source sets only.";
+        m_Project->store->Abort(transaction);
+        m_Project->lifecycle.CompleteImport(false);
+        if (error.empty()) error = "RAW burst source sets accept RAW frames only.";
         return Finish(errorMessage, error, false);
     }
     EditorNodeGraph::Node* node = nullptr;
     if (operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         if (!SyncMfdGraphTopology(graph, snapshot, sourceSet, true, error)) {
-            m_ActiveRawProjectStore->Abort(transaction);
-            m_ProjectSessionController.CompleteImport(false);
+            m_Project->store->Abort(transaction);
+            m_Project->lifecycle.CompleteImport(false);
             return Finish(errorMessage, error, false);
         }
         node = FindMfdNode(graph, sourceSet.sourceSetId, sourceSet.graphBindingNodeId);
+    } else if (operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        if (!SyncHdrGraphTopology(graph, snapshot, sourceSet, true, error)) {
+            m_Project->store->Abort(transaction);
+            m_Project->lifecycle.CompleteImport(false);
+            return Finish(errorMessage, error, false);
+        }
+        node = FindHdrNode(graph, sourceSet.sourceSetId, sourceSet.graphBindingNodeId);
     } else {
         EditorNodeGraph::RawProjectSourceSetPayload payload;
         payload.sourceSetId = sourceSet.sourceSetId;
@@ -1020,8 +1317,8 @@ bool EditorModule::AddMultiFrameSourceSet(
         }
     }
     if (!node) {
-        m_ActiveRawProjectStore->Abort(transaction);
-        m_ProjectSessionController.CompleteImport(false);
+        m_Project->store->Abort(transaction);
+        m_Project->lifecycle.CompleteImport(false);
         return Finish(errorMessage, "Could not create the managed graph binding.", false);
     }
     snapshot.activeSourceSetId = sourceSet.sourceSetId;
@@ -1031,6 +1328,8 @@ bool EditorModule::AddMultiFrameSourceSet(
     }
     if (operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         ++snapshot.mfdInputRevision;
+    } else if (operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        ++snapshot.hdrInputRevision;
     }
     graph.SelectNode(node->id, false);
     return CommitActiveMultiFrameMutation(
@@ -1040,53 +1339,89 @@ bool EditorModule::AddMultiFrameSourceSet(
 bool EditorModule::AddFramesToMultiFrameSourceSet(
     const std::string& sourceSetId,
     const std::vector<std::filesystem::path>& sourcePaths,
-    std::string* errorMessage) {
+    std::string* errorMessage,
+    bool updateBracketRecipe) {
     if (!IsMultiFrameRawProjectActive()) {
         return Finish(errorMessage, "No multi-frame RAW project is active.", false);
     }
-    if (IsMfdExperimentalProcessingBusy()) {
+    if (IsMfdExperimentalProcessingBusy() || IsHdrProcessingBusy()) {
         return Finish(
             errorMessage,
-            "Finish or cancel MFD processing before adding frames to the current burst.",
+            "Finish or cancel multi-frame processing before adding frames to the current burst.",
             false);
     }
-    if (!m_ProjectSessionController.BeginImport()) {
+    if (!m_Project->lifecycle.BeginImport()) {
         return Finish(errorMessage, "The project is currently busy or read-only.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) {
-        m_ProjectSessionController.CompleteImport(false);
+        m_Project->lifecycle.CompleteImport(false);
         return Finish(errorMessage, "The selected source set no longer exists.", false);
     }
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        !Stack::Project::IsBracketing(*sourceSet) &&
+        sourceSet->frames.size() + sourcePaths.size() > Raw::Hdr::kMaximumFrameCount) {
+        m_Project->lifecycle.CompleteImport(false);
+        return Finish(errorMessage, "HDR source sets support at most twenty frames.", false);
+    }
     const Stack::Project::ProjectStoreTransaction transaction =
-        m_ActiveRawProjectStore->BeginTransaction(snapshot.persistedStorageRevision);
+        m_Project->store->BeginTransaction(snapshot.persistedStorageRevision);
     if (!transaction) {
-        m_ProjectSessionController.CompleteImport(false);
+        m_Project->lifecycle.CompleteImport(false);
         return Finish(errorMessage, "Could not begin source ingestion.", false);
     }
     std::string error;
     if (!StageFrames(
-            m_ActiveRawProjectStore,
+            m_Project->store,
             transaction,
             snapshot,
             *sourceSet,
             sourcePaths,
             true,
             error)) {
-        m_ActiveRawProjectStore->Abort(transaction);
-        m_ProjectSessionController.CompleteImport(false);
+        m_Project->store->Abort(transaction);
+        m_Project->lifecycle.CompleteImport(false);
         return Finish(errorMessage, error, false);
+    }
+    const bool bracketDraftAssets = Stack::Project::IsBracketing(*sourceSet) && !updateBracketRecipe;
+    if (Stack::Project::IsBracketing(*sourceSet) && updateBracketRecipe) {
+        Raw::Bracketing::BracketingRecipe recipe;
+        if (!Raw::Bracketing::Deserialize(sourceSet->settings["bracketing"], recipe, error)) {
+            m_Project->store->Abort(transaction);
+            m_Project->lifecycle.CompleteImport(false);
+            return Finish(errorMessage, error, false);
+        }
+        const auto previousGroups = recipe.groups;
+        auto suggested = Stack::Project::SuggestBracketingGroups(snapshot, *sourceSet);
+        std::unordered_set<std::string> existing;
+        for (const auto& group : recipe.groups) for (const auto& frame : group.frames) existing.insert(frame.id);
+        for (auto& group : suggested.groups) {
+            group.frames.erase(std::remove_if(group.frames.begin(), group.frames.end(),
+                [&](const auto& frame) { return existing.count(frame.id) != 0; }), group.frames.end());
+            if (!group.frames.empty()) recipe.groups.push_back(std::move(group));
+        }
+        Raw::Bracketing::RemapCurves(recipe, previousGroups);
+        sourceSet->settings["algorithmVersion"] = Raw::Bracketing::RecipeVersion;
+        sourceSet->settings["bracketing"] = Raw::Bracketing::Serialize(recipe);
     }
     snapshot.activeSourceSetId = sourceSetId;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         ++snapshot.mfdInputRevision;
+    } else if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr && !bracketDraftAssets) {
+        ++snapshot.hdrInputRevision;
     }
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
         !SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, error)) {
-        m_ActiveRawProjectStore->Abort(transaction);
-        m_ProjectSessionController.CompleteImport(false);
+        m_Project->store->Abort(transaction);
+        m_Project->lifecycle.CompleteImport(false);
+        return Finish(errorMessage, error, false);
+    }
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        !SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, error)) {
+        m_Project->store->Abort(transaction);
+        m_Project->lifecycle.CompleteImport(false);
         return Finish(errorMessage, error, false);
     }
     return CommitActiveMultiFrameMutation(
@@ -1099,7 +1434,7 @@ bool EditorModule::DuplicateMultiFrameSourceSet(
     if (!IsMultiFrameRawProjectActive()) {
         return Finish(errorMessage, "No multi-frame RAW project is active.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     const MultiFrameSourceSet* original = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!original) return Finish(errorMessage, "The source set no longer exists.", false);
     MultiFrameSourceSet duplicate = *original;
@@ -1111,7 +1446,7 @@ bool EditorModule::DuplicateMultiFrameSourceSet(
         frame.frameId = Stack::Project::GenerateStableUuid();
         if (wasReference) duplicate.referenceFrameId = frame.frameId;
     }
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     EditorNodeGraph::Node* node = nullptr;
     std::string topologyError;
     if (duplicate.operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
@@ -1121,6 +1456,19 @@ bool EditorModule::DuplicateMultiFrameSourceSet(
         }
         node = FindMfdNode(graph, duplicate.sourceSetId, duplicate.graphBindingNodeId);
         ++snapshot.mfdInputRevision;
+    } else if (duplicate.operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        duplicate.settings["result"] = nlohmann::json {
+            { "state", "unavailable" }
+        };
+        duplicate.settings["automaticGeometricReference"] = true;
+        duplicate.settings["automaticRadiometricAnchor"] = true;
+        duplicate.settings["radiometricAnchorFrameId"] = nullptr;
+        if (!SyncHdrGraphTopology(
+                graph, snapshot, duplicate, true, topologyError)) {
+            return Finish(errorMessage, topologyError, false);
+        }
+        node = FindHdrNode(graph, duplicate.sourceSetId, duplicate.graphBindingNodeId);
+        ++snapshot.hdrInputRevision;
     } else {
         EditorNodeGraph::RawProjectSourceSetPayload payload;
         payload.sourceSetId = duplicate.sourceSetId;
@@ -1136,7 +1484,7 @@ bool EditorModule::DuplicateMultiFrameSourceSet(
     snapshot.activeSourceSetId = duplicate.sourceSetId;
     snapshot.sourceSets.push_back(std::move(duplicate));
     graph.SelectNode(node->id, false);
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
@@ -1149,21 +1497,26 @@ bool EditorModule::RenameMultiFrameSourceSet(
     if (!IsMultiFrameRawProjectActive() || name.empty()) {
         return Finish(errorMessage, "An active source set and non-empty name are required.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The source set no longer exists.", false);
     sourceSet->name = name;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         if (EditorNodeGraph::Node* node = FindMfdNode(
                 graph, sourceSetId, sourceSet->graphBindingNodeId)) {
             node->title = "MFD - " + name;
         }
+    } else if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        if (EditorNodeGraph::Node* node = FindHdrNode(
+                graph, sourceSetId, sourceSet->graphBindingNodeId)) {
+            node->title = "HDR - " + name;
+        }
     } else if (EditorNodeGraph::Node* node = FindSourceSetNode(
                    graph, sourceSetId, sourceSet->graphBindingNodeId)) {
         node->title = "RAW Project Source Set - " + name;
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
@@ -1175,7 +1528,7 @@ bool EditorModule::DeleteMultiFrameSourceSet(
     if (!IsMultiFrameRawProjectActive()) {
         return Finish(errorMessage, "No multi-frame RAW project is active.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     const auto found = std::find_if(
         snapshot.sourceSets.begin(), snapshot.sourceSets.end(),
         [&](const MultiFrameSourceSet& sourceSet) {
@@ -1187,28 +1540,33 @@ bool EditorModule::DeleteMultiFrameSourceSet(
     const std::string binding = found->graphBindingNodeId;
     const bool deletingMfd =
         found->operationIntent == MultiFrameOperationIntent::RawBurstDenoise;
+    const bool deletingHdr =
+        found->operationIntent == MultiFrameOperationIntent::RawBurstHdr;
     snapshot.sourceSets.erase(found);
     snapshot.activeSourceSetId = snapshot.sourceSets.empty()
         ? std::string()
         : snapshot.sourceSets.front().sourceSetId;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
-    if (deletingMfd) {
+    EditorNodeGraph::Graph graph = m_Project->graph;
+    if (deletingMfd || deletingHdr) {
         std::vector<int> nodesToRemove;
         for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
             if ((node.kind == EditorNodeGraph::NodeKind::MultiFrameDenoise &&
                  node.multiFrameDenoise.sourceSetId == sourceSetId) ||
+                (node.kind == EditorNodeGraph::NodeKind::MultiFrameHdr &&
+                 node.multiFrameHdr.sourceSetId == sourceSetId) ||
                 (node.kind == EditorNodeGraph::NodeKind::RawProjectFrame &&
                  node.rawProjectFrame.sourceSetId == sourceSetId)) {
                 nodesToRemove.push_back(node.id);
             }
         }
         for (int nodeId : nodesToRemove) graph.RemoveNode(nodeId);
-        ++snapshot.mfdInputRevision;
+        if (deletingMfd) ++snapshot.mfdInputRevision;
+        if (deletingHdr) ++snapshot.hdrInputRevision;
     } else if (const EditorNodeGraph::Node* node = FindSourceSetNode(
                    graph, sourceSetId, binding)) {
         graph.RemoveNode(node->id);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
@@ -1222,7 +1580,7 @@ bool EditorModule::MoveMultiFrameFrame(
     if (!IsMultiFrameRawProjectActive() || direction == 0) {
         return Finish(errorMessage, "Frame move is unavailable.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet || frameIndex >= sourceSet->frames.size()) {
         return Finish(errorMessage, "The selected frame no longer exists.", false);
@@ -1235,14 +1593,20 @@ bool EditorModule::MoveMultiFrameFrame(
     std::swap(sourceSet->frames[frameIndex], sourceSet->frames[static_cast<std::size_t>(target)]);
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         ++snapshot.mfdInputRevision;
+    } else if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        ++snapshot.hdrInputRevision;
     }
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     std::string topologyError;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
         !SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
         return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        !SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
+        return Finish(errorMessage, topologyError, false);
+    }
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage, false);
@@ -1254,7 +1618,7 @@ bool EditorModule::SetMultiFrameFrameEnabled(
     bool enabled,
     std::string* errorMessage) {
     if (!IsMultiFrameRawProjectActive()) return Finish(errorMessage, "No project is active.", false);
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The source set no longer exists.", false);
     const auto frame = std::find_if(
@@ -1265,14 +1629,20 @@ bool EditorModule::SetMultiFrameFrameEnabled(
     snapshot.activeFrameId = frameId;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         ++snapshot.mfdInputRevision;
+    } else if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        ++snapshot.hdrInputRevision;
     }
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     std::string topologyError;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
         !SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
         return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(snapshot.persistedStorageRevision);
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        !SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
+        return Finish(errorMessage, topologyError, false);
+    }
+    const auto transaction = m_Project->store->BeginTransaction(snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
 }
@@ -1282,7 +1652,7 @@ bool EditorModule::SetMultiFrameReferenceFrame(
     const std::string& frameId,
     std::string* errorMessage) {
     if (!IsMultiFrameRawProjectActive()) return Finish(errorMessage, "No project is active.", false);
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The source set no longer exists.", false);
     const auto frame = std::find_if(
@@ -1293,14 +1663,21 @@ bool EditorModule::SetMultiFrameReferenceFrame(
     snapshot.activeFrameId = frameId;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
         ++snapshot.mfdInputRevision;
+    } else if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        sourceSet->settings["automaticGeometricReference"] = false;
+        ++snapshot.hdrInputRevision;
     }
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     std::string topologyError;
     if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
         !SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
         return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(snapshot.persistedStorageRevision);
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        !SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
+        return Finish(errorMessage, topologyError, false);
+    }
+    const auto transaction = m_Project->store->BeginTransaction(snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
 }
@@ -1313,7 +1690,7 @@ bool EditorModule::SetMultiFrameFrameLabel(
     if (!IsMultiFrameRawProjectActive()) {
         return Finish(errorMessage, "No MFD project is active.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The MFD burst no longer exists.", false);
     auto frame = std::find_if(
@@ -1323,12 +1700,16 @@ bool EditorModule::SetMultiFrameFrameLabel(
         return Finish(errorMessage, "The frame no longer exists.", false);
     }
     frame->userLabel = label;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     std::string topologyError;
-    if (!SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
+    const bool topologyOk =
+        sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr
+        ? SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, topologyError)
+        : SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError);
+    if (!topologyOk) {
         return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
@@ -1342,7 +1723,7 @@ bool EditorModule::SetMultiFrameFrameOrientation(
     if (!IsMultiFrameRawProjectActive() || orientation < 0 || orientation > 8) {
         return Finish(errorMessage, "Choose a valid CFA-preserving orientation interpretation.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The MFD burst no longer exists.", false);
     auto frame = std::find_if(
@@ -1353,14 +1734,21 @@ bool EditorModule::SetMultiFrameFrameOrientation(
     }
     frame->metadataOverrides["orientation"] = orientation;
     frame->metadataOverrides["orientationPolicy"] = "cfa-preserving-interpretation";
-    ++snapshot.mfdInputRevision;
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr)
+        ++snapshot.hdrInputRevision;
+    else
+        ++snapshot.mfdInputRevision;
     snapshot.activeFrameId = frameId;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     std::string topologyError;
-    if (!SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
+    const bool topologyOk =
+        sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr
+        ? SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, topologyError)
+        : SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError);
+    if (!topologyOk) {
         return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
@@ -1373,7 +1761,7 @@ bool EditorModule::RemoveMultiFrameFrame(
     if (!IsMultiFrameRawProjectActive()) {
         return Finish(errorMessage, "No MFD project is active.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The MFD burst no longer exists.", false);
     const auto frame = std::find_if(
@@ -1390,30 +1778,46 @@ bool EditorModule::RemoveMultiFrameFrame(
             : sourceSet->frames.front().frameId;
     }
     snapshot.activeFrameId = sourceSet->referenceFrameId;
-    ++snapshot.mfdInputRevision;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr)
+        ++snapshot.hdrInputRevision;
+    else
+        ++snapshot.mfdInputRevision;
+    EditorNodeGraph::Graph graph = m_Project->graph;
     std::string topologyError;
-    if (!SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
+    const bool topologyOk =
+        sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr
+        ? SyncHdrGraphTopology(graph, snapshot, *sourceSet, true, topologyError)
+        : SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError);
+    if (!topologyOk) {
         return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
 }
 
-bool EditorModule::SetMfdInternalViewTransformEnabled(
+bool EditorModule::SetMultiFrameInternalViewTransformEnabled(
     const std::string& sourceSetId,
     bool enabled,
     std::string* errorMessage) {
     if (!IsMultiFrameRawProjectActive()) {
-        return Finish(errorMessage, "No MFD project is active.", false);
+        return Finish(errorMessage, "No multi-frame project is active.", false);
     }
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
+    Stack::Project::RawProjectEditRecipeBinding binding;
+    std::string bindingError;
     if (!sourceSet ||
-        sourceSet->operationIntent != MultiFrameOperationIntent::RawBurstDenoise) {
-        return Finish(errorMessage, "The MFD burst no longer exists.", false);
+        !Stack::Project::ResolveRawProjectEditRecipe(
+            snapshot, sourceSetId, binding, &bindingError) ||
+        !binding.multiFrameResult) {
+        return Finish(
+            errorMessage,
+            bindingError.empty()
+                ? "The multi-frame result no longer exists."
+                : bindingError,
+            false);
     }
     const std::string currentPlacement = sourceSet->settings.value(
         "viewTransformPlacement", std::string("internal"));
@@ -1422,26 +1826,32 @@ bool EditorModule::SetMfdInternalViewTransformEnabled(
         return Finish(errorMessage, std::string(), true);
     }
 
-    const EditorNodeGraph::Graph graphBefore = m_NodeGraph;
-    const std::vector<std::shared_ptr<LayerBase>> layersBefore = m_Layers;
-    EditorNodeGraph::Node* mfd = FindMfdNode(
-        m_NodeGraph, sourceSetId, sourceSet->graphBindingNodeId);
-    EditorNodeGraph::Node* output = m_NodeGraph.FindNode(
-        m_NodeGraph.GetOutputNodeId());
-    if (!mfd || !output || output->kind != EditorNodeGraph::NodeKind::Output) {
-        return Finish(errorMessage, "The MFD output path is incomplete.", false);
+    const EditorNodeGraph::Graph graphBefore = m_Project->graph;
+    const std::vector<std::shared_ptr<LayerBase>> layersBefore = m_Project->layers;
+    const bool hdrResult = binding.hdrResult;
+    EditorNodeGraph::Node* multiFrameNode = hdrResult
+        ? FindHdrNode(m_Project->graph, sourceSetId, sourceSet->graphBindingNodeId)
+        : FindMfdNode(m_Project->graph, sourceSetId, sourceSet->graphBindingNodeId);
+    EditorNodeGraph::Node* output = m_Project->graph.FindNode(
+        m_Project->graph.GetOutputNodeId());
+    if (!multiFrameNode || !output || output->kind != EditorNodeGraph::NodeKind::Output) {
+        return Finish(errorMessage, "The multi-frame output path is incomplete.", false);
     }
-    mfd->multiFrameDenoise.internalViewTransformEnabled = enabled;
+    if (hdrResult) {
+        multiFrameNode->multiFrameHdr.internalViewTransformEnabled = enabled;
+    } else {
+        multiFrameNode->multiFrameDenoise.internalViewTransformEnabled = enabled;
+    }
     std::string mutationError;
     if (!enabled) {
-        const EditorNodeGraph::Link* outputInput = m_NodeGraph.FindInputLink(
+        const EditorNodeGraph::Link* outputInput = m_Project->graph.FindInputLink(
             output->id, EditorNodeGraph::kImageInputSocketId);
         if (!outputInput) {
-            m_NodeGraph = graphBefore;
-            return Finish(errorMessage, "Connect the MFD result path to Output before using graph View Transform mode.", false);
+            m_Project->graph = graphBefore;
+            return Finish(errorMessage, "Connect the multi-frame result path to Output before using graph View Transform mode.", false);
         }
         const EditorNodeGraph::Link inputSnapshot = *outputInput;
-        if (!m_NodeGraph.RemoveLink(
+        if (!m_Project->graph.RemoveLink(
                 inputSnapshot.fromNodeId,
                 inputSnapshot.fromSocketId,
                 inputSnapshot.toNodeId,
@@ -1452,8 +1862,8 @@ bool EditorModule::SetMfdInternalViewTransformEnabled(
                 output->id,
                 EditorNodeGraph::kImageInputSocketId,
                 &mutationError)) {
-            m_NodeGraph = graphBefore;
-            m_Layers = layersBefore;
+            m_Project->graph = graphBefore;
+            m_Project->layers = layersBefore;
             return Finish(
                 errorMessage,
                 mutationError.empty()
@@ -1461,17 +1871,17 @@ bool EditorModule::SetMfdInternalViewTransformEnabled(
                     : mutationError,
                 false);
         }
-        const EditorNodeGraph::Link* insertedInput = m_NodeGraph.FindInputLink(
+        const EditorNodeGraph::Link* insertedInput = m_Project->graph.FindInputLink(
             output->id, EditorNodeGraph::kImageInputSocketId);
         EditorNodeGraph::Node* viewNode = insertedInput
-            ? m_NodeGraph.FindNode(insertedInput->fromNodeId)
+            ? m_Project->graph.FindNode(insertedInput->fromNodeId)
             : nullptr;
         if (!viewNode || viewNode->kind != EditorNodeGraph::NodeKind::Layer ||
             viewNode->layerType != LayerType::ViewTransform ||
             viewNode->layerIndex < 0 ||
-            viewNode->layerIndex >= static_cast<int>(m_Layers.size())) {
-            m_NodeGraph = graphBefore;
-            m_Layers = layersBefore;
+            viewNode->layerIndex >= static_cast<int>(m_Project->layers.size())) {
+            m_Project->graph = graphBefore;
+            m_Project->layers = layersBefore;
             return Finish(
                 errorMessage,
                 "The graph connection did not create the required View Transform.",
@@ -1479,23 +1889,38 @@ bool EditorModule::SetMfdInternalViewTransformEnabled(
         }
         sourceSet->settings["graphViewTransformNodeUuid"] =
             viewNode->instanceUuid;
-        if (sourceSet->settings.contains("graphViewTransformSettings") &&
-            m_Layers[viewNode->layerIndex]) {
-            m_Layers[viewNode->layerIndex]->Deserialize(
-                sourceSet->settings["graphViewTransformSettings"]);
+        if (m_Project->layers[viewNode->layerIndex]) {
+            nlohmann::json graphViewSettings = sourceSet->settings.value(
+                "graphViewTransformSettings", nlohmann::json::object());
+            if (!graphViewSettings.is_object() || graphViewSettings.empty()) {
+                const char* recipeKey = hdrResult
+                    ? "sharedPostHdrRecipe"
+                    : "sharedPostMfdRecipe";
+                const nlohmann::json storedRecipe = sourceSet->settings.value(
+                    recipeKey, nlohmann::json::object());
+                if (storedRecipe.is_object() &&
+                    storedRecipe.contains("rawRecipeVersion")) {
+                    graphViewSettings = Stack::RawRecipe::DeserializeRecipe(
+                        storedRecipe).viewTransform.layerJson;
+                    graphViewSettings.erase("enabled");
+                }
+            }
+            if (graphViewSettings.is_object() && !graphViewSettings.empty()) {
+                m_Project->layers[viewNode->layerIndex]->Deserialize(graphViewSettings);
+            }
         }
         sourceSet->settings["viewTransformPlacement"] = "graph";
     } else {
-        const EditorNodeGraph::Link* outputInput = m_NodeGraph.FindInputLink(
+        const EditorNodeGraph::Link* outputInput = m_Project->graph.FindInputLink(
             output->id, EditorNodeGraph::kImageInputSocketId);
         EditorNodeGraph::Node* viewNode = outputInput
-            ? m_NodeGraph.FindNode(outputInput->fromNodeId)
+            ? m_Project->graph.FindNode(outputInput->fromNodeId)
             : nullptr;
         if (!viewNode || viewNode->kind != EditorNodeGraph::NodeKind::Layer ||
             viewNode->layerType != LayerType::ViewTransform ||
             viewNode->layerIndex < 0 ||
-            viewNode->layerIndex >= static_cast<int>(m_Layers.size())) {
-            m_NodeGraph = graphBefore;
+            viewNode->layerIndex >= static_cast<int>(m_Project->layers.size())) {
+            m_Project->graph = graphBefore;
             return Finish(
                 errorMessage,
                 "Internal View Transform can only be restored when exactly one View Transform is immediately before Output.",
@@ -1505,45 +1930,64 @@ bool EditorModule::SetMfdInternalViewTransformEnabled(
             "graphViewTransformNodeUuid", std::string());
         if (managedViewNodeUuid.empty() ||
             viewNode->instanceUuid != managedViewNodeUuid) {
-            m_NodeGraph = graphBefore;
+            m_Project->graph = graphBefore;
             return Finish(
                 errorMessage,
-                "The View Transform before Output is no longer the one placed by MFD. Preserve the user-authored graph and reconnect the managed MFD View before moving it internally.",
+                "The View Transform before Output is no longer the one placed by the multi-frame workflow. Preserve the user-authored graph before moving display mapping internally.",
                 false);
         }
-        const EditorNodeGraph::Link* viewInput = m_NodeGraph.FindInputLink(
+        const EditorNodeGraph::Link* viewInput = m_Project->graph.FindInputLink(
             viewNode->id, EditorNodeGraph::kImageInputSocketId);
         if (!viewInput) {
-            m_NodeGraph = graphBefore;
+            m_Project->graph = graphBefore;
             return Finish(errorMessage, "The external View Transform has no input.", false);
         }
         const EditorNodeGraph::Link upstream = *viewInput;
         std::size_t viewOutgoingCount = 0;
-        for (const EditorNodeGraph::Link& link : m_NodeGraph.GetLinks()) {
+        for (const EditorNodeGraph::Link& link : m_Project->graph.GetLinks()) {
             if (link.fromNodeId == viewNode->id) ++viewOutgoingCount;
         }
         if (viewOutgoingCount != 1u) {
-            m_NodeGraph = graphBefore;
+            m_Project->graph = graphBefore;
             return Finish(
                 errorMessage,
                 "The external View Transform has additional consumers and cannot be removed safely.",
                 false);
         }
-        if (m_Layers[viewNode->layerIndex]) {
+        if (m_Project->layers[viewNode->layerIndex]) {
+            const nlohmann::json graphViewSettings =
+                m_Project->layers[viewNode->layerIndex]->Serialize();
             sourceSet->settings["graphViewTransformSettings"] =
-                m_Layers[viewNode->layerIndex]->Serialize();
+                graphViewSettings;
+            const char* recipeKey = hdrResult
+                ? "sharedPostHdrRecipe"
+                : "sharedPostMfdRecipe";
+            const nlohmann::json storedRecipe = sourceSet->settings.value(
+                recipeKey, nlohmann::json::object());
+            Stack::RawRecipe::RawDevelopmentRecipe internalRecipe =
+                storedRecipe.is_object() &&
+                    storedRecipe.contains("rawRecipeVersion")
+                ? Stack::RawRecipe::DeserializeRecipe(storedRecipe)
+                : Stack::RawRecipe::MakeDefaultRecipe(
+                    std::string(hdrResult ? "hdr://" : "mfd://") +
+                        snapshot.projectId + "/" + sourceSetId,
+                    sourceSet->name + " developed result");
+            internalRecipe.viewTransform.layerJson = graphViewSettings;
+            internalRecipe.viewTransform.layerJson["enabled"] = true;
+            sourceSet->settings[recipeKey] =
+                Stack::RawRecipe::SerializeRecipe(internalRecipe);
         }
         const int viewLayerIndex = viewNode->layerIndex;
         RemoveLayer(viewLayerIndex);
-        output = m_NodeGraph.FindNode(m_NodeGraph.GetOutputNodeId());
-        if (!output || !m_NodeGraph.TryConnectSockets(
+        output = m_Project->graph.FindNode(m_Project->graph.GetOutputNodeId());
+        if (!output || !m_Project->graph.TryConnectSockets(
                 upstream.fromNodeId,
                 upstream.fromSocketId,
                 output->id,
                 EditorNodeGraph::kImageInputSocketId,
                 &mutationError)) {
-            m_NodeGraph = graphBefore;
-            m_Layers = layersBefore;
+            m_Project->graph = graphBefore;
+            m_Project->layers = layersBefore;
             return Finish(
                 errorMessage,
                 mutationError.empty()
@@ -1555,15 +1999,16 @@ bool EditorModule::SetMfdInternalViewTransformEnabled(
         sourceSet->settings.erase("graphViewTransformNodeUuid");
     }
 
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    ++snapshot.postRecipeRevision;
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     if (!transaction) {
-        m_NodeGraph = graphBefore;
-        m_Layers = layersBefore;
+        m_Project->graph = graphBefore;
+        m_Project->layers = layersBefore;
         return Finish(errorMessage, "Could not begin the View Transform project transaction.", false);
     }
     return CommitActiveMultiFrameMutation(
-        std::move(snapshot), m_NodeGraph, transaction, false, errorMessage);
+        std::move(snapshot), m_Project->graph, transaction, false, errorMessage);
 }
 
 bool EditorModule::SetMultiFrameOperationIntent(
@@ -1571,49 +2016,260 @@ bool EditorModule::SetMultiFrameOperationIntent(
     MultiFrameOperationIntent intent,
     std::string* errorMessage) {
     if (!IsMultiFrameRawProjectActive()) return Finish(errorMessage, "No project is active.", false);
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(snapshot, sourceSetId);
     if (!sourceSet) return Finish(errorMessage, "The source set no longer exists.", false);
+    if (sourceSet->operationIntent == intent) {
+        return Finish(errorMessage, std::string(), true);
+    }
+    if (intent != MultiFrameOperationIntent::RawBurstDenoise &&
+        intent != MultiFrameOperationIntent::RawBurstHdr) {
+        return Finish(
+            errorMessage,
+            "Choose a Burst Denoise or HDR Merge processing node.",
+            false);
+    }
+    if (sourceSet->operationIntent != MultiFrameOperationIntent::RawCaptureSet &&
+        sourceSet->operationIntent != MultiFrameOperationIntent::Mfsr &&
+        sourceSet->operationIntent != MultiFrameOperationIntent::RawBurstDenoise &&
+        sourceSet->operationIntent != MultiFrameOperationIntent::RawBurstHdr) {
+        return Finish(errorMessage,
+            "This capture set has an unsupported compatibility binding.", false);
+    }
+    if (sourceSet->inputFamily != MultiFrameInputFamily::Raw) {
+        return Finish(errorMessage, "MultiFrame processing accepts RAW capture sets only.", false);
+    }
+    const std::size_t enabledFrameCount = static_cast<std::size_t>(std::count_if(
+        sourceSet->frames.begin(),
+        sourceSet->frames.end(),
+        [](const SourceSetFrame& frame) { return frame.enabled; }));
+    if (enabledFrameCount < 2u) {
+        return Finish(
+            errorMessage,
+            "This processing node requires at least two enabled RAW captures.",
+            false);
+    }
+    if (intent == MultiFrameOperationIntent::RawBurstHdr &&
+        snapshot.multiFrameGraph.nodes.empty() &&
+        enabledFrameCount > Raw::Hdr::kMaximumFrameCount) {
+        return Finish(
+            errorMessage,
+            "HDR Merge currently supports at most twenty enabled captures.",
+            false);
+    }
     if (intent == MultiFrameOperationIntent::RawBurstDenoise &&
-        sourceSet->inputFamily != MultiFrameInputFamily::Raw) {
-        return Finish(errorMessage, "Burst Denoise accepts RAW source sets only.", false);
+        snapshot.multiFrameGraph.nodes.empty() &&
+        enabledFrameCount > Raw::Mfd::kSharedBurstMaximumEnabledCaptures) {
+        return Finish(
+            errorMessage,
+            "Shared Burst supports at most thirty enabled captures. Disable extras without removing them from the capture set.",
+            false);
+    }
+    if (intent == MultiFrameOperationIntent::RawBurstHdr) {
+        RawCaptureCompatibilitySummary reference;
+        bool haveReference = false;
+        for (const SourceSetFrame& frame : sourceSet->frames) {
+            if (!frame.enabled) continue;
+            const EmbeddedAssetRecord* asset =
+                Stack::Project::FindEmbeddedAsset(snapshot, frame.assetId);
+            RawCaptureCompatibilitySummary candidate;
+            std::string compatibilityError;
+            if (!asset ||
+                !Stack::Project::DeserializeRawCaptureCompatibilitySummary(
+                    asset->captureMetadataSummary,
+                    candidate,
+                    &compatibilityError)) {
+                return Finish(
+                    errorMessage,
+                    compatibilityError.empty()
+                        ? "A selected capture has no usable RAW metadata."
+                        : compatibilityError,
+                    false);
+            }
+            if (haveReference &&
+                !Stack::Project::AreHdrCapturesStructurallyCompatible(
+                    reference,
+                    candidate,
+                    &compatibilityError,
+                    nullptr)) {
+                return Finish(errorMessage, compatibilityError, false);
+            }
+            if (!haveReference) {
+                reference = candidate;
+                haveReference = true;
+            }
+    }
     }
     sourceSet->operationIntent = intent;
-    sourceSet->operationSchemaVersion = intent == MultiFrameOperationIntent::RawBurstDenoise
-        ? Stack::Project::kMfdOperationSchemaVersion
-        : Stack::Project::kMultiFrameOperationSchemaVersion;
-    sourceSet->settings = intent == MultiFrameOperationIntent::RawBurstDenoise
-        ? DefaultMfdSettings()
-        : nlohmann::json::object();
     if (intent == MultiFrameOperationIntent::RawBurstDenoise) {
+        sourceSet->operationSchemaVersion =
+            Stack::Project::kMfdOperationSchemaVersion;
+        sourceSet->settings = DefaultMfdSettings();
         EnsureMfdPostRecipe(*sourceSet);
+    } else {
+        sourceSet->operationSchemaVersion =
+            Stack::Project::kHdrOperationSchemaVersion;
+        sourceSet->settings = DefaultHdrSettings();
+        EnsureHdrPostRecipe(*sourceSet);
     }
     ++snapshot.mfdInputRevision;
-    EditorNodeGraph::Graph graph = m_NodeGraph;
+    ++snapshot.hdrInputRevision;
+    EditorNodeGraph::Graph graph = m_Project->graph;
+    std::vector<int> neutralBindingNodes;
+    for (const EditorNodeGraph::Node& node : graph.GetNodes()) {
+        if ((node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet &&
+             node.rawProjectSourceSet.sourceSetId == sourceSetId) ||
+            (node.kind == EditorNodeGraph::NodeKind::MultiFrameDenoise &&
+             node.multiFrameDenoise.sourceSetId == sourceSetId) ||
+            (node.kind == EditorNodeGraph::NodeKind::MultiFrameHdr &&
+             node.multiFrameHdr.sourceSetId == sourceSetId)) {
+            neutralBindingNodes.push_back(node.id);
+        }
+    }
+    for (const int nodeId : neutralBindingNodes) {
+        graph.RemoveNode(nodeId);
+    }
+    sourceSet->graphBindingNodeId.clear();
     std::string topologyError;
     if (intent == MultiFrameOperationIntent::RawBurstDenoise &&
         !SyncMfdGraphTopology(graph, snapshot, *sourceSet, true, topologyError)) {
         return Finish(errorMessage, topologyError, false);
+    } else if (intent == MultiFrameOperationIntent::RawBurstHdr &&
+               !SyncHdrGraphTopology(
+                   graph, snapshot, *sourceSet, true, topologyError)) {
+        return Finish(errorMessage, topologyError, false);
     }
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(snapshot.persistedStorageRevision);
+    const auto transaction = m_Project->store->BeginTransaction(snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
         std::move(snapshot), std::move(graph), transaction, false, errorMessage);
+}
+
+bool EditorModule::SetMultiFrameGraphDocument(
+    Stack::Project::MultiFrameGraphDocument graph,
+    std::string* errorMessage) {
+    if (!IsMultiFrameRawProjectActive() || !m_Project->snapshot ||
+        !m_Project->store) {
+        return Finish(errorMessage, "No MultiFrame project is active.", false);
+    }
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
+    const Stack::Project::MultiFrameGraphValidationResult validation =
+        Stack::Project::ValidateMultiFrameGraph(graph, snapshot, false);
+    if (!validation.valid) {
+        return Finish(
+            errorMessage,
+            validation.errors.empty()
+                ? "The MultiFrame graph edit is invalid."
+                : validation.errors.front(),
+            false);
+    }
+    const Raw::MultiFrame::GraphExecutionPlan previousPlan =
+        Raw::MultiFrame::BuildMultiFrameGraphExecutionPlan(snapshot);
+    snapshot.multiFrameGraph = std::move(graph);
+    const Raw::MultiFrame::GraphExecutionPlan editedPlan =
+        Raw::MultiFrame::BuildMultiFrameGraphExecutionPlan(snapshot);
+    if (previousPlan.contentIdentitySha256 !=
+            editedPlan.contentIdentitySha256 ||
+        previousPlan.valid != editedPlan.valid) {
+        // Rewiring, membership, or processor settings retire pixels. View-only
+        // canvas edits retain the same execution identity and current result.
+        ++snapshot.mfdInputRevision;
+        ++snapshot.hdrInputRevision;
+    }
+    EditorNodeGraph::Graph rendererGraph = m_Project->graph;
+    const Raw::MultiFrame::GraphExecutionStep* terminal =
+        Raw::MultiFrame::FindGraphExecutionStep(
+            editedPlan, editedPlan.outputProducerNodeId);
+    const bool finalHdr = terminal && terminal->adapter ==
+        Raw::MultiFrame::GraphExecutionAdapter::HdrV4;
+    const bool finalBurst = terminal && terminal->adapter ==
+        Raw::MultiFrame::GraphExecutionAdapter::SharedBurstV1;
+    MultiFrameSourceSet* activeSet = Stack::Project::FindSourceSet(
+        snapshot, snapshot.activeSourceSetId);
+    if (!activeSet && snapshot.sourceSets.size() == 1u) {
+        activeSet = &snapshot.sourceSets.front();
+    }
+    if ((finalHdr || finalBurst) && activeSet) {
+        if (finalHdr) EnsureHdrPostRecipe(*activeSet);
+        else EnsureMfdPostRecipe(*activeSet);
+        const bool hasMatchingBridge = finalHdr
+            ? FindHdrNode(
+                rendererGraph,
+                activeSet->sourceSetId,
+                activeSet->graphBindingNodeId) != nullptr
+            : FindMfdNode(
+                rendererGraph,
+                activeSet->sourceSetId,
+                activeSet->graphBindingNodeId) != nullptr;
+        std::vector<int> obsoleteBridgeNodes;
+        for (const EditorNodeGraph::Node& node : rendererGraph.GetNodes()) {
+            const bool neutral =
+                node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet &&
+                node.rawProjectSourceSet.sourceSetId == activeSet->sourceSetId;
+            const bool oppositeHdr = finalBurst &&
+                node.kind == EditorNodeGraph::NodeKind::MultiFrameHdr &&
+                node.multiFrameHdr.sourceSetId == activeSet->sourceSetId;
+            const bool oppositeBurst = finalHdr &&
+                node.kind == EditorNodeGraph::NodeKind::MultiFrameDenoise &&
+                node.multiFrameDenoise.sourceSetId == activeSet->sourceSetId;
+            if (neutral || oppositeHdr || oppositeBurst) {
+                obsoleteBridgeNodes.push_back(node.id);
+            }
+        }
+        for (int nodeId : obsoleteBridgeNodes) {
+            rendererGraph.RemoveNode(nodeId);
+        }
+        if (!hasMatchingBridge || !obsoleteBridgeNodes.empty()) {
+            std::string bridgeError;
+            const bool bridgeReady = finalHdr
+                ? SyncHdrGraphTopology(
+                    rendererGraph, snapshot, *activeSet, true, bridgeError)
+                : SyncMfdGraphTopology(
+                    rendererGraph, snapshot, *activeSet, true, bridgeError);
+            if (!bridgeReady) {
+                return Finish(
+                    errorMessage,
+                    bridgeError.empty()
+                        ? "The typed MultiFrame Output could not create its RAW renderer bridge."
+                        : bridgeError,
+                    false);
+            }
+        }
+    }
+    const auto transaction = m_Project->store->BeginTransaction(
+        snapshot.persistedStorageRevision);
+    if (!transaction) {
+        return Finish(
+            errorMessage,
+            "Could not begin the MultiFrame graph transaction.",
+            false);
+    }
+    return CommitActiveMultiFrameMutation(
+        std::move(snapshot),
+        std::move(rendererGraph),
+        transaction,
+        false,
+        errorMessage,
+        true);
 }
 
 bool EditorModule::ActivateMultiFrameSourceSet(const std::string& sourceSetId) {
     if (!IsMultiFrameRawProjectActive()) return false;
     MultiFrameSourceSet* sourceSet =
-        Stack::Project::FindSourceSet(*m_ActiveRawProjectSnapshot, sourceSetId);
+        Stack::Project::FindSourceSet(*m_Project->snapshot, sourceSetId);
     if (!sourceSet) return false;
-    const bool changed = m_ActiveRawProjectSnapshot->activeSourceSetId != sourceSetId;
-    m_ActiveRawProjectSnapshot->activeSourceSetId = sourceSetId;
-    m_ActiveRawProjectSnapshot->rawWorkspaceData["activeSourceSetId"] = sourceSetId;
-    const EditorNodeGraph::Node* node =
-        sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise
-        ? FindMfdNode(m_NodeGraph, sourceSetId, sourceSet->graphBindingNodeId)
-        : FindSourceSetNode(m_NodeGraph, sourceSetId, sourceSet->graphBindingNodeId);
+    const bool changed = m_Project->snapshot->activeSourceSetId != sourceSetId;
+    m_Project->snapshot->activeSourceSetId = sourceSetId;
+    m_Project->snapshot->rawWorkspaceData["activeSourceSetId"] = sourceSetId;
+    const EditorNodeGraph::Node* node = nullptr;
+    if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstDenoise) {
+        node = FindMfdNode(m_Project->graph, sourceSetId, sourceSet->graphBindingNodeId);
+    } else if (sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        node = FindHdrNode(m_Project->graph, sourceSetId, sourceSet->graphBindingNodeId);
+    } else {
+        node = FindSourceSetNode(m_Project->graph, sourceSetId, sourceSet->graphBindingNodeId);
+    }
     if (node) {
-        m_NodeGraph.SelectNode(node->id, false);
+        m_Project->graph.SelectNode(node->id, false);
     }
     if (changed) MarkDirty();
     return true;
@@ -1625,22 +2281,22 @@ bool EditorModule::ActivateMultiFrameFrame(
     bool selectGraphNode) {
     if (!IsMultiFrameRawProjectActive()) return false;
     MultiFrameSourceSet* sourceSet =
-        Stack::Project::FindSourceSet(*m_ActiveRawProjectSnapshot, sourceSetId);
+        Stack::Project::FindSourceSet(*m_Project->snapshot, sourceSetId);
     if (!sourceSet) return false;
     const auto frame = std::find_if(
         sourceSet->frames.begin(), sourceSet->frames.end(),
         [&](const SourceSetFrame& candidate) { return candidate.frameId == frameId; });
     if (frame == sourceSet->frames.end()) return false;
     const bool changed =
-        m_ActiveRawProjectSnapshot->activeSourceSetId != sourceSetId ||
-        m_ActiveRawProjectSnapshot->activeFrameId != frameId;
-    m_ActiveRawProjectSnapshot->activeSourceSetId = sourceSetId;
-    m_ActiveRawProjectSnapshot->activeFrameId = frameId;
-    UpdateWorkspaceManifestFields(*m_ActiveRawProjectSnapshot);
+        m_Project->snapshot->activeSourceSetId != sourceSetId ||
+        m_Project->snapshot->activeFrameId != frameId;
+    m_Project->snapshot->activeSourceSetId = sourceSetId;
+    m_Project->snapshot->activeFrameId = frameId;
+    UpdateWorkspaceManifestFields(*m_Project->snapshot);
     if (selectGraphNode) {
         if (const EditorNodeGraph::Node* node = FindMfdFrameNode(
-                m_NodeGraph, sourceSetId, frameId)) {
-            m_NodeGraph.SelectNode(node->id, false);
+                m_Project->graph, sourceSetId, frameId)) {
+            m_Project->graph.SelectNode(node->id, false);
         }
     }
     if (changed) MarkDirty();
@@ -1649,7 +2305,7 @@ bool EditorModule::ActivateMultiFrameFrame(
 
 bool EditorModule::OpenManagedMfdGraphNode(int nodeId) {
     if (!IsMultiFrameRawProjectActive()) return false;
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node) return false;
     if (node->kind == EditorNodeGraph::NodeKind::RawProjectFrame) {
         if (!ActivateMultiFrameFrame(
@@ -1662,6 +2318,10 @@ bool EditorModule::OpenManagedMfdGraphNode(int nodeId) {
         if (!ActivateMultiFrameSourceSet(node->multiFrameDenoise.sourceSetId)) {
             return false;
         }
+    } else if (node->kind == EditorNodeGraph::NodeKind::MultiFrameHdr) {
+        if (!ActivateMultiFrameSourceSet(node->multiFrameHdr.sourceSetId)) {
+            return false;
+        }
     } else {
         return false;
     }
@@ -1671,12 +2331,118 @@ bool EditorModule::OpenManagedMfdGraphNode(int nodeId) {
 }
 
 bool EditorModule::RequestCreateMfdProjectFromGallerySelection() {
+    return RequestCreateMultiFrameProjectFromGallerySelection(
+        MultiFrameOperationIntent::RawCaptureSet);
+}
+
+bool EditorModule::StartActiveMultiFrameProcessingForQueue(
+    std::string* errorMessage) {
+    if (IsBracketingActive()) {
+        if(HasPendingBracketingDraft()){if(errorMessage)*errorMessage="Process or discard pending Bracketing input changes before export.";return false;}
+        return StartBracketingProcessing(true, errorMessage);
+    }
+    if (!IsMultiFrameRawProjectActive() || !m_Project->snapshot) {
+        if (errorMessage) *errorMessage =
+            "The queued document is not an active multi-frame project.";
+        return false;
+    }
+    const std::string sourceSetId =
+        m_Project->snapshot->activeSourceSetId;
+    const Stack::Project::MultiFrameSourceSet* sourceSet =
+        Stack::Project::FindSourceSet(
+            *m_Project->snapshot, sourceSetId);
+    if (!sourceSet) {
+        if (errorMessage) *errorMessage =
+            "The multi-frame project has no active source set.";
+        return false;
+    }
+    const bool restoredHdrResult =
+        sourceSet->operationIntent == MultiFrameOperationIntent::RawBurstHdr &&
+        m_HdrAdoptedRawResult && m_HdrAdoptedRawResult->rawData &&
+        m_HdrAdoptedRawResult->projectId ==
+            m_Project->snapshot->projectId &&
+        m_HdrAdoptedRawResult->sourceSetId == sourceSetId &&
+        m_HdrAdoptedRawResult->inputRevision ==
+            m_Project->snapshot->hdrInputRevision;
+    const bool restoredBurstResult =
+        sourceSet->operationIntent ==
+            MultiFrameOperationIntent::RawBurstDenoise &&
+        m_MfdAdoptedRawResult && m_MfdAdoptedRawResult->rawData &&
+        m_MfdAdoptedRawResult->projectId ==
+            m_Project->snapshot->projectId &&
+        m_MfdAdoptedRawResult->sourceSetId == sourceSetId &&
+        m_MfdAdoptedRawResult->inputRevision ==
+            m_Project->snapshot->mfdInputRevision;
+    if (restoredHdrResult || restoredBurstResult) {
+        if (errorMessage) errorMessage->clear();
+        m_MultiFrameGraphProcessingTaskState = Async::TaskState::Ready;
+        m_MultiFrameGraphProcessingStatusText =
+            "Using the verified saved MultiFrame result.";
+        return true;
+    }
+    if (!m_Project->snapshot->multiFrameGraph.nodes.empty()) {
+        return StartMultiFrameGraphProcessing(sourceSetId, errorMessage);
+    }
+    if (sourceSet->operationIntent ==
+        MultiFrameOperationIntent::RawBurstHdr) {
+        return StartHdrProcessing(sourceSetId, errorMessage);
+    }
+    if (sourceSet->operationIntent ==
+        MultiFrameOperationIntent::RawBurstDenoise) {
+        return StartMfdExperimentalProcessing(sourceSetId, errorMessage);
+    }
+    if (errorMessage) *errorMessage =
+        "This capture set has no executable Bracket processing operation.";
+    return false;
+}
+
+bool EditorModule::IsActiveMultiFrameProcessingForQueueBusy() const {
+    if (IsBracketingActive()) {
+        const_cast<EditorModule*>(this)->TickBracketing();
+        return m_MultiFrameGraphProcessingTaskState == Async::TaskState::Failed ||
+            Async::IsBusy(m_MultiFrameGraphProcessingTaskState);
+    }
+    return Async::IsBusy(m_MultiFrameGraphProcessingTaskState) ||
+        Async::IsBusy(m_MfdExperimentalProcessingTaskState) ||
+        Async::IsBusy(m_HdrProcessingTaskState);
+}
+
+bool EditorModule::DidActiveMultiFrameProcessingForQueueFail(
+    std::string* errorMessage) const {
+    if (IsBracketingActive()) const_cast<EditorModule*>(this)->TickBracketing();
+    const auto copyFailure = [&](Async::TaskState state,
+                                 const std::string& status) {
+        if (state != Async::TaskState::Failed) return false;
+        if (errorMessage) {
+            *errorMessage = status.empty()
+                ? "The Bracket pipeline failed."
+                : status;
+        }
+        return true;
+    };
+    return copyFailure(
+               m_MultiFrameGraphProcessingTaskState,
+               m_MultiFrameGraphProcessingStatusText) ||
+        copyFailure(
+               m_MfdExperimentalProcessingTaskState,
+               m_MfdExperimentalProcessingStatusText) ||
+        copyFailure(
+               m_HdrProcessingTaskState,
+               m_HdrProcessingStatusText);
+}
+
+bool EditorModule::RequestCreateMultiFrameProjectFromGallerySelection(
+    MultiFrameOperationIntent intent) {
+    if(intent==MultiFrameOperationIntent::RawCaptureSet) {
+        BeginBracketingDraft(true);OpenBracketingTool();RequestOpenRawLabTab();return true;
+    }
     if (IsDeferredLoadedProjectApplyActive() ||
         IsRawWorkspaceProjectLoadBusy() ||
-        IsMfdExperimentalProcessingBusy()) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
-            "Finish the current RAW load or MFD processing run before creating a new project.",
+        IsMfdExperimentalProcessingBusy() ||
+        IsHdrProcessingBusy()) {
+        PostNotification(
+            UiNotificationSeverity::Warning,
+            "Finish the current RAW load or multi-frame processing run before creating a new project.",
             "mfd-create-new-busy");
         return false;
     }
@@ -1692,7 +2458,23 @@ bool EditorModule::RequestCreateMfdProjectFromGallerySelection() {
             paths.push_back(source->absolutePath);
         }
     }
-    if (paths.size() < 2u) return false;
+    if (paths.empty()) {
+        PostNotification(
+            UiNotificationSeverity::Warning,
+            "At least one selected RAW source must still be available to create a capture set.",
+            "multi-frame-create-selection-unavailable");
+        return false;
+    }
+    if (intent != MultiFrameOperationIntent::RawCaptureSet &&
+        intent != MultiFrameOperationIntent::RawBurstDenoise &&
+        intent != MultiFrameOperationIntent::RawBurstHdr) {
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "The requested multi-frame project type is not supported.",
+            "multi-frame-create-unsupported-intent");
+        return false;
+    }
+    m_PendingMultiFrameCreationIntent = intent;
     m_PendingMultiFrameGallerySourcePaths = std::move(paths);
     m_PopulateMultiFrameCreationFromGallery = true;
     m_OpenMultiFrameCreationPopup = true;
@@ -1702,65 +2484,662 @@ bool EditorModule::RequestCreateMfdProjectFromGallerySelection() {
     return true;
 }
 
-bool EditorModule::SaveActiveMultiFrameRawProject(std::string* errorMessage) {
-    if (!IsMultiFrameRawProjectActive()) {
-        return Finish(errorMessage, "No multi-frame RAW project is active.", false);
+bool EditorModule::HandleMultiFrameFileDrop(
+    const std::vector<std::string>& paths,
+    float screenX,
+    float screenY) {
+    if(IsBracketingToolActive()) {
+        std::vector<std::filesystem::path> files;for(const auto& path:paths)files.emplace_back(path);
+        AddBracketingDraftFiles(files);return true;
     }
-    if (!m_Dirty) return Finish(errorMessage, std::string(), true);
-    RawProjectSnapshot snapshot = *m_ActiveRawProjectSnapshot;
-    const auto transaction = m_ActiveRawProjectStore->BeginTransaction(
+    if (paths.empty()) {
+        return false;
+    }
+
+    std::vector<std::filesystem::path> rawPaths;
+    rawPaths.reserve(paths.size());
+    for (const std::string& path : paths) {
+        if (!path.empty() && Raw::RawLoader::IsRawPath(path)) {
+            rawPaths.emplace_back(path);
+        }
+    }
+    if (rawPaths.empty()) {
+        PostNotification(
+            UiNotificationSeverity::Warning,
+            "MultiFrame accepts mosaiced RAW captures such as DNG, CR3, NEF, ARW, RAF, and RW2 files.",
+            "multi-frame-file-drop-raw-only");
+        return true;
+    }
+
+    if (!IsMultiFrameRawProjectActive() || !m_Project->snapshot) {
+        m_PendingMultiFrameCreationIntent =
+            MultiFrameOperationIntent::RawCaptureSet;
+        m_PendingMultiFrameGallerySourcePaths = std::move(rawPaths);
+        m_PopulateMultiFrameCreationFromGallery = true;
+        m_OpenMultiFrameCreationPopup = true;
+        m_ReturnToMultiFrameAfterGalleryCreationCancel = true;
+        m_MultiFrameWorkspaceStatusText =
+            "Choose where to save the capture-set project for the dropped RAW files.";
+        return true;
+    }
+
+    if (IsDeferredLoadedProjectApplyActive() ||
+        IsRawWorkspaceProjectLoadBusy() ||
+        IsMultiFrameGraphProcessingBusy() ||
+        IsMfdExperimentalProcessingBusy() ||
+        IsHdrProcessingBusy()) {
+        PostNotification(
+            UiNotificationSeverity::Warning,
+            "Finish the current RAW load or MultiFrame processing run before dropping more captures.",
+            "multi-frame-file-drop-busy");
+        return true;
+    }
+
+    RawProjectSnapshot& beforeSnapshot = *m_Project->snapshot;
+    MultiFrameSourceSet* beforeSourceSet = Stack::Project::FindSourceSet(
+        beforeSnapshot,
+        beforeSnapshot.activeSourceSetId);
+    if (!beforeSourceSet) {
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "The active MultiFrame project has no capture set to receive the dropped RAW files.",
+            "multi-frame-file-drop-missing-set");
+        return true;
+    }
+
+    const std::string sourceSetId = beforeSourceSet->sourceSetId;
+    std::unordered_set<std::string> previousFrameIds;
+    previousFrameIds.reserve(beforeSourceSet->frames.size());
+    for (const SourceSetFrame& frame : beforeSourceSet->frames) {
+        previousFrameIds.insert(frame.frameId);
+    }
+
+    std::string error;
+    if (!AddFramesToMultiFrameSourceSet(sourceSetId, rawPaths, &error)) {
+        m_MultiFrameWorkspaceStatusText = error.empty()
+            ? "The dropped RAW captures could not be added."
+            : error;
+        PostNotification(
+            UiNotificationSeverity::Error,
+            m_MultiFrameWorkspaceStatusText,
+            "multi-frame-file-drop-failed");
+        return true;
+    }
+
+    RawProjectSnapshot& snapshot = *m_Project->snapshot;
+    MultiFrameSourceSet* sourceSet = Stack::Project::FindSourceSet(
+        snapshot,
+        sourceSetId);
+    if (!sourceSet) {
+        m_MultiFrameWorkspaceStatusText =
+            "The RAW captures were imported, but the active capture set could not be refreshed.";
+        return true;
+    }
+
+    if (Stack::Project::IsBracketing(*sourceSet)) return true;
+    Stack::Project::MultiFrameGraphDocument edited = snapshot.multiFrameGraph;
+    const bool hasDropRect =
+        m_MultiFrameDropMaxX > m_MultiFrameDropMinX &&
+        m_MultiFrameDropMaxY > m_MultiFrameDropMinY;
+    const bool dropInside = hasDropRect &&
+        screenX >= m_MultiFrameDropMinX && screenX <= m_MultiFrameDropMaxX &&
+        screenY >= m_MultiFrameDropMinY && screenY <= m_MultiFrameDropMaxY;
+    const double anchorScreenX = dropInside
+        ? static_cast<double>(screenX)
+        : static_cast<double>(m_MultiFrameDropMinX + m_MultiFrameDropMaxX) * 0.5;
+    const double anchorScreenY = dropInside
+        ? static_cast<double>(screenY)
+        : static_cast<double>(m_MultiFrameDropMinY + m_MultiFrameDropMaxY) * 0.5;
+    const double safeZoom = std::clamp(m_MultiFrameDropZoom, 0.25, 4.0);
+    const double graphX = hasDropRect
+        ? (anchorScreenX - m_MultiFrameDropMinX) / safeZoom -
+              m_MultiFrameDropPanX
+        : 260.0;
+    const double graphY = hasDropRect
+        ? (anchorScreenY - m_MultiFrameDropMinY) / safeZoom -
+              m_MultiFrameDropPanY
+        : 220.0;
+
+    std::vector<std::string> addedNodeIds;
+    std::size_t addedFrameIndex = 0u;
+    for (const SourceSetFrame& frame : sourceSet->frames) {
+        if (previousFrameIds.count(frame.frameId) != 0u) {
+            continue;
+        }
+        const EmbeddedAssetRecord* asset = Stack::Project::FindEmbeddedAsset(
+            snapshot,
+            frame.assetId);
+        Stack::Project::MultiFrameGraphNode node;
+        node.nodeId = Stack::Project::GenerateStableUuid();
+        node.kind = Stack::Project::MultiFrameGraphNodeKind::CaptureSubset;
+        node.title = asset && !asset->originalFilename.empty()
+            ? asset->originalFilename
+            : (frame.userLabel.empty() ? "RAW Capture" : frame.userLabel);
+        node.sourceSetId = sourceSetId;
+        node.frameIds = { frame.frameId };
+        node.positionX = graphX;
+        node.positionY = graphY +
+            static_cast<double>(addedFrameIndex) * 138.0;
+        node.settings = {
+            { "source", "raw-file" },
+            { "import", "explorer-drop" },
+            { "frameId", frame.frameId },
+            { "assetId", frame.assetId },
+            { "provisional", false }
+        };
+        addedNodeIds.push_back(node.nodeId);
+        edited.nodes.push_back(std::move(node));
+        ++addedFrameIndex;
+    }
+
+    if (!addedNodeIds.empty()) {
+        edited.userEdited = true;
+        if (!SetMultiFrameGraphDocument(std::move(edited), &error)) {
+            m_MultiFrameWorkspaceStatusText =
+                "The RAW captures were added to the project, but their canvas nodes could not be created: " +
+                error;
+            PostNotification(
+                UiNotificationSeverity::Error,
+                m_MultiFrameWorkspaceStatusText,
+                "multi-frame-file-drop-node-failed");
+            return true;
+        }
+        m_MultiFrameWorkspaceSelectedNodeId = addedNodeIds.front();
+        m_MultiFrameWorkspaceSelection =
+            MultiFrameWorkspaceSelection::CaptureSubset;
+    }
+
+    m_MultiFrameWorkspaceStatusText = addedFrameIndex == 1u
+        ? "Added 1 RAW capture. Drag its output socket to Burst Denoise, HDR Merge, or another compatible node."
+        : "Added " + std::to_string(addedFrameIndex) +
+              " RAW captures as movable source nodes. Connect their output sockets manually.";
+    PostNotification(
+        UiNotificationSeverity::Success,
+        m_MultiFrameWorkspaceStatusText,
+        "multi-frame-file-drop-complete");
+    return true;
+}
+
+bool EditorModule::SaveActiveMultiFrameRawProject(std::string* errorMessage) {
+    if(m_Bracketing&&!m_Bracketing->newProject&&m_Bracketing->processRequired&&!m_Bracketing->savingDraft)
+        return CommitBracketingDraft(false,errorMessage);
+    if (!m_DocumentPersistenceEnabled) {
+        return Finish(
+            errorMessage,
+            "Document persistence is disabled for this isolated render session.",
+            false);
+    }
+    if (!IsUnifiedProjectStoreActive()) {
+        return Finish(errorMessage, "No managed project is active.", false);
+    }
+    if (!IsDirty()) return Finish(errorMessage, std::string(), true);
+    RawProjectSnapshot snapshot = *m_Project->snapshot;
+    const auto transaction = m_Project->store->BeginTransaction(
         snapshot.persistedStorageRevision);
     return transaction && CommitActiveMultiFrameMutation(
-        std::move(snapshot), m_NodeGraph, transaction, false, errorMessage);
+        std::move(snapshot),
+        m_Project->graph,
+        transaction,
+        false,
+        errorMessage,
+        false);
+}
+
+void EditorModule::StartManagedProjectSaveAsync(
+    std::uint64_t capturedEditorRevision,
+    Stack::Project::ProjectSaveReason reason,
+    Stack::Project::ProjectSaveCoordinator::Completion completion) {
+    using Stack::Project::ProjectSaveResult;
+    using Stack::Project::ProjectSaveStatus;
+
+    auto failImmediately = [&](std::string message) {
+        ProjectSaveResult result;
+        result.status = ProjectSaveStatus::Failed;
+        result.projectId = m_Project->documentId;
+        result.message = std::move(message);
+        if (completion) completion(std::move(result));
+    };
+    if (!IsUnifiedProjectStoreActive()) {
+        failImmediately("No managed project is active.");
+        return;
+    }
+    if(m_Bracketing&&!m_Bracketing->newProject&&m_Bracketing->processRequired) {
+        std::string error;
+        if(!CommitBracketingDraft(false,&error)){failImmediately(error);return;}
+        ProjectSaveResult result;
+        result.status=ProjectSaveStatus::Saved;
+        result.projectId=m_Project->documentId;
+        result.persistedEditRevision=GetProjectEditRevision();
+        result.storageRevision=m_Project->snapshot->persistedStorageRevision;
+        result.path=GetCurrentProjectFileName();
+        if(completion)completion(std::move(result));
+        return;
+    }
+
+    const std::string projectId = EnsureProjectDocumentId();
+    const auto snapshotCaptureBegin = std::chrono::steady_clock::now();
+    // The live snapshot already owns the last serialized graph. Copying it
+    // here duplicated the largest JSON payload on the UI thread immediately
+    // before SerializePipeline() replaced it. Preserve every other project
+    // field, then serialize the current graph exactly once below.
+    RawProjectSnapshot snapshot =
+        CopyProjectSnapshotWithoutPipeline(*m_Project->snapshot);
+    snapshot.projectId = projectId;
+    if (!m_Project->name.empty()) snapshot.projectName = m_Project->name;
+    const bool rawProject = IsRawWorkspaceProjectActive();
+    if (rawProject && !IsMultiFrameRawProjectActive()) {
+        if (!snapshot.rawWorkspaceData.is_object()) {
+            snapshot.rawWorkspaceData = nlohmann::json::object();
+        }
+        snapshot.rawWorkspaceData["rawRecipe"] =
+            Stack::RawRecipe::SerializeWorkspaceSourceRecipe(m_Project->rawRecipe);
+        snapshot.rawWorkspaceData["rawWorkspaceMode"] =
+            Stack::RawWorkspace::RawProjectModeToString(
+                m_Project->rawMode);
+        StackBinaryFormat::ProjectDocument modeDocument;
+        modeDocument.rawWorkspaceData = snapshot.rawWorkspaceData;
+        ApplyActiveRawWorkspaceModeDataToDocument(modeDocument);
+        snapshot.rawWorkspaceData = std::move(modeDocument.rawWorkspaceData);
+    }
+    // Serialize the active graph once. PipelineForGraph is required when a
+    // detached mutation graph is supplied, but using it here serialized the
+    // same live document twice before every autosave.
+    snapshot.pipelineData = SerializePipeline();
+    if (rawProject) UpdateWorkspaceManifestFields(snapshot);
+    m_GraphPerformanceStats.lastProjectSaveSnapshotMs =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - snapshotCaptureBegin).count();
+
+    const Stack::Project::ProjectSaveToken saveToken =
+        m_Project->lifecycle.BeginSave();
+    if (!saveToken) {
+        failImmediately("The project is not ready to save.");
+        return;
+    }
+    snapshot.dirtyRevision = saveToken.snapshotDirtyRevision;
+
+    const Stack::Project::ProjectStoreHandle sourceStore =
+        m_Project->store;
+    const bool adopting =
+        !m_Project->adoptionSourcePath.empty() ||
+        sourceStore->StorageKind() ==
+            Stack::Project::ProjectStorageKind::PortableFile;
+    const std::filesystem::path adoptionSource =
+        !m_Project->adoptionSourcePath.empty()
+            ? m_Project->adoptionSourcePath
+            : sourceStore->StoragePath();
+    std::filesystem::path destination;
+    if (adopting) {
+        const std::filesystem::path destinationRoot =
+            IsRawWorkspaceProjectActive() &&
+                    !m_RawWorkspace.workspaceRoot.empty()
+                ? Stack::RawWorkspace::BuildManagedLayout(
+                      m_RawWorkspace.workspaceRoot).projectsDirectory
+                : AppPaths::GetProjectsDirectory();
+        destination = Stack::Project::ProjectIndex::BuildUniqueProjectPath(
+            destinationRoot,
+            snapshot.projectName.empty() ? "Untitled Project" : snapshot.projectName,
+            projectId);
+        snapshot.adoptedFrom = adoptionSource.lexically_normal().string();
+    }
+
+    std::shared_ptr<const Raw::Bracketing::BracketingResult> bracketResult;
+    std::string bracketSetId;
+    if(m_Bracketing && m_Bracketing->result &&
+        m_Bracketing->projectId==snapshot.projectId && m_Bracketing->completedRevision==snapshot.hdrInputRevision) {
+        const auto* set=Stack::Project::FindSourceSet(snapshot,m_Bracketing->setId);
+        if(set && set->settings["bracketing"].dump()==m_Bracketing->completedRecipe) {
+            bracketResult=m_Bracketing->result;bracketSetId=m_Bracketing->setId;
+        }
+    }
+    struct ManagedSaveWork {
+        RawProjectSnapshot snapshot;
+        Stack::Project::ProjectStoreHandle savedStore;
+        Stack::Project::ProjectStoreCommitResult commit;
+        std::string error;
+        bool success = false;
+        bool conflict = false;
+        double commitMs = 0.0;
+    };
+    auto work = std::make_shared<ManagedSaveWork>();
+    work->snapshot = std::move(snapshot);
+
+    auto saveWork = [
+        sourceStore,
+        bracketResult, bracketSetId,
+        adopting,
+        destination,
+        reason,
+        work,
+        this,
+        projectId,
+        capturedEditorRevision,
+        saveToken,
+        adoptionSource,
+        completion
+    ]() mutable {
+        const auto commitBegin = std::chrono::steady_clock::now();
+        try {
+        if (adopting) {
+            Stack::Project::ProjectStoreOpenResult converted =
+                Stack::Project::ConvertProjectStore(
+                    sourceStore,
+                    work->snapshot,
+                    destination,
+                    Stack::Project::ProjectStorageKind::DirectoryBundle,
+                    [bracketResult, bracketSetId](const auto& store, const auto& transaction, auto& snapshot, auto& error) {
+                        return !bracketResult || Stack::Project::StageBracketingResult(
+                            store, transaction, snapshot, bracketSetId, *bracketResult, {}, error);
+                    });
+            if (converted) {
+                work->success = true;
+                work->savedStore = std::move(converted.store);
+                work->snapshot = std::move(converted.snapshot);
+            } else {
+                work->error = converted.message.empty()
+                    ? "The adopted project bundle could not be committed."
+                    : converted.message;
+            }
+        } else {
+            const Stack::Project::ProjectStoreTransaction transaction =
+                sourceStore->BeginTransaction(
+                    work->snapshot.persistedStorageRevision);
+            if (!transaction) {
+                work->error = "Could not begin the project save transaction.";
+            } else if (!StackBinaryFormat::ExternalizeManagedProjectAssets(
+                           sourceStore,
+                           transaction,
+                           work->snapshot)) {
+                sourceStore->Abort(transaction);
+                work->error = "Could not stage the project's managed image assets.";
+            } else if (bracketResult && !Stack::Project::StageBracketingResult(
+                sourceStore,transaction,work->snapshot,bracketSetId,*bracketResult,{},work->error)) {
+                sourceStore->Abort(transaction);
+            } else {
+                const Stack::Project::ModelValidationResult validation =
+                    Stack::Project::ValidateRawProjectSnapshot(work->snapshot);
+                if (!validation.valid) {
+                    sourceStore->Abort(transaction);
+                    work->error = validation.errors.empty()
+                        ? "The project snapshot is invalid."
+                        : validation.errors.front();
+                } else {
+                    work->commit = sourceStore->Commit(
+                        transaction,
+                        work->snapshot);
+                    work->success = static_cast<bool>(work->commit);
+                    work->conflict = work->commit.status ==
+                        Stack::Project::ProjectStoreCommitStatus::Conflict;
+                    if (!work->success) {
+                        sourceStore->Abort(transaction);
+                        work->error = work->commit.message.empty()
+                            ? "The project manifest could not be published."
+                            : work->commit.message;
+                    } else {
+                        work->snapshot.persistedStorageRevision =
+                            work->commit.committedStorageRevision;
+                        work->savedStore = sourceStore;
+                    }
+                }
+            }
+        }
+        } catch (const std::exception& error) {
+            work->success = false;
+            work->conflict = false;
+            work->error = error.what();
+        } catch (...) {
+            work->success = false;
+            work->conflict = false;
+            work->error = "An unknown error interrupted the project save.";
+        }
+        work->commitMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - commitBegin).count();
+
+        ProjectTasks().PostToMain([
+            this,
+            projectId,
+            capturedEditorRevision,
+            saveToken,
+            adopting,
+            destination,
+            adoptionSource,
+            sourceStore,
+            reason,
+            work,
+            completion = std::move(completion)
+        ]() mutable {
+            m_GraphPerformanceStats.lastProjectSaveCommitMs = work->commitMs;
+            ProjectSaveResult result;
+            result.projectId = projectId;
+            result.persistedEditRevision =
+                work->success ? capturedEditorRevision : 0;
+            result.storageRevision = work->success
+                ? work->snapshot.persistedStorageRevision
+                : 0;
+            result.path = (adopting
+                ? destination
+                : sourceStore->StoragePath()).string();
+            result.message = work->error;
+
+            try {
+            const bool currentProject =
+                m_Project->documentId == projectId &&
+                m_Project->store == sourceStore;
+            if (!currentProject) {
+                result.status = ProjectSaveStatus::Canceled;
+                result.message = "The project changed before the save completed.";
+                if (completion) completion(std::move(result));
+                return;
+            }
+
+            m_Project->lifecycle.CompleteSave(
+                saveToken,
+                work->success,
+                work->success ? work->snapshot.persistedStorageRevision : 0,
+                work->conflict);
+            if (work->success) {
+                if (adopting) {
+                    m_Project->store = work->savedStore;
+                    m_Project->storePath = destination;
+                    SetCurrentProjectFileName(destination.string());
+                    m_Project->adoptionSourcePath.clear();
+                }
+                if (m_Project->snapshot) {
+                    if (m_Project->lifecycle.DirtyRevision() ==
+                        saveToken.snapshotDirtyRevision) {
+                        m_Project->snapshot =
+                            std::make_shared<RawProjectSnapshot>(work->snapshot);
+                        ApplyManagedGraphImageReferences(
+                            m_Project->graph,
+                            work->snapshot.pipelineData);
+                    } else {
+                        // A newer in-memory snapshot remains authoritative;
+                        // only advance the storage fence it must save against.
+                        m_Project->snapshot->persistedStorageRevision =
+                            work->snapshot.persistedStorageRevision;
+                        // Keep an immutable result committed by this save when the
+                        // newer editor revision still uses the same bracket inputs.
+                        auto& current=*m_Project->snapshot;
+                        if(current.hdrInputRevision==work->snapshot.hdrInputRevision) {
+                            for(const auto& savedSet:work->snapshot.sourceSets) {
+                                auto* liveSet=Stack::Project::FindSourceSet(current,savedSet.sourceSetId);
+                                if(!liveSet || !savedSet.settings.contains("bracketingResult") ||
+                                    liveSet->settings.value("bracketing",nlohmann::json())!=savedSet.settings.value("bracketing",nlohmann::json()))continue;
+                                liveSet->settings["bracketingResult"]=savedSet.settings.at("bracketingResult");
+                                const auto* asset=Stack::Project::FindEmbeddedAsset(work->snapshot,
+                                    savedSet.settings.at("bracketingResult").at("assetId").get<std::string>());
+                                if(asset&&!Stack::Project::FindEmbeddedAsset(current,asset->assetId))current.embeddedAssets.push_back(*asset);
+                            }
+                        }
+                        if (adopting) {
+                            m_Project->snapshot->adoptedFrom =
+                                adoptionSource.lexically_normal().string();
+                        }
+                    }
+                }
+                if (!ClearDirtyIfRevision(capturedEditorRevision)) {
+                    m_Project->dirty = true;
+                }
+                result.status = ProjectSaveStatus::Saved;
+                SetCurrentProjectFileName(m_Project->store->StoragePath().string());
+                RefreshUnifiedProjectViewsAfterSave(
+                    adopting,
+                    reason != Stack::Project::ProjectSaveReason::Autosave);
+            } else {
+                m_Project->dirty = true;
+                result.status = work->conflict
+                    ? ProjectSaveStatus::Conflict
+                    : ProjectSaveStatus::Failed;
+                PostNotification(
+                    UiNotificationSeverity::Error,
+                    work->error.empty()
+                        ? "Failed to save the project."
+                        : work->error,
+                    "unified-project-save");
+            }
+            } catch (const std::exception& error) {
+                m_Project->lifecycle.CompleteSave(
+                    saveToken, false, 0, false);
+                m_Project->dirty = true;
+                result.status = ProjectSaveStatus::Failed;
+                result.persistedEditRevision = 0;
+                result.storageRevision = 0;
+                result.message = error.what();
+            } catch (...) {
+                m_Project->lifecycle.CompleteSave(
+                    saveToken, false, 0, false);
+                m_Project->dirty = true;
+                result.status = ProjectSaveStatus::Failed;
+                result.persistedEditRevision = 0;
+                result.storageRevision = 0;
+                result.message =
+                    "An unknown error interrupted project save finalization.";
+            }
+            if (completion) completion(std::move(result));
+        });
+    };
+    // Explicit flushes should start promptly. Autosaves remain ordinary
+    // background work so asset I/O cannot jump ahead of interactive tasks.
+    const bool submitted =
+        reason == Stack::Project::ProjectSaveReason::Autosave
+        ? ProjectTasks().Submit("Saving",std::move(saveWork))
+        : ProjectTasks().SubmitHighPriority("Saving",std::move(saveWork));
+
+    if (!submitted) {
+        m_Project->lifecycle.CancelSave(saveToken);
+        failImmediately("The project save could not be queued.");
+    }
 }
 
 bool EditorModule::SaveActiveMultiFrameRawProjectAs(
     const std::filesystem::path& destination,
     Stack::Project::ProjectStorageKind storageKind,
     std::string* errorMessage) {
-    if (!IsMultiFrameRawProjectActive() || destination.empty()) {
-        return Finish(errorMessage, "No multi-frame project or destination is available.", false);
+    if (!IsUnifiedProjectStoreActive() || destination.empty()) {
+        return Finish(errorMessage, "No managed project or destination is available.", false);
     }
-    std::filesystem::path normalizedDestination = destination;
-    const char* requiredExtension =
-        storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle
-        ? ".stackbundle"
-        : ".stack";
-    if (Lower(normalizedDestination.extension().string()) != requiredExtension) {
-        normalizedDestination += requiredExtension;
+    // Save As is also the recovery path for a conflicted, read-only, or
+    // otherwise unwritable current store.  Do not require a commit back to
+    // that store first: the active snapshot and graph below are the complete
+    // in-memory project state and are written directly to the new store.
+    std::filesystem::path normalizedDestination = destination.lexically_normal();
+    if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
+        const std::string extension =
+            Lower(normalizedDestination.extension().string());
+        const std::string fileName =
+            Lower(normalizedDestination.filename().string());
+        if (fileName == "project.stack") {
+            normalizedDestination = normalizedDestination.parent_path();
+        } else if (extension == ".stack" || extension == ".stackbundle") {
+            normalizedDestination = normalizedDestination.parent_path() /
+                normalizedDestination.stem();
+        }
+    } else if (Lower(normalizedDestination.extension().string()) != ".stack") {
+        normalizedDestination += ".stack";
     }
-    RawProjectSnapshot snapshotForCopy = *m_ActiveRawProjectSnapshot;
-    snapshotForCopy.pipelineData = PipelineForGraph(
-        m_NodeGraph, m_Layers, snapshotForCopy.pipelineData);
+    RawProjectSnapshot snapshotForCopy = CopyProjectSnapshotWithoutPipeline(*m_Project->snapshot);
+    if (!m_Project->name.empty()) snapshotForCopy.projectName = m_Project->name;
+    if (storageKind == Stack::Project::ProjectStorageKind::DirectoryBundle) {
+        snapshotForCopy.projectId = Stack::Project::GenerateStableUuid();
+        snapshotForCopy.lifecycle.creationOrigin = Stack::Project::ProjectCreationOrigin::Manual;
+        snapshotForCopy.lifecycle.cleanupWhenUntouched = false;
+        snapshotForCopy.lifecycle.explicitlyRetained = true;
+        snapshotForCopy.lifecycle.autoCreatedAtDirtyRevision = 0;
+        snapshotForCopy.adoptedFrom.clear();
+    }
+    snapshotForCopy.pipelineData = SerializePipeline();
     const bool repairedCopy =
-        m_ProjectSessionController.Phase() ==
+        m_Project->lifecycle.Phase() ==
             Stack::Project::ProjectLifecyclePhase::ReadOnlyRecovery ||
         snapshotForCopy.rawWorkspaceData.value("repairRequired", false);
     if (repairedCopy) {
         snapshotForCopy.rawWorkspaceData["repairRequired"] = false;
         snapshotForCopy.rawWorkspaceData["repairedCopy"] = true;
     }
-    UpdateWorkspaceManifestFields(snapshotForCopy);
+    if (IsRawWorkspaceProjectActive()) UpdateWorkspaceManifestFields(snapshotForCopy);
     Stack::Project::ProjectStoreOpenResult converted =
         Stack::Project::ConvertProjectStore(
-            m_ActiveRawProjectStore,
+            m_Project->store,
             snapshotForCopy,
             normalizedDestination,
-            storageKind);
+            storageKind,
+            [this](const auto& store, const auto& transaction, auto& snapshot, auto& error) {
+                if (!CaptureBracketingDraftForCopy(store, transaction, snapshot, error)) return false;
+                if (!StackBinaryFormat::ExternalizeManagedProjectAssets(store, transaction, snapshot)) {
+                    error = "Could not stage the copied project's image assets.";
+                    return false;
+                }
+                if (m_Bracketing && m_Bracketing->result &&
+                    m_Bracketing->completedRevision == snapshot.hdrInputRevision) {
+                    const auto* set = Stack::Project::FindSourceSet(snapshot, m_Bracketing->setId);
+                    if (set && set->settings.at("bracketing").dump() == m_Bracketing->completedRecipe)
+                        return Stack::Project::StageBracketingResult(store, transaction, snapshot,
+                            m_Bracketing->setId, *m_Bracketing->result, {}, error);
+                }
+                return true;
+            });
     if (!converted) return Finish(errorMessage, converted.message, false);
-    m_ActiveRawProjectStore = converted.store;
-    m_ActiveRawProjectSnapshot =
+    if (storageKind == Stack::Project::ProjectStorageKind::PortableFile) {
+        // Packing is an export. Continue editing the ordinary working folder.
+        return Finish(errorMessage, std::string(), true);
+    }
+    // Save As starts a separate project. Completed immutable results still
+    // describe the copied inputs, but workers from the old project cannot publish.
+    CancelMfdExperimentalProcessing({}, false);
+    CancelHdrProcessing();
+    CancelMultiFrameGraphProcessing();
+    InvalidateRenderSnapshotsBefore(m_RenderGeneration + 1);
+    ClearRawRenderSession();
+    m_Project->store = converted.store;
+    m_Project->snapshot =
         std::make_shared<RawProjectSnapshot>(std::move(converted.snapshot));
-    m_ActiveRawWorkspaceProjectPath = normalizedDestination.lexically_normal();
-    SetCurrentProjectFileName(m_ActiveRawWorkspaceProjectPath.string());
-    const auto replacement = m_ProjectSessionController.BeginReplacement();
-    m_ProjectSessionController.CompleteReplacement(
+    ApplyManagedGraphImageReferences(m_Project->graph, m_Project->snapshot->pipelineData);
+    m_Project->storePath = normalizedDestination.lexically_normal();
+    SetCurrentProjectFileName(m_Project->storePath.string());
+    const auto replacement = m_Project->lifecycle.BeginReplacement();
+    m_Project->lifecycle.CompleteReplacement(
         replacement,
-        m_ActiveRawProjectSnapshot->projectId,
-        m_ActiveRawProjectSnapshot->dirtyRevision,
-        m_ActiveRawProjectSnapshot->persistedStorageRevision,
-        m_ActiveRawProjectStore->IsReadOnlyRecovery());
-    m_Dirty = false;
+        m_Project->snapshot->projectId,
+        m_Project->snapshot->dirtyRevision,
+        m_Project->snapshot->persistedStorageRevision,
+        m_Project->store->IsReadOnlyRecovery());
+    m_Project->dirty = false;
+    const auto& copiedProjectId = m_Project->snapshot->projectId;
+    m_Project->documentId = copiedProjectId;
+    m_Project->adoptionSourcePath.clear();
+    m_Project->saves.Reset(copiedProjectId, m_Project->editRevision);
+    if (m_HdrAdoptedRawResult) m_HdrAdoptedRawResult->projectId = copiedProjectId;
+    if (m_MfdAdoptedRawResult) m_MfdAdoptedRawResult->projectId = copiedProjectId;
+    if (m_Bracketing && !m_Bracketing->newProject) {
+        m_Bracketing->projectId = copiedProjectId;
+        m_Bracketing->job.reset();
+        if (m_Bracketing->presentation) m_Bracketing->presentation->active = false;
+        // The copy may have remapped duplicate draft captures to managed IDs.
+        m_Bracketing->storedRecipe.clear();
+        m_Bracketing->selectionRestored = false;
+    }
+    RefreshBracketingProjectCard();
+    MarkRenderRefreshDirty();
     return Finish(errorMessage, std::string(), true);
 }
 
@@ -1768,9 +3147,9 @@ bool EditorModule::OptimizeActiveMultiFrameRawProject(std::string* errorMessage)
     if (!IsMultiFrameRawProjectActive()) {
         return Finish(errorMessage, "No multi-frame RAW project is active.", false);
     }
-    if (m_Dirty && !SaveActiveMultiFrameRawProject(errorMessage)) return false;
+    if (IsDirty() && !SaveActiveMultiFrameRawProject(errorMessage)) return false;
     const Stack::Project::ProjectSaveToken maintenanceToken =
-        m_ProjectSessionController.BeginSave();
+        m_Project->lifecycle.BeginSave();
     if (!maintenanceToken) {
         return Finish(
             errorMessage,
@@ -1778,17 +3157,17 @@ bool EditorModule::OptimizeActiveMultiFrameRawProject(std::string* errorMessage)
             false);
     }
     std::string optimizeError;
-    const bool optimized = m_ActiveRawProjectStore->Optimize(&optimizeError);
+    const bool optimized = m_Project->store->Optimize(&optimizeError);
     const bool conflict = !optimized &&
         optimizeError.find("changed while it was being optimized") != std::string::npos;
-    m_ProjectSessionController.CompleteSave(
+    m_Project->lifecycle.CompleteSave(
         maintenanceToken,
         optimized,
-        m_ActiveRawProjectStore->StorageRevision(),
+        m_Project->store->StorageRevision(),
         conflict);
     if (!optimized) return Finish(errorMessage, optimizeError, false);
-    m_ActiveRawProjectSnapshot->persistedStorageRevision =
-        m_ActiveRawProjectStore->StorageRevision();
+    m_Project->snapshot->persistedStorageRevision =
+        m_Project->store->StorageRevision();
     return Finish(errorMessage, std::string(), true);
 }
 
@@ -1796,12 +3175,102 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
     bool* requiresRepairedCopy,
     std::string* outError) {
     if (requiresRepairedCopy) *requiresRepairedCopy = false;
-    if (!m_ActiveRawProjectSnapshot) return true;
+    if (!m_Project->snapshot) return true;
+    if (!m_Project->snapshot->multiFrameGraph.nodes.empty()) {
+        // The typed graph remains authoritative. The EditorGraph renderer
+        // bridge is derived from it and may be rebuilt without rewriting the
+        // saved typed topology.
+        const Raw::MultiFrame::GraphExecutionPlan plan =
+            Raw::MultiFrame::BuildMultiFrameGraphExecutionPlan(
+                *m_Project->snapshot);
+        const Raw::MultiFrame::GraphExecutionStep* terminal =
+            Raw::MultiFrame::FindGraphExecutionStep(
+                plan, plan.outputProducerNodeId);
+        const bool finalHdr = terminal && terminal->adapter ==
+            Raw::MultiFrame::GraphExecutionAdapter::HdrV4;
+        const bool finalBurst = terminal && terminal->adapter ==
+            Raw::MultiFrame::GraphExecutionAdapter::SharedBurstV1;
+        MultiFrameSourceSet* activeSet = Stack::Project::FindSourceSet(
+            *m_Project->snapshot,
+            m_Project->snapshot->activeSourceSetId);
+        if (!activeSet &&
+            m_Project->snapshot->sourceSets.size() == 1u) {
+            activeSet = &m_Project->snapshot->sourceSets.front();
+        }
+        if ((finalHdr || finalBurst) && activeSet) {
+            if (finalHdr) EnsureHdrPostRecipe(*activeSet);
+            else EnsureMfdPostRecipe(*activeSet);
+            const bool bridgePresent = finalHdr
+                ? FindHdrNode(
+                    m_Project->graph,
+                    activeSet->sourceSetId,
+                    activeSet->graphBindingNodeId) != nullptr
+                : FindMfdNode(
+                    m_Project->graph,
+                    activeSet->sourceSetId,
+                    activeSet->graphBindingNodeId) != nullptr;
+            if (!bridgePresent) {
+                EditorNodeGraph::Graph bridgeGraph = m_Project->graph;
+                std::vector<int> obsoleteNodes;
+                for (const EditorNodeGraph::Node& node :
+                     bridgeGraph.GetNodes()) {
+                    const bool neutral =
+                        node.kind ==
+                            EditorNodeGraph::NodeKind::RawProjectSourceSet &&
+                        node.rawProjectSourceSet.sourceSetId ==
+                            activeSet->sourceSetId;
+                    const bool oppositeHdr = finalBurst &&
+                        node.kind ==
+                            EditorNodeGraph::NodeKind::MultiFrameHdr &&
+                        node.multiFrameHdr.sourceSetId ==
+                            activeSet->sourceSetId;
+                    const bool oppositeBurst = finalHdr &&
+                        node.kind ==
+                            EditorNodeGraph::NodeKind::MultiFrameDenoise &&
+                        node.multiFrameDenoise.sourceSetId ==
+                            activeSet->sourceSetId;
+                    if (neutral || oppositeHdr || oppositeBurst) {
+                        obsoleteNodes.push_back(node.id);
+                    }
+                }
+                for (int nodeId : obsoleteNodes) {
+                    bridgeGraph.RemoveNode(nodeId);
+                }
+                std::string bridgeError;
+                const bool bridgeReady = finalHdr
+                    ? SyncHdrGraphTopology(
+                        bridgeGraph,
+                        *m_Project->snapshot,
+                        *activeSet,
+                        true,
+                        bridgeError)
+                    : SyncMfdGraphTopology(
+                        bridgeGraph,
+                        *m_Project->snapshot,
+                        *activeSet,
+                        true,
+                        bridgeError);
+                if (!bridgeReady) {
+                    return Finish(
+                        outError,
+                        bridgeError.empty()
+                            ? "The typed MultiFrame Output could not rebuild its RAW renderer bridge."
+                            : bridgeError,
+                        false);
+                }
+                m_Project->graph = std::move(bridgeGraph);
+                RefreshGraphLayerMetadata();
+                ApplyGraphLayerOrder();
+                MarkRenderRefreshDirty();
+            }
+        }
+        return true;
+    }
 
     bool changed = false;
     bool quarantined = false;
     std::unordered_map<std::string, std::vector<EditorNodeGraph::Node*>> nodesBySet;
-    for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
         if (node.kind == EditorNodeGraph::NodeKind::RawProjectSourceSet &&
             node.rawProjectSourceSet.managed &&
             !node.rawProjectSourceSet.quarantined) {
@@ -1810,105 +3279,13 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
     }
     std::unordered_set<std::string> knownSetIds;
     float nextY = 120.0f;
-    for (MultiFrameSourceSet& sourceSet : m_ActiveRawProjectSnapshot->sourceSets) {
+    for (MultiFrameSourceSet& sourceSet : m_Project->snapshot->sourceSets) {
         knownSetIds.insert(sourceSet.sourceSetId);
-        if (sourceSet.operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
-            sourceSet.operationSchemaVersion >= Stack::Project::kMfdMosaicPlaceholderSchemaVersion) {
-            std::vector<EditorNodeGraph::Node*> mfdNodes;
-            std::unordered_map<std::string, std::vector<EditorNodeGraph::Node*>> frameNodes;
-            for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-                if (node.kind == EditorNodeGraph::NodeKind::MultiFrameDenoise &&
-                    node.multiFrameDenoise.sourceSetId == sourceSet.sourceSetId &&
-                    !node.multiFrameDenoise.quarantined) {
-                    mfdNodes.push_back(&node);
-                } else if (node.kind == EditorNodeGraph::NodeKind::RawProjectFrame &&
-                           node.rawProjectFrame.sourceSetId == sourceSet.sourceSetId &&
-                           !node.rawProjectFrame.quarantined) {
-                    frameNodes[node.rawProjectFrame.frameId].push_back(&node);
-                }
-            }
-            EditorNodeGraph::Node* primaryMfd = nullptr;
-            for (EditorNodeGraph::Node* candidate : mfdNodes) {
-                if (!primaryMfd || candidate->instanceUuid == sourceSet.graphBindingNodeId) {
-                    primaryMfd = candidate;
-                }
-            }
-            for (EditorNodeGraph::Node* candidate : mfdNodes) {
-                if (candidate == primaryMfd) continue;
-                candidate->multiFrameDenoise.managed = false;
-                candidate->multiFrameDenoise.quarantined = true;
-                candidate->multiFrameDenoise.presentationStatus =
-                    "Quarantined duplicate MFD binding. Save Repaired Copy is required.";
-                changed = true;
-                quarantined = true;
-            }
-            std::unordered_set<std::string> manifestFrameIds;
-            bool topologyMissing = primaryMfd == nullptr;
-            for (const SourceSetFrame& frame : sourceSet.frames) {
-                manifestFrameIds.insert(frame.frameId);
-                auto foundFrames = frameNodes.find(frame.frameId);
-                if (foundFrames == frameNodes.end() || foundFrames->second.empty()) {
-                    topologyMissing = true;
-                    continue;
-                }
-                for (std::size_t duplicateIndex = 1;
-                     duplicateIndex < foundFrames->second.size();
-                     ++duplicateIndex) {
-                    EditorNodeGraph::Node* duplicate =
-                        foundFrames->second[duplicateIndex];
-                    duplicate->rawProjectFrame.managed = false;
-                    duplicate->rawProjectFrame.quarantined = true;
-                    duplicate->rawProjectFrame.compatibilityStatus =
-                        "Quarantined duplicate frame binding.";
-                    changed = true;
-                    quarantined = true;
-                }
-            }
-            for (auto& [frameId, candidates] : frameNodes) {
-                if (manifestFrameIds.find(frameId) != manifestFrameIds.end()) continue;
-                for (EditorNodeGraph::Node* orphan : candidates) {
-                    orphan->rawProjectFrame.managed = false;
-                    orphan->rawProjectFrame.quarantined = true;
-                    orphan->rawProjectFrame.compatibilityStatus =
-                        "Quarantined orphan frame binding.";
-                    changed = true;
-                    quarantined = true;
-                }
-            }
-            if (primaryMfd) {
-                for (const SourceSetFrame& frame : sourceSet.frames) {
-                    const auto foundFrames = frameNodes.find(frame.frameId);
-                    if (foundFrames == frameNodes.end() || foundFrames->second.empty()) continue;
-                    const EditorNodeGraph::Node* frameNode = foundFrames->second.front();
-                    const EditorNodeGraph::Link* link = m_NodeGraph.FindInputLink(
-                        primaryMfd->id,
-                        EditorNodeGraph::MfdFrameInputSocketId(frame.frameId));
-                    if (!link || link->fromNodeId != frameNode->id ||
-                        link->ownership != EditorNodeGraph::Link::Ownership::ManagedSourceBinding) {
-                        topologyMissing = true;
-                    }
-                }
-            }
-            if (topologyMissing) {
-                std::string topologyError;
-                if (!SyncMfdGraphTopology(
-                        m_NodeGraph,
-                        *m_ActiveRawProjectSnapshot,
-                        sourceSet,
-                        true,
-                        topologyError)) {
-                    return Finish(outError, topologyError, false);
-                }
-                changed = true;
-            }
-            nextY += 150.0f;
-            continue;
-        }
         auto found = nodesBySet.find(sourceSet.sourceSetId);
         if (found == nodesBySet.end() || found->second.empty()) {
             EditorNodeGraph::RawProjectSourceSetPayload payload;
             payload.sourceSetId = sourceSet.sourceSetId;
-            EditorNodeGraph::Node* node = m_NodeGraph.AddRawProjectSourceSetNode(
+            EditorNodeGraph::Node* node = m_Project->graph.AddRawProjectSourceSetNode(
                 std::move(payload), { 80.0f, nextY });
             if (!node) {
                 return Finish(outError, "A missing managed source-set node could not be recreated.", false);
@@ -1950,7 +3327,7 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
         }
         nextY += 150.0f;
     }
-    for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::RawProjectSourceSet) continue;
         if (node.rawProjectSourceSet.managed &&
             !node.rawProjectSourceSet.quarantined &&
@@ -1963,7 +3340,7 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
             quarantined = true;
         }
     }
-    for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
         std::string sourceSetId;
         if (node.kind == EditorNodeGraph::NodeKind::MultiFrameDenoise &&
             node.multiFrameDenoise.managed &&
@@ -1974,6 +3351,18 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
                 node.multiFrameDenoise.quarantined = true;
                 node.multiFrameDenoise.presentationStatus =
                     "Quarantined orphan MFD binding. Save Repaired Copy is required.";
+                changed = true;
+                quarantined = true;
+            }
+        } else if (node.kind == EditorNodeGraph::NodeKind::MultiFrameHdr &&
+                   node.multiFrameHdr.managed &&
+                   !node.multiFrameHdr.quarantined) {
+            sourceSetId = node.multiFrameHdr.sourceSetId;
+            if (knownSetIds.find(sourceSetId) == knownSetIds.end()) {
+                node.multiFrameHdr.managed = false;
+                node.multiFrameHdr.quarantined = true;
+                node.multiFrameHdr.presentationStatus =
+                    "Quarantined orphan HDR binding. Save Repaired Copy is required.";
                 changed = true;
                 quarantined = true;
             }
@@ -1992,36 +3381,86 @@ bool EditorModule::ValidateAndRepairActiveRawProjectGraphBindings(
         }
     }
     if (changed) {
-        m_ActiveRawProjectSnapshot->pipelineData = PipelineForGraph(
-            m_NodeGraph, m_Layers, m_ActiveRawProjectSnapshot->pipelineData);
+        m_Project->snapshot->pipelineData = PipelineForGraph(
+            m_Project->graph, m_Project->layers, m_Project->snapshot->pipelineData);
         MarkDirty();
     }
     if (quarantined) {
-        m_ActiveRawProjectSnapshot->rawWorkspaceData["repairRequired"] = true;
-        m_ProjectSessionController.MarkReadOnlyRecovery();
+        m_Project->snapshot->rawWorkspaceData["repairRequired"] = true;
+        m_Project->lifecycle.MarkReadOnlyRecovery();
         if (requiresRepairedCopy) *requiresRepairedCopy = true;
     }
     return true;
 }
 
 void EditorModule::RenderMultiFrameRawLabCreationPopup() {
-    static char projectName[160] = "Multi-Frame Denoise Project";
-    static std::filesystem::path destinationFolder;
-    static std::vector<std::filesystem::path> selectedPaths;
-    static int referenceFrameIndex = 0;
+    auto& dialog = m_ProjectInteractionUi.multiFrame;
+    auto& projectName = dialog.projectName;
+    auto& destinationFolder = dialog.destinationFolder;
+    auto& selectedPaths = dialog.selectedPaths;
+    auto& referenceFrameIndex = dialog.referenceFrameIndex;
+    auto& selectedSummaries = dialog.selectedSummaries;
+    auto& selectedSummaryWarnings = dialog.selectedSummaryWarnings;
+    const auto refreshSelectedSummaries = [&]() {
+        selectedSummaries.assign(selectedPaths.size(), {});
+        selectedSummaryWarnings.assign(selectedPaths.size(), {});
+        for (std::size_t i = 0; i < selectedPaths.size(); ++i) {
+            try {
+                Raw::RawMetadata metadata;
+                if (!Raw::RawLoader::LoadMetadata(
+                        selectedPaths[i].string(), metadata)) {
+                    selectedSummaryWarnings[i] = metadata.error.empty()
+                        ? "RAW metadata unavailable" : metadata.error;
+                    continue;
+                }
+                selectedSummaries[i] = BuildMfdCaptureSummary(metadata);
+                if (!selectedSummaries[i].supported) {
+                    selectedSummaryWarnings[i] =
+                        selectedSummaries[i].rejectionReason;
+                }
+            } catch (const std::exception& exception) {
+                selectedSummaryWarnings[i] =
+                    std::string("RAW metadata inspection failed: ") +
+                    exception.what();
+            } catch (...) {
+                selectedSummaryWarnings[i] =
+                    "RAW metadata inspection failed unexpectedly.";
+            }
+        }
+        if (!selectedSummaries.empty()) {
+            for (std::size_t i = 1; i < selectedSummaries.size(); ++i) {
+                std::string compatibilityReason;
+                if (!Stack::Project::AreMfdCapturesStructurallyCompatible(
+                        selectedSummaries.front(),
+                        selectedSummaries[i],
+                        &compatibilityReason) &&
+                    selectedSummaryWarnings[i].empty()) {
+                    selectedSummaryWarnings[i] = compatibilityReason;
+                }
+            }
+        }
+    };
 
     if (m_PopulateMultiFrameCreationFromGallery) {
         selectedPaths = m_PendingMultiFrameGallerySourcePaths;
         m_PendingMultiFrameGallerySourcePaths.clear();
         m_PopulateMultiFrameCreationFromGallery = false;
+        refreshSelectedSummaries();
+        const char* defaultName =
+            m_PendingMultiFrameCreationIntent == MultiFrameOperationIntent::RawBurstDenoise
+                ? "Burst Project"
+                : (m_PendingMultiFrameCreationIntent == MultiFrameOperationIntent::RawBurstHdr
+                    ? "HDR Project"
+                    : "Bracket Project");
+        std::snprintf(projectName, sizeof(projectName), "%s", defaultName);
     }
     if (m_OpenMultiFrameCreationPopup) {
-        ImGui::OpenPopup("Create New MFD Project");
+        ImGui::OpenPopup("Create Multi-Frame Project");
         m_OpenMultiFrameCreationPopup = false;
     }
 
     if (!ImGui::BeginPopupModal(
-            "Create New MFD Project",
+            "Create Multi-Frame Project",
             nullptr,
             ImGuiWindowFlags_AlwaysAutoResize)) {
         return;
@@ -2030,13 +3469,24 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
         destinationFolder = Stack::RawWorkspace::BuildManagedLayout(
             m_RawWorkspace.workspaceRoot).projectsDirectory;
     }
+    const bool creatingBurst =
+        m_PendingMultiFrameCreationIntent == MultiFrameOperationIntent::RawBurstDenoise;
+    const bool creatingHdr =
+        m_PendingMultiFrameCreationIntent == MultiFrameOperationIntent::RawBurstHdr;
     ImGui::TextWrapped(
-        "Create one MFD project from compatible, still-mosaiced Bayer RAW "
-        "captures. Every selected original is embedded exactly.");
+        creatingBurst
+            ? "Create a Burst project from compatible, still-mosaiced Bayer RAW captures. Every selected original is copied into managed project assets."
+            : (creatingHdr
+                ? "Create an HDR project from compatible bracketed RAW captures. Every selected original is copied into managed project assets."
+                : "Create a bracket from Bayer RAW captures. Exposure groups and global RAW alignment are suggested automatically."));
     ImGui::Separator();
     ImGui::InputText("Project name", projectName, sizeof(projectName));
-    ImGui::TextDisabled("Format: Directory bundle (.stackbundle)");
-    ImGui::TextDisabled("Operation: MFD / Mosaic CFA Burst Denoise");
+    ImGui::TextDisabled("Format: Working project folder (project.stack + assets/)");
+    ImGui::TextDisabled(
+        "%s",
+        creatingBurst
+            ? "Operation: Burst denoise"
+            : (creatingHdr ? "Operation: HDR merge" : "Operation: Bracketing"));
 
     if (ImGui::Button("Choose project folder")) {
         const std::string folder = FileDialogs::OpenFolderDialog(
@@ -2053,10 +3503,11 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
     if (ImGui::Button("Choose source frames")) {
         const std::vector<std::string> selected =
             FileDialogs::OpenMultipleFilesDialog(
-                "Choose MFD RAW Frames",
+                "Choose RAW Capture Set",
                 "RAW Frames\0*.dng;*.cr2;*.cr3;*.nef;*.nrw;*.arw;*.srf;*.sr2;*.raf;*.rw2;*.orf;*.pef;*.3fr;*.fff;*.iiq;*.rwl;*.raw\0All Files\0*.*\0");
         selectedPaths.clear();
         for (const std::string& path : selected) selectedPaths.emplace_back(path);
+        refreshSelectedSummaries();
         referenceFrameIndex = 0;
     }
     ImGui::SameLine();
@@ -2071,7 +3522,7 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
         const std::string referenceLabel =
             selectedPaths[static_cast<std::size_t>(referenceFrameIndex)]
                 .filename().string();
-        if (ImGui::BeginCombo("Reference frame", referenceLabel.c_str())) {
+        if ((creatingBurst || creatingHdr) && ImGui::BeginCombo("Reference frame", referenceLabel.c_str())) {
             for (std::size_t index = 0; index < selectedPaths.size(); ++index) {
                 const bool selected =
                     static_cast<int>(index) == referenceFrameIndex;
@@ -2083,12 +3534,63 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
             }
             ImGui::EndCombo();
         }
-        ImGui::TextDisabled(
-            "Compatibility is checked from RAW headers before any original is copied.");
+        std::vector<double> exposureMetrics;
+        exposureMetrics.reserve(selectedSummaries.size());
+        for (const RawCaptureCompatibilitySummary& summary : selectedSummaries) {
+            if (summary.exposureTimeSeconds > 0.0) {
+                const double aperture = summary.apertureFNumber > 0.0
+                    ? summary.apertureFNumber : 1.0;
+                const double iso = summary.isoSpeed > 0.0 ? summary.isoSpeed : 100.0;
+                exposureMetrics.push_back(
+                    summary.exposureTimeSeconds * iso / (aperture * aperture));
+            }
+        }
+        double medianExposure = 0.0;
+        if (!exposureMetrics.empty()) {
+            std::sort(exposureMetrics.begin(), exposureMetrics.end());
+            medianExposure = exposureMetrics[exposureMetrics.size() / 2u];
+        }
+        if (ImGui::BeginTable("##HdrCreationFrames", 2,
+                ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+            for (std::size_t i = 0; i < selectedPaths.size(); ++i) {
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(selectedPaths[i].filename().string().c_str());
+                ImGui::TableSetColumnIndex(1);
+                if (i < selectedSummaries.size() &&
+                    selectedSummaries[i].exposureTimeSeconds > 0.0) {
+                    const RawCaptureCompatibilitySummary& summary = selectedSummaries[i];
+                    const double aperture = summary.apertureFNumber > 0.0
+                        ? summary.apertureFNumber : 1.0;
+                    const double iso = summary.isoSpeed > 0.0 ? summary.isoSpeed : 100.0;
+                    const double metric = summary.exposureTimeSeconds * iso /
+                        (aperture * aperture);
+                    const double ev = medianExposure > 0.0
+                        ? std::log2(metric / medianExposure) : 0.0;
+                    ImGui::TextDisabled("%.6g s  f/%.1f  ISO %.0f  %+0.2f EV",
+                        summary.exposureTimeSeconds,
+                        summary.apertureFNumber,
+                        summary.isoSpeed,
+                        ev);
+                } else {
+                    ImGui::TextDisabled("Exposure metadata unavailable");
+                }
+                if (i < selectedSummaryWarnings.size() &&
+                    !selectedSummaryWarnings[i].empty()) {
+                    ImGui::TextColored(ImVec4(0.94f, 0.72f, 0.34f, 1.0f), "%s",
+                        selectedSummaryWarnings[i].c_str());
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("Camera and sensor compatibility is checked during import.");
+        if(!creatingBurst&&!creatingHdr) ImGui::TextWrapped("The median exposure fixes the brightness origin. You can edit the suggested groups after import.");
     }
 
-    const bool ready = projectName[0] != '\0' &&
-        !destinationFolder.empty() && selectedPaths.size() >= 2u;
+    const bool ready = projectName[0] != '\0' && !destinationFolder.empty() &&
+        !selectedPaths.empty();
     ImGui::BeginDisabled(!ready);
     if (ImGui::Button("Create")) {
         std::filesystem::path destination =
@@ -2098,37 +3600,66 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
         const std::vector<std::filesystem::path> requestedPaths = selectedPaths;
         const std::size_t requestedReferenceIndex =
             static_cast<std::size_t>(referenceFrameIndex);
+        const MultiFrameOperationIntent requestedIntent =
+            m_PendingMultiFrameCreationIntent;
+        const std::string requestedSourceSetName = creatingBurst
+            ? "Burst"
+            : (creatingHdr ? "HDR Bracket" : "Capture Set");
         auto createAction = [
             this,
             destination,
             requestedProjectName,
             requestedPaths,
-            requestedReferenceIndex
+            requestedReferenceIndex,
+            requestedIntent,
+            requestedSourceSetName
         ](std::string* actionError) {
-            return CreateMultiFrameRawProject(
+            const bool created = CreateMultiFrameRawProject(
                 destination,
                 Stack::Project::ProjectStorageKind::DirectoryBundle,
                 requestedProjectName,
-                "MFD Burst",
-                Stack::Project::MultiFrameOperationIntent::RawBurstDenoise,
+                requestedSourceSetName,
+                requestedIntent,
                 requestedPaths,
                 requestedReferenceIndex,
                 actionError);
+            if (created) {
+                // Leave the windowed selection mode as soon as activation is
+                // queued; the deferred project apply will then drill into the
+                // new project's frames and present the Multi-Frame workspace.
+                m_RawWorkspaceLabUi.galleryNavigationMode =
+                    RawGalleryNavigationMode::ProjectRoot;
+                m_RawWorkspaceLabUi.galleryProjectId.clear();
+                CloseRawWorkspaceLabNativeGallery();
+                m_RawWorkspaceLabUi.activeTool = RawLabTool::MultiFrame;
+                m_ReturnToMultiFrameAfterGalleryCreationCancel = false;
+                RequestOpenMultiFrameTab();
+                InvalidateRawWorkspaceGalleryPresentation();
+            }
+            return created;
         };
 
-        if (HasProjectContent() && m_Dirty) {
+        if (NeedsWorkspaceSaveBeforeTransition() || IsProjectFileSaveBusy()) {
             QueueRawWorkspaceProjectReplacement(
-                "create a new MFD project",
+                creatingBurst
+                    ? "create a new Burst project"
+                    : (creatingHdr
+                        ? "create a new HDR project"
+                        : "create a new MultiFrame capture-set project"),
                 requestedProjectName,
                 std::move(createAction));
             m_RawWorkspaceLabUi.multiFrameStatusText =
-                "Choose how to handle the current project's unsaved changes.";
+                "Saving the current project before creating the capture set...";
             selectedPaths.clear();
             ImGui::CloseCurrentPopup();
         } else if (createAction(&error)) {
             m_RawWorkspaceLabUi.activeTool = RawLabTool::MultiFrame;
             m_RawWorkspaceLabUi.multiFrameStatusText =
-                "New MFD project created and opening.";
+                creatingBurst
+                    ? "New Burst project created and opening."
+                    : (creatingHdr
+                        ? "New HDR project created and opening."
+                        : "New capture-set project created and opening.");
             selectedPaths.clear();
             ImGui::CloseCurrentPopup();
         } else {
@@ -2138,7 +3669,27 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {
+        const bool returnToMultiFrame =
+            m_ReturnToMultiFrameAfterGalleryCreationCancel;
         selectedPaths.clear();
+        if (m_RawWorkspaceLabUi.galleryNavigationMode ==
+            RawGalleryNavigationMode::MultiFrameCreation) {
+            m_RawWorkspace.selectedSourceKey =
+                m_RawWorkspaceGallerySelectionRestoreKey;
+            m_RawWorkspace.selectedSourceKeys =
+                m_RawWorkspaceGallerySelectionRestoreKeys;
+            m_RawWorkspaceLabUi.galleryNavigationMode =
+                m_RawWorkspaceGalleryRestoreNavigationMode;
+            m_RawWorkspaceLabUi.galleryProjectId =
+                m_RawWorkspaceGalleryRestoreProjectId;
+            m_RawWorkspaceLabUi.galleryHost =
+                m_RawWorkspaceGalleryRestoreHost;
+            m_ReturnToMultiFrameAfterGalleryCreationCancel = false;
+            InvalidateRawWorkspaceGalleryPresentation();
+        }
+        if (returnToMultiFrame) {
+            RequestOpenMultiFrameTab();
+        }
         ImGui::CloseCurrentPopup();
     }
     if (!m_RawWorkspaceLabUi.multiFrameStatusText.empty()) {
@@ -2148,41 +3699,26 @@ void EditorModule::RenderMultiFrameRawLabCreationPopup() {
 }
 
 void EditorModule::RenderMultiFrameRawLabTool() {
+    if (IsBracketingActive()) {
+        ImGui::TextWrapped("Edit exposure groups and contributions in Bracketing.");
+        if (ImGui::Button("Open Bracketing")) RequestOpenMultiFrameTab();
+        return;
+    }
     if (!IsMultiFrameRawProjectActive()) {
         if (IsRawWorkspaceProjectActive()) {
             ImGui::TextWrapped(
-                "This single-RAW project can be upgraded into a separate "
-                "multi-frame bundle without changing the original.");
-            if (ImGui::Button("Save As Upgraded Project")) {
-                const std::string folder = FileDialogs::OpenFolderDialog(
-                    "Choose Directory for Upgraded RAW Project");
-                if (!folder.empty()) {
-                    const std::string baseName = m_CurrentProjectName.empty()
-                        ? "RAW Project"
-                        : m_CurrentProjectName;
-                    std::string error;
-                    if (!UpgradeActiveLegacyRawProjectToMultiFrame(
-                            std::filesystem::path(folder) /
-                                (baseName + " Upgraded"),
-                            &error)) {
-                        m_RawWorkspaceLabUi.multiFrameStatusText = error;
-                    } else {
-                        m_RawWorkspaceLabUi.multiFrameStatusText =
-                            "The upgraded embedded copy is now active.";
-                    }
-                }
-            }
+                "This project contains one RAW source. Create Burst and HDR "
+                "projects from a multi-selection in the Library.");
         } else {
             ImGui::TextDisabled("No multi-frame RAW project is active.");
             ImGui::Spacing();
-            if (ImGui::Button("Create New MFD Project")) {
+            if (ImGui::Button("Create Capture Set")) {
                 m_RawWorkspaceLabUi.multiFrameStatusText.clear();
                 m_OpenMultiFrameCreationPopup = true;
             }
             ImGui::TextWrapped(
-                "Select two or more RAW images in Gallery to prefill the burst.");
+                "Select one or more RAW images in Gallery. Processing is chosen later in MultiFrame.");
         }
-        RenderMultiFrameRawLabCreationPopup();
         if (!m_RawWorkspaceLabUi.multiFrameStatusText.empty()) {
             ImGui::TextWrapped(
                 "%s",
@@ -2191,9 +3727,9 @@ void EditorModule::RenderMultiFrameRawLabTool() {
         return;
     }
 
-    const int selectedNodeId = m_NodeGraph.GetSelectedNodeId();
+    const int selectedNodeId = m_Project->graph.GetSelectedNodeId();
     if (const EditorNodeGraph::Node* selectedNode =
-            m_NodeGraph.FindNode(selectedNodeId);
+            m_Project->graph.FindNode(selectedNodeId);
         selectedNode) {
         if (selectedNode->kind ==
             EditorNodeGraph::NodeKind::RawProjectFrame) {
@@ -2205,15 +3741,37 @@ void EditorModule::RenderMultiFrameRawLabTool() {
                    EditorNodeGraph::NodeKind::MultiFrameDenoise) {
             ActivateMultiFrameSourceSet(
                 selectedNode->multiFrameDenoise.sourceSetId);
+        } else if (selectedNode->kind ==
+                   EditorNodeGraph::NodeKind::MultiFrameHdr) {
+            ActivateMultiFrameSourceSet(
+                selectedNode->multiFrameHdr.sourceSetId);
         }
     }
 
-    RawProjectSnapshot& snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot& snapshot = *m_Project->snapshot;
     MultiFrameSourceSet* active = Stack::Project::FindSourceSet(
         snapshot,
         snapshot.activeSourceSetId);
     if (active == nullptr) {
         ImGui::TextDisabled("This project has no active source set.");
+        return;
+    }
+    if (active->operationIntent == MultiFrameOperationIntent::RawCaptureSet) {
+        ImGui::TextUnformatted(active->name.c_str());
+        ImGui::TextDisabled(
+            "%llu neutral RAW captures",
+            static_cast<unsigned long long>(active->frames.size()));
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "This dataset has no processing objective yet. Add Burst Denoise or "
+            "HDR Merge from the processing stage in the MultiFrame graph.");
+        if (ImGui::Button("Open MultiFrame")) {
+            RequestOpenMultiFrameTab();
+        }
+        return;
+    }
+    if (active->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        RenderHdrRawLabTool();
         return;
     }
     const std::string activeSetId = active->sourceSetId;
@@ -2287,7 +3845,7 @@ void EditorModule::RenderMultiFrameRawLabTool() {
         }
         ImGui::SameLine(0.0f, 6.0f);
         const char* frameLabel = frame.userLabel.empty()
-            ? (asset ? asset->originalFileName.c_str() : "Missing asset")
+            ? (asset ? asset->originalFilename.c_str() : "Missing asset")
             : frame.userLabel.c_str();
         if (ImGui::Selectable(
                 frameLabel,
@@ -2323,14 +3881,14 @@ void EditorModule::RenderMultiFrameRawLabTool() {
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Manage...")) {
-        m_RawWorkspaceLabUi.secondarySheetOpen = true;
+        RequestRawSettingsPanel();
         m_RawLabMultiFrameAdvancedOpenedThisFrame = true;
     }
 
     if (active->operationIntent !=
             MultiFrameOperationIntent::RawBurstDenoise ||
-        active->operationSchemaVersion <
-            Stack::Project::kMfdMosaicPlaceholderSchemaVersion) {
+        active->operationSchemaVersion !=
+            Stack::Project::kMfdOperationSchemaVersion) {
         ImGui::Spacing();
         ImGui::TextColored(
             ImVec4(0.92f, 0.76f, 0.42f, 1.0f),
@@ -2369,6 +3927,10 @@ void EditorModule::RenderMultiFrameRawLabTool() {
             .exactFallbackAlternateToReferenceRatio =
             displayedParameters.fusion
                 .exactFallbackAlternateToReferenceRatio;
+        m_MfdExperimentalParameterDraft.fusionMethod =
+            displayedParameters.fusion.method == "robust" ? 0 : 1;
+        m_MfdExperimentalParameterDraft.fusionSmoothing =
+            displayedParameters.fusion.smoothing;
         m_MfdExperimentalParameterDraft.memoryBudgetGiB =
             active->settings.value(
                 "experimentalMemoryBudgetGiB",
@@ -2397,7 +3959,7 @@ void EditorModule::RenderMultiFrameRawLabTool() {
             "Translation only",
             "None - fixed camera"
         };
-        ImGui::BeginDisabled(processingBusy);
+        Stack::UiActivity::BeginDisabledForWork(processingBusy);
         ImGui::SetNextItemWidth(-1.0f);
         const bool alignmentChanged = ImGui::Combo(
             "##MfdAlignmentMode",
@@ -2438,7 +4000,7 @@ void EditorModule::RenderMultiFrameRawLabTool() {
             ImVec4(0.95f, 0.55f, 0.42f, 1.0f),
             "%s",
             displayedParameterError.empty()
-                ? "The RA-CFA V1 parameter object is invalid."
+                ? "The Burst preparation parameter object is invalid."
                 : displayedParameterError.c_str());
     }
 
@@ -2522,17 +4084,18 @@ void EditorModule::RenderMultiFrameRawLabTool() {
     if (report &&
         report->inputRevision == snapshot.mfdInputRevision) {
         ImGui::TextDisabled(
-            "%llu/%llu alternates accepted - %.1f%% pixels combined",
+            "%llu/%llu alternates included - %.1f%% alternate coverage",
             static_cast<unsigned long long>(report->acceptedAlternateCount),
             static_cast<unsigned long long>(report->compatibleAlternateCount),
             report->contributingPixelFraction * 100.0);
         ImGui::TextDisabled(
-            "Mean effective samples per pixel: %.2f",
-            report->meanEffectiveSampleCount);
+            "Average effective frames: %.2f of %llu",
+            report->meanEffectiveSampleCount,
+            static_cast<unsigned long long>(
+                report->acceptedAlternateCount + 1u));
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
-                "Accepted frames can still receive conservative weights. "
-                "This number is the average noise-reduction depth actually used per pixel.");
+                "Coverage says where alternates participated. Effective frames says how strongly they were actually averaged.");
         }
         if (report->compatibleAlternateCount > 0u &&
             (report->acceptedAlternateCount == 0u ||
@@ -2554,30 +4117,12 @@ void EditorModule::RenderMultiFrameRawLabTool() {
 }
 
 void EditorModule::RenderMultiFrameRawLabAdvanced() {
+    if (IsBracketingActive()) return;
     if (!IsMultiFrameRawProjectActive()) {
         if (IsRawWorkspaceProjectActive()) {
             ImGui::TextWrapped(
-                "This is a legacy single-RAW project. It opens unchanged. "
-                "Adding source sets requires an explicit upgraded copy.");
-            if (ImGui::Button("Save As Upgraded Project")) {
-                const std::string folder = FileDialogs::OpenFolderDialog(
-                    "Choose Directory for Upgraded RAW Project");
-                if (!folder.empty()) {
-                    const std::string baseName = m_CurrentProjectName.empty()
-                        ? "RAW Project"
-                        : m_CurrentProjectName;
-                    std::string error;
-                    if (!UpgradeActiveLegacyRawProjectToMultiFrame(
-                            std::filesystem::path(folder) /
-                                (baseName + " Upgraded"),
-                            &error)) {
-                        m_RawWorkspaceLabUi.multiFrameStatusText = error;
-                    } else {
-                        m_RawWorkspaceLabUi.multiFrameStatusText =
-                            "Legacy project upgraded into a separate embedded bundle.";
-                    }
-                }
-            }
+                "This project contains one RAW source. Create Burst and HDR "
+                "projects from a multi-selection in the Library.");
         } else {
             ImGui::TextDisabled("No multi-frame RAW project is active.");
             if (ImGui::Button("Create New MFD Project")) {
@@ -2585,7 +4130,6 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
                 m_OpenMultiFrameCreationPopup = true;
             }
         }
-        RenderMultiFrameRawLabCreationPopup();
         if (!m_RawWorkspaceLabUi.multiFrameStatusText.empty()) {
             ImGui::TextWrapped(
                 "%s", m_RawWorkspaceLabUi.multiFrameStatusText.c_str());
@@ -2593,9 +4137,9 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         return;
     }
 
-    const int selectedNodeId = m_NodeGraph.GetSelectedNodeId();
+    const int selectedNodeId = m_Project->graph.GetSelectedNodeId();
     if (const EditorNodeGraph::Node* selectedNode =
-            m_NodeGraph.FindNode(selectedNodeId);
+            m_Project->graph.FindNode(selectedNodeId);
         selectedNode) {
         if (selectedNode->kind == EditorNodeGraph::NodeKind::RawProjectFrame) {
             ActivateMultiFrameFrame(
@@ -2609,20 +4153,20 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         } else if (selectedNode->kind ==
                    EditorNodeGraph::NodeKind::RawProjectSourceSet &&
                    Stack::Project::FindSourceSet(
-                       *m_ActiveRawProjectSnapshot,
+                       *m_Project->snapshot,
                        selectedNode->rawProjectSourceSet.sourceSetId)) {
             ActivateMultiFrameSourceSet(
                 selectedNode->rawProjectSourceSet.sourceSetId);
         }
     }
 
-    RawProjectSnapshot& snapshot = *m_ActiveRawProjectSnapshot;
+    RawProjectSnapshot& snapshot = *m_Project->snapshot;
     ImGui::TextUnformatted(snapshot.projectName.c_str());
     ImGui::SameLine();
     ImGui::TextDisabled(
         "%s · %llu set(s) · %llu frame(s)",
         Stack::Project::ProjectStorageKindName(
-            m_ActiveRawProjectStore->StorageKind()),
+            m_Project->store->StorageKind()),
         static_cast<unsigned long long>(snapshot.sourceSets.size()),
         static_cast<unsigned long long>([&]() {
             std::uint64_t count = 0;
@@ -2631,9 +4175,9 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             }
             return count;
         }()));
-    ImGui::TextDisabled("%s", m_ActiveRawWorkspaceProjectPath.string().c_str());
+    ImGui::TextDisabled("%s", m_Project->storePath.string().c_str());
     const Stack::Project::ProjectLifecyclePhase phase =
-        m_ProjectSessionController.Phase();
+        m_Project->lifecycle.Phase();
     if (phase == Stack::Project::ProjectLifecyclePhase::ReadOnlyRecovery) {
         ImGui::TextColored(
             ImVec4(0.95f, 0.68f, 0.25f, 1.0f),
@@ -2665,7 +4209,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         ImGui::SameLine();
     }
     ImGui::BeginDisabled(
-        m_ActiveRawProjectStore->StorageKind() !=
+        m_Project->store->StorageKind() !=
             Stack::Project::ProjectStorageKind::PortableFile ||
         phase == Stack::Project::ProjectLifecyclePhase::Conflict ||
         phase == Stack::Project::ProjectLifecyclePhase::ReadOnlyRecovery);
@@ -2706,10 +4250,11 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
 
     MultiFrameSourceSet* active = Stack::Project::FindSourceSet(
         snapshot, snapshot.activeSourceSetId);
-    const bool focusedMfdProject =
+    const bool focusedManagedRawProject =
         snapshot.sourceSets.size() == 1u && active &&
-        active->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
-        active->operationSchemaVersion >= Stack::Project::kMfdMosaicPlaceholderSchemaVersion;
+        ((active->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
+          active->operationSchemaVersion == Stack::Project::kMfdOperationSchemaVersion) ||
+         active->operationIntent == MultiFrameOperationIntent::RawBurstHdr);
     const char* activeLabel = active ? active->name.c_str() : "No source set";
     if (ImGui::BeginCombo("Source set", activeLabel)) {
         for (const MultiFrameSourceSet& sourceSet : snapshot.sourceSets) {
@@ -2718,19 +4263,19 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             if (ImGui::Selectable(sourceSet.name.c_str(), selected)) {
                 ActivateMultiFrameSourceSet(sourceSet.sourceSetId);
                 active = Stack::Project::FindSourceSet(
-                    *m_ActiveRawProjectSnapshot, sourceSet.sourceSetId);
+                    *m_Project->snapshot, sourceSet.sourceSetId);
             }
         }
         ImGui::EndCombo();
     }
 
-    static char newSetName[160] = "New Source Set";
-    static int newSetIntent = 0;
-    ImGui::BeginDisabled(focusedMfdProject);
+    auto& newSetName = m_ProjectInteractionUi.multiFrame.newSetName;
+    auto& newSetIntent = m_ProjectInteractionUi.multiFrame.newSetIntent;
+    ImGui::BeginDisabled(focusedManagedRawProject);
     if (ImGui::Button("New Set")) ImGui::OpenPopup("New Multi-Frame Source Set");
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(active == nullptr || focusedMfdProject);
+    ImGui::BeginDisabled(active == nullptr || focusedManagedRawProject);
     if (ImGui::Button("Duplicate")) {
         std::string error;
         if (!DuplicateMultiFrameSourceSet(active->sourceSetId, &error)) {
@@ -2762,25 +4307,31 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
                 FileDialogs::OpenMultipleFilesDialog("Add Source Set Frames");
             std::vector<std::filesystem::path> paths;
             for (const std::string& path : selected) paths.emplace_back(path);
-            std::string error;
-            const bool created = AddMultiFrameSourceSet(
-                newSetName,
-                newSetIntent == 0
-                    ? MultiFrameOperationIntent::Mfsr
-                    : MultiFrameOperationIntent::RawBurstDenoise,
-                paths,
-                &error);
-            m_RawWorkspaceLabUi.multiFrameStatusText = created
-                ? "Source set created."
-                : error;
-            if (created) ImGui::CloseCurrentPopup();
+            if (paths.empty()) {
+                m_RawWorkspaceLabUi.multiFrameStatusText = "No captures selected.";
+            } else {
+                std::string error;
+                const bool created = AddMultiFrameSourceSet(
+                    newSetName,
+                    newSetIntent == 0
+                        ? MultiFrameOperationIntent::Mfsr
+                        : MultiFrameOperationIntent::RawBurstDenoise,
+                    paths,
+                    &error);
+                m_RawWorkspaceLabUi.multiFrameStatusText = created
+                    ? "Source set created."
+                    : error;
+                PostNotification(created ? UiNotificationSeverity::Success : UiNotificationSeverity::Error,
+                    created ? "Source set created." : error.empty() ? "The source set could not be created." : error);
+                if (created) ImGui::CloseCurrentPopup();
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
-    static char renameSetName[160] = {};
+    auto& renameSetName = m_ProjectInteractionUi.multiFrame.renameSetName;
     if (ImGui::BeginPopupModal(
             "Rename Multi-Frame Source Set", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -2795,6 +4346,8 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             m_RawWorkspaceLabUi.multiFrameStatusText = renamed
                 ? "Source set renamed."
                 : error;
+            if (!renamed) PostNotification(UiNotificationSeverity::Error,
+                error.empty() ? "The source set could not be renamed." : error);
             if (renamed) {
                 renameSetName[0] = '\0';
                 ImGui::CloseCurrentPopup();
@@ -2815,8 +4368,11 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         return;
     }
 
-    if (focusedMfdProject) {
-        ImGui::TextDisabled("Operation: MFD / Mosaic CFA Burst Denoise");
+    if (focusedManagedRawProject) {
+        ImGui::TextDisabled(
+            active->operationIntent == MultiFrameOperationIntent::RawBurstHdr
+                ? "Operation: Scene-linear Bayer HDR"
+                : "Operation: MFD / Mosaic CFA Burst Denoise");
     } else {
         int intent = active->operationIntent == MultiFrameOperationIntent::Mfsr ? 0 : 1;
         const char* intentLabels[] = { "MFSR", "Burst Denoise" };
@@ -2832,26 +4388,14 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             return;
         }
     }
-    if (active->operationIntent == MultiFrameOperationIntent::RawBurstDenoise &&
-        active->operationSchemaVersion >= Stack::Project::kMfdMosaicPlaceholderSchemaVersion) {
-        bool internalView = active->settings.value(
+    if (active->operationIntent == MultiFrameOperationIntent::RawBurstDenoise ||
+        active->operationIntent == MultiFrameOperationIntent::RawBurstHdr) {
+        const bool internalView = active->settings.value(
             "viewTransformPlacement", std::string("internal")) != "graph";
-        if (ImGui::Checkbox("Apply View Transform inside the MFD RAW workflow", &internalView)) {
-            std::string error;
-            if (!SetMfdInternalViewTransformEnabled(
-                    active->sourceSetId, internalView, &error)) {
-                m_RawWorkspaceLabUi.multiFrameStatusText = error;
-            } else {
-                m_RawWorkspaceLabUi.multiFrameStatusText = internalView
-                    ? "View Transform moved back inside the MFD RAW workflow."
-                    : "One View Transform was inserted immediately before Output.";
-            }
-            return;
-        }
         ImGui::TextDisabled(
             internalView
-                ? "Display mapping is internal; reconnecting Output will not create a duplicate transform."
-                : "MFD output is scene-linear and exactly one graph View Transform owns display mapping.");
+                ? "HDR/denoise fusion remains scene-linear. Display Mapping is controlled once in the RAW View tab after the merge."
+                : "HDR/denoise fusion and RAW edits remain scene-linear. One graph View Transform owns display mapping.");
     }
     std::string setReason;
     const Stack::Project::MultiFrameSetStatus setStatus =
@@ -2897,7 +4441,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         }
         ImGui::SameLine();
         const char* frameLabel = frame.userLabel.empty()
-            ? (asset ? asset->originalFileName.c_str() : "Missing asset")
+            ? (asset ? asset->originalFilename.c_str() : "Missing asset")
             : frame.userLabel.c_str();
         const bool activeFrame = snapshot.activeFrameId == frame.frameId;
         if (ImGui::Selectable(
@@ -2976,8 +4520,8 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
     }
     if (active->operationIntent !=
             MultiFrameOperationIntent::RawBurstDenoise ||
-        active->operationSchemaVersion <
-            Stack::Project::kMfdMosaicPlaceholderSchemaVersion) {
+        active->operationSchemaVersion !=
+            Stack::Project::kMfdOperationSchemaVersion) {
         ImGui::Separator();
         ImGui::TextColored(
             ImVec4(0.92f, 0.76f, 0.42f, 1.0f),
@@ -3131,6 +4675,10 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             .exactFallbackAlternateToReferenceRatio =
             displayedParameters.fusion
                 .exactFallbackAlternateToReferenceRatio;
+        m_MfdExperimentalParameterDraft.fusionMethod =
+            displayedParameters.fusion.method == "robust" ? 0 : 1;
+        m_MfdExperimentalParameterDraft.fusionSmoothing =
+            displayedParameters.fusion.smoothing;
         m_MfdExperimentalParameterDraft.memoryBudgetGiB =
             active->settings.value(
                 "experimentalMemoryBudgetGiB", 0.0);
@@ -3150,7 +4698,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             ImVec4(0.95f, 0.55f, 0.42f, 1.0f),
             "%s",
             displayedParameterError.empty()
-                ? "The RA-CFA V1 parameter object is invalid."
+                ? "The Burst preparation and safety parameter object is invalid."
                 : displayedParameterError.c_str());
     } else if (ImGui::CollapsingHeader(
             "Processing resources",
@@ -3160,7 +4708,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             "Translation only",
             "None - identity coordinates"
         };
-        ImGui::BeginDisabled(processingBusy);
+        Stack::UiActivity::BeginDisabledForWork(processingBusy);
         ImGui::SetNextItemWidth(260.0f);
         const bool alignmentChanged = ImGui::Combo(
             "Alignment mode",
@@ -3231,7 +4779,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
                 "%s",
                 memoryDecision.message.c_str());
         }
-        ImGui::BeginDisabled(processingBusy);
+        Stack::UiActivity::BeginDisabledForWork(processingBusy);
         ImGui::SetNextItemWidth(150.0f);
         const bool commitMemoryBudget = ImGui::InputDouble(
             "Memory budget (GiB, 0 = automatic)",
@@ -3260,101 +4808,52 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         }
     }
 
-    if (haveParameters && ImGui::CollapsingHeader("RA-CFA V1 parameters")) {
-        ImGui::TextDisabled(
-            "Only four high-impact parameters are exposed in this first pass. Press Enter to commit a value.");
-        ImGui::BeginDisabled(processingBusy);
-        bool commitParameters = false;
-        ImGui::SetNextItemWidth(150.0f);
-        commitParameters |= ImGui::InputDouble(
-            "Motion disagreement hard limit (raw px)",
-            &m_MfdExperimentalParameterDraft
-                .motionDisagreementHardLimitRawPixels,
-            0.0,
-            0.0,
-            "%.3f",
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "Rejects locally inconsistent motion above this raw-pixel distance. Research range: 0.4-1.2; default: 0.75.");
+    const bool invalidBurstSettings =
+        active->operationSchemaVersion !=
+            Stack::Project::kMfdOperationSchemaVersion ||
+        active->settings.value("algorithmId", std::string()) !=
+            Raw::Mfd::kSharedBurstAlgorithmId;
+    if (haveParameters && !invalidBurstSettings && ImGui::CollapsingHeader(
+            "Shared Burst V1",
+            ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextUnformatted("Goal: Static Maximum");
+        ImGui::TextWrapped(
+            "Strongly averages trustworthy aligned measurements without spatial blur or HDR highlight replacement. Hard clipping, motion, geometry, and support gates remain authoritative.");
+        Raw::Mfd::SharedBurstSettings burstSettings;
+        std::string settingsError;
+        const auto burstValue = active->settings.find("sharedBurstSettings");
+        if (burstValue != active->settings.end()) {
+            Raw::Mfd::DeserializeSharedBurstSettings(
+                *burstValue, burstSettings, &settingsError);
         }
-        ImGui::SetNextItemWidth(150.0f);
-        commitParameters |= ImGui::InputDouble(
-            "Trusted-pixel zero-weight residual (noise sigma)",
-            &m_MfdExperimentalParameterDraft.trustedPixelZeroWeightSigma,
-            0.0,
-            0.0,
-            "%.3f",
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "An alternate receives zero trusted-pixel weight at this standardized residual. Research range: 4-7; default: 5.");
-        }
-        ImGui::SetNextItemWidth(150.0f);
-        commitParameters |= ImGui::InputDouble(
-            "Single alternate weight cap (x reference)",
-            &m_MfdExperimentalParameterDraft
-                .oneAlternateWeightCapRelativeToReference,
-            0.0,
-            0.0,
-            "%.3f",
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "Caps one alternate's fusion weight relative to the reference. Research range: 2-8; default: 4.");
-        }
-        ImGui::SetNextItemWidth(150.0f);
-        commitParameters |= ImGui::InputDouble(
-            "Exact-fallback alternate/reference ratio",
-            &m_MfdExperimentalParameterDraft
-                .exactFallbackAlternateToReferenceRatio,
-            0.0,
-            0.0,
-            "%.3f",
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "Below this alternate/reference support ratio, the output copies the reference sample exactly. Research range: 0.01-0.10; default: 0.05.");
-        }
-        if (ImGui::Button("Apply parameter values")) {
-            commitParameters = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Reset RA-CFA V1 defaults")) {
-            const Raw::Mfd::Parameters defaults;
-            m_MfdExperimentalParameterDraft
-                .motionDisagreementHardLimitRawPixels =
-                defaults.registration.motionDisagreementHardLimitRawPixels;
-            m_MfdExperimentalParameterDraft.trustedPixelZeroWeightSigma =
-                defaults.reliability.trustedPixelZeroWeightSigma;
-            m_MfdExperimentalParameterDraft
-                .oneAlternateWeightCapRelativeToReference =
-                defaults.fusion.oneAlternateWeightCapRelativeToReference;
-            m_MfdExperimentalParameterDraft
-                .exactFallbackAlternateToReferenceRatio =
-                defaults.fusion.exactFallbackAlternateToReferenceRatio;
-            commitParameters = true;
-        }
-        ImGui::EndDisabled();
-        if (commitParameters) {
+        float tolerance = static_cast<float>(
+            burstSettings.exposureGroupToleranceEv);
+        Stack::UiActivity::BeginDisabledForWork(processingBusy, invalidBurstSettings);
+        ImGui::SetNextItemWidth(180.0f);
+        if (ImGui::SliderFloat(
+                "Exposure group tolerance",
+                &tolerance,
+                0.1f,
+                2.0f,
+                "%.2f EV")) {
             std::string error;
-            if (!SetMfdExperimentalParameters(
-                    activeSetId,
-                    m_MfdExperimentalParameterDraft
-                        .motionDisagreementHardLimitRawPixels,
-                    m_MfdExperimentalParameterDraft
-                        .trustedPixelZeroWeightSigma,
-                    m_MfdExperimentalParameterDraft
-                        .oneAlternateWeightCapRelativeToReference,
-                    m_MfdExperimentalParameterDraft
-                        .exactFallbackAlternateToReferenceRatio,
-                    &error)) {
+            if (!SetMfdSharedBurstExposureTolerance(
+                    activeSetId, tolerance, &error)) {
                 m_RawWorkspaceLabUi.multiFrameStatusText = error;
             } else {
                 m_RawWorkspaceLabUi.multiFrameStatusText =
-                    "RA-CFA V1 parameters saved. Any earlier result is now stale.";
+                    "Shared Burst exposure group updated. Reprocess to publish a current result.";
             }
+            ImGui::EndDisabled();
             return;
+        }
+        ImGui::EndDisabled();
+        ImGui::TextDisabled(
+            "Adjust frame inclusion, temporal owner/reference, and per-frame trust in the MultiFrame tab.");
+        if (invalidBurstSettings) {
+            ImGui::TextColored(
+                ImVec4(0.92f, 0.76f, 0.42f, 1.0f),
+                "Reprocess required with Shared Burst V1.");
         }
     }
 
@@ -3388,7 +4887,11 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             static_cast<unsigned long long>(report->acceptedAlternateCount),
             static_cast<unsigned long long>(report->compatibleAlternateCount));
         ImGui::Text(
-            "Pixels using alternates: %.2f%% - exact reference: %.2f%%",
+            "Exposure group: %llu selected - %llu routed toward HDR",
+            static_cast<unsigned long long>(report->exposureGroupedCaptureCount),
+            static_cast<unsigned long long>(report->exposureExcludedCaptureCount));
+        ImGui::Text(
+            "Alternate coverage: %.2f%% - exact reference: %.2f%%",
             report->contributingPixelFraction * 100.0,
             report->exactReferencePixelFraction * 100.0);
         if (!stale && report->compatibleAlternateCount > 0u &&
@@ -3399,10 +4902,58 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
                 "No frames contributed; this result is the exact reference image.");
         }
         ImGui::Text(
-            "Mean |delta|: %.7f - P99 |delta|: %.7f - mean effective samples: %.3f",
+            "Average effective frames per pixel: %.2f of %llu",
+            report->meanEffectiveSampleCount,
+            static_cast<unsigned long long>(
+                report->acceptedAlternateCount + 1u));
+        ImGui::Text("Processing backend: %s",
+            report->executionBackend.empty()
+                ? "CPU reference"
+                : report->executionBackend.c_str());
+        ImGui::Text("Registration backend: %s",
+            report->registrationBackend.empty()
+                ? "CPU reference"
+                : report->registrationBackend.c_str());
+        if (!report->registrationGpuDeviceIdentity.empty()) {
+            ImGui::TextDisabled(
+                "Registration GPU: %s",
+                report->registrationGpuDeviceIdentity.c_str());
+            ImGui::TextDisabled(
+                "Registration dispatches: %u - candidates scored: %llu",
+                report->registrationGpuDispatchCount,
+                static_cast<unsigned long long>(
+                    report->registrationGpuScoredCandidateCount));
+        }
+        if (!report->registrationGpuFallbackReason.empty()) {
+            ImGui::TextWrapped(
+                "Registration GPU fallback: %s",
+                report->registrationGpuFallbackReason.c_str());
+        }
+        if (!report->gpuDeviceIdentity.empty()) {
+            ImGui::TextDisabled("GPU: %s", report->gpuDeviceIdentity.c_str());
+            ImGui::TextDisabled("GPU dispatch tiles: %u",
+                report->gpuDispatchedTileCount);
+        }
+        if (!report->gpuFallbackReason.empty()) {
+            ImGui::TextWrapped("GPU fallback: %s",
+                report->gpuFallbackReason.c_str());
+        }
+        ImGui::TextDisabled(
+            "Coverage shows where alternates participated. Effective frames shows how strongly they were actually averaged.");
+        ImGui::Text(
+            "Robust evidence retained: %.1f%%",
+            report->meanRobustAttenuation * 100.0);
+        ImGui::Text(
+            "Model-only independent-noise reduction: %.2fx",
+            report->predictedIndependentNoiseReduction);
+        if (!report->independentNoiseReductionClaimQualified) {
+            ImGui::TextDisabled(
+                "Cross-frame correlation is not calibrated yet, so this is not presented as a measured sqrt(N) result.");
+        }
+        ImGui::TextDisabled(
+            "Mean |delta|: %.7f - P99 |delta|: %.7f",
             report->meanAbsoluteDelta,
-            report->percentile99AbsoluteDelta,
-            report->meanEffectiveSampleCount);
+            report->percentile99AbsoluteDelta);
         ImGui::TextDisabled(
             "Estimated peak: %.1f MiB - budget: %.2f GiB%s",
             static_cast<double>(report->estimatedPeakResidentBytes) /
@@ -3431,15 +4982,28 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
         }
         if (ImGui::CollapsingHeader("Frame decisions")) {
             for (const MfdExperimentalFrameReport& frame : report->frames) {
-                ImGui::BulletText(
-                    "%s - %s%s",
-                    frame.label.c_str(),
-                    frame.reference
-                        ? "reference"
-                        : !frame.attempted
-                            ? "not attempted"
-                            : frame.acceptedForFusion ? "accepted" : "rejected",
-                    frame.message.empty() ? "" : (" - " + frame.message).c_str());
+                const char* status = frame.reference
+                    ? "reference"
+                    : !frame.attempted
+                        ? "not attempted"
+                        : frame.acceptedForFusion ? "included" : "rejected";
+                ImGui::Bullet();
+                ImGui::SameLine();
+                ImGui::PushTextWrapPos(0.0f);
+                if (frame.message.empty()) {
+                    ImGui::TextWrapped(
+                        "%s - %s",
+                        frame.label.c_str(),
+                        status);
+                } else {
+                    ImGui::TextWrapped(
+                        "%s - %s - noise: %s - %s",
+                        frame.label.c_str(),
+                        status,
+                        frame.noiseModelQuality.c_str(),
+                        frame.message.c_str());
+                }
+                ImGui::PopTextWrapPos();
             }
         }
     }
@@ -3459,7 +5023,7 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
             ? "Developed MFD result is active in RAW Lab and the graph"
             : "Process the current burst to publish its RAW result");
     ImGui::TextWrapped(
-        "RA-CFA V1 publishes one normalized float Bayer mosaic. Stack then "
+        "Shared Burst V1 publishes one signed, positive-overrange float Bayer mosaic. Stack then "
         "develops it once with the reference frame's gain map, white balance, "
         "camera matrices, orientation, and the shared post-MFD RAW recipe. "
         "The neutral inspection PNG remains a diagnostic comparison only.");
@@ -3477,75 +5041,89 @@ void EditorModule::RenderMultiFrameRawLabAdvanced() {
 }
 
 void EditorModule::RenderMultiFrameSourceSetDeletePopup() {
-    if (m_OpenMultiFrameDeletePopup) {
-        ImGui::OpenPopup("Delete Source Set and Managed Node?");
-        m_OpenMultiFrameDeletePopup = false;
-    }
-    if (!ImGui::BeginPopupModal(
-            "Delete Source Set and Managed Node?",
-            nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize)) {
-        return;
-    }
-    ImGui::TextWrapped(
-        "This removes the source set, its managed graph node, and all links "
-        "from that node in one project transaction. Shared embedded originals "
-        "remain available to other sets.");
-    if (ImGui::Button("Delete")) {
+    if (!m_OpenMultiFrameDeletePopup) return;
+    m_OpenMultiFrameDeletePopup = false;
+    namespace N = Stack::Notifications;
+    const auto setId = m_PendingDeleteMultiFrameSourceSetId;
+    const auto document = GetProjectDocumentId();
+    const auto revision = GetProjectEditRevision();
+    const auto valid = [this, setId, document, revision] {
+        return GetProjectDocumentId() == document && GetProjectEditRevision() == revision &&
+            m_PendingDeleteMultiFrameSourceSetId == setId && m_Project->snapshot &&
+            Stack::Project::FindSourceSet(*m_Project->snapshot, setId) != nullptr;
+    };
+    N::NoticeSpec notice;
+    notice.title = "Delete source set?";
+    notice.message = "Remove this source set, its managed node, and downstream links?";
+    notice.details = "Shared embedded originals remain available to other sets.";
+    notice.route = N::Route::Center;
+    notice.foreground = m_NotificationForeground;
+    notice.operationId = GetNotifier().NewOperation();
+    N::ActionSpec remove;
+    remove.label = "Delete";
+    remove.destructive = true;
+    remove.canInvoke = valid;
+    remove.invoke = [this, setId] {
         std::string error;
-        const bool deleted = DeleteMultiFrameSourceSet(
-            m_PendingDeleteMultiFrameSourceSetId, &error);
-        m_RawWorkspaceLabUi.multiFrameStatusText = deleted
-            ? "Source set and managed node deleted."
-            : error;
-        if (deleted) {
-            m_PendingDeleteMultiFrameSourceSetId.clear();
-            ImGui::CloseCurrentPopup();
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+        if (!DeleteMultiFrameSourceSet(setId, &error))
+            return N::ActionResult::Failure(error.empty() ? "The source set could not be deleted." : error);
         m_PendingDeleteMultiFrameSourceSetId.clear();
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
+        m_RawWorkspaceLabUi.multiFrameStatusText = "Source set and managed node deleted.";
+        return N::ActionResult::Success();
+    };
+    N::ActionSpec cancel;
+    cancel.label = "Cancel";
+    cancel.safeCancel = true;
+    cancel.invoke = [this, setId] {
+        if (m_PendingDeleteMultiFrameSourceSetId == setId) m_PendingDeleteMultiFrameSourceSetId.clear();
+        return N::ActionResult::Success();
+    };
+    notice.actions = {std::move(remove), std::move(cancel)};
+    RequestNotificationDecision(std::move(notice));
 }
 
 void EditorModule::RenderMultiFrameFrameDeletePopup() {
-    if (m_OpenMultiFrameFrameDeletePopup) {
-        ImGui::OpenPopup("Remove Frame from MFD Project?");
-        m_OpenMultiFrameFrameDeletePopup = false;
-    }
-    if (!ImGui::BeginPopupModal(
-            "Remove Frame from MFD Project?",
-            nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize)) {
-        return;
-    }
-    ImGui::TextWrapped(
-        "This removes the frame membership, its managed graph node, and its "
-        "protected MFD link. The embedded original remains recoverable in "
-        "the project asset store until a future compact/cleanup pass.");
-    if (ImGui::Button("Remove Frame")) {
+    if (!m_OpenMultiFrameFrameDeletePopup) return;
+    m_OpenMultiFrameFrameDeletePopup = false;
+    namespace N = Stack::Notifications;
+    const auto setId = m_PendingDeleteMultiFrameFrameSetId;
+    const auto frameId = m_PendingDeleteMultiFrameFrameId;
+    const auto document = GetProjectDocumentId();
+    const auto revision = GetProjectEditRevision();
+    const auto valid = [this, setId, frameId, document, revision] {
+        return GetProjectDocumentId() == document && GetProjectEditRevision() == revision &&
+            m_PendingDeleteMultiFrameFrameSetId == setId && m_PendingDeleteMultiFrameFrameId == frameId;
+    };
+    N::NoticeSpec notice;
+    notice.title = "Remove frame?";
+    notice.message = "Remove this frame, its managed node, and its protected MFD link?";
+    notice.details = "The embedded original remains in the project asset store.";
+    notice.route = N::Route::Center;
+    notice.foreground = m_NotificationForeground;
+    notice.operationId = GetNotifier().NewOperation();
+    N::ActionSpec remove;
+    remove.label = "Remove frame";
+    remove.destructive = true;
+    remove.canInvoke = valid;
+    remove.invoke = [this, setId, frameId] {
         std::string error;
-        const bool removed = RemoveMultiFrameFrame(
-            m_PendingDeleteMultiFrameFrameSetId,
-            m_PendingDeleteMultiFrameFrameId,
-            &error);
-        m_RawWorkspaceLabUi.multiFrameStatusText = removed
-            ? "Frame removed from the MFD burst."
-            : error;
-        if (removed) {
-            m_PendingDeleteMultiFrameFrameSetId.clear();
-            m_PendingDeleteMultiFrameFrameId.clear();
-            ImGui::CloseCurrentPopup();
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+        if (!RemoveMultiFrameFrame(setId, frameId, &error))
+            return N::ActionResult::Failure(error.empty() ? "The frame could not be removed." : error);
         m_PendingDeleteMultiFrameFrameSetId.clear();
         m_PendingDeleteMultiFrameFrameId.clear();
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
+        m_RawWorkspaceLabUi.multiFrameStatusText = "Frame removed from the MFD burst.";
+        return N::ActionResult::Success();
+    };
+    N::ActionSpec cancel;
+    cancel.label = "Cancel";
+    cancel.safeCancel = true;
+    cancel.invoke = [this, setId, frameId] {
+        if (m_PendingDeleteMultiFrameFrameSetId == setId && m_PendingDeleteMultiFrameFrameId == frameId) {
+            m_PendingDeleteMultiFrameFrameSetId.clear();
+            m_PendingDeleteMultiFrameFrameId.clear();
+        }
+        return N::ActionResult::Success();
+    };
+    notice.actions = {std::move(remove), std::move(cancel)};
+    RequestNotificationDecision(std::move(notice));
 }

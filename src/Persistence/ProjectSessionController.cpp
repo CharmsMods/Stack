@@ -49,6 +49,25 @@ void ProjectSessionController::Clear() {
     m_Phase = ProjectLifecyclePhase::Empty;
 }
 
+bool ProjectSessionController::AdoptSavedBaseline(
+    std::string projectId,
+    std::uint64_t persistedDirtyRevision,
+    std::uint64_t currentDirtyRevision,
+    std::uint64_t storageRevision) {
+    if (projectId.empty() || storageRevision == 0 ||
+        currentDirtyRevision < persistedDirtyRevision ||
+        (!m_ProjectId.empty() && m_ProjectId != projectId)) return false;
+    ++m_ReplacementGeneration;
+    ++m_SaveGeneration;
+    m_ActiveSaveGeneration = 0;
+    m_ProjectId = std::move(projectId);
+    m_PersistedDirtyRevision = persistedDirtyRevision;
+    m_DirtyRevision = currentDirtyRevision;
+    m_StorageRevision = storageRevision;
+    UpdateReadyPhase();
+    return true;
+}
+
 std::uint64_t ProjectSessionController::NoteEdit() {
     if (m_ProjectId.empty()) return m_DirtyRevision;
     ++m_DirtyRevision;
@@ -127,6 +146,16 @@ void ProjectSessionController::CancelSave(const ProjectSaveToken& token) {
     if (!IsCurrentSave(token)) return;
     m_ActiveSaveGeneration = 0;
     UpdateReadyPhase();
+}
+
+bool ProjectSessionController::RecoverOrphanedSave() {
+    if (m_Phase != ProjectLifecyclePhase::Saving) {
+        return false;
+    }
+    ++m_SaveGeneration;
+    m_ActiveSaveGeneration = 0;
+    UpdateReadyPhase();
+    return true;
 }
 
 void ProjectSessionController::MarkConflict() {

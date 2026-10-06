@@ -5,6 +5,7 @@
 #include "Editor/LayerRegistry.h"
 #include "Editor/Layers/ToneLayers.h"
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Renderer/GLHelpers.h"
 #include "Renderer/RawPreviewProxy.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Renderer/ScopedGLObjects.h"
@@ -425,12 +426,20 @@ const Raw::RawImageData& RenderPipeline::ResolveRawPreviewRenderData(
     const std::string& sourceCacheKey) {
     if (m_PreviewMaxDimension <= 0 ||
         !Stack::Renderer::RawPreviewProxy::HasPixels(rawData) ||
-        !rawData.metadata.error.empty()) {
+        !rawData.metadata.error.empty() ||
+        rawData.metadata.pixelLayout == Raw::RawPixelLayout::MosaicBayer) {
+        // Keep the source CFA resident and let RawGpuPipeline demosaic from
+        // sensor coordinates directly into the display-sized output. A
+        // pre-demosaic proxy is both visibly soft and expensive to rebuild
+        // whenever adaptive interaction changes the requested edge.
         return rawData;
     }
 
     const std::string previewCacheKey =
-        Stack::Renderer::RawPreviewProxy::BuildCacheKey(sourceCacheKey, rawData, m_PreviewMaxDimension);
+        Stack::Renderer::RawPreviewProxy::BuildCacheKey(
+            sourceCacheKey,
+            rawData,
+            m_PreviewMaxDimension);
     std::string& cachedKey = m_RawPreviewDataCacheKeys[cacheNodeId];
     Raw::RawImageData& cachedPreview = m_RawPreviewDataCache[cacheNodeId];
     if (cachedKey == previewCacheKey &&
@@ -440,7 +449,10 @@ const Raw::RawImageData& RenderPipeline::ResolveRawPreviewRenderData(
     }
 
     Raw::RawImageData preview;
-    if (!Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(rawData, m_PreviewMaxDimension, preview)) {
+    if (!Stack::Renderer::RawPreviewProxy::BuildPreviewRawData(
+            rawData,
+            m_PreviewMaxDimension,
+            preview)) {
         cachedKey.clear();
         cachedPreview = Raw::RawImageData {};
         return rawData;
@@ -457,34 +469,44 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     GraphNodeRenderResult result;
     Stack::Renderer::ScopedOwnedGLTextureExceptionCleanup
         resultExceptionCleanup(result.texture, result.owned);
+    const auto cancellationRequested = [this]() {
+        return m_ShouldCancelRender && m_ShouldCancelRender();
+    };
+    const auto recordFailure = [&](const std::string& error) {
+        m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+        m_LastGraphExecutionStats.lastSpecializedFailure = error;
+    };
+    if (cancellationRequested()) {
+        return result;
+    }
 
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe = node.rawDevelopment.recipe;
     const std::string& sourcePath = recipe.source.sourcePath;
     const std::shared_ptr<const Raw::RawImageData>& embeddedRawData =
         node.rawDevelopment.embeddedRawData;
     if (sourcePath.empty() && !embeddedRawData) {
+        recordFailure("The RAW Development source image is unavailable.");
         return result;
     }
 
     const std::string cacheKeyPath =
         Stack::Renderer::RawDevelopmentCache::BuildSourceDataIdentity(
             recipe.source);
-    const Raw::RawImageData* rawData = embeddedRawData.get();
-    if (!rawData) {
-        Raw::RawImageData& cachedRawData = m_RawDataCache[node.nodeId];
-        std::string& cachedPath = m_RawDataCachePaths[node.nodeId];
-        if (cachedPath != cacheKeyPath ||
-            (cachedRawData.rawBuffer.empty() &&
-             cachedRawData.linearUInt16Buffer.empty() &&
-             cachedRawData.linearFloatBuffer.empty() &&
-             !cachedRawData.normalizedMosaicBuffer)) {
-            Raw::RawImageData loadedRaw;
-            Raw::RawLoader::LoadFile(sourcePath, loadedRaw);
-            cachedRawData = std::move(loadedRaw);
-            cachedPath = cacheKeyPath;
+    auto sourceLease = embeddedRawData;
+    if (!sourceLease) {
+        const auto cached = m_RawSharedSourceData.find(cacheKeyPath);
+        if (cached != m_RawSharedSourceData.end()) sourceLease = cached->second;
+        else {
+            auto loaded = std::make_shared<Raw::RawImageData>();
+            Raw::RawLoader::LoadFile(sourcePath, *loaded);
+            sourceLease = std::move(loaded);
+            // Immutable decoder data is shared by Original and Current. Bound
+            // retention when one renderer visits several independent sources.
+            if (m_RawSharedSourceData.size() >= 8) m_RawSharedSourceData.erase(m_RawSharedSourceData.begin());
+            m_RawSharedSourceData.emplace(cacheKeyPath, sourceLease);
         }
-        rawData = &cachedRawData;
     }
+    const Raw::RawImageData* rawData = sourceLease.get();
 
     const bool rawDataHasPixels =
         Stack::Renderer::RawPreviewProxy::HasPixels(*rawData);
@@ -492,28 +514,35 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         const std::string error = !rawData->metadata.error.empty()
             ? rawData->metadata.error
             : "LibRaw did not produce a usable raw buffer.";
+        recordFailure(error);
         std::cerr << "[RAW] Load failed for RAW Development node " << node.nodeId
                   << " (" << sourcePath << "): " << error << "\n";
         return result;
     }
+    if (cancellationRequested()) {
+        return result;
+    }
 
     const Raw::RawDevelopSettings settings = Stack::RawRecipe::ToRawDevelopSettings(recipe);
+    m_RawViewportAppliedRegion = {};
+    m_RawViewportGpuTiming.Mark(Raw::ViewportStage::RawBase);
     const bool captureAnalysis = m_RawDevelopmentAnalysisEnabled;
+    const bool detailedDamageValidation =
+        m_RawDevelopmentViewportValidationEnabled &&
+        !m_RawDevelopmentInteractivePreview;
     Stack::RawAutoStartPoint::RawAutoStartPointRawSafetyStats rawSafetyStats;
     if (captureAnalysis) {
         rawSafetyStats = BuildRawSafetyStats(*rawData, settings);
     }
-    const bool localExposureEnabled = Stack::RawRecipe::IsLocalExposureEnabled(recipe);
-    if (!localExposureEnabled) {
-        m_PreLocalExposureSummaries.erase(node.nodeId);
-    }
+    m_PreLocalExposureSummaries.erase(node.nodeId);
     Raw::RawDevelopSettings rawRenderSettings = settings;
     rawRenderSettings.toneCurvePoints.clear();
     const Raw::RawImageData& renderRawData =
-        rawData->normalizedMosaicBuffer
-            ? *rawData
-            : ResolveRawPreviewRenderData(
-                  node.nodeId, *rawData, cacheKeyPath);
+        ResolveRawPreviewRenderData(
+            node.nodeId, *rawData, cacheKeyPath);
+    if (cancellationRequested()) {
+        return result;
+    }
     const std::string rawPlacementCacheKey =
         std::to_string(node.nodeId) + ":__rawDevelopmentPlacement";
     const std::string neutralPlacementCacheKey =
@@ -522,82 +551,306 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         std::to_string(node.nodeId) + ":__rawDevelopmentRgbBase";
     const std::string rgbDenoiseCacheKey =
         std::to_string(node.nodeId) + ":__rawDevelopmentRgbDenoise";
-    const std::string postLocalExposureCacheKey =
-        std::to_string(node.nodeId) + ":__rawDevelopmentPostLocalExposure";
     const std::string postLocalRangeCacheKey =
         std::to_string(node.nodeId) + ":__rawDevelopmentPostLocalRange";
     const std::string postFinishToneCacheKey =
         std::to_string(node.nodeId) + ":__rawDevelopmentPostFinishTone";
+    const std::string postColorWarpCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPostColorWarp";
+    const std::string postViewTransformCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPostViewTransform";
+    const std::string postOutputCropCacheKey =
+        std::to_string(node.nodeId) + ":__rawDevelopmentPostOutputCrop";
+    const std::string denoiseDiagnosticOutputCropCacheKey =
+        std::to_string(node.nodeId) +
+        ":__rawDevelopmentDenoiseDiagnosticOutputCrop";
+    Stack::Renderer::RawDevelopmentCache::StageFingerprints
+        stageFingerprints =
+            Stack::Renderer::RawDevelopmentCache::BuildStageFingerprints(
+                recipe,
+                m_PreviewMaxDimension);
+    const bool regionalOutput = m_RawViewportRequest.visible.Partial() &&
+        !captureAnalysis && m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::None &&
+        !m_RawDevelopmentViewportValidationEnabled;
+    if (regionalOutput) {
+        const int first = static_cast<int>(Raw::ViewportFirstRegionalStage(recipe));
+        std::size_t* fingerprints[] = {&stageFingerprints.rawBase, &stageFingerprints.neutralPlacement,
+            &stageFingerprints.rawPlacement, &stageFingerprints.postLocalRange, &stageFingerprints.postFinishTone,
+            &stageFingerprints.postColorWarp, &stageFingerprints.postViewTransform, &stageFingerprints.postOutputCrop};
+        for (int stage = first; stage < 8; ++stage)
+            Stack::Renderer::RawDevelopmentCache::MixJsonHash(*fingerprints[stage], m_RawViewportRequest.visible.Fingerprint());
+    }
+    if (regionalOutput)
+        Stack::Renderer::RawDevelopmentCache::MixJsonHash(
+            stageFingerprints.calibratedNeutral, m_RawViewportRequest.visible.Fingerprint());
+    const std::size_t calibratedNeutralFingerprint = stageFingerprints.calibratedNeutral;
+    const auto calibration = Stack::RawRecipe::BuildColorCalibrationTransform(
+        recipe.colorCalibration, recipe.technical.workingSpace);
     const std::size_t rawPlacementFingerprint =
-        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
-            recipe,
-            m_PreviewMaxDimension,
-            Stack::Renderer::RawDevelopmentCache::Stage::RawPlacement);
+        stageFingerprints.rawPlacement;
     const std::size_t neutralPlacementFingerprint =
-        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
-            recipe,
-            m_PreviewMaxDimension,
-            Stack::Renderer::RawDevelopmentCache::Stage::NeutralPlacement);
-    const std::size_t rawBaseFingerprint =
-        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
-            recipe,
-            m_PreviewMaxDimension,
-            Stack::Renderer::RawDevelopmentCache::Stage::RawBase);
-    const std::size_t postLocalExposureFingerprint =
-        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
-            recipe,
-            m_PreviewMaxDimension,
-            Stack::Renderer::RawDevelopmentCache::Stage::PostLocalExposure);
+        stageFingerprints.neutralPlacement;
+    const std::size_t rawBaseFingerprint = stageFingerprints.rawBase;
     const std::size_t postLocalRangeFingerprint =
-        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
-            recipe,
-            m_PreviewMaxDimension,
-            Stack::Renderer::RawDevelopmentCache::Stage::PostLocalRange);
+        stageFingerprints.postLocalRange;
     const std::size_t postFinishToneFingerprint =
-        Stack::Renderer::RawDevelopmentCache::BuildStageFingerprint(
-            recipe,
-            m_PreviewMaxDimension,
-            Stack::Renderer::RawDevelopmentCache::Stage::PostFinishTone);
+        stageFingerprints.postFinishTone;
+    const std::size_t postColorWarpFingerprint =
+        stageFingerprints.postColorWarp;
+    const std::size_t postViewTransformFingerprint =
+        stageFingerprints.postViewTransform;
+    const std::size_t postOutputCropFingerprint =
+        stageFingerprints.postOutputCrop;
     const Stack::RawRecipe::RawRgbDenoiseRecipe rgbDenoiseSettings =
         Stack::RawRecipe::SanitizeRgbDenoiseRecipe(recipe.rgbDenoise);
-    const bool rgbDenoiseEnabled = rgbDenoiseSettings.enabled;
+    const bool rgbDenoiseDiagnosticRequested =
+        rgbDenoiseSettings.diagnosticMode !=
+            Stack::RawRecipe::RawDenoiseDiagnosticMode::None;
+    const bool rgbDenoiseStageRequested =
+        Stack::RawRecipe::IsRgbDenoiseActive(rgbDenoiseSettings) ||
+        rgbDenoiseDiagnosticRequested;
     Raw::RawDevelopSettings neutralSceneSettings = rawRenderSettings;
     neutralSceneSettings.exposureStops = 0.0f;
     neutralSceneSettings.toneCurvePoints.clear();
     const bool currentRawRenderIsNeutralScene =
         std::fabs(rawRenderSettings.exposureStops) <= 0.0001f &&
-        rawRenderSettings.toneCurvePoints.empty();
+        rawRenderSettings.toneCurvePoints.empty() && !calibration.active;
+    const char* neutralGradingMeasurementDomain =
+        recipe.technical.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
+            ? "scene-linear-neutral-rec2020-d65"
+            : "scene-linear-neutral-srgb-d65";
     RenderTextureStats neutralSceneStats;
-    if (!rgbDenoiseEnabled) {
-        if (captureAnalysis && !currentRawRenderIsNeutralScene) {
-            const CachedGraphTexture cachedNeutral =
-                FindRawDevelopStageCacheEntry(neutralPlacementCacheKey, neutralPlacementFingerprint);
-            unsigned int neutralTexture = cachedNeutral.texture;
-            int neutralWidth = cachedNeutral.width;
-            int neutralHeight = cachedNeutral.height;
-            if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
-                ++m_LastGraphExecutionStats.rawStageCacheHits;
-            } else {
-                ++m_LastGraphExecutionStats.rawStageCacheMisses;
-                neutralTexture =
-                    m_RawPipelines[node.nodeId].Render(
-                        renderRawData,
-                        neutralSceneSettings,
-                        m_PreviewMaxDimension);
-                neutralWidth = m_RawPipelines[node.nodeId].GetOutputWidth();
-                neutralHeight = m_RawPipelines[node.nodeId].GetOutputHeight();
-                if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
-                    m_Width = neutralWidth;
-                    m_Height = neutralHeight;
-                    StoreRawDevelopStageCacheEntry(
-                        neutralPlacementCacheKey,
-                        neutralTexture,
-                        neutralPlacementFingerprint);
-                }
+
+    using RawCacheStage =
+        Stack::Renderer::RawDevelopmentCache::Stage;
+    const auto prewarmStageDescriptor =
+        [&](RawCacheStage stage,
+            const std::string*& outKey,
+            const std::size_t*& outFingerprint) {
+            outKey = nullptr;
+            outFingerprint = nullptr;
+            switch (stage) {
+                case RawCacheStage::RawBase:
+                    outKey = &rawBaseCacheKey;
+                    outFingerprint = &rawBaseFingerprint;
+                    break;
+                case RawCacheStage::NeutralPlacement:
+                    outKey = rgbDenoiseStageRequested
+                        ? &rgbDenoiseCacheKey
+                        : &neutralPlacementCacheKey;
+                    outFingerprint = &neutralPlacementFingerprint;
+                    break;
+                case RawCacheStage::RawPlacement:
+                    outKey = &rawPlacementCacheKey;
+                    outFingerprint = &rawPlacementFingerprint;
+                    break;
+                case RawCacheStage::PostLocalRange:
+                    outKey = &postLocalRangeCacheKey;
+                    outFingerprint = &postLocalRangeFingerprint;
+                    break;
+                case RawCacheStage::PostFinishTone:
+                    outKey = &postFinishToneCacheKey;
+                    outFingerprint = &postFinishToneFingerprint;
+                    break;
+                case RawCacheStage::PostColorWarp:
+                    outKey = &postColorWarpCacheKey;
+                    outFingerprint = &postColorWarpFingerprint;
+                    break;
+                case RawCacheStage::PostViewTransform:
+                    outKey = &postViewTransformCacheKey;
+                    outFingerprint = &postViewTransformFingerprint;
+                    break;
+                case RawCacheStage::PostOutputCrop:
+                    outKey = &postOutputCropCacheKey;
+                    outFingerprint = &postOutputCropFingerprint;
+                    break;
             }
-            if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
+        };
+    const auto clearOwnedPrewarmResult = [&]() {
+        if (result.owned && result.texture != 0) {
+            glDeleteTextures(1, &result.texture);
+        }
+        result = {};
+    };
+    const auto cacheResultStage = [&result, this](
+        const std::string& key,
+        std::size_t fingerprint) {
+        const bool transferOwnership = result.owned;
+        if (StoreRawDevelopStageCacheEntry(
+                key,
+                result.texture,
+                fingerprint,
+                transferOwnership) &&
+            transferOwnership) {
+            result.owned = false;
+        }
+    };
+    const auto finishCachePrewarmStage =
+        [&](RawCacheStage stage,
+            const std::string& cacheKey,
+            std::size_t stageFingerprint,
+            bool allowCurrentBorrowedTexture = false) {
+            if (!m_RawDevelopmentCachePrewarmActive ||
+                m_RawDevelopmentCachePrewarmStage != stage) {
+                return false;
+            }
+            if (m_RawDevelopmentCachePrewarmFingerprint !=
+                stageFingerprint) {
+                clearOwnedPrewarmResult();
+                return true;
+            }
+            const CachedGraphTexture cached =
+                FindRawDevelopStageCacheEntry(
+                    cacheKey,
+                    stageFingerprint);
+            const CachedGraphTexture neutralPlacementAlias =
+                allowCurrentBorrowedTexture &&
+                    stage == RawCacheStage::RawPlacement
+                ? FindRawDevelopStageCacheEntry(
+                      rgbDenoiseStageRequested
+                          ? rgbDenoiseCacheKey
+                          : neutralPlacementCacheKey,
+                      neutralPlacementFingerprint)
+                : CachedGraphTexture{};
+            if (cached.texture != 0 &&
+                cached.width > 0 &&
+                cached.height > 0) {
+                clearOwnedPrewarmResult();
+                result.texture = cached.texture;
+                result.owned = false;
+                m_Width = cached.width;
+                m_Height = cached.height;
+                m_RawDevelopmentCachePrewarmCompleted = true;
+            } else if (neutralPlacementAlias.texture != 0 &&
+                       neutralPlacementAlias.width > 0 &&
+                       neutralPlacementAlias.height > 0) {
+                // At exactly 0 EV, NeutralPlacement and RawPlacement are the
+                // same pixels. Avoid a duplicate cache clone while still
+                // treating the requested upstream input as ready.
+                clearOwnedPrewarmResult();
+                result.texture = neutralPlacementAlias.texture;
+                result.owned = false;
+                m_Width = neutralPlacementAlias.width;
+                m_Height = neutralPlacementAlias.height;
+                m_RawDevelopmentCachePrewarmCompleted = true;
+            } else {
+                clearOwnedPrewarmResult();
+            }
+            return true;
+        };
+
+    if (m_RawDevelopmentCachePrewarmActive) {
+        const std::string* targetKey = nullptr;
+        const std::size_t* targetFingerprint = nullptr;
+        prewarmStageDescriptor(
+            m_RawDevelopmentCachePrewarmStage,
+            targetKey,
+            targetFingerprint);
+        if (targetKey == nullptr ||
+            targetFingerprint == nullptr ||
+            *targetFingerprint == 0 ||
+            m_RawDevelopmentCachePrewarmFingerprint !=
+                *targetFingerprint) {
+            return result;
+        }
+        const CachedGraphTexture ready =
+            FindRawDevelopStageCacheEntry(
+                *targetKey,
+                *targetFingerprint);
+        if (ready.texture != 0 && ready.width > 0 && ready.height > 0) {
+            result.texture = ready.texture;
+            result.owned = false;
+            m_Width = ready.width;
+            m_Height = ready.height;
+            m_RawDevelopmentCachePrewarmCompleted = true;
+            return result;
+        }
+        if (m_RawDevelopmentCachePrewarmStage ==
+                RawCacheStage::RawPlacement &&
+            currentRawRenderIsNeutralScene) {
+            const CachedGraphTexture neutralReady =
+                FindRawDevelopStageCacheEntry(
+                    rgbDenoiseStageRequested
+                        ? rgbDenoiseCacheKey
+                        : neutralPlacementCacheKey,
+                    neutralPlacementFingerprint);
+            if (neutralReady.texture != 0 &&
+                neutralReady.width > 0 &&
+                neutralReady.height > 0) {
+                result.texture = neutralReady.texture;
+                result.owned = false;
+                m_Width = neutralReady.width;
+                m_Height = neutralReady.height;
+                m_RawDevelopmentCachePrewarmCompleted = true;
+                return result;
+            }
+        }
+    }
+    const QuickTextureStats authoredPlacementValidationStats =
+        m_RawDevelopmentViewportValidationEnabled
+            ? ProbeTextureStats(result.texture, m_Width, m_Height)
+            : QuickTextureStats{};
+    if (cancellationRequested()) {
+        return result;
+    }
+    Stack::Renderer::ScopedGLTexture regionalNeutralOwner;
+    Stack::Renderer::ScopedGLTexture zoneAreaReference;
+    m_RawZoneAreasFloatOutput = !recipe.localRange.areas.empty();
+    std::vector<Stack::RawRecipe::RawZoneAreaStatistics> zoneAreaStatistics;
+    const auto selectNeutralRegion = [&](unsigned int& texture, int& width, int& height) {
+        GraphNodeRenderResult regionInput;
+        regionInput.texture = texture;
+        regionInput.owned = false;
+        m_Width = width;
+        m_Height = height;
+        ApplyRawViewportRegion(regionInput, recipe, Raw::ViewportStage::RawPlacement, neutralPlacementFingerprint, node.nodeId);
+        texture = regionInput.texture;
+        width = m_Width;
+        height = m_Height;
+        if (regionInput.owned) regionalNeutralOwner.Reset(texture);
+    };
+    if (!rgbDenoiseStageRequested) {
+        const CachedGraphTexture cachedNeutral =
+            FindRawDevelopStageCacheEntry(
+                neutralPlacementCacheKey,
+                neutralPlacementFingerprint);
+        unsigned int neutralTexture = cachedNeutral.texture;
+        int neutralWidth = cachedNeutral.width;
+        int neutralHeight = cachedNeutral.height;
+        if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
+            ++m_LastGraphExecutionStats.rawStageCacheHits;
+        } else {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            neutralTexture =
+                RenderRawPipelineWithTelemetry(
+                    node.nodeId,
+                    renderRawData,
+                    neutralSceneSettings,
+                    m_PreviewMaxDimension);
+            neutralWidth = m_RawPipelines[node.nodeId].GetOutputWidth();
+            neutralHeight = m_RawPipelines[node.nodeId].GetOutputHeight();
+            if (neutralTexture != 0 &&
+                neutralWidth > 0 &&
+                neutralHeight > 0) {
+                m_Width = neutralWidth;
+                m_Height = neutralHeight;
+                StoreRawDevelopStageCacheEntry(
+                    neutralPlacementCacheKey,
+                    neutralTexture,
+                    neutralPlacementFingerprint);
+            }
+        }
+        if (neutralTexture != 0 &&
+            neutralWidth > 0 &&
+            neutralHeight > 0 &&
+            !currentRawRenderIsNeutralScene) {
+            if (captureAnalysis) {
                 neutralSceneStats =
-                    ReadTextureStats(neutralTexture, neutralWidth, neutralHeight, "RawDevelopmentNeutralSceneStats");
+                    ReadTextureStats(
+                        neutralTexture,
+                        neutralWidth,
+                        neutralHeight,
+                        "RawDevelopmentNeutralSceneStats");
                 CaptureRawDevelopmentStageImageReadback(
                     Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
                     Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
@@ -608,8 +861,32 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                     true,
                     false);
             }
+            CaptureRawDevelopmentGradingScopeReadback(
+                RawDevelopmentGradingScopeSource::NeutralScene,
+                neutralTexture,
+                neutralWidth,
+                neutralHeight,
+                neutralGradingMeasurementDomain,
+                recipe.technical.workingSpace,
+                true,
+                false);
+        }
+        result.texture = neutralTexture;
+        result.owned = false;
+        m_Width = neutralWidth;
+        m_Height = neutralHeight;
+        if (finishCachePrewarmStage(
+                RawCacheStage::NeutralPlacement,
+                neutralPlacementCacheKey,
+                neutralPlacementFingerprint)) {
+            return result;
         }
 
+        selectNeutralRegion(neutralTexture, neutralWidth, neutralHeight);
+        if (m_RawZoneAreasFloatOutput && neutralTexture != 0) {
+            zoneAreaReference.Reset(RenderRawDevelopmentExposure(neutralTexture, 0.0f, &calibration));
+            if (!zoneAreaReference) throw std::runtime_error("Zones reference image unavailable");
+        }
         const CachedGraphTexture cachedRawPlacement =
             FindRawDevelopStageCacheEntry(rawPlacementCacheKey, rawPlacementFingerprint);
         if (cachedRawPlacement.texture != 0 &&
@@ -617,25 +894,56 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             cachedRawPlacement.height > 0) {
             ++m_LastGraphExecutionStats.rawStageCacheHits;
             result.texture = cachedRawPlacement.texture;
+            result.owned = false;
             m_Width = cachedRawPlacement.width;
             m_Height = cachedRawPlacement.height;
+        } else if (neutralTexture != 0 &&
+                   neutralWidth > 0 &&
+                   neutralHeight > 0 &&
+                   currentRawRenderIsNeutralScene) {
+            // Neutral placement is exactly the authored 0 EV placement. Keep
+            // one cache owner instead of cloning the same texture under two
+            // stage keys.
+            result.texture = neutralTexture;
+            result.owned = false;
+            m_Width = neutralWidth;
+            m_Height = neutralHeight;
         } else {
             ++m_LastGraphExecutionStats.rawStageCacheMisses;
-            result.texture =
-                m_RawPipelines[node.nodeId].Render(
-                    renderRawData,
-                    rawRenderSettings,
-                    m_PreviewMaxDimension);
-            m_Width = m_RawPipelines[node.nodeId].GetOutputWidth();
-            m_Height = m_RawPipelines[node.nodeId].GetOutputHeight();
-            if (result.texture != 0 && m_Width > 0 && m_Height > 0) {
-                StoreRawDevelopStageCacheEntry(
+            // Keep denoise OFF on the same neutral-scene -> Exposure boundary
+            // used when denoise is ON. The only semantic difference between
+            // the two toggle states should be the optional denoise pass; a
+            // direct RAW render here otherwise makes the toggle switch both
+            // the image operation and the materialization path. That can
+            // expose stale or partially initialized intermediate textures as
+            // apparently reversed brightness changes during rapid edits.
+            m_Width = neutralWidth;
+            m_Height = neutralHeight;
+            m_RawViewportGpuTiming.Mark(Raw::ViewportStage::RawPlacement);
+            result.texture = RenderRawDevelopmentExposure(
+                neutralTexture,
+                recipe.preToneExposureEv, &calibration);
+            result.owned = result.texture != 0;
+            if (result.texture != 0) {
+                cacheResultStage(
                     rawPlacementCacheKey,
-                    result.texture,
                     rawPlacementFingerprint);
+            } else {
+                if (calibration.active || m_RawViewportAppliedRegion.Valid())
+                    throw std::runtime_error("RAW calibration/exposure rendering failed");
+                // Preserve a last-resort path if the fullscreen exposure
+                // program or target cannot be created.
+                result.texture =
+                    RenderRawPipelineWithTelemetry(
+                        node.nodeId,
+                        renderRawData,
+                        rawRenderSettings,
+                        m_PreviewMaxDimension);
+                m_Width = m_RawPipelines[node.nodeId].GetOutputWidth();
+                m_Height = m_RawPipelines[node.nodeId].GetOutputHeight();
+                result.owned = false;
             }
         }
-        result.owned = false;
     } else {
         const bool aiDenoiseMethod =
             rgbDenoiseSettings.method !=
@@ -645,19 +953,19 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 Stack::Restormer::Client::Instance().Validate(
                     rgbDenoiseSettings);
             if (!package.ok) {
-                m_LastRawRgbDenoiseError = package.error;
+                m_RawRgbDenoiseState->error = package.error;
                 std::cerr
                     << "[RAW] Restormer RGB denoise blocked RAW Development "
                     << "node " << node.nodeId << ": " << package.error << "\n";
                 return result;
             }
         }
-        const CachedGraphTexture cachedDenoise =
-            FindRawDevelopStageCacheEntry(
-                rgbDenoiseCacheKey,
-                neutralPlacementFingerprint);
+        bool temporaryDenoise = false;
+        const CachedGraphTexture cachedDenoise = FindRawViewportDenoiseInput(
+            rgbDenoiseCacheKey, recipe, temporaryDenoise);
         unsigned int neutralTexture = cachedDenoise.texture;
         Stack::Renderer::ScopedGLTexture neutralTextureOwner;
+        if (temporaryDenoise) neutralTextureOwner.Reset(neutralTexture);
         int neutralWidth = cachedDenoise.width;
         int neutralHeight = cachedDenoise.height;
         if (neutralTexture != 0 && neutralWidth > 0 && neutralHeight > 0) {
@@ -678,7 +986,8 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             } else {
                 ++m_LastGraphExecutionStats.rawStageCacheMisses;
                 baseTexture =
-                    m_RawPipelines[node.nodeId].Render(
+                    RenderRawPipelineWithTelemetry(
+                        node.nodeId,
                         renderRawData,
                         neutralSceneSettings,
                         m_PreviewMaxDimension);
@@ -694,73 +1003,155 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 }
             }
 
+            if (cancellationRequested()) {
+                return result;
+            }
             if (baseTexture != 0 && m_Width > 0 && m_Height > 0) {
+                m_RawViewportGpuTiming.Mark(Raw::ViewportStage::NeutralPlacement);
+                ++m_LastGraphExecutionStats.rawRgbDenoisePasses;
                 neutralTexture = RenderRawDevelopmentRgbDenoise(
                     baseTexture,
                     rgbDenoiseSettings,
                     recipe.technical.workingSpace,
-                    rawBaseFingerprint);
+                    rawBaseFingerprint,
+                    Raw::Denoise::BuildRawRgbNoiseModel(
+                        renderRawData,
+                        neutralSceneSettings),
+                    rgbDenoiseCacheKey,
+                    renderRawData.metadata.visibleWidth > 0
+                        ? renderRawData.metadata.visibleWidth
+                        : renderRawData.metadata.rawWidth,
+                    renderRawData.metadata.visibleHeight > 0
+                        ? renderRawData.metadata.visibleHeight
+                        : renderRawData.metadata.rawHeight,
+                    &recipe);
                 if (neutralTexture != 0) {
                     neutralTextureOwner.Reset(neutralTexture);
                     neutralWidth = m_Width;
                     neutralHeight = m_Height;
-                    StoreRawDevelopStageCacheEntry(
+                    const bool storedDenoise = StoreRawDevelopStageCacheEntry(
                         rgbDenoiseCacheKey,
                         neutralTexture,
                         neutralPlacementFingerprint);
+                    if (storedDenoise && m_PreviewMaxDimension == 0 &&
+                        !rgbDenoiseDiagnosticRequested && !IsRawRgbDenoiseAsyncPending())
+                        m_RawDevelopStageImageCache.at(rgbDenoiseCacheKey).front().viewportNativeDependency = true;
                 } else {
                     const bool aiMethod =
                         rgbDenoiseSettings.method !=
                         Stack::RawRecipe::RawRgbDenoiseMethod::
                             ClassicalMultiscaleV1;
-                    if (aiMethod) {
+                    const bool denoiseRequested =
+                        Stack::RawRecipe::IsRgbDenoiseActive(
+                            rgbDenoiseSettings) ||
+                        rgbDenoiseSettings.diagnosticMode !=
+                            Stack::RawRecipe::RawDenoiseDiagnosticMode::None;
+                    if (aiMethod && denoiseRequested) {
                         neutralTexture = 0;
                         neutralWidth = 0;
                         neutralHeight = 0;
                         std::cerr
                             << "[RAW] Restormer RGB denoise blocked RAW "
                             << "Development node " << node.nodeId << ": "
-                            << (m_LastRawRgbDenoiseError.empty()
+                            << (m_RawRgbDenoiseState->error.empty()
                                 ? "external model inference failed"
-                                : m_LastRawRgbDenoiseError)
+                                : m_RawRgbDenoiseState->error)
                             << "\n";
                     } else {
-                        // The built-in method may fail open because it does
-                        // not represent an authored external model identity.
                         neutralTexture = baseTexture;
                         neutralWidth = m_Width;
                         neutralHeight = m_Height;
-                        std::cerr
-                            << "[RAW] Classical RGB denoise failed for RAW "
-                            << "Development node " << node.nodeId
-                            << "; passing neutral demosaic through.\n";
+                        if (denoiseRequested) {
+                            // The built-in method may fail open because it
+                            // does not represent an authored external model.
+                            std::cerr
+                                << "[RAW] Classical RGB denoise failed for RAW "
+                                << "Development node " << node.nodeId
+                                << "; passing neutral demosaic through.\n";
+                        }
                     }
                 }
             }
         }
 
-        if (captureAnalysis &&
+        // Keep a completed native denoise dependency, but yield before
+        // downstream exposure/analysis when foreground input supersedes it.
+        if (cancellationRequested()) return result;
+
+        if (rgbDenoiseDiagnosticRequested &&
             neutralTexture != 0 &&
+            neutralWidth > 0 &&
+            neutralHeight > 0) {
+            result.texture = neutralTexture;
+            result.owned = false;
+            m_Width = neutralWidth;
+            m_Height = neutralHeight;
+            if (neutralTextureOwner.Get() == neutralTexture) {
+                result.texture = neutralTextureOwner.Release();
+                result.owned = true;
+            }
+            // A diagnostic is already a display image. Only preserve output
+            // geometry; later exposure, tone, color, and view operations would
+            // alter the mask and repeat unrelated work.
+            RenderRawDevelopmentOutputCropStage(
+                result,
+                recipe.cropRotation,
+                denoiseDiagnosticOutputCropCacheKey,
+                postOutputCropFingerprint);
+            return result;
+        }
+
+        if (neutralTexture != 0 &&
             neutralWidth > 0 &&
             neutralHeight > 0 &&
             !currentRawRenderIsNeutralScene) {
-            neutralSceneStats =
-                ReadTextureStats(
+            if (captureAnalysis) {
+                neutralSceneStats =
+                    ReadTextureStats(
+                        neutralTexture,
+                        neutralWidth,
+                        neutralHeight,
+                        "RawDevelopmentNeutralSceneStats");
+                CaptureRawDevelopmentStageImageReadback(
+                    Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
+                    Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
                     neutralTexture,
                     neutralWidth,
                     neutralHeight,
-                    "RawDevelopmentNeutralSceneStats");
-            CaptureRawDevelopmentStageImageReadback(
-                Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
-                Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,
+                    "scene-linear-neutral-srgb",
+                    true,
+                    false);
+            }
+            CaptureRawDevelopmentGradingScopeReadback(
+                RawDevelopmentGradingScopeSource::NeutralScene,
                 neutralTexture,
                 neutralWidth,
                 neutralHeight,
-                "scene-linear-neutral-srgb",
+                neutralGradingMeasurementDomain,
+                recipe.technical.workingSpace,
                 true,
                 false);
         }
+        if (m_RawDevelopmentCachePrewarmActive &&
+            m_RawDevelopmentCachePrewarmStage ==
+                RawCacheStage::NeutralPlacement) {
+            result.texture = neutralTexture;
+            result.owned = false;
+            m_Width = neutralWidth;
+            m_Height = neutralHeight;
+            if (finishCachePrewarmStage(
+                    RawCacheStage::NeutralPlacement,
+                    rgbDenoiseCacheKey,
+                    neutralPlacementFingerprint)) {
+                return result;
+            }
+        }
 
+        selectNeutralRegion(neutralTexture, neutralWidth, neutralHeight);
+        if (m_RawZoneAreasFloatOutput && neutralTexture != 0) {
+            zoneAreaReference.Reset(RenderRawDevelopmentExposure(neutralTexture, 0.0f, &calibration));
+            if (!zoneAreaReference) throw std::runtime_error("Zones reference image unavailable");
+        }
         const CachedGraphTexture cachedRawPlacement =
             FindRawDevelopStageCacheEntry(
                 rawPlacementCacheKey,
@@ -777,20 +1168,23 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             ++m_LastGraphExecutionStats.rawStageCacheMisses;
             m_Width = neutralWidth;
             m_Height = neutralHeight;
+            m_RawViewportGpuTiming.Mark(Raw::ViewportStage::RawPlacement);
             result.texture = RenderRawDevelopmentExposure(
                 neutralTexture,
-                recipe.preToneExposureEv);
+                recipe.preToneExposureEv, &calibration);
             result.owned = result.texture != 0;
             if (result.texture != 0) {
-                StoreRawDevelopStageCacheEntry(
+                cacheResultStage(
                     rawPlacementCacheKey,
-                    result.texture,
                     rawPlacementFingerprint);
             } else {
+                if (calibration.active || m_RawViewportAppliedRegion.Valid())
+                    throw std::runtime_error("RAW calibration/exposure rendering failed");
                 // The exposure pass is deliberately simple, but preserve a
                 // last-resort path through the established RAW renderer.
                 result.texture =
-                    m_RawPipelines[node.nodeId].Render(
+                    RenderRawPipelineWithTelemetry(
+                        node.nodeId,
                         renderRawData,
                         rawRenderSettings,
                         m_PreviewMaxDimension);
@@ -801,13 +1195,37 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         }
 
     }
+    if (regionalNeutralOwner.Get() && result.texture == regionalNeutralOwner.Get()) {
+        result.texture = regionalNeutralOwner.Release();
+        result.owned = true;
+    }
     if (result.texture == 0) {
         const std::string& error = m_RawPipelines[node.nodeId].GetLastError();
+        recordFailure(error.empty() ? "RAW processing did not produce a GPU image." : error);
         std::cerr << "[RAW] Render failed for RAW Development node " << node.nodeId
                   << " (" << sourcePath << "): "
                   << (error.empty() ? "unknown RAW GPU failure" : error)
                   << "\n";
         return result;
+    }
+    if (finishCachePrewarmStage(
+            RawCacheStage::RawPlacement,
+            rawPlacementCacheKey,
+            rawPlacementFingerprint,
+            currentRawRenderIsNeutralScene)) {
+        return result;
+    }
+
+    if (currentRawRenderIsNeutralScene) {
+        CaptureRawDevelopmentGradingScopeReadback(
+            RawDevelopmentGradingScopeSource::NeutralScene,
+            result.texture,
+            m_Width,
+            m_Height,
+            neutralGradingMeasurementDomain,
+            recipe.technical.workingSpace,
+            true,
+            false);
     }
 
     const auto adoptCachedStage = [&](const CachedGraphTexture& cached) {
@@ -828,6 +1246,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
     };
 
     RenderTextureStats rawPlacementStats;
+    if (cancellationRequested()) {
+        return result;
+    }
     if (captureAnalysis) {
         rawPlacementStats =
             ReadTextureStats(result.texture, m_Width, m_Height, "RawDevelopmentRawPlacementStats");
@@ -853,92 +1274,25 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 false);
         }
     }
-    if (localExposureEnabled && result.texture != 0) {
-        Raw::RawDetailFusionSettings localSettings = Stack::RawRecipe::ToRawDetailFusionSettings(recipe);
-        localSettings.mode = Raw::RawDetailFusionMode::AutoAnalyze;
-        localSettings.debugView = Raw::RawDetailFusionDebugView::FinalImage;
-        localSettings.invertMask = false;
-        localSettings.maskBlackPoint = 0.0f;
-        localSettings.maskWhitePoint = 1.0f;
-        localSettings.maskGamma = 1.0f;
-        localSettings.manualBlend = 0.0f;
-        if (localSettings.autoSafetyEnabled && !localSettings.overrideBaseEv) {
-            localSettings.baseEv = std::clamp(localSettings.baseEvBias, -1.0f, 1.0f);
-            localSettings.overrideBaseEv = true;
-        }
-
-        if (captureAnalysis) {
-            m_PreLocalExposureSummaries[node.nodeId] = BuildPreLocalExposureSummary(
-                result.texture,
-                localSettings,
-                false,
-                !localSettings.autoSafetyEnabled);
-        }
-
-        const CachedGraphTexture cachedPostLocalExposure =
-            FindRawDevelopStageCacheEntry(
-                postLocalExposureCacheKey,
-                postLocalExposureFingerprint);
-        if (!adoptCachedStage(cachedPostLocalExposure)) {
-            ++m_LastGraphExecutionStats.rawStageCacheMisses;
-            RenderGraphNode localMapNode;
-            localMapNode.nodeId = node.nodeId;
-            localMapNode.kind = RenderGraphNodeKind::RawDetailFusion;
-            localMapNode.rawDetailFusion.settings = localSettings;
-
-            const unsigned int preLocalTexture = result.texture;
-            const bool preLocalTextureOwned = result.owned;
-            Stack::Renderer::ScopedGLTexture exposureMap(
-                RenderRawDetailAutoMask(
-                    preLocalTexture,
-                    localMapNode,
-                    0,
-                    false));
-            Stack::Renderer::ScopedGLTexture localResult(
-                exposureMap
-                    ? RenderRawDetailFusion(
-                        preLocalTexture,
-                        exposureMap.Get(),
-                        localSettings)
-                    : 0);
-            if (localResult) {
-                QuickTextureStats inputStats;
-                QuickTextureStats outputStats;
-                if (captureAnalysis) {
-                    inputStats = ProbeTextureStats(preLocalTexture, m_Width, m_Height);
-                    outputStats = ProbeTextureStats(localResult.Get(), m_Width, m_Height);
-                }
-                const bool inputHasSignal =
-                    captureAnalysis && inputStats.valid && inputStats.p99Luma > 0.00001f;
-                const bool outputIsBlank =
-                    captureAnalysis &&
-                    outputStats.valid &&
-                    outputStats.p99Luma <= 0.000001f &&
-                    outputStats.maxRgb <= 0.00001f;
-                if (inputHasSignal && outputIsBlank) {
-                    std::cerr << "[RenderPipeline] RAW Workspace local exposure produced a blank output for RAW Development node "
-                              << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                              << ", output p99 luma " << outputStats.p99Luma
-                              << "); passing pre-local texture through.\n";
-                } else {
-                    if (preLocalTextureOwned && preLocalTexture != 0) {
-                        glDeleteTextures(1, &preLocalTexture);
-                    }
-                    result.texture = localResult.Release();
-                    result.owned = true;
-                    StoreRawDevelopStageCacheEntry(
-                        postLocalExposureCacheKey,
-                        result.texture,
-                        postLocalExposureFingerprint);
-                }
-            }
-        }
+    if (cancellationRequested()) {
+        return result;
     }
-
+    int spatialSourceWidth = Raw::DisplayWidth(rawData->metadata);
+    int spatialSourceHeight = Raw::DisplayHeight(rawData->metadata);
+    if (std::abs(recipe.cropRotation.rotationDegrees) % 180 == 90)
+        std::swap(spatialSourceWidth, spatialSourceHeight);
+    ApplyRawViewportRegion(result, recipe, Raw::ViewportStage::PostLocalRange, rawPlacementFingerprint, node.nodeId);
+    m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostLocalRange);
     const bool localRangeActive = Stack::RawRecipe::IsLocalRangeEnabled(recipe);
+    const bool globalLocalRangeActive =
+        Stack::RawRecipe::IsLocalRangeEnabled(recipe.localRange);
+    if (cancellationRequested()) {
+        return result;
+    }
     RenderTextureStats preLocalRangeStats;
     bool hasPreLocalRangeStats = false;
     bool localRangeApplied = false;
+    bool adoptedPostLocalRange = false;
 
     if (captureAnalysis && result.texture != 0) {
         m_RawDevelopmentLocalSuggestionImage =
@@ -956,7 +1310,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             MakeStageStatsReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::NeutralScene,
                 neutralSceneStats,
-                "Neutral scene analysis render using the current WB policy and optional RGB Denoise at 0 EV authored RAW Exposure before Local Exposure, Local Range, Finish Tone, and View Transform.",
+                "Neutral scene analysis render using the current WB policy and optional RGB Denoise at 0 EV authored RAW Exposure before Local Range, Finish Tone, and View Transform.",
                 "scene-linear-neutral-rgb",
                 true,
                 false));
@@ -964,7 +1318,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             MakeStageStatsReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::RawPlacement,
                 rawPlacementStats,
-                "Current converted RAW texture after optional RGB Denoise and authored RAW Exposure, before legacy Local Exposure, Local Range, Finish Tone, and View Transform.",
+                "Current converted RAW texture after optional RGB Denoise and authored RAW Exposure, before Local Range, Finish Tone, and View Transform.",
                 "scene-linear-raw-placement-rgb",
                 true,
                 false));
@@ -994,14 +1348,17 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             result.texture,
             recipe.localRange,
             recipe.technical.workingSpace,
-            postLocalExposureFingerprint);
+            recipe.technical.processingVersion,
+            rawPlacementFingerprint);
     }
-    if (captureAnalysis && result.texture != 0) {
+    if ((captureAnalysis ||
+            m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput) && result.texture != 0) {
         CaptureRawDevelopmentLocalRangeGraphScopeReadback(
             result.texture,
             recipe.localRange,
             m_Width,
-            m_Height);
+            m_Height, recipe.technical.workingSpace, spatialSourceWidth, spatialSourceHeight);
+        m_RawDevelopmentGraphScopeReadback.inputExposureEv = recipe.preToneExposureEv;
     }
 
     const bool regionMaskOverlayActive =
@@ -1016,6 +1373,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             regionMaskOverlayActive ||
             targetOutlineOverlayActive) &&
         result.texture != 0) {
+        if (cancellationRequested()) {
+            return result;
+        }
         const unsigned int preLocalRangeTexture = result.texture;
         if (!m_RawDevelopmentLocalRangeOverlayRequestMode.empty() &&
             m_RawDevelopmentLocalRangeOverlayRequestMode != "none") {
@@ -1026,8 +1386,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                     preLocalRangeTexture,
                     recipe.localRange,
                     recipe.technical.workingSpace,
+                    recipe.technical.processingVersion,
                     replacementOverlayMode,
-                    postLocalExposureFingerprint));
+                    rawPlacementFingerprint, spatialSourceWidth, spatialSourceHeight));
             if (overlayTexture) {
                 ClearRawDevelopmentLocalRangeOverlay();
                 m_RawDevelopmentLocalRangeOverlayWidth = m_Width;
@@ -1038,13 +1399,14 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                     overlayTexture.Release();
             }
         }
-        if (localRangeActive) {
+        if (globalLocalRangeActive) {
             const CachedGraphTexture cachedPostLocalRange =
                 FindRawDevelopStageCacheEntry(
                     postLocalRangeCacheKey,
                     postLocalRangeFingerprint);
             if (adoptCachedStage(cachedPostLocalRange)) {
                 localRangeApplied = true;
+                adoptedPostLocalRange = true;
             } else {
                 ++m_LastGraphExecutionStats.rawStageCacheMisses;
                 Stack::Renderer::ScopedGLTexture localRangeResult(
@@ -1052,23 +1414,40 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                         preLocalRangeTexture,
                         recipe.localRange,
                         recipe.technical.workingSpace,
-                        postLocalExposureFingerprint));
+                        recipe.technical.processingVersion,
+                        rawPlacementFingerprint, spatialSourceWidth, spatialSourceHeight));
+                if (localRangeResult && zoneAreaReference &&
+                    Stack::RawRecipe::HasZoneAreaGain(recipe.localRange)) {
+                    const unsigned int adjusted = m_RawZoneAreaRenderer.Render(
+                        localRangeResult.Get(), zoneAreaReference.Get(), m_Width, m_Height,
+                        recipe, m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput,
+                        m_PreviewMaxDimension <= 0, zoneAreaStatistics, cancellationRequested, calibratedNeutralFingerprint);
+                    if (!adjusted) {
+                        if (cancellationRequested()) return result;
+                        throw std::runtime_error("Zones area rendering failed");
+                    }
+                    localRangeResult.Reset(adjusted);
+                }
                 if (localRangeResult) {
                     QuickTextureStats inputStats;
                     QuickTextureStats outputStats;
-                    if (captureAnalysis) {
-                        inputStats = ProbeTextureStats(preLocalRangeTexture, m_Width, m_Height);
-                        outputStats = ProbeTextureStats(localRangeResult.Get(), m_Width, m_Height);
+                    bool damagedOutput = false;
+                    // A deliberately large negative area gain can be very dark.
+                    if (detailedDamageValidation && !Stack::RawRecipe::HasZoneAreaGain(recipe.localRange)) {
+                        inputStats = ProbeTextureStats(
+                            preLocalRangeTexture,
+                            m_Width,
+                            m_Height);
+                        outputStats = ProbeTextureStats(
+                            localRangeResult.Get(),
+                            m_Width,
+                            m_Height);
+                        damagedOutput = IsImplausiblyDamagedTextureOutput(
+                            inputStats,
+                            outputStats);
                     }
-                    const bool inputHasSignal =
-                        captureAnalysis && inputStats.valid && inputStats.p99Luma > 0.00001f;
-                    const bool outputIsBlank =
-                        captureAnalysis &&
-                        outputStats.valid &&
-                        outputStats.p99Luma <= 0.000001f &&
-                        outputStats.maxRgb <= 0.00001f;
-                    if (inputHasSignal && outputIsBlank) {
-                        std::cerr << "[RenderPipeline] RAW Development local range produced a blank output for node "
+                    if (damagedOutput) {
+                        std::cerr << "[RenderPipeline] RAW Development local range produced an invalid or collapsed output for node "
                                   << node.nodeId << " (input p99 luma " << inputStats.p99Luma
                                   << ", output p99 luma " << outputStats.p99Luma
                                   << "); passing pre-local-range texture through.\n";
@@ -1079,14 +1458,85 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                         result.texture = localRangeResult.Release();
                         result.owned = true;
                         localRangeApplied = true;
-                        StoreRawDevelopStageCacheEntry(
-                            postLocalRangeCacheKey,
-                            result.texture,
-                            postLocalRangeFingerprint);
                     }
                 }
             }
         }
+    }
+    if (!globalLocalRangeActive && localRangeActive && result.texture != 0) {
+        const CachedGraphTexture cachedPostLocalRange =
+            FindRawDevelopStageCacheEntry(postLocalRangeCacheKey,
+                postLocalRangeFingerprint);
+        if (adoptCachedStage(cachedPostLocalRange)) {
+            localRangeApplied = true;
+            adoptedPostLocalRange = true;
+        }
+    }
+    if (!adoptedPostLocalRange && result.texture != 0) {
+        bool appliedGradient = false;
+        bool gradientFailure = false;
+        const unsigned int gradientInput = result.texture;
+        Stack::Renderer::ScopedGLTexture accumulatedEv;
+        Stack::RawRecipe::RawGradientMask lastMask;
+        for (const auto& adjustment : recipe.evGradients) {
+            if (!adjustment.mask.enabled ||
+                !Stack::RawRecipe::IsLocalRangeEnabled(adjustment.curve)) continue;
+            Stack::Renderer::ScopedGLTexture processed(
+                RenderRawDevelopmentLocalRange(gradientInput, adjustment.curve,
+                    recipe.technical.workingSpace,
+                    recipe.technical.processingVersion,
+                    rawPlacementFingerprint, spatialSourceWidth, spatialSourceHeight));
+            if (!processed) { gradientFailure = true; break; }
+            Stack::Renderer::ScopedGLTexture nextEv(
+                RenderRawGradientBlend(
+                    accumulatedEv ? accumulatedEv.Get() : gradientInput,
+                    processed.Get(), adjustment.mask, gradientInput,
+                    accumulatedEv ? 2 : 1));
+            if (!nextEv) { gradientFailure = true; break; }
+            accumulatedEv.Reset(nextEv.Release());
+            lastMask = adjustment.mask;
+            appliedGradient = true;
+        }
+        if (appliedGradient && !gradientFailure) {
+            Stack::Renderer::ScopedGLTexture gained(
+                RenderRawGradientBlend(gradientInput, accumulatedEv.Get(),
+                    lastMask, 0, 3));
+            if (gained) {
+                if (result.owned) glDeleteTextures(1, &result.texture);
+                result.texture = gained.Release();
+                result.owned = true;
+            } else {
+                gradientFailure = true;
+            }
+        }
+        if (localRangeApplied || (appliedGradient && !gradientFailure)) {
+            localRangeApplied = true;
+            if (!gradientFailure)
+                cacheResultStage(postLocalRangeCacheKey, postLocalRangeFingerprint);
+        }
+    }
+    if (zoneAreaReference && m_RawDevelopmentGraphScopeStage == RawDevelopmentGraphScopeStage::LocalRangeInput) {
+        if (zoneAreaStatistics.empty()) {
+            Stack::Renderer::ScopedGLTexture measured(m_RawZoneAreaRenderer.Render(
+                zoneAreaReference.Get(), zoneAreaReference.Get(), m_Width, m_Height,
+                recipe, true, m_PreviewMaxDimension <= 0, zoneAreaStatistics, cancellationRequested, calibratedNeutralFingerprint));
+            if (!measured) {
+                if (cancellationRequested()) return result;
+                throw std::runtime_error("Zones area measurement failed");
+            }
+        }
+        m_RawDevelopmentGraphScopeReadback.zoneAreas = std::move(zoneAreaStatistics);
+        m_RawDevelopmentGraphScopeReadback.zoneReferenceExposureEv = recipe.preToneExposureEv;
+        m_RawDevelopmentGraphScopeReadback.zoneGuide = m_RawZoneAreaRenderer.PreviewGuide();
+    }
+    if (finishCachePrewarmStage(
+            RawCacheStage::PostLocalRange,
+            postLocalRangeCacheKey,
+            postLocalRangeFingerprint)) {
+        return result;
+    }
+    if (cancellationRequested()) {
+        return result;
     }
     if (captureAnalysis && localRangeActive && result.texture != 0) {
         if (localRangeApplied) {
@@ -1131,7 +1581,11 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         }
     }
 
-    auto renderRecipeLayer = [&](const nlohmann::json& layerJson, const char* fallbackType) {
+    ApplyRawViewportRegion(result, recipe, Raw::ViewportStage::PostFinishTone, postLocalRangeFingerprint, node.nodeId);
+    m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostFinishTone);
+    auto renderRecipeLayer = [&](const nlohmann::json& layerJson, const char* fallbackType,
+        const Stack::RawRecipe::RawGradientMask* gradientMask = nullptr,
+        const std::string& cacheSuffix = std::string{}) {
         if (result.texture == 0) {
             return false;
         }
@@ -1142,7 +1596,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 ? authoredPayload["type"].get<std::string>()
                 : std::string(fallbackType);
         const std::string layerCacheKey =
-            std::to_string(node.nodeId) + ":__rawDevelopmentRecipeLayer:" + fallbackType;
+            std::to_string(node.nodeId) + ":__rawDevelopmentRecipeLayer:" + fallbackType + cacheSuffix;
         std::shared_ptr<LayerBase> layer;
         nlohmann::json layerPayload;
         try {
@@ -1179,7 +1633,13 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                 layerPayload[authoredIt.key()] = authoredIt.value();
             }
             layerPayload["type"] = type;
-            layer->Deserialize(layerPayload);
+            // Upstream edits change pixels, not this module's settings.
+            // Re-deserializing a retained tone layer invalidates its LUT.
+            if (cacheIt->second.appliedPayload != layerPayload) {
+                cacheIt->second.appliedPayload = nullptr;
+                layer->Deserialize(layerPayload);
+                cacheIt->second.appliedPayload = layerPayload;
+            }
         } catch (const std::exception& error) {
             std::cerr << "[RenderPipeline] RAW Development " << type
                       << " recipe layer setup failed for node " << node.nodeId
@@ -1207,18 +1667,20 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get());
             toneCurve && toneCurve->HasPendingAutoRewriteFeedback()) {
             m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
+            // Auto analysis authored a different internal state. The next
+            // recipe must still be applied, even if its input JSON repeats.
+            m_RawDevelopmentRecipeLayerCache.at(layerCacheKey).appliedPayload = nullptr;
         }
 
-        if (captureAnalysis && type == "ToneCurve" && IsDefaultToneCurvePayload(layerPayload)) {
+        if (detailedDamageValidation) {
             const QuickTextureStats inputStats = ProbeTextureStats(inputTexture, m_Width, m_Height);
             const QuickTextureStats outputStats = ProbeTextureStats(processed.Get(), m_Width, m_Height);
-            const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-            const bool outputIsBlank =
-                outputStats.valid &&
-                outputStats.p99Luma <= 0.000001f &&
-                outputStats.maxRgb <= 0.00001f;
-            if (inputHasSignal && outputIsBlank) {
-                std::cerr << "[RenderPipeline] RAW Development default Tone Curve produced a blank output for node "
+            if (!LayerPayloadExplicitlyRequestsCollapsedOutput(layerPayload) &&
+                IsImplausiblyDamagedTextureOutput(
+                    inputStats,
+                    outputStats)) {
+                std::cerr << "[RenderPipeline] RAW Development " << type
+                          << " produced an invalid or collapsed output for node "
                           << node.nodeId << " (input p99 luma " << inputStats.p99Luma
                           << ", output p99 luma " << outputStats.p99Luma
                           << "); passing input texture through.\n";
@@ -1226,6 +1688,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             }
         }
 
+        if (gradientMask) {
+            Stack::Renderer::ScopedGLTexture blended(
+                RenderRawGradientBlend(inputTexture, processed.Get(), *gradientMask));
+            if (!blended) return false;
+            processed.Reset(blended.Release());
+        }
         if (result.owned && inputTexture != 0) {
             glDeleteTextures(1, &inputTexture);
         }
@@ -1234,6 +1702,9 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         return true;
     };
 
+    if (cancellationRequested()) {
+        return result;
+    }
     if (captureAnalysis && result.texture != 0) {
         CaptureRawDevelopmentGraphScopeReadback(
             RawDevelopmentGraphScopeStage::FinishToneInput,
@@ -1248,6 +1719,13 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
         recipe.finishTone.layerJson.contains("autoCalibratePending") &&
         recipe.finishTone.layerJson["autoCalibratePending"].is_boolean() &&
         recipe.finishTone.layerJson["autoCalibratePending"].get<bool>();
+    nlohmann::json finishTonePayload = recipe.finishTone.layerJson.is_object()
+        ? recipe.finishTone.layerJson
+        : Stack::RawRecipe::DefaultFinishToneJson();
+    finishTonePayload["inputWorkingSpace"] =
+        Stack::RawRecipe::WorkingSpaceStableString(
+            recipe.technical.workingSpace);
+    finishTonePayload["truthfulV2SignedMath"] = true;
     const CachedGraphTexture cachedPostFinishTone =
         finishToneHasPendingAutoCalibration
             ? CachedGraphTexture{}
@@ -1256,14 +1734,90 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
                   postFinishToneFingerprint);
     if (!adoptCachedStage(cachedPostFinishTone)) {
         ++m_LastGraphExecutionStats.rawStageCacheMisses;
-        if (renderRecipeLayer(recipe.finishTone.layerJson, "ToneCurve")) {
-            if (!finishToneHasPendingAutoCalibration) {
-                StoreRawDevelopStageCacheEntry(
+        if (renderRecipeLayer(finishTonePayload, "ToneCurve")) {
+            bool toneGradientsComplete = true;
+            for (std::size_t gradientIndex = 0;
+                 gradientIndex < recipe.toneGradients.size(); ++gradientIndex) {
+                const auto& adjustment = recipe.toneGradients[gradientIndex];
+                if (!adjustment.mask.enabled) continue;
+                nlohmann::json localCurve = adjustment.curveJson.is_object()
+                    ? adjustment.curveJson : Stack::RawRecipe::DefaultFinishToneJson();
+                localCurve["inputWorkingSpace"] =
+                    Stack::RawRecipe::WorkingSpaceStableString(recipe.technical.workingSpace);
+                localCurve["truthfulV2SignedMath"] = true;
+                if (!renderRecipeLayer(localCurve, "ToneCurve", &adjustment.mask,
+                    ":gradient:" + std::to_string(gradientIndex))) {
+                    toneGradientsComplete = false;
+                    break;
+                }
+            }
+            if (!finishToneHasPendingAutoCalibration && toneGradientsComplete) {
+                cacheResultStage(
                     postFinishToneCacheKey,
-                    result.texture,
                     postFinishToneFingerprint);
             }
         }
+    }
+    if (finishCachePrewarmStage(
+            RawCacheStage::PostFinishTone,
+            postFinishToneCacheKey,
+            postFinishToneFingerprint)) {
+        return result;
+    }
+    if (cancellationRequested()) {
+        return result;
+    }
+    if (captureAnalysis && result.texture != 0) {
+        CaptureRawDevelopmentGraphScopeReadback(
+            RawDevelopmentGraphScopeStage::ColorWarpInput,
+            result.texture,
+            m_Width,
+            m_Height,
+            "scene-linear-pre-color-warp-rgb",
+            true);
+    }
+    ApplyRawViewportRegion(result, recipe, Raw::ViewportStage::PostColorWarp, postFinishToneFingerprint, node.nodeId);
+    m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostColorWarp);
+    if (Stack::RawRecipe::IsColorWarpEnabled(recipe.colorWarp) ||
+        Stack::RawRecipe::IsDetailContrastActive(recipe.detailContrast)) {
+        const CachedGraphTexture cachedPostColorWarp =
+            FindRawDevelopStageCacheEntry(
+                postColorWarpCacheKey,
+                postColorWarpFingerprint);
+        if (!adoptCachedStage(cachedPostColorWarp)) {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            bool complete = !Stack::RawRecipe::IsColorWarpEnabled(recipe.colorWarp) ||
+                RenderRawDevelopmentColorWarpStage(result, recipe);
+            if (complete && Stack::RawRecipe::IsDetailContrastActive(recipe.detailContrast)) {
+                int sourceWidth = Raw::DisplayWidth(rawData->metadata);
+                int sourceHeight = Raw::DisplayHeight(rawData->metadata);
+                if (std::abs(recipe.cropRotation.rotationDegrees) % 180 == 90) std::swap(sourceWidth, sourceHeight);
+                Stack::Renderer::ScopedGLTexture detailed(RenderRawSceneDetail(result.texture,
+                    recipe.detailContrast,recipe.technical.workingSpace,sourceWidth,sourceHeight));
+                complete = bool(detailed);
+                if (complete) {
+                    if (result.owned) glDeleteTextures(1,&result.texture);
+                    result.texture=detailed.Release(); result.owned=true;
+                } else {
+                    recordFailure("Detail Contrast rendering failed.");
+                    return {};
+                }
+            }
+            if (complete) {
+                cacheResultStage(
+                    postColorWarpCacheKey,
+                    postColorWarpFingerprint);
+            }
+        }
+    }
+    if (finishCachePrewarmStage(
+            RawCacheStage::PostColorWarp,
+            postColorWarpCacheKey,
+            postColorWarpFingerprint)) {
+        return result;
+    }
+    if (cancellationRequested()) {
+        return result;
     }
     if (captureAnalysis && result.texture != 0) {
         CaptureRawDevelopmentStageImageReadback(
@@ -1276,28 +1830,136 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawDevelopmentGraphN
             true,
             false);
         m_RawDevelopmentViewTransformInputStats =
-            ReadTextureStats(result.texture, m_Width, m_Height, "RawDevelopmentViewTransformInputStats");
+            ReadTextureStats(result.texture, m_Width, m_Height, "RawDevelopmentViewTransformInputStats",
+                recipe.technical.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65);
         m_RawDevelopmentStageStatsReadbacks.push_back(
             MakeStageStatsReadback(
                 Stack::RawAutoStartPoint::RawAutoStartPointStage::FinishToneCandidate,
                 m_RawDevelopmentViewTransformInputStats,
-                "Post-Local-Range and post-Finish-Tone texture immediately before View Transform.",
+                "Post-Finish-Tone and post-Color-Warp texture immediately before View Transform.",
                 "scene-linear-pre-display-rgb",
                 true,
                 false));
     }
+    ApplyRawViewportRegion(result, recipe, Raw::ViewportStage::PostViewTransform, postColorWarpFingerprint, node.nodeId);
+    m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostViewTransform);
     const bool viewTransformEnabled =
         Stack::RawRecipe::IsViewTransformEnabled(recipe);
-    if (viewTransformEnabled) {
-        (void)renderRecipeLayer(recipe.viewTransform.layerJson, "ViewTransform");
+    bool viewTransformRendered = false;
+    bool encodedSrgbOutput = false;
+    if (cancellationRequested()) {
+        return result;
     }
-    if (viewTransformEnabled && captureAnalysis && result.texture != 0) {
-        const bool encodedSrgbOutput = recipe.viewTransform.layerJson.value(
-            "encodeSrgbOutput",
-            recipe.technical.encodeSrgbOutput);
-        const char* displayMeasurementDomain = encodedSrgbOutput
+    if (viewTransformEnabled) {
+        const CachedGraphTexture cachedPostViewTransform =
+            FindRawDevelopStageCacheEntry(
+                postViewTransformCacheKey,
+                postViewTransformFingerprint);
+        if (adoptCachedStage(cachedPostViewTransform)) {
+            viewTransformRendered = true;
+        } else {
+            ++m_LastGraphExecutionStats.rawStageCacheMisses;
+            viewTransformRendered =
+                renderRecipeLayer(
+                    recipe.viewTransform.layerJson,
+                    "ViewTransform");
+            if (viewTransformRendered) {
+                cacheResultStage(
+                    postViewTransformCacheKey,
+                    postViewTransformFingerprint);
+            }
+        }
+        if (viewTransformRendered) {
+            encodedSrgbOutput = recipe.viewTransform.layerJson.value(
+                "encodeSrgbOutput",
+                recipe.technical.encodeSrgbOutput);
+        }
+    }
+    if (finishCachePrewarmStage(
+            RawCacheStage::PostViewTransform,
+            postViewTransformCacheKey,
+            postViewTransformFingerprint)) {
+        return result;
+    }
+
+    // Crop V2 is output geometry, not another color operation. Rotation and
+    // flips have already established the oriented image in the RAW placement
+    // stage; the normalized crop rectangle therefore applies after View.
+    m_RawViewportGpuTiming.Mark(Raw::ViewportStage::PostOutputCrop);
+    if (!m_RawViewportAppliedRegion.Valid()) RenderRawDevelopmentOutputCropStage(
+        result,
+        recipe.cropRotation,
+        postOutputCropCacheKey,
+        postOutputCropFingerprint);
+    if (finishCachePrewarmStage(
+            RawCacheStage::PostOutputCrop,
+            postOutputCropCacheKey,
+            postOutputCropFingerprint)) {
+        return result;
+    }
+    if (cancellationRequested()) {
+        return result;
+    }
+    const QuickTextureStats finalValidationStats =
+        m_RawDevelopmentViewportValidationEnabled
+            ? ProbeTextureStats(result.texture, m_Width, m_Height)
+            : QuickTextureStats{};
+    if (m_RawDevelopmentViewportValidationEnabled &&
+        !LayerPayloadExplicitlyRequestsCollapsedOutput(
+            recipe.finishTone.layerJson) &&
+        IsImplausiblyDamagedTextureOutput(
+            authoredPlacementValidationStats,
+            finalValidationStats)) {
+        std::cerr << "[RenderPipeline] RAW Development rejected an invalid or implausibly collapsed final output for node "
+                  << node.nodeId << " (placement p99 luma "
+                  << authoredPlacementValidationStats.p99Luma
+                  << ", final p99 luma "
+                  << finalValidationStats.p99Luma
+                  << "); quarantining this recipe's stage entries.\n";
+        InvalidateRawDevelopStageCacheEntry(
+            rawPlacementCacheKey,
+            rawPlacementFingerprint);
+        InvalidateRawDevelopStageCacheEntry(
+            postLocalRangeCacheKey,
+            postLocalRangeFingerprint);
+        InvalidateRawDevelopStageCacheEntry(
+            postFinishToneCacheKey,
+            postFinishToneFingerprint);
+        InvalidateRawDevelopStageCacheEntry(
+            postColorWarpCacheKey,
+            postColorWarpFingerprint);
+        InvalidateRawDevelopStageCacheEntry(
+            postViewTransformCacheKey,
+            postViewTransformFingerprint);
+        InvalidateRawDevelopStageCacheEntry(
+            postOutputCropCacheKey,
+            postOutputCropFingerprint);
+        if (result.owned && result.texture != 0) {
+            glDeleteTextures(1, &result.texture);
+        }
+        result = {};
+        return result;
+    }
+    const bool displayMapped = viewTransformEnabled && viewTransformRendered;
+    const char* displayMeasurementDomain = displayMapped
+        ? (encodedSrgbOutput
             ? "display-mapped-srgb-encoded"
-            : "display-mapped-linear-srgb";
+            : "display-mapped-linear-srgb")
+        : (recipe.technical.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
+            ? "scene-linear-result-rec2020-d65"
+            : "scene-linear-result-srgb-d65");
+    CaptureRawDevelopmentGradingScopeReadback(
+        RawDevelopmentGradingScopeSource::DisplayCandidate,
+        result.texture,
+        m_Width,
+        m_Height,
+        displayMeasurementDomain,
+        displayMapped
+            ? Raw::RawWorkingSpace::LinearSrgbD65
+            : recipe.technical.workingSpace,
+        !displayMapped || !encodedSrgbOutput,
+        displayMapped && encodedSrgbOutput);
+    if (viewTransformEnabled && captureAnalysis && result.texture != 0) {
         CaptureRawDevelopmentStageImageReadback(
             Stack::RawAutoStartPoint::RawAutoStartPointStage::DisplayCandidate,
             Stack::RawAutoStartPoint::RawAutoStartPointStageStatus::Complete,

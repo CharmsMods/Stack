@@ -3,6 +3,7 @@
 #include "Async/TaskSystem.h"
 #include "Editor/EditorModule.h"
 #include "Library/Internal/LibraryImageHelpers.h"
+#include "Persistence/ProjectSaveCapture.h"
 #include "Renderer/GLHelpers.h"
 #include "Utils/PixelBufferUtils.h"
 #include "Utils/PngEncodingUtils.h"
@@ -388,13 +389,7 @@ bool LibraryManager::HasPendingThumbnailWarmup() const {
 }
 
 std::vector<unsigned char> LibraryManager::GenerateThumbnailBytes(const std::vector<unsigned char>& pixels, int width, int height) {
-    int thumbW = 0;
-    int thumbH = 0;
-    std::vector<unsigned char> thumbPixels = LibraryImage::ResizePixelsNearest(pixels, width, height, thumbW, thumbH);
-    if (thumbPixels.empty()) return {};
-
-    return Stack::PngEncoding::EncodeInterleaved(
-        thumbPixels, thumbW, thumbH, 4);
+    return Stack::Project::EncodeProjectThumbnail(pixels, width, height);
 }
 
 void LibraryManager::InitializeThumbnail(std::shared_ptr<ProjectEntry> project) {
@@ -462,7 +457,7 @@ void LibraryManager::QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEn
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit(
+        submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Loading preview", true),
             [project, thumbnailBytes = std::move(thumbnailBytes)]() mutable {
                 std::vector<unsigned char> pixels;
                 int width = 0;
@@ -527,7 +522,7 @@ void LibraryManager::QueueAssetThumbnailDecode(const std::shared_ptr<AssetEntry>
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit([asset, assetPath]() mutable {
+        submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Loading preview", true),[asset, assetPath]() mutable {
         std::vector<unsigned char> pixels;
         int width = 0;
         int height = 0;
@@ -588,18 +583,18 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
     if (project->sourcePreviewTex != 0 && project->fullPreviewTex != 0 && !project->pipelineData.is_null()) {
         project->previewTaskState = Async::TaskState::Idle;
         project->previewStatusText = "Preview ready.";
+        ResolvePreviewProblem("project-preview-" + project->fileName);
         return;
     }
 
-    ++m_ProjectPreviewGeneration;
-    const std::uint64_t generation = m_ProjectPreviewGeneration;
-    project->previewRequestGeneration = generation;
+    const std::uint64_t cancelGeneration = m_ProjectPreviewGeneration;
+    const std::uint64_t generation = ++project->previewRequestGeneration;
     project->previewTaskState = Async::TaskState::Queued;
     project->previewStatusText = "Preparing project preview...";
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit([this, generation, project]() {
+        submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Loading preview", true),[this, generation, cancelGeneration, project]() {
         DecodedProjectPreview preview;
         try {
             StackFormat::ProjectLoadOptions options;
@@ -655,9 +650,9 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             preview = {};
         }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, project, preview = std::move(preview)]() mutable {
+        Async::TaskSystem::Get().PostToMain([this, generation, cancelGeneration, project, preview = std::move(preview)]() mutable {
             if (!project ||
-                generation != m_ProjectPreviewGeneration ||
+                cancelGeneration != m_ProjectPreviewGeneration ||
                 project->previewRequestGeneration != generation) {
                 if (project &&
                     project->previewRequestGeneration == generation) {
@@ -670,6 +665,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             if (!preview.success || preview.sourcePixels.empty()) {
                 project->previewTaskState = Async::TaskState::Failed;
                 project->previewStatusText = "Preview render failed.";
+                ReportPreviewProblem(project);
                 return;
             }
 
@@ -762,6 +758,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             if (finalPreviewPixels.empty() || finalPreviewWidth <= 0 || finalPreviewHeight <= 0) {
                 project->previewTaskState = Async::TaskState::Failed;
                 project->previewStatusText = "Preview render failed.";
+                ReportPreviewProblem(project);
                 return;
             }
 
@@ -784,6 +781,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             if (newSourcePreviewTex == 0) {
                 project->previewTaskState = Async::TaskState::Failed;
                 project->previewStatusText = "Preview render failed.";
+                ReportPreviewProblem(project);
                 return;
             }
 
@@ -796,6 +794,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
                 glDeleteTextures(1, &newSourcePreviewTex);
                 project->previewTaskState = Async::TaskState::Failed;
                 project->previewStatusText = "Preview render failed.";
+                ReportPreviewProblem(project);
                 return;
             }
 
@@ -812,6 +811,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
             project->previewStatusText = usedSavedAsset
                 ? "Preview ready (saved render)."
                 : "Preview ready.";
+            ResolvePreviewProblem("project-preview-" + project->fileName);
         });
         });
     } catch (...) {
@@ -821,6 +821,7 @@ void LibraryManager::RequestProjectPreview(const std::shared_ptr<ProjectEntry>& 
         project->previewRequestGeneration == generation) {
         project->previewTaskState = Async::TaskState::Failed;
         project->previewStatusText = "Project preview could not be queued.";
+        ReportPreviewProblem(project);
     }
 }
 
@@ -830,18 +831,18 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
     if (asset->fullPreviewTex != 0) {
         asset->previewTaskState = Async::TaskState::Idle;
         asset->previewStatusText = "Preview ready.";
+        ResolvePreviewProblem("asset-preview-" + asset->fileName);
         return;
     }
 
-    ++m_AssetPreviewGeneration;
-    const std::uint64_t generation = m_AssetPreviewGeneration;
-    asset->previewRequestGeneration = generation;
+    const std::uint64_t cancelGeneration = m_AssetPreviewGeneration;
+    const std::uint64_t generation = ++asset->previewRequestGeneration;
     asset->previewTaskState = Async::TaskState::Queued;
     asset->previewStatusText = "Loading asset preview...";
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit([this, generation, asset]() {
+        submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Loading preview", true),[this, generation, cancelGeneration, asset]() {
         DecodedAssetPreview preview;
         try {
             preview.success = LibraryImage::LoadRgbaImageFromFile(
@@ -853,9 +854,9 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
             preview.success = false;
         }
 
-        Async::TaskSystem::Get().PostToMain([this, generation, asset, preview = std::move(preview)]() mutable {
+        Async::TaskSystem::Get().PostToMain([this, generation, cancelGeneration, asset, preview = std::move(preview)]() mutable {
             if (!asset ||
-                generation != m_AssetPreviewGeneration ||
+                cancelGeneration != m_AssetPreviewGeneration ||
                 asset->previewRequestGeneration != generation) {
                 if (asset &&
                     asset->previewRequestGeneration == generation) {
@@ -868,6 +869,7 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
             if (!preview.success || preview.pixels.empty()) {
                 asset->previewTaskState = Async::TaskState::Failed;
                 asset->previewStatusText = "Asset preview failed.";
+                ReportPreviewProblem(asset);
                 return;
             }
 
@@ -885,6 +887,7 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
             if (replacementTexture == 0) {
                 asset->previewTaskState = Async::TaskState::Failed;
                 asset->previewStatusText = "Asset preview upload failed.";
+                ReportPreviewProblem(asset);
                 return;
             }
             if (asset->fullPreviewTex) {
@@ -893,6 +896,7 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
             asset->fullPreviewTex = replacementTexture;
             asset->previewTaskState = Async::TaskState::Idle;
             asset->previewStatusText = "Preview ready.";
+            ResolvePreviewProblem("asset-preview-" + asset->fileName);
         });
         });
     } catch (...) {
@@ -902,6 +906,7 @@ void LibraryManager::RequestAssetPreview(const std::shared_ptr<AssetEntry>& asse
         asset->previewRequestGeneration == generation) {
         asset->previewTaskState = Async::TaskState::Failed;
         asset->previewStatusText = "Asset preview could not be queued.";
+        ReportPreviewProblem(asset);
     }
 }
 

@@ -22,7 +22,6 @@ namespace {
 
 constexpr float kLibraryViewScaleMin = 0.55f;
 constexpr float kLibraryViewScaleMax = 1.80f;
-constexpr float kLibraryViewScaleStep = 1.10f;
 
 ImVec4 BlendColor(const ImVec4& from, const ImVec4& to, float t) {
     const float clamped = std::clamp(t, 0.0f, 1.0f);
@@ -67,10 +66,7 @@ void LibraryModule::RenderLibraryGrid(
         if (wheel != 0.0f) {
             if (io.KeyCtrl) {
                 const float previousScale = m_LibraryViewScale;
-                m_LibraryViewScale = std::clamp(
-                    previousScale * std::pow(kLibraryViewScaleStep, wheel),
-                    kLibraryViewScaleMin,
-                    kLibraryViewScaleMax);
+                AdjustViewScale(wheel);
 
                 if (std::abs(m_LibraryViewScale - previousScale) > 0.0001f) {
                     const float scaleRatio = m_LibraryViewScale / previousScale;
@@ -78,12 +74,12 @@ void LibraryModule::RenderLibraryGrid(
                         io.MousePos.y - ImGui::GetWindowPos().y,
                         0.0f,
                         ImGui::GetWindowHeight());
+                    const float scrollAnchor = m_ScrollTargetY >= 0.0f
+                        ? m_ScrollTargetY
+                        : currentScrollY;
                     const float anchoredScrollY =
-                        (currentScrollY + cursorOffsetY) * scaleRatio - cursorOffsetY;
+                        (scrollAnchor + cursorOffsetY) * scaleRatio - cursorOffsetY;
                     m_ScrollTargetY = std::max(0.0f, anchoredScrollY);
-                    m_ScrollCurrentY = m_ScrollTargetY;
-                    m_CachedLayoutKey.clear();
-                    SaveViewState();
                 }
 
                 ImGui::SetTooltip("Library view: %.0f%%", m_LibraryViewScale * 100.0f);
@@ -98,6 +94,17 @@ void LibraryModule::RenderLibraryGrid(
     const ImVec2 layoutStartLocal = ImGui::GetCursorPos();
     const float layoutWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     const float packedCardGap = 22.0f * m_LibraryViewScale;
+    const bool searchLayoutActive = m_SearchFilter[0] != '\0';
+    const double now = ImGui::GetTime();
+    const std::string currentSearchQuery(m_SearchFilter);
+    if (currentSearchQuery != m_LastSearchLayoutQuery) {
+        m_LastSearchLayoutQuery = currentSearchQuery;
+        m_SearchLayoutQueryChangedAt = now;
+        m_ScrollTargetY = 0.0f;
+    }
+    const bool searchMovementReady =
+        !searchLayoutActive || (now - m_SearchLayoutQueryChangedAt) >= 0.10;
+    const float searchResultScale = searchLayoutActive ? 1.08f : 1.0f;
     const auto layoutStarted = std::chrono::steady_clock::now();
     const auto& assets = LibraryManager::Get().GetAssets();
     const auto& projects = LibraryManager::Get().GetProjects();
@@ -110,17 +117,15 @@ void LibraryModule::RenderLibraryGrid(
             const auto& asset = assets[idx];
             if (!asset) continue;
 
-            const auto motionIt = m_AssetCardMotion.find(asset->fileName);
-            const bool revealing = motionIt != m_AssetCardMotion.end() && motionIt->second.reveal > 0.01f;
             const bool matchesFilter = AssetMatchesFilter(*asset, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag);
-            if (!matchesFilter && !revealing) continue;
+            if (!matchesFilter) continue;
 
             LibraryPackedCard card;
             card.index = idx;
             card.size = ComputeLibraryCardSize(
                 static_cast<float>(asset->width),
                 static_cast<float>(asset->height),
-                m_LibraryViewScale);
+                m_LibraryViewScale * searchResultScale);
             cards.push_back(card);
             contentHash = HashCombine(contentHash, HashString(asset->fileName));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, asset->width)));
@@ -132,17 +137,15 @@ void LibraryModule::RenderLibraryGrid(
             const auto& project = projects[idx];
             if (!project) continue;
 
-            const auto motionIt = m_ProjectCardMotion.find(project->fileName);
-            const bool revealing = motionIt != m_ProjectCardMotion.end() && motionIt->second.reveal > 0.01f;
             const bool matchesFilter = ProjectMatchesFilter(*project, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag);
-            if (!matchesFilter && !revealing) continue;
+            if (!matchesFilter) continue;
 
             LibraryPackedCard card;
             card.index = idx;
             card.size = ComputeLibraryCardSize(
                 static_cast<float>(project->sourceWidth),
                 static_cast<float>(project->sourceHeight),
-                m_LibraryViewScale);
+                m_LibraryViewScale * searchResultScale);
             cards.push_back(card);
             contentHash = HashCombine(contentHash, HashString(project->fileName));
             contentHash = HashCombine(contentHash, static_cast<std::uint64_t>(std::max(0, project->sourceWidth)));
@@ -164,7 +167,38 @@ void LibraryModule::RenderLibraryGrid(
     const std::string layoutKeyText = layoutKey.str();
     m_LastRenderStats.layoutCacheHit = layoutKeyText == m_CachedLayoutKey;
     if (!m_LastRenderStats.layoutCacheHit) {
-        const std::vector<LibraryPackedCard> packedCards = PackLibraryCards(cards, layoutWidth, packedCardGap);
+        const float baseTargetScale = std::clamp(
+            m_LibraryViewScale * searchResultScale,
+            kLibraryViewScaleMin,
+            kLibraryViewScaleMax);
+        const float adaptiveScaleLimit = std::clamp(
+            kLibraryViewScaleMax / std::max(baseTargetScale, 0.001f),
+            1.0f,
+            1.08f);
+        std::vector<LibraryPackedCard> packedCards = PackLibraryCards(
+            cards,
+            layoutWidth,
+            packedCardGap,
+            adaptiveScaleLimit);
+        float packedWidth = 0.0f;
+        float packedHeight = 0.0f;
+        for (const LibraryPackedCard& card : packedCards) {
+            packedWidth = std::max(packedWidth, card.pos.x + card.size.x);
+            packedHeight = std::max(packedHeight, card.pos.y + card.size.y);
+        }
+        const float centeredX = searchLayoutActive
+            ? std::max(0.0f, (layoutWidth - packedWidth) * 0.5f)
+            : 0.0f;
+        const float availableViewHeight = std::max(1.0f, ImGui::GetWindowHeight() - layoutStartLocal.y - 72.0f);
+        const float centeredY = searchLayoutActive && packedHeight < availableViewHeight
+            ? std::max(0.0f, (availableViewHeight - packedHeight) * 0.5f)
+            : 0.0f;
+        if (searchLayoutActive) {
+            for (LibraryPackedCard& card : packedCards) {
+                card.pos.x += centeredX;
+                card.pos.y += centeredY;
+            }
+        }
         m_CachedPackedCards.clear();
         m_CachedPackedCards.reserve(packedCards.size());
         m_CachedPackedHeight = 0.0f;
@@ -175,13 +209,13 @@ void LibraryModule::RenderLibraryGrid(
             cached.y = card.pos.y;
             cached.width = card.size.x;
             cached.height = card.size.y;
+            cached.scaleMultiplier = card.scaleMultiplier;
             m_CachedPackedCards.push_back(cached);
             m_CachedPackedHeight = std::max(m_CachedPackedHeight, cached.y + cached.height);
         }
         m_CachedLayoutKey = layoutKeyText;
     }
 
-    const double now = ImGui::GetTime();
     const int frameCount = ImGui::GetFrameCount();
     std::vector<std::pair<std::string, const LibraryCachedPackedCard*>> entranceOrder;
     entranceOrder.reserve(m_CachedPackedCards.size());
@@ -233,8 +267,124 @@ void LibraryModule::RenderLibraryGrid(
     priorityProjects.reserve(48);
     priorityAssets.reserve(48);
 
+    std::vector<LibraryCachedPackedCard> animatedCards;
+    animatedCards.reserve(m_CachedPackedCards.size() + 32);
+    const auto smoothDamp = [dt](float current, float target, float& velocity, float smoothTime) {
+        const float safeTime = std::max(0.05f, smoothTime);
+        const float omega = 2.0f / safeTime;
+        const float step = omega * std::max(0.0f, dt);
+        const float decay = 1.0f /
+            (1.0f + step + 0.48f * step * step + 0.235f * step * step * step);
+        const float change = current - target;
+        const float temporary = (velocity + omega * change) * dt;
+        velocity = (velocity - omega * temporary) * decay;
+        float result = target + (change + temporary) * decay;
+        const bool passedTarget =
+            ((target - current) > 0.0f) == (result > target);
+        if (passedTarget) {
+            result = target;
+            velocity = 0.0f;
+        }
+        if (std::abs(result - target) < 0.01f && std::abs(velocity) < 0.01f) {
+            velocity = 0.0f;
+            return target;
+        }
+        return result;
+    };
+
+    for (const LibraryCachedPackedCard& targetCard : m_CachedPackedCards) {
+        std::string key;
+        if (m_ShowAssets) {
+            if (targetCard.index >= assets.size() || !assets[targetCard.index]) continue;
+            key = assets[targetCard.index]->fileName;
+        } else {
+            if (targetCard.index >= projects.size() || !projects[targetCard.index]) continue;
+            key = projects[targetCard.index]->fileName;
+        }
+
+        LibraryCardMotionState& motion = m_ShowAssets
+            ? GetCardMotionState(m_AssetCardMotion, key)
+            : GetCardMotionState(m_ProjectCardMotion, key);
+        motion.lastSeenFrame = frameCount;
+        motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, 1.0f, dt, kCardMotionSpeed);
+        motion.layoutTargetX = targetCard.x;
+        motion.layoutTargetY = targetCard.y;
+        motion.layoutTargetScale = std::clamp(
+            m_LibraryViewScale * searchResultScale * targetCard.scaleMultiplier,
+            kLibraryViewScaleMin,
+            kLibraryViewScaleMax);
+        if (!motion.layoutInitialized) {
+            motion.layoutX = motion.layoutTargetX;
+            motion.layoutY = motion.layoutTargetY;
+            motion.layoutScale = motion.layoutTargetScale;
+            motion.layoutInitialized = true;
+        } else {
+            if (searchMovementReady) {
+                motion.layoutX = smoothDamp(
+                    motion.layoutX, motion.layoutTargetX, motion.layoutVelocityX, 0.30f);
+                motion.layoutY = smoothDamp(
+                    motion.layoutY, motion.layoutTargetY, motion.layoutVelocityY, 0.30f);
+                motion.layoutScale = smoothDamp(
+                    motion.layoutScale, motion.layoutTargetScale, motion.layoutScaleVelocity, 0.24f);
+            } else {
+                const float velocityDecay = std::exp(-dt * 24.0f);
+                motion.layoutVelocityX *= velocityDecay;
+                motion.layoutVelocityY *= velocityDecay;
+                motion.layoutScaleVelocity *= velocityDecay;
+            }
+        }
+
+        LibraryCachedPackedCard animated = targetCard;
+        animated.x = motion.layoutX;
+        animated.y = motion.layoutY;
+        const ImVec2 animatedSize = ComputeLibraryCardSize(
+            static_cast<float>(m_ShowAssets ? assets[targetCard.index]->width : projects[targetCard.index]->sourceWidth),
+            static_cast<float>(m_ShowAssets ? assets[targetCard.index]->height : projects[targetCard.index]->sourceHeight),
+            motion.layoutScale);
+        animated.width = animatedSize.x;
+        animated.height = animatedSize.y;
+        animatedCards.push_back(animated);
+    }
+
+    // Cards rejected by the current query keep their last live rectangle while
+    // fading. They are excluded from target packing, so they cannot push the
+    // surviving result group around or reserve empty holes in its final layout.
+    if (m_ShowAssets) {
+        for (std::size_t idx = 0; idx < assets.size(); ++idx) {
+            const auto& asset = assets[idx];
+            if (!asset || AssetMatchesFilter(*asset, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag)) continue;
+            auto motionIt = m_AssetCardMotion.find(asset->fileName);
+            if (motionIt == m_AssetCardMotion.end() || !motionIt->second.layoutInitialized) continue;
+            LibraryCardMotionState& motion = motionIt->second;
+            motion.lastSeenFrame = frameCount;
+            motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, 0.0f, dt, kCardMotionSpeed);
+            if (motion.reveal <= 0.01f) continue;
+            const ImVec2 size = ComputeLibraryCardSize(
+                static_cast<float>(asset->width), static_cast<float>(asset->height),
+                motion.layoutScale);
+            animatedCards.push_back({ idx, motion.layoutX, motion.layoutY, size.x, size.y });
+        }
+    } else {
+        for (std::size_t idx = 0; idx < projects.size(); ++idx) {
+            const auto& project = projects[idx];
+            if (!project || ProjectMatchesFilter(*project, m_SearchFilter, m_ActiveTagFilters, m_FilterNoTag)) continue;
+            auto motionIt = m_ProjectCardMotion.find(project->fileName);
+            if (motionIt == m_ProjectCardMotion.end() || !motionIt->second.layoutInitialized) continue;
+            LibraryCardMotionState& motion = motionIt->second;
+            motion.lastSeenFrame = frameCount;
+            motion.reveal = ImGuiExtras::AnimateTowards(motion.reveal, 0.0f, dt, kCardMotionSpeed);
+            if (motion.reveal <= 0.01f) continue;
+            const ImVec2 size = ComputeLibraryCardSize(
+                static_cast<float>(project->sourceWidth), static_cast<float>(project->sourceHeight),
+                motion.layoutScale);
+            animatedCards.push_back({ idx, motion.layoutX, motion.layoutY, size.x, size.y });
+        }
+    }
+
     const auto cardRenderStarted = std::chrono::steady_clock::now();
-    for (const LibraryCachedPackedCard& card : m_CachedPackedCards) {
+    float animatedContentHeight = m_CachedPackedHeight;
+    for (const LibraryCachedPackedCard& card : animatedCards) {
+        animatedContentHeight = std::max(animatedContentHeight, card.y + card.height);
         const float cardMinY = layoutStartLocal.y + card.y;
         const float cardMaxY = cardMinY + card.height;
         if (cardMaxY < visibleMinY || cardMinY > visibleMaxY) {
@@ -272,7 +422,7 @@ void LibraryModule::RenderLibraryGrid(
     m_LastRenderStats.visibleCards = renderedCount;
     LibraryManager::Get().SetThumbnailWarmupPriority(std::move(priorityProjects), std::move(priorityAssets));
 
-    const float packedHeight = m_CachedPackedHeight;
+    const float packedHeight = animatedContentHeight;
 
     ImGui::SetCursorPos(ImVec2(layoutStartLocal.x, layoutStartLocal.y + packedHeight));
     if (packedHeight > 0.0f) {
@@ -280,8 +430,9 @@ void LibraryModule::RenderLibraryGrid(
     }
 
     const bool noPackedCards = m_LastRenderStats.packedCards == 0;
-    const bool showLoadingState = noPackedCards && refreshBusy;
-    const bool showEmptyState = noPackedCards && !refreshBusy;
+    const bool transitionCardsGone = animatedCards.empty();
+    const bool showLoadingState = noPackedCards && transitionCardsGone && refreshBusy;
+    const bool showEmptyState = noPackedCards && transitionCardsGone && !refreshBusy;
     m_LibraryLoadingStateAlpha = ImGuiExtras::AnimateTowards(m_LibraryLoadingStateAlpha, showLoadingState ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
     m_EmptyStateAlpha = ImGuiExtras::AnimateTowards(m_EmptyStateAlpha, showEmptyState ? 1.0f : 0.0f, dt, kStatusMotionSpeed);
 
@@ -319,33 +470,46 @@ void LibraryModule::RenderLibraryGrid(
         : (m_SearchFilter[0] ? "No projects match the current search filter." : "No projects found in the library.");
     renderCenteredGridStatus(emptyText, m_EmptyStateAlpha, false);
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Border, wallpaperSurfaces ? surfacePalette.border : ImVec4(118.0f / 255.0f, 162.0f / 255.0f, 196.0f / 255.0f, 210.0f / 255.0f));
-    if (!m_BlockLibraryGridContextMenuThisFrame &&
-        ImGui::BeginPopupContextWindow("LibraryGridContextMenu", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
-        RenderLibraryMenuOptions(importBusy, exportBusy);
-        ImGui::EndPopup();
+    ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 0.0f), ImVec2(440.0f, ImGui::GetMainViewport()->Size.y * 0.85f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 9.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    if (!m_BlockLibraryGridContextMenuThisFrame || ImGui::IsPopupOpen("LibraryGridContextMenu")) {
+        if (ImGui::BeginPopupContextWindow("LibraryGridContextMenu", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+            RenderLibraryMenuOptions(importBusy, exportBusy);
+            ImGui::EndPopup();
+        }
     }
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(4);
+    ImGui::PopStyleVar(5);
 
     RenderTagsDrawer(appearance, wallpaperSurfaces, surfacePalette, dt);
 
-    {
+    if (!m_SectionPanelHosted) {
         ImVec2 libraryPos = ImGui::GetWindowPos();
         ImVec2 librarySize = ImGui::GetWindowSize();
 
-        const float searchW = 340.0f;
-        const float gapFromBottom = 10.0f;
+        const float searchFieldW = 210.0f;
+        const float iconHitSize = 28.0f;
+        const float iconGap = 8.0f;
+        const float stripW = searchFieldW + 14.0f + iconHitSize;
+        const float featherX = 74.0f;
+        const float featherY = 52.0f;
+        const float stripH = 31.0f;
+        const float overlayW = stripW + featherX * 2.0f;
+        const float overlayH = stripH + featherY * 2.0f;
+        const float gapFromBottom = 4.0f;
         ImVec2 searchPos = ImVec2(
             libraryPos.x + librarySize.x * 0.5f,
             libraryPos.y + librarySize.y - gapFromBottom);
+        const ImGuiViewport* libraryViewport = ImGui::GetWindowViewport();
 
         ImGui::SetNextWindowPos(searchPos, ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-        ImGui::SetNextWindowSize(ImVec2(searchW, 0.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(overlayW, overlayH), ImGuiCond_Always);
+        if (libraryViewport != nullptr) {
+            ImGui::SetNextWindowViewport(libraryViewport->ID);
+        }
         ImGui::SetNextWindowBgAlpha(0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
@@ -355,10 +519,39 @@ void LibraryModule::RenderLibraryGrid(
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings |
             ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoScrollWithMouse |
-            ImGuiWindowFlags_AlwaysAutoResize);
+            ImGuiWindowFlags_NoScrollWithMouse);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f));
+        // A broad, low-density feather keeps moving thumbnails legible behind
+        // the controls without introducing a panel edge. Each shell contributes
+        // only a small amount of opacity; their accumulation becomes gently
+        // stronger near the strip and falls to effectively zero at the outside.
+        {
+            ImDrawList* overlayDrawList = ImGui::GetWindowDrawList();
+            const ImVec2 windowPos = ImGui::GetWindowPos();
+            const ImVec2 stripMin(windowPos.x + featherX, windowPos.y + featherY);
+            const ImVec2 stripMax(stripMin.x + stripW, stripMin.y + stripH);
+            ImVec4 backdrop = wallpaperSurfaces
+                ? surfacePalette.controlSurface
+                : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+            constexpr int kFeatherShells = 30;
+            for (int shell = kFeatherShells - 1; shell >= 0; --shell) {
+                const float t = static_cast<float>(shell) / static_cast<float>(kFeatherShells - 1);
+                const float smooth = t * t * (3.0f - 2.0f * t);
+                const float expandX = featherX * t;
+                const float expandY = featherY * t;
+                ImVec4 shellColor = backdrop;
+                shellColor.w = 0.0025f + (1.0f - smooth) * 0.0125f;
+                overlayDrawList->AddRectFilled(
+                    ImVec2(stripMin.x - expandX, stripMin.y - expandY),
+                    ImVec2(stripMax.x + expandX, stripMax.y + expandY),
+                    ImGui::GetColorU32(shellColor),
+                    17.0f + std::max(expandX, expandY));
+            }
+        }
+
+        ImGui::SetCursorPos(ImVec2(featherX, featherY));
+
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(iconGap, 2.0f));
 
         if (wallpaperSurfaces) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg, surfacePalette.controlSurface);
@@ -373,34 +566,58 @@ void LibraryModule::RenderLibraryGrid(
         }
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 17.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 6.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(38.0f, 6.0f));
 
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint("##search", "Search library...", m_SearchFilter, sizeof(m_SearchFilter));
+        ImGui::SetNextItemWidth(searchFieldW);
+        ImGui::InputTextWithHint("##search", "Search", m_SearchFilter, sizeof(m_SearchFilter));
+        if (m_SearchIconTex != 0) {
+            const ImVec2 fieldMin = ImGui::GetItemRectMin();
+            const ImVec2 fieldMax = ImGui::GetItemRectMax();
+            const float searchIconSize = 15.0f;
+            const ImVec2 iconMin(fieldMin.x + 14.0f, fieldMin.y + (fieldMax.y - fieldMin.y - searchIconSize) * 0.5f);
+            ImVec4 tint = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+                tint = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            }
+            ImGui::GetWindowDrawList()->AddImage(
+                (ImTextureID)(intptr_t)m_SearchIconTex,
+                iconMin, ImVec2(iconMin.x + searchIconSize, iconMin.y + searchIconSize),
+                ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), ImGui::GetColorU32(tint));
+        }
 
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(4);
 
-        const float defaultBtnWidth = 110.0f;
-        const float optionsWidth = (m_OptionsIconTex != 0) ? (18.0f + ImGui::GetStyle().FramePadding.x * 2.0f) : 84.0f;
-        const float allProjWidth = (m_AllProjectsIconTex != 0) ? (18.0f + ImGui::GetStyle().FramePadding.x * 2.0f) : defaultBtnWidth;
-        const float assetsWidth = (m_AssetsIconTex != 0) ? (18.0f + ImGui::GetStyle().FramePadding.x * 2.0f) : defaultBtnWidth;
-        const float rawWorkspaceWidth = 134.0f;
-        const float iconsRowWidth =
-            optionsWidth + 12.0f + allProjWidth + 6.0f + assetsWidth + 6.0f + rawWorkspaceWidth;
-
-        ImGui::SetCursorPosX((searchW - iconsRowWidth) * 0.5f);
-
-        bool openOptions = false;
-        if (m_OptionsIconTex != 0) {
-            if (ImGui::ImageButton("##OptionsIconBtn", (ImTextureID)(intptr_t)m_OptionsIconTex, ImVec2(18.0f, 18.0f))) {
-                openOptions = true;
+        ImGui::SameLine(0.0f, 14.0f);
+        const auto renderIconTab = [&](const char* id, const char* tooltip, unsigned int texture, bool active) {
+            const ImVec2 cursor = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(id, ImVec2(iconHitSize, iconHitSize));
+            const bool hovered = ImGui::IsItemHovered();
+            const bool held = ImGui::IsItemActive();
+            ImVec4 tint = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+            if (active || held) {
+                tint = accent;
+            } else if (hovered) {
+                tint = BlendColor(tint, accent, 0.72f);
+            } else {
+                tint.w *= 0.52f;
             }
-        } else {
-            if (ImGui::Button("Options", ImVec2(84.0f, 28.0f))) {
-                openOptions = true;
+            const float visualSize = 18.0f;
+            const ImVec2 iconMin(
+                cursor.x + (iconHitSize - visualSize) * 0.5f,
+                cursor.y + (iconHitSize - visualSize) * 0.5f);
+            if (texture != 0) {
+                ImGui::GetWindowDrawList()->AddImage(
+                    (ImTextureID)(intptr_t)texture,
+                    iconMin, ImVec2(iconMin.x + visualSize, iconMin.y + visualSize),
+                    ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), ImGui::GetColorU32(tint));
             }
-        }
+            if (hovered) ImGui::SetTooltip("%s", tooltip);
+            return ImGui::IsItemClicked();
+        };
+
+        const bool openOptions = renderIconTab("##OptionsIconBtn", "Options", m_OptionsIconTex, false);
         if (openOptions) {
             ImGui::OpenPopup("LibraryOptionsPopup");
         }
@@ -412,66 +629,6 @@ void LibraryModule::RenderLibraryGrid(
             RenderLibraryMenuOptions(importBusy, exportBusy);
             ImGui::EndPopup();
         }
-
-        ImGui::SameLine(0.0f, 12.0f);
-        ImGui::BeginGroup();
-        {
-            auto renderModePill = [&](const char* label, bool active, bool showAssetsValue, bool showRawWorkspaceValue, unsigned int iconTex, float textWidth) {
-                if (wallpaperSurfaces) {
-                    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
-                    const ImVec4 button = active
-                        ? BlendColor(surfacePalette.controlSurface, accent, 0.28f)
-                        : surfacePalette.controlSurface;
-                    const ImVec4 buttonHovered = active
-                        ? BlendColor(surfacePalette.controlSurfaceHovered, accent, 0.34f)
-                        : surfacePalette.controlSurfaceHovered;
-                    const ImVec4 buttonActive = active
-                        ? BlendColor(surfacePalette.controlSurfaceActive, accent, 0.40f)
-                        : surfacePalette.controlSurfaceActive;
-                    ImGui::PushStyleColor(ImGuiCol_Button, button);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, buttonHovered);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, buttonActive);
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button, active ? IM_COL32(110, 186, 255, 52) : IM_COL32(255, 255, 255, 10));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? IM_COL32(110, 186, 255, 68) : IM_COL32(255, 255, 255, 22));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? IM_COL32(110, 186, 255, 82) : IM_COL32(255, 255, 255, 30));
-                }
-
-                bool clicked = false;
-                if (iconTex != 0) {
-                    const std::string strId = std::string("##ModePill_") + label;
-                    clicked = ImGui::ImageButton(strId.c_str(), (ImTextureID)(intptr_t)iconTex, ImVec2(18.0f, 18.0f));
-                } else {
-                    clicked = ImGui::Button(label, ImVec2(textWidth, 28.0f));
-                }
-
-                if (clicked) {
-                    m_ShowRawWorkspace = showRawWorkspaceValue;
-                    m_ShowAssets = showAssetsValue;
-                    if (m_ShowRawWorkspace) {
-                        m_SelectedProjects.clear();
-                        m_SelectedAssets.clear();
-                        m_PreviewProject = nullptr;
-                        m_PreviewAsset = nullptr;
-                    } else if (m_ShowAssets) {
-                        m_SelectedProjects.clear();
-                    } else {
-                        m_SelectedAssets.clear();
-                    }
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", label);
-                }
-                ImGui::PopStyleColor(3);
-            };
-
-            renderModePill("All Projects", !m_ShowRawWorkspace && !m_ShowAssets, false, false, m_AllProjectsIconTex, defaultBtnWidth);
-            ImGui::SameLine(0.0f, 6.0f);
-            renderModePill("Assets", !m_ShowRawWorkspace && m_ShowAssets, true, false, m_AssetsIconTex, defaultBtnWidth);
-            ImGui::SameLine(0.0f, 6.0f);
-            renderModePill("RAW Workspace", m_ShowRawWorkspace, false, true, 0, rawWorkspaceWidth);
-        }
-        ImGui::EndGroup();
 
         ImGui::PopStyleVar();
         ImGui::End();

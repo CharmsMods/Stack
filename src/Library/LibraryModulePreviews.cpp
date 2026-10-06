@@ -1,3 +1,4 @@
+#include "Utils/UiBusyState.h"
 #include "LibraryModule.h"
 
 #include "Async/TaskSystem.h"
@@ -165,15 +166,6 @@ void LibraryModule::RenderPreviewPopup(
         } else {
             DrawComparePreview(*m_PreviewProject, fittedImageSize, m_CompareSplit, 18.0f, false, contentVisibility);
         }
-    } else {
-        const ImVec2 spinnerPos(
-            contentMin.x + std::max(0.0f, (previewArea.x - 140.0f) * 0.5f),
-            contentMin.y + std::max(0.0f, (previewArea.y - 70.0f) * 0.44f));
-        ImGui::SetCursorPos(ImVec2(spinnerPos.x - viewport->Pos.x, spinnerPos.y - viewport->Pos.y));
-        const char* spinnerLabel = m_PreviewProject->previewStatusText.empty()
-            ? "Rendering preview..."
-            : m_PreviewProject->previewStatusText.c_str();
-        ImGuiExtras::DrawSpinner(spinnerLabel, 18.0f, 4, IM_COL32(220, 220, 220, 240));
     }
     ImGui::SetCursorPos(ImVec2(
         contentMin.x + previewArea.x + gap - viewport->Pos.x,
@@ -246,7 +238,7 @@ void LibraryModule::RenderPreviewPopup(
     ImGui::PopItemWidth();
     ImGui::Spacing();
 
-    const bool projectLoadBusy = Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState());
+    const bool projectLoadBusy = Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState(m_CachedEditor));
     const float actionWidth = std::max(108.0f, (contentWidth - 12.0f) * 0.5f);
     const ImVec2 actionSize(actionWidth, 34.0f);
 
@@ -261,10 +253,9 @@ void LibraryModule::RenderPreviewPopup(
         m_ProjectPreviewClosing = true;
     }
 
-    ImGui::BeginDisabled(
-        m_ProjectPreviewClosing || projectLoadBusy || previewBusy
-        || renderProject
-        || compositeProject);
+    Stack::UiActivity::BeginDisabledForWork(
+        projectLoadBusy || previewBusy,
+        m_ProjectPreviewClosing || renderProject || compositeProject);
     if (ImGui::Button(
             projectLoadBusy
                 ? "Loading Project..."
@@ -272,23 +263,15 @@ void LibraryModule::RenderPreviewPopup(
             actionSize)) {
         const std::string projectFileName = m_PreviewProject->fileName;
         if (!renderProject && !compositeProject) {
-            if (editor != nullptr && editor->IsDirty()) {
-                m_PendingLoadProjectFileName = projectFileName;
-                m_PendingLoadTarget = PendingLoadTarget::Editor;
-                m_ConfirmLoadOpen = true;
-            } else {
-                m_ProjectPreviewClosing = true;
-                m_ProjectPreviewRefreshAfterClose = false;
-                (void)editor;
-                (void)activeTab;
-                RequestOpenEditorProject(projectFileName);
-            }
+            m_ProjectPreviewClosing = true;
+            m_ProjectPreviewRefreshAfterClose = false;
+            RequestOpenEditorProject(projectFileName);
         }
     }
     ImGui::EndDisabled();
     ImGui::SameLine(0.0f, 10.0f);
     if (ImGui::Button("Delete Project...", actionSize)) {
-        ImGui::OpenPopup("Confirm Delete Project");
+        RequestDeleteItems({m_PreviewProject->fileName}, false);
     }
 
     ImGui::Spacing();
@@ -304,43 +287,9 @@ void LibraryModule::RenderPreviewPopup(
         ImGui::TextDisabled("Legacy standalone composite projects are no longer supported.");
     }
 
-    if (!LibraryManager::Get().GetProjectLoadStatusText().empty()) {
+    if (!LibraryManager::Get().GetProjectLoadStatusText(m_CachedEditor).empty()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("%s", LibraryManager::Get().GetProjectLoadStatusText().c_str());
-    }
-
-    if (ImGui::BeginPopupModal("Confirm Delete Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        static double s_deletePopupOpenedAt = 0.0;
-        if (ImGui::IsWindowAppearing()) {
-            s_deletePopupOpenedAt = ImGui::GetTime();
-        }
-        const float dialogProgress = ImGuiExtras::EaseOutCubic(std::clamp(
-            static_cast<float>((ImGui::GetTime() - s_deletePopupOpenedAt) / kDialogAppearDuration),
-            0.0f,
-            1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, dialogProgress);
-        ImGui::TextWrapped("Delete \"%s\" from the library?", m_PreviewProject ? m_PreviewProject->projectName.c_str() : "this project");
-        ImGui::TextDisabled("This removes the saved project file and any linked rendered preview asset from the Library.");
-        ImGui::Spacing();
-
-        if (ImGui::Button("Delete", ImVec2(120, 0))) {
-            const std::string fileName = m_PreviewProject ? m_PreviewProject->fileName : "";
-            if (!fileName.empty()) {
-                LibraryManager::Get().DeleteProject(fileName);
-                m_ProjectPreviewRefreshAfterClose = true;
-                m_ProjectPreviewClosing = true;
-            }
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::SameLine();
-
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::PopStyleVar();
-        ImGui::EndPopup();
+        ImGui::TextDisabled("%s", LibraryManager::Get().GetProjectLoadStatusText(m_CachedEditor).c_str());
     }
 
     ImGui::Unindent(18.0f);
@@ -409,7 +358,7 @@ void LibraryModule::RenderAssetPreviewPopup(
 
     const bool previewReady = (m_PreviewAsset->fullPreviewTex != 0);
     const bool previewBusy = Async::IsBusy(m_PreviewAsset->previewTaskState);
-    const bool projectLoadBusy = Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState());
+    const bool projectLoadBusy = Async::IsBusy(LibraryManager::Get().GetProjectLoadTaskState(m_CachedEditor));
     const bool renderLinkedProject = m_PreviewAsset->projectKind == StackBinaryFormat::kRenderProjectKind;
     const bool compositeLinkedProject = m_PreviewAsset->projectKind == StackBinaryFormat::kCompositeProjectKind;
     const float contentProgress = ImGuiExtras::EaseOutCubic(previewAlpha);
@@ -502,15 +451,6 @@ void LibraryModule::RenderAssetPreviewPopup(
             ImVec2(1, 0),
             IM_COL32(255, 255, 255, static_cast<int>(255.0f * contentVisibility)),
             18.0f);
-    } else {
-        const ImVec2 spinnerPos(
-            contentMin.x + std::max(0.0f, (previewArea.x - 140.0f) * 0.5f),
-            contentMin.y + std::max(0.0f, (previewArea.y - 70.0f) * 0.44f));
-        ImGui::SetCursorPos(ImVec2(spinnerPos.x - viewport->Pos.x, spinnerPos.y - viewport->Pos.y));
-        const char* spinnerLabel = m_PreviewAsset->previewStatusText.empty()
-            ? "Loading full-quality asset..."
-            : m_PreviewAsset->previewStatusText.c_str();
-        ImGuiExtras::DrawSpinner(spinnerLabel, 18.0f, 4, IM_COL32(220, 220, 220, 240));
     }
 
     ImGui::SetCursorPos(ImVec2(
@@ -600,10 +540,10 @@ void LibraryModule::RenderAssetPreviewPopup(
         m_AssetPreviewClosing = true;
     }
 
-    ImGui::BeginDisabled(
-        m_AssetPreviewClosing || projectLoadBusy || previewBusy || m_PreviewAsset->projectFileName.empty()
-        || renderLinkedProject
-        || compositeLinkedProject);
+    Stack::UiActivity::BeginDisabledForWork(
+        projectLoadBusy || previewBusy,
+        m_AssetPreviewClosing || m_PreviewAsset->projectFileName.empty()
+        || renderLinkedProject || compositeLinkedProject);
     if (ImGui::Button(
             projectLoadBusy
                 ? "Loading Project..."
@@ -611,16 +551,8 @@ void LibraryModule::RenderAssetPreviewPopup(
             ImVec2(contentWidth, 34.0f))) {
         const std::string projectFileName = m_PreviewAsset->projectFileName;
         if (!renderLinkedProject && !compositeLinkedProject) {
-            if (editor != nullptr && editor->IsDirty()) {
-                m_PendingLoadProjectFileName = projectFileName;
-                m_PendingLoadTarget = PendingLoadTarget::Editor;
-                m_ConfirmLoadOpen = true;
-            } else {
-                m_AssetPreviewClosing = true;
-                (void)editor;
-                (void)activeTab;
-                RequestOpenEditorProject(projectFileName);
-            }
+            m_AssetPreviewClosing = true;
+            RequestOpenEditorProject(projectFileName);
         }
     }
     ImGui::EndDisabled();
@@ -632,9 +564,9 @@ void LibraryModule::RenderAssetPreviewPopup(
         ImGui::TextDisabled("No linked project metadata was found for this asset.");
     }
 
-    if (!LibraryManager::Get().GetProjectLoadStatusText().empty()) {
+    if (!LibraryManager::Get().GetProjectLoadStatusText(m_CachedEditor).empty()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("%s", LibraryManager::Get().GetProjectLoadStatusText().c_str());
+        ImGui::TextDisabled("%s", LibraryManager::Get().GetProjectLoadStatusText(m_CachedEditor).c_str());
     }
 
     ImGui::Unindent(18.0f);

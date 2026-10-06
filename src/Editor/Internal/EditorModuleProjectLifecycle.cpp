@@ -1,14 +1,19 @@
+#include "Utils/UiBusyState.h"
 #include "Editor/EditorModule.h"
+#include "Editor/Internal/Project/ProjectLifecycleSupport.h"
 
 #include "Async/TaskSystem.h"
+#include "App/AppPaths.h"
 #include "Library/LibraryManager.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/Internal/EditorRenderWorkerScheduling.h"
+#include "Persistence/ProjectIndex.h"
+#include "Raw/RawLoader.h"
+#include "Raw/RawTechnicalEvidence.h"
 
 #include <imgui.h>
 
 #include <algorithm>
-#include <array>
-#include <chrono>
 #include <cctype>
 #include <exception>
 #include <filesystem>
@@ -17,144 +22,56 @@
 #include <string>
 #include <vector>
 
+using Stack::Editor::ProjectInternal::ApplyRawWorkspaceProjectInfoToSource;
+using Stack::Editor::ProjectInternal::EnsureMinimalProjectDocument;
+using Stack::Editor::ProjectInternal::OverlayOwnedJsonFields;
+using Stack::Editor::ProjectInternal::RawWorkspaceProjectFileTimeTicks;
+
 namespace {
-
-std::vector<unsigned char> MinimalTransparentPngBytes() {
-    static constexpr std::array<unsigned char, 70> kPng = {
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-        0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
-        0x54, 0x78, 0x01, 0x63, 0x60, 0x60, 0x60, 0x00,
-        0x00, 0x00, 0x04, 0x00, 0x01, 0x0b, 0x0e, 0x0c,
-        0x1a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
-        0x44, 0xae, 0x42, 0x60, 0x82
-    };
-    return std::vector<unsigned char>(kPng.begin(), kPng.end());
-}
-
-std::int64_t RawWorkspaceProjectFileTimeTicks(const std::filesystem::path& path) {
-    std::error_code ec;
-    const std::filesystem::file_time_type writeTime = std::filesystem::last_write_time(path, ec);
-    return ec
-        ? 0
-        : std::chrono::duration_cast<std::chrono::microseconds>(
-            writeTime.time_since_epoch()).count();
-}
-
-std::string RawWorkspaceProjectSaveRevisionKey(
-    const std::filesystem::path& workspaceRoot,
-    const std::string& sourceKey) {
-    return workspaceRoot.lexically_normal().generic_string() + "\n" + sourceKey;
-}
-
-void EnsureMinimalProjectDocument(StackBinaryFormat::ProjectDocument& document, const std::string& name) {
-    if (document.metadata.projectKind.empty()) {
-        document.metadata.projectKind = StackBinaryFormat::kRawProjectKind;
-    }
-    if (document.metadata.projectName.empty()) {
-        document.metadata.projectName = name.empty() ? "Untitled RAW Project" : name;
-    }
-    if (document.metadata.sourceWidth <= 0) {
-        document.metadata.sourceWidth = 1;
-    }
-    if (document.metadata.sourceHeight <= 0) {
-        document.metadata.sourceHeight = 1;
-    }
-    if (document.thumbnailBytes.empty()) {
-        document.thumbnailBytes = MinimalTransparentPngBytes();
-    }
-    if (document.sourceImageBytes.empty()) {
-        document.sourceImageBytes = MinimalTransparentPngBytes();
-    }
-}
-
-void OverlayOwnedJsonFields(
-    nlohmann::json& current,
-    const nlohmann::json& owned) {
-    if (!current.is_object() || !owned.is_object()) {
-        current = owned;
-        return;
-    }
-
-    for (auto it = owned.begin(); it != owned.end(); ++it) {
-        auto currentIt = current.find(it.key());
-        if (currentIt != current.end() &&
-            currentIt->is_object() &&
-            it->is_object()) {
-            OverlayOwnedJsonFields(*currentIt, *it);
-        } else {
-            current[it.key()] = *it;
-        }
-    }
-}
 
 struct RawWorkspaceProjectLoadResult {
     Stack::RawWorkspace::SourceRecord source;
     EditorLoadedProjectData loadedProject;
     Stack::RawRecipe::RawDevelopmentRecipe recipe;
-    Stack::RawWorkspace::RawProjectMode mode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+    Stack::RawWorkspace::RawProjectMode mode = Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
     Stack::RawWorkspace::ManagedRawSection managedSection;
     bool success = false;
     bool hasRawWorkspaceInfo = false;
     std::string errorMessage;
 };
 
-void ApplyRawWorkspaceProjectInfoToSource(
-    Stack::RawWorkspace::SourceRecord& source,
-    const StackBinaryFormat::ProjectDocument& document,
-    const std::filesystem::path& projectPath,
-    const std::filesystem::path& projectRelativePath,
-    bool autosaved,
-    bool dirty,
-    std::string associationReason) {
-    Stack::RawWorkspace::ProjectInfo info;
-    if (!Stack::RawWorkspace::ReadProjectInfoFromDocument(document, info, nullptr)) {
-        info = source.project;
-        info.status = Stack::RawWorkspace::ProjectStatus::Invalid;
-        if (info.errorMessage.empty()) {
-            info.errorMessage = "Project does not contain RAW Workspace metadata.";
-        }
-    }
-
-    info.absolutePath = projectPath.lexically_normal();
-    info.relativePath = projectRelativePath.lexically_normal();
-    info.projectModifiedTimeTicks = RawWorkspaceProjectFileTimeTicks(info.absolutePath);
-    if (info.status != Stack::RawWorkspace::ProjectStatus::Invalid) {
-        info.status = info.embeddedRaw
-            ? Stack::RawWorkspace::ProjectStatus::Embedded
-            : Stack::RawWorkspace::ProjectStatus::Existing;
-    }
-    info.autosaved = autosaved;
-    info.dirty = dirty;
-    info.associationReason = std::move(associationReason);
-    source.project = std::move(info);
-}
-
 } // namespace
 
 bool EditorModule::HasProjectContent() const {
-    return !m_CurrentProjectName.empty() ||
-        !m_CurrentProjectFileName.empty() ||
-        !m_Layers.empty() ||
-        !m_NodeGraph.GetNodes().empty() ||
-        !m_NodeGraph.GetLinks().empty() ||
+    return !m_Project->name.empty() ||
+        !m_Project->fileName.empty() ||
+        !m_Project->layers.empty() ||
+        !m_Project->graph.GetNodes().empty() ||
+        !m_Project->graph.GetLinks().empty() ||
         m_Pipeline.HasSourceImage();
+}
+
+bool EditorModule::HasOpenProjectSession() const {
+    return HasProjectContent() ||
+        !m_Project->documentId.empty() ||
+        !m_Project->lifecycle.ProjectId().empty() ||
+        m_Project->store != nullptr ||
+        m_Project->snapshot != nullptr ||
+        !m_Project->storePath.empty();
 }
 
 EditorModule::ProjectSessionKind EditorModule::GetProjectSessionKind() const {
     if (IsRawWorkspaceProjectActive()) {
         const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+            FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
         if (source != nullptr &&
             source->project.status == Stack::RawWorkspace::ProjectStatus::NoProject &&
-            !m_Dirty) {
+            !IsDirty()) {
             return ProjectSessionKind::RawPreview;
         }
         return ProjectSessionKind::RawProject;
     }
-    return HasProjectContent()
+    return HasOpenProjectSession()
         ? ProjectSessionKind::EditorProject
         : ProjectSessionKind::Empty;
 }
@@ -162,19 +79,30 @@ EditorModule::ProjectSessionKind EditorModule::GetProjectSessionKind() const {
 EditorModule::ProjectFileCommandContext
 EditorModule::GetProjectFileCommandContext() const {
     ProjectFileCommandContext context;
+    if (IsAutoBracketWorkspace()) {
+        context.canClose = true;
+        context.canOpen = false;
+        context.canCreateEditorProject = false;
+        context.busyReason = "Use a project tab to open or edit a project.";
+        return context;
+    }
     context.sessionKind = GetProjectSessionKind();
-    context.dirty = m_Dirty;
-    context.projectPath = m_ActiveRawWorkspaceProjectPath.empty()
-        ? std::filesystem::path(m_CurrentProjectFileName)
-        : m_ActiveRawWorkspaceProjectPath;
+    context.dirty = IsDirty();
+    if (IsUnifiedProjectStoreActive()) {
+        context.projectPath = m_Project->store->StoragePath();
+    } else {
+        context.projectPath = m_Project->storePath.empty()
+            ? std::filesystem::path(m_Project->fileName)
+            : m_Project->storePath;
+    }
 
-    if (IsMultiFrameRawProjectActive()) {
-        context.lifecyclePhase = m_ProjectSessionController.Phase();
-        context.storageKind = m_ActiveRawProjectStore->StorageKind();
+    if (IsUnifiedProjectStoreActive()) {
+        context.lifecyclePhase = m_Project->lifecycle.Phase();
+        context.storageKind = m_Project->store->StorageKind();
     } else {
         context.lifecyclePhase = context.sessionKind == ProjectSessionKind::Empty
             ? Stack::Project::ProjectLifecyclePhase::Empty
-            : (m_Dirty
+            : (context.dirty
                 ? Stack::Project::ProjectLifecyclePhase::ReadyDirty
                 : Stack::Project::ProjectLifecyclePhase::ReadyClean);
     }
@@ -184,19 +112,16 @@ EditorModule::GetProjectFileCommandContext() const {
     context.readOnlyRecovery = context.lifecyclePhase ==
         Stack::Project::ProjectLifecyclePhase::ReadOnlyRecovery;
 
-    const LibraryManager& library = LibraryManager::Get();
     const bool projectLoadBusy =
         IsDeferredLoadedProjectApplyActive() ||
         IsRawWorkspaceProjectLoadBusy() ||
-        Async::IsBusy(library.GetProjectLoadTaskState());
+        Async::IsBusy(GetProjectLoadTaskState());
     const bool projectSaveBusy =
         IsProjectFileSaveBusy() ||
-        IsRawWorkspaceProjectSaveBusy() ||
-        Async::IsBusy(library.GetSaveTaskState());
+        IsRawWorkspaceProjectSaveBusy();
     const bool importBusy =
         IsSourceLoadBusy() ||
-        IsGraphDropImportBusy() ||
-        Async::IsBusy(library.GetImportTaskState());
+        IsGraphDropImportBusy();
     const bool lifecycleLoadBusy = context.lifecyclePhase ==
         Stack::Project::ProjectLifecyclePhase::Loading;
     const bool lifecycleSaveBusy = context.lifecyclePhase ==
@@ -222,10 +147,24 @@ EditorModule::GetProjectFileCommandContext() const {
         context.busyReason = "Source frames are currently being imported.";
     } else if (mfdProcessingBusy) {
         context.busyReason = "Multi-frame processing is currently running.";
+    } else if (context.conflict) {
+        context.busyReason =
+            "The open project has a storage conflict. Save a copy to continue safely.";
+    } else if (context.readOnlyRecovery) {
+        context.busyReason =
+            "The open project is in read-only recovery. Save a copy to continue editing.";
+    } else if (!m_DocumentPersistenceEnabled) {
+        context.busyReason = "Project saving is disabled in this session.";
     }
 
     const bool hasSession = context.sessionKind != ProjectSessionKind::Empty;
-    context.canSave = hasSession && !context.busy &&
+    // Save is the one command that remains available while a save is active:
+    // Ctrl+S joins the single-writer queue and completes only after its
+    // requested revision is durable. Loading/importing still cannot be saved.
+    context.canSave = (hasSession || HasUnsavedBracketingDraft()) &&
+        m_DocumentPersistenceEnabled &&
+        !projectLoadBusy && !importBusy && !lifecycleLoadBusy &&
+        !lifecycleImportBusy && !mfdProcessingBusy &&
         !context.conflict && !context.readOnlyRecovery;
     context.canSaveAs = hasSession && !context.busy;
     context.canClose = hasSession && !context.busy;
@@ -235,6 +174,7 @@ EditorModule::GetProjectFileCommandContext() const {
 }
 
 bool EditorModule::CloseCurrentProject(bool discardUnsavedChanges) {
+    if(RequestAutoBracketForeground("close this project",[this,discardUnsavedChanges]{CloseCurrentProject(discardUnsavedChanges);}))return true;
     const ProjectSessionKind kind = GetProjectSessionKind();
     if (kind == ProjectSessionKind::Empty) {
         return false;
@@ -243,7 +183,7 @@ bool EditorModule::CloseCurrentProject(bool discardUnsavedChanges) {
         kind == ProjectSessionKind::RawProject) {
         return CloseActiveRawWorkspaceProject(discardUnsavedChanges);
     }
-    if (m_Dirty && !discardUnsavedChanges) {
+    if (IsDirty() && !discardUnsavedChanges) {
         return false;
     }
     ResetToBlankProject();
@@ -251,6 +191,7 @@ bool EditorModule::CloseCurrentProject(bool discardUnsavedChanges) {
 }
 
 bool EditorModule::CloseEditorProjectAndActivateRawWorkspace() {
+    if(RequestAutoBracketForeground("change projects",[this]{CloseEditorProjectAndActivateRawWorkspace();}))return true;
     if (IsRawWorkspaceProjectActive()) {
         m_RawWorkspaceLockedByEditorProject = false;
         m_RawWorkspaceRootTabActive = true;
@@ -270,15 +211,16 @@ bool EditorModule::CloseEditorProjectAndActivateRawWorkspace() {
 }
 
 bool EditorModule::CloseActiveRawWorkspaceProject(bool discardUnsavedChanges) {
+    if(RequestAutoBracketForeground("close this project",[this,discardUnsavedChanges]{CloseActiveRawWorkspaceProject(discardUnsavedChanges);}))return true;
     if (!IsRawWorkspaceProjectActive()) {
         return false;
     }
-    if (m_Dirty && !discardUnsavedChanges) {
+    if (IsDirty() && !discardUnsavedChanges) {
         return false;
     }
     if (IsRawWorkspaceProjectLoadBusy() || IsRawWorkspaceProjectSaveBusy()) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Wait for the current RAW project operation to finish before closing it.",
             "raw-workspace-project-close-busy");
         return false;
@@ -289,14 +231,6 @@ bool EditorModule::CloseActiveRawWorkspaceProject(bool discardUnsavedChanges) {
         : m_RawWorkspace.selectedSourceKey;
     const std::vector<std::string> selectedSourceKeys =
         m_RawWorkspace.selectedSourceKeys;
-    const std::string activeSourceKey = m_ActiveRawWorkspaceSourceKey;
-    if (!activeSourceKey.empty()) {
-        // Any delayed save completion for this session is stale after close.
-        BumpRawWorkspaceProjectSaveRevision(
-            m_RawWorkspace.workspaceRoot,
-            activeSourceKey);
-    }
-
     m_RawWorkspaceProjectLoadGeneration.fetch_add(1, std::memory_order_relaxed);
     m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Idle;
     m_RawWorkspaceProjectLoadSourceKey.clear();
@@ -340,51 +274,47 @@ bool EditorModule::CloseActiveRawWorkspaceProject(bool discardUnsavedChanges) {
     InvalidateRawWorkspaceGalleryPresentation();
     PersistRawWorkspaceCatalog();
     SaveRawWorkspaceAppState();
-    QueueUiNotification(
+    PostNotification(
         UiNotificationSeverity::Success,
         "Project closed. The RAW gallery remains available.",
         "raw-workspace-project-closed");
     return true;
 }
 
-bool EditorModule::ConsumeUiNotification(UiNotificationEvent& outEvent) {
-    if (m_UiNotifications.empty()) {
-        return false;
-    }
-    outEvent = std::move(m_UiNotifications.front());
-    m_UiNotifications.pop_front();
-    return true;
+void EditorModule::SetNotificationScope(Stack::Notifications::Notifier notifier) {
+    m_Notifier = std::move(notifier);
+    ProjectTasks().SetActivityOwner(m_Notifier.GetOwner().id, m_Notifier.GetOwner().generation);
 }
 
 void EditorModule::ShowUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey) {
-    QueueUiNotification(severity, std::move(message), std::move(dedupeKey));
+    PostNotification(severity, std::move(message), std::move(dedupeKey));
 }
 
-void EditorModule::QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey) {
-    if (message.empty()) {
-        return;
-    }
-    if (!dedupeKey.empty()) {
-        for (UiNotificationEvent& event : m_UiNotifications) {
-            if (event.dedupeKey == dedupeKey) {
-                event.severity = severity;
-                event.message = std::move(message);
-                return;
-            }
-        }
-    }
-    m_UiNotifications.push_back(UiNotificationEvent{
-        severity,
-        std::move(message),
-        std::move(dedupeKey)
-    });
+void EditorModule::PostNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey) {
+    PostUiNotification(m_Notifier, severity, std::move(message), std::move(dedupeKey));
 }
 
 void EditorModule::ResetToBlankProject() {
+    auto canceledLoadCompletion = std::move(m_DeferredLoadedProjectApply.completion);
+    ResetDeferredLoadedProjectApplyState();
+    m_Project->files->load.Invalidate();
+    m_Project->files->save.Invalidate();
+    ResetProjectInteractionState();
+    ResetBracketingForProjectLoad({});
+    m_Project->saves.Reset();
     ++m_ProjectFileSaveGeneration;
     m_ProjectFileSaveTaskState = Async::TaskState::Idle;
     m_ProjectFileSaveStatusText.clear();
     CancelMfdExperimentalProcessing({}, true);
+    CancelHdrProcessing();
+    CancelMultiFrameGraphProcessing();
+    m_HdrAdoptedRawResult.reset();
+    m_MultiFrameProcessingCache.reset();
+    m_MultiFrameFusionResults.clear();
+    m_MultiFrameCacheProjectId.clear();
+    m_FusionWorkspaceUi.reset();
+    m_HdrProcessingReport.reset();
+    m_MultiFrameProjectCoverRefreshPending = false;
     CancelCanvasTool();
     CancelGraphAutoFocusTracking();
     m_GraphDropImportTaskState = Async::TaskState::Idle;
@@ -392,9 +322,9 @@ void EditorModule::ResetToBlankProject() {
     m_PendingGraphDropImports.clear();
     m_SourceLoadTaskState = Async::TaskState::Idle;
     m_SourceLoadStatusText.clear();
-    m_Layers.clear();
+    m_Project->layers.clear();
     m_SelectedLayerIndex = -1;
-    m_NodeGraph.ResetFromLayers(0, false);
+    m_Project->graph.ResetFromLayers(0, false);
     ClearCompositeRuntimeState();
     m_NodeDirtyGenerations.clear();
     m_DevelopAutoSolveTriggerHashes.clear();
@@ -422,33 +352,43 @@ void EditorModule::ResetToBlankProject() {
     ClearViewportOutputTiles();
     m_Pipeline.Clear();
     m_CompositePreviewPipeline.Clear();
-    m_ActiveRawWorkspaceSourceKey.clear();
+    m_Project->rawSourceKey.clear();
     m_PinnedRawWorkspaceSource.reset();
     m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
-    m_RawWorkspacePipelineActive = false;
+    m_Project->rawPipelineActive = false;
     m_RawWorkspaceStaleRenderStatusText.clear();
-    m_ActiveRawWorkspaceProjectPath.clear();
-    m_ActiveRawProjectStore.reset();
-    m_ActiveRawProjectSnapshot.reset();
-    m_ProjectSessionController.Clear();
-    m_ActiveRawWorkspaceRecipe = {};
-    m_ActiveRawWorkspaceMode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
-    m_ActiveManagedRawSection = {};
-    m_ShowRawWorkspaceRelinkPopup = false;
-    m_ShowRawWorkspaceEmbedPopup = false;
+    m_Project->storePath.clear();
+    m_Project->store.reset();
+    m_Project->snapshot.reset();
+    m_Project->singleRawSource.reset();
+    m_Project->lifecycle.Clear();
+    m_Project->rawRecipe = {};
+    m_Project->rawMode = Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
+    m_Project->managedRaw = {};
     SetCurrentProjectName("");
     SetCurrentProjectFileName("");
-    MarkRenderDirty();
+    m_Project->documentId.clear();
+    m_Project->adoptionSourcePath.clear();
+    m_ProjectNamingPromptRequested = false;
+    m_ProjectNamingPromptShown = false;
+    m_Project->editRevision = 0;
+    MarkRenderRefreshDirty();
     ClearDirty();
-    m_LastUserActionTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
-    m_LastAutoSaveTime = -1.0;
+    m_Project->lastEditTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
+    m_Project->lastAutosaveTime = -1.0;
+    m_Project->lastAutosaveAttemptTime = -1.0;
+    if (canceledLoadCompletion) {
+        try {
+            canceledLoadCompletion(false, "The project closed before loading completed.");
+        } catch (...) {
+        }
+    }
 }
 
 void EditorModule::ResetRenderSubmissionState() {
-    ++m_RenderGeneration;
-    if (m_RenderWorkerAvailable) {
-        m_RenderWorker.InvalidateSnapshotsBefore(m_RenderGeneration);
-    }
+    m_RenderGeneration =
+        Stack::EditorRenderScheduling::NextGlobalGeneration();
+    InvalidateRenderSnapshotsBefore(m_RenderGeneration);
     m_RenderPending = false;
     m_RenderDirty = true;
     m_LastCompletedRenderGeneration = 0;
@@ -491,14 +431,43 @@ Stack::RawWorkspace::SourceRecord* EditorModule::FindRawWorkspaceSourceByKey(con
     return it == m_RawWorkspace.sources.end() ? nullptr : &(*it);
 }
 
+void EditorModule::PreserveActiveRawProjectSourceForLibraryNavigation() {
+    if (!IsRawWorkspaceProjectActive() ||
+        m_Project->rawSourceKey.empty() ||
+        (m_PinnedRawWorkspaceSource.has_value() &&
+         m_PinnedRawWorkspaceSource->relativePathKey ==
+             m_Project->rawSourceKey)) {
+        return;
+    }
+    const auto source = std::find_if(
+        m_RawWorkspace.sources.begin(),
+        m_RawWorkspace.sources.end(),
+        [&](const Stack::RawWorkspace::SourceRecord& candidate) {
+            return candidate.relativePathKey ==
+                m_Project->rawSourceKey;
+        });
+    if (source == m_RawWorkspace.sources.end()) {
+        return;
+    }
+    m_RawWorkspaceSelectedSourceBeforePinnedProject =
+        m_RawWorkspace.selectedSourceKey;
+    m_PinnedRawWorkspaceSource = *source;
+    if (!m_Project->storePath.empty()) {
+        m_PinnedRawWorkspaceSource->project.absolutePath =
+            m_Project->storePath;
+        m_PinnedRawWorkspaceSource->project.relativePath =
+            m_Project->storePath.filename();
+    }
+}
+
 bool EditorModule::ApplyLoadedRawProjectSessionMetadata(
     const LoadedProjectData& projectData,
     std::string* outError) {
     const bool isRawProject =
-        projectData.projectKind == StackBinaryFormat::kRawProjectKind ||
-        (projectData.rawWorkspaceData.is_object() &&
-         projectData.rawWorkspaceData.value("schema", std::string()) ==
-             "stack.rawWorkspace.project");
+        projectData.projectKind == StackBinaryFormat::kRawProjectKind;
+    m_Project->singleRawSource = isRawProject
+        ? projectData.decodedRawSource
+        : std::shared_ptr<const Raw::RawImageData>();
     if (!isRawProject) {
         if (m_PinnedRawWorkspaceSource.has_value() &&
             m_RawWorkspace.selectedSourceKey ==
@@ -506,18 +475,94 @@ bool EditorModule::ApplyLoadedRawProjectSessionMetadata(
             m_RawWorkspace.selectedSourceKey =
                 m_RawWorkspaceSelectedSourceBeforePinnedProject;
         }
-        m_ActiveRawWorkspaceSourceKey.clear();
+        m_Project->rawSourceKey.clear();
         m_PinnedRawWorkspaceSource.reset();
         m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
-        m_RawWorkspacePipelineActive = false;
+        m_Project->rawPipelineActive = false;
         m_RawWorkspaceStaleRenderStatusText.clear();
-        m_ActiveRawWorkspaceProjectPath.clear();
-        m_ActiveRawProjectStore.reset();
-        m_ActiveRawProjectSnapshot.reset();
-        m_ProjectSessionController.Clear();
-        m_ActiveRawWorkspaceRecipe = {};
-        m_ActiveRawWorkspaceMode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
-        m_ActiveManagedRawSection = {};
+        m_Project->storePath.clear();
+        m_Project->store = projectData.projectStore;
+        m_Project->snapshot = projectData.rawProjectSnapshot;
+        if (m_Project->store && m_Project->snapshot) {
+            const Stack::Project::ProjectReplacementToken replacement =
+                m_Project->lifecycle.BeginReplacement();
+            if (!m_Project->lifecycle.CompleteReplacement(
+                    replacement,
+                    m_Project->snapshot->projectId,
+                    m_Project->snapshot->dirtyRevision,
+                    m_Project->snapshot->persistedStorageRevision,
+                    m_Project->store->IsReadOnlyRecovery())) {
+                if (outError) {
+                    *outError = "The unified project session could not be activated.";
+                }
+                return false;
+            }
+        } else {
+            m_Project->lifecycle.Clear();
+        }
+        m_Project->rawRecipe = {};
+        m_Project->rawMode = Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
+        m_Project->managedRaw = {};
+        return true;
+    }
+
+    if (projectData.transientRawPreview) {
+        if (projectData.rawProjectSnapshot || projectData.projectStore) {
+            if (outError) {
+                *outError = "The temporary RAW preview has conflicting project storage.";
+            }
+            return false;
+        }
+
+        StackBinaryFormat::ProjectDocument document;
+        document.rawWorkspaceData = projectData.rawWorkspaceData;
+        Stack::RawWorkspace::ProjectInfo projectInfo;
+        Stack::RawRecipe::RawDevelopmentRecipe recipe;
+        if (!Stack::RawWorkspace::ReadProjectInfoFromDocument(
+                document, projectInfo, &recipe)) {
+            if (outError) {
+                *outError = projectInfo.errorMessage.empty()
+                    ? "The temporary RAW preview metadata is invalid."
+                    : projectInfo.errorMessage;
+            }
+            return false;
+        }
+        if (projectInfo.mode !=
+            Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
+            if (outError) {
+                *outError = "The temporary RAW preview is not recipe-backed.";
+            }
+            return false;
+        }
+
+        const std::string sourceKey =
+            !projectInfo.sourceRelativePathKey.empty()
+                ? projectInfo.sourceRelativePathKey
+                : recipe.source.relativePathKey;
+        const Stack::RawWorkspace::SourceRecord* source =
+            FindRawWorkspaceSourceByKey(sourceKey);
+        if (!source) {
+            if (outError) {
+                *outError = "The Gallery image for the temporary RAW preview is unavailable.";
+            }
+            return false;
+        }
+
+        m_Project->store.reset();
+        m_Project->snapshot.reset();
+        m_Project->lifecycle.Clear();
+        m_PinnedRawWorkspaceSource.reset();
+        m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
+        m_Project->rawSourceKey = source->relativePathKey;
+        m_RawWorkspace.selectedSourceKey = source->relativePathKey;
+        m_Project->storePath =
+            std::filesystem::path(projectData.projectFileName).lexically_normal();
+        m_Project->rawRecipe = std::move(recipe);
+        m_Project->rawMode = projectInfo.mode;
+        m_Project->managedRaw = {};
+        m_Project->rawPipelineActive = true;
+        m_RawWorkspaceLockedByEditorProject = false;
+        m_RawWorkspaceStaleRenderStatusText.clear();
         return true;
     }
 
@@ -533,166 +578,129 @@ bool EditorModule::ApplyLoadedRawProjectSessionMetadata(
             }
             return false;
         }
-        m_ActiveRawWorkspaceSourceKey.clear();
-        m_PinnedRawWorkspaceSource.reset();
-        m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
-        m_ActiveRawWorkspaceProjectPath =
+        m_Project->storePath =
             std::filesystem::path(projectData.projectFileName).lexically_normal();
-        m_ActiveRawWorkspaceRecipe = {};
-        m_ActiveRawWorkspaceMode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
-        m_ActiveManagedRawSection = {};
-        m_ActiveRawProjectStore = projectData.projectStore;
-        m_ActiveRawProjectSnapshot = projectData.rawProjectSnapshot;
-        m_RawWorkspacePipelineActive = true;
+        m_Project->store = projectData.projectStore;
+        m_Project->snapshot = projectData.rawProjectSnapshot;
+        if (m_Project->snapshot->coverThumbnailBytes.empty()) {
+            m_MultiFrameProjectCoverRefreshPending = true;
+        }
+        m_Project->rawPipelineActive = true;
         m_RawWorkspaceLockedByEditorProject = false;
-        m_RawWorkspaceStaleRenderStatusText =
-            "Process the burst to create its developed RAW result.";
+        const bool multiFrameProject = IsMultiFrameRawProjectActive();
+        if (multiFrameProject) {
+            m_Project->rawSourceKey.clear();
+            m_PinnedRawWorkspaceSource.reset();
+            m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
+            m_Project->rawRecipe = {};
+            m_Project->rawMode =
+                Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
+            m_Project->managedRaw = {};
+            m_RawWorkspaceStaleRenderStatusText =
+                "Process the burst to create its developed RAW result.";
+        } else {
+            StackBinaryFormat::ProjectDocument document;
+            document.rawWorkspaceData = projectData.rawWorkspaceData;
+            Stack::RawWorkspace::ProjectInfo projectInfo;
+            Stack::RawRecipe::RawDevelopmentRecipe recipe;
+            if (!Stack::RawWorkspace::ReadProjectInfoFromDocument(
+                    document, projectInfo, &recipe)) {
+                if (outError) {
+                    *outError = projectInfo.errorMessage.empty()
+                        ? "The single-image RAW project metadata is invalid."
+                        : projectInfo.errorMessage;
+                }
+                return false;
+            }
+
+            Stack::RawWorkspace::SourceRecord pinnedSource;
+            pinnedSource.absolutePath = recipe.source.sourcePath;
+            pinnedSource.relativePathKey = !projectInfo.sourceRelativePathKey.empty()
+                ? projectInfo.sourceRelativePathKey
+                : recipe.source.relativePathKey;
+            if (pinnedSource.relativePathKey.empty()) {
+                pinnedSource.relativePathKey =
+                    "project-asset:" + m_Project->snapshot->projectId;
+            }
+            pinnedSource.relativePath = pinnedSource.relativePathKey;
+            pinnedSource.fileName = !recipe.source.displayName.empty()
+                ? recipe.source.displayName
+                : pinnedSource.absolutePath.filename().string();
+            pinnedSource.stem =
+                std::filesystem::path(pinnedSource.fileName).stem().string();
+            pinnedSource.extension =
+                std::filesystem::path(pinnedSource.fileName).extension().string();
+            pinnedSource.fileSizeBytes = projectInfo.sourceFileSizeBytes;
+            pinnedSource.modifiedTimeTicks = projectInfo.sourceModifiedTimeTicks;
+            pinnedSource.fingerprint = projectInfo.sourceFingerprint;
+            pinnedSource.project = projectInfo;
+            pinnedSource.project.absolutePath = m_Project->storePath;
+            pinnedSource.project.relativePath =
+                m_Project->storePath.filename();
+            pinnedSource.project.status =
+                Stack::RawWorkspace::ProjectStatus::Existing;
+            pinnedSource.project.linkedRaw = false;
+            pinnedSource.project.embeddedRaw = false;
+            pinnedSource.project.associationReason =
+                "Project-owned RAW asset";
+
+            auto catalogSource = std::find_if(
+                m_RawWorkspace.sources.begin(),
+                m_RawWorkspace.sources.end(),
+                [&](const Stack::RawWorkspace::SourceRecord& source) {
+                    return (!pinnedSource.fingerprint.empty() &&
+                            source.fingerprint == pinnedSource.fingerprint) ||
+                        source.relativePathKey ==
+                            pinnedSource.relativePathKey;
+                });
+            if (catalogSource != m_RawWorkspace.sources.end()) {
+                catalogSource->project = pinnedSource.project;
+                m_PinnedRawWorkspaceSource.reset();
+                m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
+                m_Project->rawSourceKey =
+                    catalogSource->relativePathKey;
+            } else {
+                m_RawWorkspaceSelectedSourceBeforePinnedProject =
+                    m_RawWorkspace.selectedSourceKey;
+                m_PinnedRawWorkspaceSource = std::move(pinnedSource);
+                m_Project->rawSourceKey =
+                    m_PinnedRawWorkspaceSource->relativePathKey;
+            }
+            // A unified single-RAW bundle is already the active editing
+            // session. Select its resolved catalog or pinned source so RAW Lab
+            // does not render its empty "Select an image" state.
+            m_RawWorkspace.selectedSourceKey =
+                m_Project->rawSourceKey;
+            m_Project->rawRecipe = std::move(recipe);
+            m_Project->rawMode = projectInfo.mode;
+            m_Project->managedRaw = projectData.rawWorkspaceData.is_object()
+                ? Stack::RawWorkspace::DeserializeManagedRawSection(
+                    projectData.rawWorkspaceData.value(
+                        "managedRawSection", nlohmann::json::object()))
+                : Stack::RawWorkspace::ManagedRawSection{};
+            m_RawWorkspaceStaleRenderStatusText.clear();
+        }
         const Stack::Project::ProjectReplacementToken replacement =
-            m_ProjectSessionController.BeginReplacement();
-        if (!m_ProjectSessionController.CompleteReplacement(
+            m_Project->lifecycle.BeginReplacement();
+        if (!m_Project->lifecycle.CompleteReplacement(
                 replacement,
-                m_ActiveRawProjectSnapshot->projectId,
-                m_ActiveRawProjectSnapshot->dirtyRevision,
-                m_ActiveRawProjectSnapshot->persistedStorageRevision,
-                m_ActiveRawProjectStore->IsReadOnlyRecovery())) {
-            if (outError) *outError = "The multi-frame project session could not be activated.";
+                m_Project->snapshot->projectId,
+                m_Project->snapshot->dirtyRevision,
+                m_Project->snapshot->persistedStorageRevision,
+                m_Project->store->IsReadOnlyRecovery())) {
+            if (outError) *outError = "The project session could not be activated.";
             return false;
+        }
+        if (multiFrameProject) {
+            RestoreHdrResultCacheAfterProjectLoad();
         }
         return true;
     }
 
-    m_ActiveRawProjectStore.reset();
-    m_ActiveRawProjectSnapshot.reset();
-    m_ProjectSessionController.Clear();
-
-    StackBinaryFormat::ProjectDocument document;
-    document.rawWorkspaceData = projectData.rawWorkspaceData;
-    Stack::RawWorkspace::ProjectInfo projectInfo;
-    Stack::RawRecipe::RawDevelopmentRecipe recipe;
-    if (!Stack::RawWorkspace::ReadProjectInfoFromDocument(
-            document,
-            projectInfo,
-            &recipe)) {
-        if (outError) {
-            *outError = projectInfo.errorMessage.empty()
-                ? "The project does not contain valid RAW Workspace metadata."
-                : projectInfo.errorMessage;
-        }
-        return false;
+    if (outError) {
+        *outError = "The RAW project does not contain the current project store and snapshot.";
     }
-    if (projectInfo.mode == Stack::RawWorkspace::RawProjectMode::CustomGraph ||
-        projectInfo.mode == Stack::RawWorkspace::RawProjectMode::Unknown) {
-        if (outError) {
-            *outError = projectInfo.mode == Stack::RawWorkspace::RawProjectMode::CustomGraph
-                ? "This legacy custom RAW graph cannot be converted safely and was not opened."
-                : "This project uses an unsupported RAW Workspace mode and was not opened.";
-        }
-        return false;
-    }
-
-    Stack::RawWorkspace::SourceRecord pinnedSource;
-    pinnedSource.absolutePath = recipe.source.sourcePath;
-    pinnedSource.relativePathKey = !projectInfo.sourceRelativePathKey.empty()
-        ? projectInfo.sourceRelativePathKey
-        : recipe.source.relativePathKey;
-    if (pinnedSource.relativePathKey.empty()) {
-        pinnedSource.relativePathKey = !recipe.source.fingerprint.empty()
-            ? recipe.source.fingerprint
-            : std::string("external-project:") + projectData.projectFileName;
-    }
-    pinnedSource.relativePath = pinnedSource.relativePathKey;
-    pinnedSource.fileName = !recipe.source.displayName.empty()
-        ? recipe.source.displayName
-        : pinnedSource.absolutePath.filename().string();
-    if (pinnedSource.fileName.empty()) {
-        pinnedSource.fileName = projectData.projectName.empty()
-            ? std::filesystem::path(projectData.projectFileName).stem().string()
-            : projectData.projectName;
-    }
-    pinnedSource.stem = std::filesystem::path(pinnedSource.fileName).stem().string();
-    pinnedSource.extension = std::filesystem::path(pinnedSource.fileName).extension().string();
-    pinnedSource.fileSizeBytes = projectInfo.sourceFileSizeBytes;
-    pinnedSource.modifiedTimeTicks = projectInfo.sourceModifiedTimeTicks;
-    pinnedSource.fingerprint = projectInfo.sourceFingerprint;
-    pinnedSource.project = projectInfo;
-    pinnedSource.project.absolutePath =
-        std::filesystem::path(projectData.projectFileName).lexically_normal();
-    pinnedSource.project.relativePath = pinnedSource.project.absolutePath.filename();
-    std::error_code projectExistsError;
-    const bool projectFileExists =
-        std::filesystem::exists(pinnedSource.project.absolutePath, projectExistsError) &&
-        !projectExistsError;
-    pinnedSource.project.status = projectInfo.embeddedRaw
-        ? Stack::RawWorkspace::ProjectStatus::Embedded
-        : (projectFileExists
-            ? Stack::RawWorkspace::ProjectStatus::Existing
-            : Stack::RawWorkspace::ProjectStatus::NoProject);
-    pinnedSource.project.associationReason = "Pinned project loaded outside the active RAW folder.";
-
-    auto catalogSourceIt = std::find_if(
-        m_RawWorkspace.sources.begin(),
-        m_RawWorkspace.sources.end(),
-        [&](const Stack::RawWorkspace::SourceRecord& source) {
-            return source.relativePathKey == pinnedSource.relativePathKey;
-        });
-    if (catalogSourceIt != m_RawWorkspace.sources.end()) {
-        catalogSourceIt->project = pinnedSource.project;
-        m_PinnedRawWorkspaceSource.reset();
-        m_RawWorkspaceSelectedSourceBeforePinnedProject.clear();
-        m_ActiveRawWorkspaceSourceKey = catalogSourceIt->relativePathKey;
-    } else {
-        if (!m_PinnedRawWorkspaceSource.has_value()) {
-            m_RawWorkspaceSelectedSourceBeforePinnedProject =
-                m_RawWorkspace.selectedSourceKey;
-        }
-        m_PinnedRawWorkspaceSource = std::move(pinnedSource);
-        m_ActiveRawWorkspaceSourceKey = m_PinnedRawWorkspaceSource->relativePathKey;
-    }
-    m_RawWorkspace.selectedSourceKey = m_ActiveRawWorkspaceSourceKey;
-    m_ActiveRawWorkspaceProjectPath =
-        std::filesystem::path(projectData.projectFileName).lexically_normal();
-    m_ActiveRawWorkspaceRecipe = std::move(recipe);
-    m_ActiveRawWorkspaceMode = projectInfo.mode;
-    m_ActiveManagedRawSection = projectData.rawWorkspaceData.is_object()
-        ? Stack::RawWorkspace::DeserializeManagedRawSection(
-            projectData.rawWorkspaceData.value(
-                "managedRawSection",
-                nlohmann::json::object()))
-        : Stack::RawWorkspace::ManagedRawSection{};
-    m_RawWorkspacePipelineActive = true;
-    m_RawWorkspaceLockedByEditorProject = false;
-    m_RawWorkspaceStaleRenderStatusText.clear();
-    return true;
-}
-
-std::uint64_t EditorModule::BumpRawWorkspaceProjectSaveRevision(
-    const std::filesystem::path& workspaceRoot,
-    const std::string& sourceKey) {
-    if (workspaceRoot.empty() || sourceKey.empty()) {
-        return 0;
-    }
-
-    const std::string key = RawWorkspaceProjectSaveRevisionKey(workspaceRoot, sourceKey);
-    std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveRevisionMutex);
-    return ++m_RawWorkspaceProjectSaveRevisions[key];
-}
-
-std::uint64_t EditorModule::GetRawWorkspaceProjectSaveRevision(
-    const std::filesystem::path& workspaceRoot,
-    const std::string& sourceKey) const {
-    if (workspaceRoot.empty() || sourceKey.empty()) {
-        return 0;
-    }
-
-    const std::string key = RawWorkspaceProjectSaveRevisionKey(workspaceRoot, sourceKey);
-    std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveRevisionMutex);
-    const auto it = m_RawWorkspaceProjectSaveRevisions.find(key);
-    return it == m_RawWorkspaceProjectSaveRevisions.end() ? 0 : it->second;
-}
-
-bool EditorModule::IsRawWorkspaceProjectSaveJobCurrent(const RawWorkspaceProjectSaveJob& job) const {
-    return job.sourceRevision != 0 &&
-        GetRawWorkspaceProjectSaveRevision(job.workspaceRoot, job.sourceKey) == job.sourceRevision;
+    return false;
 }
 
 Stack::RawRecipe::RawDevelopmentRecipe EditorModule::BuildRawWorkspaceDefaultRecipe(
@@ -723,7 +731,7 @@ bool EditorModule::BuildRawWorkspaceProjectGraph(
     payload.autosaved = false;
 
     EditorNodeGraph::Node* rawNode =
-        m_NodeGraph.AddRawDevelopmentNode(std::move(payload), EditorNodeGraph::Vec2{ 20.0f, 120.0f });
+        m_Project->graph.AddRawDevelopmentNode(std::move(payload), EditorNodeGraph::Vec2{ 20.0f, 120.0f });
     if (!rawNode) {
         if (outError) {
             *outError = "Failed to create the RAW Development node.";
@@ -733,7 +741,7 @@ bool EditorModule::BuildRawWorkspaceProjectGraph(
     const int rawNodeId = rawNode->id;
 
     EditorNodeGraph::Node* outputNode =
-        m_NodeGraph.AddOutputNode(EditorNodeGraph::Vec2{ 320.0f, 120.0f }, true);
+        m_Project->graph.AddOutputNode(EditorNodeGraph::Vec2{ 320.0f, 120.0f }, true);
     if (!outputNode) {
         if (outError) {
             *outError = "Failed to create the Output node.";
@@ -743,7 +751,7 @@ bool EditorModule::BuildRawWorkspaceProjectGraph(
     const int outputNodeId = outputNode->id;
 
     std::string connectError;
-    if (!m_NodeGraph.TryConnectSockets(
+    if (!m_Project->graph.TryConnectSockets(
             rawNodeId,
             EditorNodeGraph::kImageOutputSocketId,
             outputNodeId,
@@ -757,7 +765,7 @@ bool EditorModule::BuildRawWorkspaceProjectGraph(
         return false;
     }
 
-    m_NodeGraph.SetOutputNodeId(outputNodeId);
+    m_Project->graph.SetOutputNodeId(outputNodeId);
     SelectGraphNode(rawNodeId);
     if (markEdited) {
         MarkRenderDirty(rawNodeId);
@@ -787,7 +795,7 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit(
+        submitted = ProjectTasks().Submit("Loading project",
             [this, generation, source, includeNodeBrowserThumbnails]() mutable {
                 auto isLoadCanceled = [this, generation]() {
                     return generation !=
@@ -820,20 +828,21 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
                         if (isLoadCanceled()) {
                             return;
                         }
-                        result.loadedProject.sourcePixels.assign(4, 0);
-                        result.loadedProject.width = 1;
-                        result.loadedProject.height = 1;
+                        result.loadedProject.sourceState =
+                            ProjectSourceState::LazyAsset;
+                        result.loadedProject.sourcePixels.clear();
+                        result.loadedProject.width = 0;
+                        result.loadedProject.height = 0;
                         result.loadedProject.channels = 4;
                         result.loadedProject.pipelineData = document.pipelineData.is_null()
                             ? nlohmann::json::array()
                             : document.pipelineData;
-                        if (result.loadedProject.pipelineData.empty() &&
-                            document.rawWorkspaceData.is_object() &&
-                            document.rawWorkspaceData.contains("downstreamGraph")) {
-                            result.loadedProject.pipelineData =
-                                document.rawWorkspaceData["downstreamGraph"];
-                        }
                         result.loadedProject.rawWorkspaceData = document.rawWorkspaceData;
+                        result.loadedProject.projectStore = document.projectStore;
+                        result.loadedProject.rawProjectSnapshot =
+                            document.rawProjectSnapshot;
+                        result.loadedProject.projectId = document.projectId;
+                        result.loadedProject.adoptedFrom = document.adoptedFrom;
                         result.loadedProject.projectKind = StackBinaryFormat::kRawProjectKind;
                         result.loadedProject.projectName = document.metadata.projectName.empty()
                             ? (source.stem.empty() ? source.fileName : source.stem)
@@ -857,7 +866,13 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
                                 : Stack::RawWorkspace::ManagedRawSection{};
                             result.hasRawWorkspaceInfo = true;
                         }
-                        result.success = true;
+                        result.success = result.loadedProject.projectStore &&
+                            result.loadedProject.rawProjectSnapshot &&
+                            result.hasRawWorkspaceInfo;
+                        if (!result.success) {
+                            result.errorMessage =
+                                "The RAW project does not contain a complete current project store.";
+                        }
                     }
                 } catch (const std::exception& error) {
                     result.success = false;
@@ -871,11 +886,13 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
                     return;
                 }
 
-                Async::TaskSystem::Get().PostToMain(
+                ProjectTasks().PostToMain(
                     [this, generation, result = std::move(result)]() mutable {
+                        // This editor owns the load even when Graph is visible.
+                        // Dropping an owned completion on a view change leaves
+                        // the RAW loading state queued indefinitely.
                         if (generation != m_RawWorkspaceProjectLoadGeneration.load(
-                                std::memory_order_relaxed) ||
-                            !m_RawWorkspaceRootTabActive) {
+                                std::memory_order_relaxed)) {
                             return;
                         }
 
@@ -889,21 +906,15 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
                                 m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
                                 m_PendingRawWorkspaceOpenGraphSourceKey.clear();
                             }
-                            QueueUiNotification(
+                            PostNotification(
                                 UiNotificationSeverity::Error,
                                 m_RawWorkspaceProjectLoadStatusText,
                                 "raw-workspace-project-load");
                             if (IsRawWorkspaceProjectActive()) {
                                 m_RawWorkspace.selectedSourceKey =
-                                    m_ActiveRawWorkspaceSourceKey;
+                                    m_Project->rawSourceKey;
                             }
                             return;
-                        }
-
-                        if (!result.hasRawWorkspaceInfo) {
-                            result.recipe = BuildRawWorkspaceDefaultRecipe(result.source);
-                            result.mode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
-                            result.managedSection = {};
                         }
 
                         auto loadedProject = std::make_shared<EditorLoadedProjectData>(
@@ -919,23 +930,23 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
                             m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Failed;
                             m_RawWorkspaceProjectLoadStatusText =
                                 "Failed to apply the RAW project.";
-                            QueueUiNotification(
+                            PostNotification(
                                 UiNotificationSeverity::Error,
                                 m_RawWorkspaceProjectLoadStatusText,
                                 "raw-workspace-project-load");
                             if (IsRawWorkspaceProjectActive()) {
                                 m_RawWorkspace.selectedSourceKey =
-                                    m_ActiveRawWorkspaceSourceKey;
+                                    m_Project->rawSourceKey;
                             }
                             return;
                         }
 
-                        m_ActiveRawWorkspaceRecipe = std::move(result.recipe);
-                        m_ActiveRawWorkspaceMode = result.mode;
-                        m_ActiveManagedRawSection = result.managedSection;
-                        m_ActiveRawWorkspaceSourceKey = result.source.relativePathKey;
+                        m_Project->rawRecipe = std::move(result.recipe);
+                        m_Project->rawMode = result.mode;
+                        m_Project->managedRaw = result.managedSection;
+                        m_Project->rawSourceKey = result.source.relativePathKey;
                         m_RawWorkspaceStaleRenderStatusText.clear();
-                        m_ActiveRawWorkspaceProjectPath =
+                        m_Project->storePath =
                             result.source.project.absolutePath;
                         m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Applying;
                         m_RawWorkspaceProjectLoadStatusText = "Applying RAW project...";
@@ -959,7 +970,7 @@ bool EditorModule::RequestLoadRawWorkspaceProjectForSource(
             m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
             m_PendingRawWorkspaceOpenGraphSourceKey.clear();
         }
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             m_RawWorkspaceProjectLoadStatusText,
             "raw-workspace-project-load");
@@ -971,19 +982,7 @@ void EditorModule::FinalizeDeferredRawWorkspaceProjectLoadIfNeeded() {
     if (!m_PendingRawWorkspaceDeferredProjectFinalize) {
         return;
     }
-    if (!m_RawWorkspaceRootTabActive) {
-        m_PendingRawWorkspaceDeferredProjectFinalize = false;
-        m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey.clear();
-        m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
-        m_PendingRawWorkspaceOpenGraphSourceKey.clear();
-        m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Idle;
-        m_RawWorkspaceProjectLoadSourceKey.clear();
-        m_RawWorkspaceProjectLoadStatusText.clear();
-        ResetDeferredLoadedProjectApplyState();
-        m_RawWorkspacePipelineActive = false;
-        return;
-    }
-    if (m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey != m_ActiveRawWorkspaceSourceKey) {
+    if (m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey != m_Project->rawSourceKey) {
         const std::string deferredSourceKey = m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey;
         m_PendingRawWorkspaceDeferredProjectFinalize = false;
         m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey.clear();
@@ -991,30 +990,23 @@ void EditorModule::FinalizeDeferredRawWorkspaceProjectLoadIfNeeded() {
             m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
             m_PendingRawWorkspaceOpenGraphSourceKey.clear();
         }
+        if (m_RawWorkspaceProjectLoadSourceKey == deferredSourceKey) {
+            m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Idle;
+            m_RawWorkspaceProjectLoadSourceKey.clear();
+            m_RawWorkspaceProjectLoadStatusText.clear();
+        }
         return;
     }
 
-    m_RawWorkspacePipelineActive = true;
-    if (m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
-        !ValidateActiveRawWorkspaceManagedGraph(false)) {
-        MarkActiveRawWorkspaceProjectAsCustomGraph(Stack::RawWorkspace::kCustomGraphReadOnlyReason);
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
-            Stack::RawWorkspace::kCustomGraphReadOnlyReason,
-            "raw-workspace-managed-load-invalid");
-    }
-
-    if (m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::CustomGraph) {
-        MarkDirty();
-    } else {
-        ClearDirty();
-    }
+    m_Project->rawPipelineActive = true;
+    m_RawWorkspaceLockedByEditorProject = false;
+    ClearDirty();
 
     m_PendingRawWorkspaceDeferredProjectFinalize = false;
     m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey.clear();
     m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Idle;
     const Stack::RawWorkspace::SourceRecord* activeSource =
-        FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+        FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
     const bool activeSourceHasStoredProject =
         activeSource &&
         (activeSource->project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
@@ -1024,7 +1016,7 @@ void EditorModule::FinalizeDeferredRawWorkspaceProjectLoadIfNeeded() {
         : "RAW preview ready.";
 
     if (m_PendingRawWorkspaceOpenGraphAfterProjectLoad &&
-        m_PendingRawWorkspaceOpenGraphSourceKey == m_ActiveRawWorkspaceSourceKey) {
+        m_PendingRawWorkspaceOpenGraphSourceKey == m_Project->rawSourceKey) {
         m_PendingRawWorkspaceOpenGraphAfterProjectLoad = false;
         m_PendingRawWorkspaceOpenGraphSourceKey.clear();
         FocusRawWorkspaceDevelopmentNode();
@@ -1038,10 +1030,10 @@ bool EditorModule::ResolveRawWorkspaceRecipeForSource(
     Stack::RawWorkspace::RawProjectMode* outMode,
     std::string* outError) const {
     if (IsRawWorkspaceProjectActive() &&
-        m_ActiveRawWorkspaceSourceKey == source.relativePathKey) {
-        outRecipe = m_ActiveRawWorkspaceRecipe;
+        m_Project->rawSourceKey == source.relativePathKey) {
+        outRecipe = ReadRawControlRecipe();
         if (outMode) {
-            *outMode = m_ActiveRawWorkspaceMode;
+            *outMode = m_Project->rawMode;
         }
         return true;
     }
@@ -1137,31 +1129,31 @@ bool EditorModule::ResolveRawWorkspaceRecipeForSource(
 
     outRecipe = BuildRawWorkspaceDefaultRecipe(source);
     if (outMode) {
-        *outMode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+        *outMode = Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
     }
     return true;
 }
 
 bool EditorModule::FocusRawWorkspaceDevelopmentNode() {
     SwitchToSubWindow(EditorSubWindow::NodeGraph);
-    if (m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
-        m_ActiveManagedRawSection.rawDecodeNodeId > 0 &&
-        m_NodeGraph.FindNode(m_ActiveManagedRawSection.rawDecodeNodeId)) {
-        SelectGraphNode(m_ActiveManagedRawSection.rawDecodeNodeId);
+    if (m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
+        m_Project->managedRaw.rawDecodeNodeId > 0 &&
+        m_Project->graph.FindNode(m_Project->managedRaw.rawDecodeNodeId)) {
+        SelectGraphNode(m_Project->managedRaw.rawDecodeNodeId);
         return true;
     }
-    if (m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::CustomGraph &&
-        m_ActiveManagedRawSection.rawSourceNodeId > 0 &&
-        m_NodeGraph.FindNode(m_ActiveManagedRawSection.rawSourceNodeId)) {
-        SelectGraphNode(m_ActiveManagedRawSection.rawSourceNodeId);
+    if (m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::CustomGraph &&
+        m_Project->managedRaw.rawSourceNodeId > 0 &&
+        m_Project->graph.FindNode(m_Project->managedRaw.rawSourceNodeId)) {
+        SelectGraphNode(m_Project->managedRaw.rawSourceNodeId);
         return true;
     }
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (const EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::RawDevelopment) {
             continue;
         }
         const std::string& key = node.rawDevelopment.recipe.source.relativePathKey;
-        if (m_ActiveRawWorkspaceSourceKey.empty() || key.empty() || key == m_ActiveRawWorkspaceSourceKey) {
+        if (m_Project->rawSourceKey.empty() || key.empty() || key == m_Project->rawSourceKey) {
             SelectGraphNode(node.id);
             return true;
         }
@@ -1172,14 +1164,14 @@ bool EditorModule::FocusRawWorkspaceDevelopmentNode() {
 bool EditorModule::OpenRawWorkspaceProjectInGraph(const Stack::RawWorkspace::SourceRecord& source) {
     if (source.project.status != Stack::RawWorkspace::ProjectStatus::Existing &&
         source.project.status != Stack::RawWorkspace::ProjectStatus::Embedded) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Make an edit to create this RAW project first.",
             "raw-workspace-open-graph-preview-only");
         return false;
     }
 
-    if (!IsRawWorkspaceProjectActive() || m_ActiveRawWorkspaceSourceKey != source.relativePathKey) {
+    if (!IsRawWorkspaceProjectActive() || m_Project->rawSourceKey != source.relativePathKey) {
         if (!FlushActiveRawWorkspaceProjectIfDirty()) {
             return false;
         }
@@ -1199,9 +1191,11 @@ bool EditorModule::OpenRawWorkspaceProjectInGraph(const Stack::RawWorkspace::Sou
 }
 
 bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
-    const Stack::RawWorkspace::SourceRecord& source) {
-    if (source.project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
-        source.project.status == Stack::RawWorkspace::ProjectStatus::Embedded) {
+    const Stack::RawWorkspace::SourceRecord& source,
+    bool createNewProject) {
+    if (!createNewProject &&
+        (source.project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
+         source.project.status == Stack::RawWorkspace::ProjectStatus::Embedded)) {
         return RequestLoadRawWorkspaceProjectForSource(source);
     }
 
@@ -1250,7 +1244,7 @@ bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
                 source).absolutePath.string()
             << " error=" << graphError
             << "\n";
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             "Failed to create the RAW project graph: " + graphError,
             "raw-workspace-project-preview-graph-create");
@@ -1266,22 +1260,28 @@ bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
     const std::string projectName = source.stem.empty() ? source.fileName : source.stem;
 
     auto loadedProject = std::make_shared<EditorLoadedProjectData>();
-    loadedProject->sourcePixels.assign(4, 0);
-    loadedProject->width = 1;
-    loadedProject->height = 1;
+    // The RAW Development node owns lazy decode from the source reference.
+    // Never invent a 1x1 base image whose dimensions disagree with the RAW.
+    loadedProject->sourceState = ProjectSourceState::LazyAsset;
+    loadedProject->sourcePixels.clear();
+    loadedProject->width = 0;
+    loadedProject->height = 0;
     loadedProject->channels = 4;
     loadedProject->pipelineData =
         EditorNodeGraph::SerializeGraphPayload(nlohmann::json::array(), previewGraph);
+    loadedProject->pipelineData["rawLayerStack"] = Stack::Project::SerializeRawLayerStack(Stack::Project::RawLayerStackState{});
+    loadedProject->pipelineData["rawLayerSourceNodeUuid"] = previewGraph.FindNode(rawNodeId)->instanceUuid;
     StackBinaryFormat::ProjectDocument previewDocument;
     Stack::RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
         source,
         recipe,
         nlohmann::json::object(),
         previewDocument,
-        Stack::RawWorkspace::RawProjectMode::RecipeBacked,
+        Stack::RawWorkspace::RawProjectMode::UnifiedLayers,
         true);
     loadedProject->rawWorkspaceData = std::move(previewDocument.rawWorkspaceData);
     loadedProject->projectKind = StackBinaryFormat::kRawProjectKind;
+    loadedProject->transientRawPreview = true;
     loadedProject->projectName = projectName;
     loadedProject->projectFileName = expectedProject.absolutePath.string();
 
@@ -1291,17 +1291,23 @@ bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
         m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Failed;
         m_RawWorkspaceProjectLoadStatusText = "Failed to apply the RAW preview.";
         if (IsRawWorkspaceProjectActive()) {
-            m_RawWorkspace.selectedSourceKey = m_ActiveRawWorkspaceSourceKey;
+            m_RawWorkspace.selectedSourceKey = m_Project->rawSourceKey;
         }
         return false;
     }
 
-    m_ActiveRawWorkspaceSourceKey = source.relativePathKey;
+    m_Project->rawSourceKey = source.relativePathKey;
     m_RawWorkspaceStaleRenderStatusText.clear();
-    m_ActiveRawWorkspaceProjectPath = expectedProject.absolutePath;
-    m_ActiveRawWorkspaceRecipe = std::move(recipe);
-    m_ActiveRawWorkspaceMode = Stack::RawWorkspace::RawProjectMode::RecipeBacked;
-    m_ActiveManagedRawSection = {};
+    m_Project->storePath = expectedProject.absolutePath;
+    m_Project->rawRecipe = std::move(recipe);
+    m_Project->rawMode = Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
+    m_Project->managedRaw = {};
+    // BeginDeferredLoadedProjectApply intentionally deactivates the previous
+    // session before deserialization. This newly constructed preview is now
+    // the active RAW session and must be identifiable as such before its first
+    // render is submitted; otherwise the loader can wait on a presentation
+    // whose snapshot was emitted as an untagged generic graph result.
+    m_Project->rawPipelineActive = true;
     m_RawWorkspaceProjectLoadSourceKey = source.relativePathKey;
     m_RawWorkspaceProjectLoadTaskState = Async::TaskState::Applying;
     m_RawWorkspaceProjectLoadStatusText = "Applying RAW preview...";
@@ -1312,8 +1318,8 @@ bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
 
 bool EditorModule::LoadActiveRawWorkspaceProjectInGraph() {
     if (!IsRawWorkspaceProjectActive()) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Open a RAW project before loading it into the graph.",
             "raw-workspace-load-current-no-project");
         return false;
@@ -1325,12 +1331,192 @@ bool EditorModule::LoadActiveRawWorkspaceProjectInGraph() {
     return focused;
 }
 
+bool EditorModule::MaterializeSelectedRawPreviewProject(
+    const Stack::RawWorkspace::SourceRecord& source,
+    Stack::RawRecipe::RawDevelopmentRecipe& managedRecipe,
+    std::string* outError) {
+    namespace Project = Stack::Project;
+    if (source.absolutePath.empty()) {
+        if (outError) *outError = "The viewed RAW source path is unavailable.";
+        return false;
+    }
+
+    const Stack::RawWorkspace::ManagedLayout layout =
+        Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
+    std::filesystem::path projectRoot =
+        layout.projectsDirectory /
+        Stack::RawWorkspace::BuildProjectRelativePathForSource(source);
+    std::error_code existsError;
+    if (std::filesystem::exists(projectRoot, existsError) && !existsError) {
+        const std::filesystem::path base = projectRoot;
+        for (unsigned int suffix = 2u; suffix < 10000u; ++suffix) {
+            std::filesystem::path candidate = base;
+            candidate += "-" + std::to_string(suffix);
+            existsError.clear();
+            if (!std::filesystem::exists(candidate, existsError) && !existsError) {
+                projectRoot = std::move(candidate);
+                break;
+            }
+        }
+    }
+
+    const std::string projectName = source.stem.empty()
+        ? source.fileName
+        : source.stem;
+    Project::RawProjectSnapshot bootstrap;
+    bootstrap.projectId = Project::GenerateStableUuid();
+    bootstrap.projectName = projectName.empty() ? "Untitled RAW Project" : projectName;
+    bootstrap.projectKindHint = StackBinaryFormat::kRawProjectKind;
+    bootstrap.lifecycle.creationOrigin =
+        Project::ProjectCreationOrigin::AutoFromViewer;
+    bootstrap.lifecycle.cleanupWhenUntouched = true;
+    bootstrap.lifecycle.autoCreatedAtDirtyRevision = 1u;
+
+    const nlohmann::json untouchedRecipe =
+        Stack::RawRecipe::SerializeRecipe(m_Project->rawRecipe);
+    const std::string untouchedText = untouchedRecipe.dump();
+    const std::vector<std::uint8_t> untouchedBytes(
+        untouchedText.begin(), untouchedText.end());
+    const Stack::RawEvidence::SourceIdentity untouchedIdentity =
+        Stack::RawEvidence::ComputeSourceIdentity(untouchedBytes);
+    if (untouchedIdentity.valid) {
+        bootstrap.lifecycle.untouchedStateFingerprint =
+            untouchedIdentity.sha256;
+    }
+
+    Project::ProjectStoreOpenResult created = Project::CreateProjectStore(
+        projectRoot,
+        Project::ProjectStorageKind::DirectoryBundle,
+        bootstrap);
+    if (!created) {
+        if (outError) *outError = created.message;
+        return false;
+    }
+
+    const Project::ProjectStoreTransaction transaction =
+        created.store->BeginTransaction(
+            created.snapshot.persistedStorageRevision);
+    if (!transaction) {
+        created.store.reset();
+        std::error_code cleanupError;
+        std::filesystem::remove_all(projectRoot, cleanupError);
+        if (outError) *outError = "Could not begin the first project asset import.";
+        return false;
+    }
+
+    nlohmann::json captureSummary = nlohmann::json::object();
+    Raw::RawMetadata metadata;
+    if (Raw::RawLoader::LoadMetadata(source.absolutePath.string(), metadata)) {
+        captureSummary = Project::SerializeRawCaptureCompatibilitySummary(
+            Project::BuildRawCaptureCompatibilitySummary(metadata));
+    }
+
+    Project::EmbeddedAssetRecord asset;
+    std::string stageError;
+    if (!created.store->StageAssetFile(
+            transaction,
+            source.absolutePath,
+            Project::MultiFrameInputFamily::Raw,
+            captureSummary,
+            asset,
+            &stageError)) {
+        created.store->Abort(transaction);
+        std::error_code cleanupError;
+        std::filesystem::remove_all(projectRoot, cleanupError);
+        if (outError) {
+            *outError = stageError.empty()
+                ? "Could not copy the viewed RAW into the project."
+                : stageError;
+        }
+        return false;
+    }
+
+    managedRecipe.source.sourcePath =
+        (projectRoot / asset.projectAssetPath).lexically_normal().string();
+    managedRecipe.source.relativePathKey = source.relativePathKey;
+    managedRecipe.source.fingerprint = asset.originalFileFingerprint;
+    managedRecipe.source.fileSizeBytes = asset.byteLength;
+    managedRecipe.source.modifiedTimeTicks = source.modifiedTimeTicks;
+    managedRecipe.source.displayName = source.fileName;
+
+    for (EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
+        if (node.kind == EditorNodeGraph::NodeKind::RawDevelopment) {
+            node.rawDevelopment.recipe = managedRecipe;
+        }
+    }
+
+    Project::RawProjectSnapshot snapshot = created.snapshot;
+    asset.workspaceRelativeSourcePath = source.relativePath.generic_string();
+    snapshot.embeddedAssets.push_back(asset);
+    snapshot.lifecycle.initialAssetIds.push_back(asset.assetId);
+    snapshot.dirtyRevision = 1u;
+    snapshot.pipelineData = SerializePipeline();
+    StackBinaryFormat::ProjectDocument rawDocument;
+    Stack::RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
+        source,
+        managedRecipe,
+        snapshot.pipelineData,
+        rawDocument,
+        Stack::RawWorkspace::RawProjectMode::UnifiedLayers,
+        false);
+    snapshot.rawWorkspaceData = std::move(rawDocument.rawWorkspaceData);
+    snapshot.rawWorkspaceData["managedAssetId"] = asset.assetId;
+    snapshot.rawWorkspaceData["originalSourcePath"] =
+        asset.originalSourcePath;
+    snapshot.rawWorkspaceData["originalFileFingerprint"] =
+        asset.originalFileFingerprint;
+
+    const Project::ProjectStoreCommitResult committed =
+        created.store->Commit(transaction, snapshot);
+    if (!committed) {
+        created.store->Abort(transaction);
+        std::error_code cleanupError;
+        std::filesystem::remove_all(projectRoot, cleanupError);
+        if (outError) *outError = committed.message;
+        return false;
+    }
+
+    Project::ProjectStoreOpenResult opened = Project::OpenProjectStore(projectRoot);
+    if (!opened) {
+        if (outError) *outError = opened.message;
+        return false;
+    }
+    m_Project->store = std::move(opened.store);
+    m_Project->snapshot =
+        std::make_shared<Project::RawProjectSnapshot>(
+            std::move(opened.snapshot));
+    if (m_Project->snapshot->coverThumbnailBytes.empty()) {
+        m_MultiFrameProjectCoverRefreshPending = true;
+    }
+    m_Project->storePath = projectRoot.lexically_normal();
+    const Project::ProjectReplacementToken replacement =
+        m_Project->lifecycle.BeginReplacement();
+    if (!m_Project->lifecycle.CompleteReplacement(
+            replacement,
+            m_Project->snapshot->projectId,
+            m_Project->snapshot->dirtyRevision,
+            m_Project->snapshot->persistedStorageRevision,
+            false)) {
+        if (outError) *outError = "Could not activate the newly created project.";
+        return false;
+    }
+    if (outError) outError->clear();
+    return true;
+}
+
 bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
     const Stack::RawWorkspace::SourceRecord* selectedSource =
         FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
     if (!selectedSource) {
-        QueueUiNotification(
+        std::cerr
+            << "[RAW Project Edit] selected source is unavailable"
+            << " selectedKey=" << m_RawWorkspace.selectedSourceKey
+            << " activeKey=" << m_Project->rawSourceKey
+            << " catalogSources=" << m_RawWorkspace.sources.size()
+            << " pinned=" << (m_PinnedRawWorkspaceSource.has_value() ? "yes" : "no")
+            << "\n";
+        PostNotification(
             UiNotificationSeverity::Error,
             "Select a RAW source before editing.",
             "raw-workspace-no-selection");
@@ -1339,24 +1525,27 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
 
     const bool alreadyActive =
         IsRawWorkspaceProjectActive() &&
-        m_ActiveRawWorkspaceSourceKey == selectedSource->relativePathKey;
+        m_Project->rawSourceKey == selectedSource->relativePathKey;
     if (!alreadyActive &&
         (m_RawWorkspacePreviewStageQueued &&
          m_RawWorkspacePreviewStageSourceKey == selectedSource->relativePathKey)) {
+        std::cerr << "[RAW Project Edit] preview staging is still queued\n";
         return false;
     }
     if (Async::IsBusy(m_RawWorkspaceProjectLoadTaskState) &&
         m_RawWorkspaceProjectLoadSourceKey == selectedSource->relativePathKey) {
+        std::cerr << "[RAW Project Edit] project loading is still active\n";
         return false;
     }
     if (m_PendingRawWorkspaceDeferredProjectFinalize &&
         m_PendingRawWorkspaceDeferredProjectFinalizeSourceKey == selectedSource->relativePathKey &&
         IsDeferredLoadedProjectApplyActive()) {
+        std::cerr << "[RAW Project Edit] deferred project apply is still active\n";
         return false;
     }
     bool needsDefaultGraph = !alreadyActive;
 
-    if (m_ActiveRawWorkspaceSourceKey != selectedSource->relativePathKey) {
+    if (m_Project->rawSourceKey != selectedSource->relativePathKey) {
         if (!FlushActiveRawWorkspaceProjectIfDirty()) {
             return false;
         }
@@ -1364,9 +1553,10 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
         if (selectedSource->project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
             selectedSource->project.status == Stack::RawWorkspace::ProjectStatus::Embedded) {
             if (!RequestLoadRawWorkspaceProjectForSource(*selectedSource)) {
+                std::cerr << "[RAW Project Edit] existing project could not be queued for loading\n";
                 return false;
             }
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Info,
                 "Loading this RAW project before applying edits.",
                 "raw-workspace-project-load-before-edit");
@@ -1375,12 +1565,24 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
     }
 
     Stack::RawRecipe::RawDevelopmentRecipe resolvedRecipe = recipe;
-    resolvedRecipe.source.sourcePath = selectedSource->absolutePath.string();
-    resolvedRecipe.source.relativePathKey = selectedSource->relativePathKey;
-    resolvedRecipe.source.fingerprint = selectedSource->fingerprint;
-    resolvedRecipe.source.fileSizeBytes = static_cast<std::uint64_t>(selectedSource->fileSizeBytes);
-    resolvedRecipe.source.modifiedTimeTicks = selectedSource->modifiedTimeTicks;
-    resolvedRecipe.source.displayName = selectedSource->fileName;
+    const bool keepProjectOwnedSource =
+        alreadyActive &&
+        IsUnifiedProjectStoreActive() &&
+        !m_Project->rawRecipe.source.sourcePath.empty();
+    if (keepProjectOwnedSource) {
+        // Once the first edit has copied the RAW into the project, every later
+        // edit must stay bound to that managed asset. Rebinding to the browser
+        // original here made otherwise healthy projects fail after the
+        // original was moved or deleted.
+        resolvedRecipe.source = m_Project->rawRecipe.source;
+    } else {
+        resolvedRecipe.source.sourcePath = selectedSource->absolutePath.string();
+        resolvedRecipe.source.relativePathKey = selectedSource->relativePathKey;
+        resolvedRecipe.source.fingerprint = selectedSource->fingerprint;
+        resolvedRecipe.source.fileSizeBytes = static_cast<std::uint64_t>(selectedSource->fileSizeBytes);
+        resolvedRecipe.source.modifiedTimeTicks = selectedSource->modifiedTimeTicks;
+        resolvedRecipe.source.displayName = selectedSource->fileName;
+    }
 
     const Stack::RawWorkspace::ManagedLayout layout =
         Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
@@ -1390,12 +1592,12 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
     const bool selectedHasNoProject =
         selectedSource->project.status == Stack::RawWorkspace::ProjectStatus::NoProject ||
         selectedSource->project.absolutePath.empty();
-    const std::filesystem::path targetProjectPath = selectedHasNoProject
+    std::filesystem::path targetProjectPath = selectedHasNoProject
             ? expectedProject.absolutePath
             : selectedSource->project.absolutePath;
     const Stack::RawWorkspace::RawProjectMode targetMode = selectedHasNoProject
-        ? Stack::RawWorkspace::RawProjectMode::RecipeBacked
-        : m_ActiveRawWorkspaceMode;
+        ? Stack::RawWorkspace::RawProjectMode::UnifiedLayers
+        : m_Project->rawMode;
 
     if (needsDefaultGraph) {
         const nlohmann::json previousPipeline = SerializePipeline();
@@ -1405,11 +1607,11 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
             std::cerr
                 << "[RAW Workspace] Failed to create edit project graph"
                 << " selectedSourceKey=" << selectedSource->relativePathKey
-                << " activeSourceKey=" << m_ActiveRawWorkspaceSourceKey
+                << " activeSourceKey=" << m_Project->rawSourceKey
                 << " targetProjectPath=" << targetProjectPath.string()
                 << " error=" << (graphError.empty() ? std::string("unknown") : graphError)
                 << "\n";
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Error,
                 graphError.empty()
                     ? "Failed to create the RAW project graph."
@@ -1418,18 +1620,111 @@ bool EditorModule::EnsureRawWorkspaceProjectForSelectedRecipeEdit(
             return false;
         }
     }
-    m_ActiveRawWorkspaceSourceKey = selectedSource->relativePathKey;
-    m_RawWorkspacePipelineActive = true;
+    bool materializedFromViewing = false;
+    if (selectedHasNoProject && !IsUnifiedProjectStoreActive()) {
+        std::string materializeError;
+        if (!MaterializeSelectedRawPreviewProject(
+                *selectedSource,
+                resolvedRecipe,
+                &materializeError)) {
+            std::cerr << "[RAW Project Edit] Could not materialize the project: " << materializeError << '\n';
+            PostNotification(
+                UiNotificationSeverity::Error,
+                materializeError.empty()
+                    ? "Could not create the project for this first edit."
+                    : materializeError,
+                "raw-workspace-project-materialize");
+            return false;
+        }
+        targetProjectPath = m_Project->storePath;
+        materializedFromViewing = true;
+    }
+    m_Project->rawSourceKey = selectedSource->relativePathKey;
+    m_Project->rawPipelineActive = true;
     m_RawWorkspaceStaleRenderStatusText.clear();
-    m_ActiveRawWorkspaceProjectPath = targetProjectPath;
-    m_ActiveRawWorkspaceRecipe = resolvedRecipe;
-    m_ActiveRawWorkspaceMode = targetMode;
-    if (m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::RecipeBacked) {
-        m_ActiveManagedRawSection = {};
+    m_Project->storePath = targetProjectPath;
+    m_Project->rawRecipe = Stack::RawRecipe::BuildWorkspaceSourceRecipe(resolvedRecipe);
+    m_Project->rawMode = targetMode;
+    if (m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
+        m_Project->managedRaw = {};
     }
     SetCurrentProjectName(selectedSource->stem.empty() ? selectedSource->fileName : selectedSource->stem);
-    SetCurrentProjectFileName(m_ActiveRawWorkspaceProjectPath.string());
-    MarkDirty();
+    SetCurrentProjectFileName(m_Project->storePath.string());
+    if (Stack::RawWorkspace::SourceRecord* mutableSource =
+            FindRawWorkspaceSourceByKey(selectedSource->relativePathKey)) {
+        mutableSource->project.absolutePath = m_Project->storePath;
+        mutableSource->project.relativePath =
+            m_Project->storePath.filename();
+        mutableSource->project.status =
+            Stack::RawWorkspace::ProjectStatus::Existing;
+        mutableSource->project.linkedRaw = false;
+        mutableSource->project.embeddedRaw = false;
+        mutableSource->project.autosaved = materializedFromViewing;
+        mutableSource->project.dirty = !materializedFromViewing;
+    }
+    if (materializedFromViewing) {
+        ClearDirty();
+        PersistRawWorkspaceCatalog();
+        RefreshUnifiedProjectViewsAfterSave(true);
+    }
+    // The caller owns the one render/document invalidation for this edit.
+    // Marking here as well advanced every compact RAW adjustment twice.
+    return true;
+}
+
+bool EditorModule::UpdateRawWorkspaceInteractionDraft(
+    const Stack::RawRecipe::RawDevelopmentRecipe& persistedRecipe,
+    const Stack::RawRecipe::RawDevelopmentRecipe& draftRecipe) {
+    if (m_Project->rawInteractionDraft.active &&
+        m_Project->rawInteractionDraft.sourceKey !=
+            m_RawWorkspace.selectedSourceKey) {
+        if (!ResolveRawWorkspaceInteractionDraft(false)) {
+            return false;
+        }
+    }
+    if (!m_Project->rawInteractionDraft.active) {
+        // Materialize a first-edit project using the untouched frame-start
+        // recipe. The visible gesture is then an overlay and does not dirty or
+        // revise the document until release.
+        if (!EnsureRawWorkspaceProjectForSelectedRecipeEdit(
+                persistedRecipe)) {
+            return false;
+        }
+        m_Project->rawInteractionDraft.active = true;
+        m_Project->rawInteractionDraft.sourceKey =
+            m_Project->rawSourceKey;
+        m_Project->rawInteractionDraft.source =
+            m_Project->rawRecipe.source;
+    }
+
+    m_Project->rawInteractionDraft.recipe = draftRecipe;
+    m_Project->rawInteractionDraft.recipe.source =
+        m_Project->rawInteractionDraft.source;
+
+    // The render command owns the transient recipe overlay. The authored
+    // graph remains unchanged until release, so one pointer sample now causes
+    // one render invalidation and no graph/document invalidation.
+    MarkRenderRefreshDirty();
+    NoteRawWorkspaceRecipePreviewEdit(true);
+    return true;
+}
+
+bool EditorModule::ResolveRawWorkspaceInteractionDraft(bool cancel) {
+    if (!m_Project->rawInteractionDraft.active) {
+        return true;
+    }
+    RawInteractionDraft resolved = std::move(m_Project->rawInteractionDraft);
+    m_Project->rawInteractionDraft = {};
+    if (!cancel) {
+        return ApplyRawWorkspaceRecipeEditForSelectedSource(
+            resolved.recipe,
+            false);
+    }
+
+    // Cancel only discards the transient command overlay. No graph state was
+    // mutated during the gesture, so there is nothing to restore.
+    MarkRenderRefreshDirty();
+    NoteRawWorkspaceRecipePreviewEdit(false);
     return true;
 }
 
@@ -1451,25 +1746,26 @@ bool EditorModule::ApplyRawWorkspaceRecipeEditForSelectedSource(
         CancelRawWorkspacePreciseStartingPoint(
             "The visible RAW recipe changed before precise apply.");
     }
-    if (IsRawWorkspaceProjectActive() &&
-        m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed &&
-        m_RawWorkspace.selectedSourceKey == m_ActiveRawWorkspaceSourceKey) {
-        std::string reason;
-        if (!Stack::RawWorkspace::IsRecipeRepresentableAsManagedGraph(recipe, &reason)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Info,
-                reason.empty() ? "This RAW edit cannot be represented by the managed graph." : reason,
-                "raw-workspace-managed-recipe-blocked");
-            return false;
-        }
-    }
-
-    if (!EnsureRawWorkspaceProjectForSelectedRecipeEdit(recipe)) {
+    Stack::Project::RawLayerStackState operationCandidate;
+    bool operationsChanged = false;
+    if (!PrepareRawControlRecipeEdit(recipe, operationCandidate, operationsChanged, m_RawLayerStatus)) return false;
+    if (!EnsureRawWorkspaceProjectForSelectedRecipeEdit(ReadRawControlRecipe())) return false;
+    const int boundSource = ResolveRawWorkspaceStageOutputNodeId();
+    auto* sourceNode = m_Project->graph.FindNode(boundSource);
+    if (!sourceNode || sourceNode->kind != EditorNodeGraph::NodeKind::RawDevelopment) {
+        m_RawLayerStatus = "The project's source-development binding is unavailable.";
         return false;
     }
+    if (!m_Project->rawLayers.ApplySourceEdit(std::move(operationCandidate), m_Project->rawRecipe,
+            recipe, m_RawLayerStatus, &m_Project->graph, boundSource)) return false;
+    sourceNode->rawDevelopment.recipe = m_Project->rawRecipe;
+    sourceNode->rawDevelopment.projectStatus = "Edited";
+    sourceNode->rawDevelopment.edited = true;
+    sourceNode->rawDevelopment.autosaved = false;
 
     if (Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey)) {
+            FindRawWorkspaceSourceByKey(m_Project->rawSourceKey)) {
+        bool presentationChanged = false;
         if (source->project.absolutePath.empty()) {
             const Stack::RawWorkspace::ManagedLayout layout =
                 Stack::RawWorkspace::BuildManagedLayout(m_RawWorkspace.workspaceRoot);
@@ -1477,628 +1773,411 @@ bool EditorModule::ApplyRawWorkspaceRecipeEditForSelectedSource(
                 Stack::RawWorkspace::BuildExpectedProjectInfo(layout, *source);
             source->project.absolutePath = expectedProject.absolutePath;
             source->project.relativePath = expectedProject.relativePath;
+            presentationChanged = true;
         }
         if (source->project.status == Stack::RawWorkspace::ProjectStatus::Unknown ||
             source->project.status == Stack::RawWorkspace::ProjectStatus::NoProject) {
             source->project.status = Stack::RawWorkspace::ProjectStatus::Existing;
+            presentationChanged = true;
         }
-        source->project.mode = m_ActiveRawWorkspaceMode;
+        presentationChanged = presentationChanged ||
+            source->project.mode != m_Project->rawMode ||
+            source->project.autosaved ||
+            !source->project.dirty;
+        source->project.mode = m_Project->rawMode;
+        // Apply... is always an authored edit, including the first edit whose
+        // managed asset was just materialized by Ensure.... Keep the browser
+        // card in sync, but invalidate its presentation only on the clean to
+        // dirty transition instead of once per slider frame.
         source->project.autosaved = false;
         source->project.dirty = true;
-        InvalidateRawWorkspaceGalleryPresentation();
+        if (presentationChanged) {
+            InvalidateRawWorkspaceGalleryPresentation();
+        }
     }
 
-    if (m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::ManagedDecomposed) {
-        if (!ApplyActiveRawWorkspaceRecipeToManagedGraph()) {
-            return false;
-        }
-    } else {
-        for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-            if (node.kind != EditorNodeGraph::NodeKind::RawDevelopment) {
-                continue;
-            }
-            const std::string key = node.rawDevelopment.recipe.source.relativePathKey;
-            if (key.empty() || key == m_ActiveRawWorkspaceSourceKey) {
-                node.rawDevelopment.recipe = m_ActiveRawWorkspaceRecipe;
-                node.rawDevelopment.projectStatus = "Edited";
-                node.rawDevelopment.edited = true;
-                node.rawDevelopment.autosaved = false;
-                MarkRenderDirty(node.id);
-            }
-        }
-    }
-    MarkDirty();
+    MarkRenderDirty(boundSource);
     NoteRawWorkspaceRecipePreviewEdit(interactionActive);
     return true;
 }
 
-void EditorModule::EnsureRawWorkspaceProjectSaveWorker() {
-    if (m_RawWorkspaceProjectSaveWorker.joinable()) {
+void EditorModule::RefreshUnifiedProjectViewsAfterSave(
+    bool projectMembershipChanged,
+    bool persistCatalog) {
+    RefreshBracketingProjectCard();
+    if (!m_RawWorkspaceAppStateLoaded) {
+        if (projectMembershipChanged) {
+            LibraryManager::Get().RequestRefreshLibraryAsync();
+        }
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-        m_RawWorkspaceProjectSaveWorkerStopRequested = false;
-        m_RawWorkspaceProjectSaveWorkerBusy = false;
-    }
-    m_RawWorkspaceProjectSaveWorker = std::thread([this]() {
-        RawWorkspaceProjectSaveWorkerLoop();
-    });
-}
-
-void EditorModule::EnqueueRawWorkspaceProjectSave(RawWorkspaceProjectSaveJob job) {
-    EnsureRawWorkspaceProjectSaveWorker();
-    {
-        std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-        m_RawWorkspaceProjectSaveQueue.push_back(std::move(job));
-    }
-    ++m_RawWorkspaceProjectSaveInFlightCount;
-    m_RawWorkspaceProjectSaveTaskState = Async::TaskState::Queued;
-    m_RawWorkspaceProjectSaveStatusText = "Saving RAW project...";
-    m_RawWorkspaceProjectSaveCv.notify_one();
-}
-
-void EditorModule::RequestRawWorkspaceProjectSaveWorkerDrain() {
-    {
-        std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-        m_RawWorkspaceProjectSaveWorkerStopRequested = true;
-    }
-    m_RawWorkspaceProjectSaveCv.notify_all();
-}
-
-bool EditorModule::IsRawWorkspaceProjectSaveWorkerIdle() const {
-    std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-    return m_RawWorkspaceProjectSaveQueue.empty() && !m_RawWorkspaceProjectSaveWorkerBusy;
-}
-
-void EditorModule::ShutdownRawWorkspaceProjectSaveWorker() {
-    RequestRawWorkspaceProjectSaveWorkerDrain();
-    if (m_RawWorkspaceProjectSaveWorker.joinable()) {
-        m_RawWorkspaceProjectSaveWorker.join();
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-        m_RawWorkspaceProjectSaveQueue.clear();
-        m_RawWorkspaceProjectSaveWorkerStopRequested = false;
-        m_RawWorkspaceProjectSaveWorkerBusy = false;
-    }
-    m_RawWorkspaceProjectSaveInFlightCount = 0;
-    m_RawWorkspaceProjectSaveTaskState = Async::TaskState::Idle;
-    m_RawWorkspaceProjectSaveStatusText.clear();
-}
-
-bool EditorModule::WriteRawWorkspaceProjectSaveJob(
-    RawWorkspaceProjectSaveJob& job,
-    std::string& error,
-    bool& skippedStale) const {
-    try {
-        std::lock_guard<std::mutex> fileLock(m_RawWorkspaceProjectFileWriteMutex);
-        // The revision must be checked while the file lock is held. A newer
-        // synchronous transition save may otherwise finish after the worker's
-        // first check but before this older job writes the file.
-        if (!IsRawWorkspaceProjectSaveJobCurrent(job)) {
-            skippedStale = true;
-            return true;
-        }
-        StackBinaryFormat::ProjectDocument existingDocumentForWorker;
-        StackBinaryFormat::ProjectLoadOptions existingOptions;
-        existingOptions.includeThumbnail = false;
-        existingOptions.includeSourceImage = false;
-        existingOptions.includePipelineData = false;
-        existingOptions.includeNodeBrowserThumbnails = false;
-        existingOptions.includeRawWorkspaceData = true;
-        const bool loadedExistingRawWorkspaceData =
-            std::filesystem::exists(job.projectPath) &&
-            StackBinaryFormat::ReadProjectFile(job.projectPath, existingDocumentForWorker, existingOptions);
-        nlohmann::json workerEmbeddedRaw = nlohmann::json::object();
-        bool preserveWorkerEmbeddedRaw = false;
-        if (loadedExistingRawWorkspaceData &&
-            existingDocumentForWorker.rawWorkspaceData.is_object()) {
-            auto embeddedIt =
-                existingDocumentForWorker.rawWorkspaceData.find("embeddedRaw");
-            if (embeddedIt != existingDocumentForWorker.rawWorkspaceData.end() &&
-                embeddedIt->is_object() &&
-                embeddedIt->value("present", false)) {
-                workerEmbeddedRaw = std::move(*embeddedIt);
-                existingDocumentForWorker.rawWorkspaceData.erase(embeddedIt);
-                preserveWorkerEmbeddedRaw = true;
-            }
-            nlohmann::json mergedRawWorkspaceData =
-                std::move(existingDocumentForWorker.rawWorkspaceData);
-            OverlayOwnedJsonFields(
-                mergedRawWorkspaceData,
-                job.document.rawWorkspaceData);
-            job.document.rawWorkspaceData =
-                std::move(mergedRawWorkspaceData);
-        }
-        if (preserveWorkerEmbeddedRaw) {
-            job.document.rawWorkspaceData["embeddedRaw"] =
-                std::move(workerEmbeddedRaw);
-            job.document.rawWorkspaceData["rawSourceRef"]["linked"] = false;
-            job.document.rawWorkspaceData["rawSourceRef"]["embedded"] = true;
-        } else if (job.projectStatus == Stack::RawWorkspace::ProjectStatus::Embedded) {
-            error = "Failed to preserve the embedded RAW source while saving.";
-            return false;
-        }
-
-        if (job.projectPath.has_parent_path()) {
-            std::filesystem::create_directories(job.projectPath.parent_path());
-        }
-        if (!StackBinaryFormat::WriteProjectFile(job.projectPath, job.document)) {
-            error = "Failed to save the RAW project.";
-            return false;
-        }
-        return true;
-    } catch (const std::exception& ex) {
-        error = ex.what();
-        return false;
-    } catch (...) {
-        error = "Failed to save the RAW project.";
-        return false;
-    }
-}
-
-void EditorModule::CompleteRawWorkspaceProjectSave(
-    RawWorkspaceProjectSaveJob job,
-    bool success,
-    bool skippedStale,
-    std::string errorMessage) {
-    if (m_RawWorkspaceProjectSaveInFlightCount > 0) {
-        --m_RawWorkspaceProjectSaveInFlightCount;
-    }
-    m_RawWorkspaceProjectSaveTaskState = m_RawWorkspaceProjectSaveInFlightCount > 0
-        ? Async::TaskState::Running
-        : Async::TaskState::Idle;
-    m_RawWorkspaceProjectSaveStatusText = m_RawWorkspaceProjectSaveInFlightCount > 0
-        ? "Saving RAW project..."
-        : std::string();
-
-    if (skippedStale) {
-        return;
-    }
-
-    const bool jobWorkspaceCurrent =
-        job.workspaceRoot.lexically_normal() == m_RawWorkspace.workspaceRoot.lexically_normal();
-    const bool jobRevisionCurrent = IsRawWorkspaceProjectSaveJobCurrent(job);
-    if (!jobRevisionCurrent) {
-        // The write may have completed just before a newer synchronous save
-        // acquired the file lock. In that case the newer save is already the
-        // authoritative catalog/dirty state, so this delayed completion must
-        // not roll any of it back.
-        return;
-    }
-    Stack::RawWorkspace::SourceRecord* savedSource = jobWorkspaceCurrent
-        ? FindRawWorkspaceSourceByKey(job.sourceKey)
-        : nullptr;
-    if (success) {
-        if (savedSource) {
-            savedSource->project.status = job.projectStatus;
-            savedSource->project.absolutePath = job.projectPath;
-            savedSource->project.relativePath = job.projectRelativePath;
-            savedSource->project.mode = job.mode;
-            savedSource->project.projectModifiedTimeTicks = RawWorkspaceProjectFileTimeTicks(job.projectPath);
-            if (jobRevisionCurrent) {
-                savedSource->project.autosaved = true;
-                savedSource->project.dirty = false;
-            }
-            InvalidateRawWorkspaceGalleryPresentation();
-        }
-        if (jobWorkspaceCurrent &&
-            jobRevisionCurrent &&
-            m_ActiveRawWorkspaceSourceKey == job.sourceKey) {
-            if (IsRawWorkspaceProjectActive()) {
-                SetCurrentProjectName(job.projectName);
-                SetCurrentProjectFileName(job.projectPath.string());
-                ClearDirty();
-            }
-        }
-        if (jobWorkspaceCurrent) {
-            PersistRawWorkspaceCatalog();
-        }
-        if (jobRevisionCurrent && jobWorkspaceCurrent) {
-            QueueUiNotification(
-                UiNotificationSeverity::Success,
-                "RAW project autosaved.",
-                "raw-workspace-project-autosave");
-        }
-    } else {
-        if (savedSource) {
-            if (jobRevisionCurrent) {
-                savedSource->project.absolutePath = job.previousAbsolutePath;
-                savedSource->project.relativePath = job.previousRelativePath;
-                savedSource->project.status = job.previousProjectStatus;
-                savedSource->project.mode = job.previousMode;
-                savedSource->project.autosaved = job.previousAutosaved;
-            }
-            savedSource->project.dirty = true;
-            InvalidateRawWorkspaceGalleryPresentation();
-        }
-        if (jobWorkspaceCurrent && m_ActiveRawWorkspaceSourceKey == job.sourceKey) {
-            if (IsRawWorkspaceProjectActive()) {
-                MarkDirty();
-            }
-        }
-        if (jobWorkspaceCurrent) {
-            PersistRawWorkspaceCatalog();
-        }
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            errorMessage.empty() ? "Failed to save the RAW project." : errorMessage,
-            "raw-workspace-project-save");
-    }
-}
-
-void EditorModule::RawWorkspaceProjectSaveWorkerLoop() {
-    while (true) {
-        RawWorkspaceProjectSaveJob job;
-        {
-            std::unique_lock<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-            m_RawWorkspaceProjectSaveCv.wait(lock, [this]() {
-                return m_RawWorkspaceProjectSaveWorkerStopRequested ||
-                    !m_RawWorkspaceProjectSaveQueue.empty();
-            });
-            if (m_RawWorkspaceProjectSaveQueue.empty()) {
-                if (m_RawWorkspaceProjectSaveWorkerStopRequested) {
-                    break;
-                }
-                continue;
-            }
-            job = std::move(m_RawWorkspaceProjectSaveQueue.front());
-            m_RawWorkspaceProjectSaveQueue.pop_front();
-            m_RawWorkspaceProjectSaveWorkerBusy = true;
-        }
-
-        std::string error;
-        bool skippedStale = false;
-        bool success = true;
-        if (!IsRawWorkspaceProjectSaveJobCurrent(job)) {
-            skippedStale = true;
-        } else {
-            success = WriteRawWorkspaceProjectSaveJob(
-                job,
-                error,
-                skippedStale);
-        }
-
-        bool postCompletion = true;
-        {
-            std::lock_guard<std::mutex> lock(m_RawWorkspaceProjectSaveMutex);
-            m_RawWorkspaceProjectSaveWorkerBusy = false;
-            postCompletion = !m_RawWorkspaceProjectSaveWorkerStopRequested;
-        }
-        m_RawWorkspaceProjectSaveCv.notify_all();
-
-        if (postCompletion) {
-            Async::TaskSystem::Get().PostToMain([
-                this,
-                job = std::move(job),
-                success,
-                skippedStale,
-                error = std::move(error)
-            ]() mutable {
-                CompleteRawWorkspaceProjectSave(
-                    std::move(job),
-                    success,
-                    skippedStale,
-                    std::move(error));
-            });
-        }
-    }
-}
-
-bool EditorModule::SaveActiveRawWorkspaceProject(
-    bool explicitSave,
-    bool synchronousAutosave) {
-    if (!IsRawWorkspaceProjectActive()) {
-        return false;
-    }
-    if (IsMultiFrameRawProjectActive()) {
-        (void)explicitSave;
-        (void)synchronousAutosave;
-        std::string error;
-        const bool saved = SaveActiveMultiFrameRawProject(&error);
-        if (!saved) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                error.empty() ? "Failed to save the multi-frame RAW project." : error,
-                "multi-frame-raw-project-save");
-        }
-        return saved;
-    }
-
-    Stack::RawWorkspace::SourceRecord* source =
-        FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
-    if (!source) {
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            "The active RAW source is no longer in the Workspace scan.",
-            "raw-workspace-save-missing-source");
-        return false;
-    }
-
-    const std::filesystem::path workspaceRoot = m_RawWorkspace.workspaceRoot;
-    const std::filesystem::path projectPath = m_ActiveRawWorkspaceProjectPath;
-    const std::string sourceKey = m_ActiveRawWorkspaceSourceKey;
-    const bool pinnedExternalProject =
-        m_PinnedRawWorkspaceSource.has_value() &&
-        m_PinnedRawWorkspaceSource->relativePathKey == sourceKey;
-    const bool requireSynchronousSave =
-        synchronousAutosave || workspaceRoot.empty() || pinnedExternalProject;
-    const std::uint64_t saveRevision =
-        BumpRawWorkspaceProjectSaveRevision(workspaceRoot, sourceKey);
-    StackBinaryFormat::ProjectDocument document;
-    StackBinaryFormat::ProjectDocument existingDocument;
-    nlohmann::json existingRawWorkspaceData = nlohmann::json::object();
-    nlohmann::json existingEmbeddedRaw = nlohmann::json::object();
-    bool preserveEmbeddedRaw = false;
-    bool loadedExistingRawWorkspaceData = false;
-    StackBinaryFormat::ProjectLoadOptions existingOptions;
-    existingOptions.includeThumbnail = false;
-    existingOptions.includeSourceImage = false;
-    existingOptions.includePipelineData = false;
-    existingOptions.includeNodeBrowserThumbnails = false;
-    existingOptions.includeRawWorkspaceData = true;
-    {
-        std::lock_guard<std::mutex> fileLock(m_RawWorkspaceProjectFileWriteMutex);
-        loadedExistingRawWorkspaceData =
-            std::filesystem::exists(projectPath) &&
-            StackBinaryFormat::ReadProjectFile(
-                projectPath,
-                existingDocument,
-                existingOptions);
-    }
-    if (loadedExistingRawWorkspaceData &&
-        existingDocument.rawWorkspaceData.is_object()) {
-        existingRawWorkspaceData =
-            std::move(existingDocument.rawWorkspaceData);
-        auto embeddedIt = existingRawWorkspaceData.find("embeddedRaw");
-        if (embeddedIt != existingRawWorkspaceData.end() &&
-            embeddedIt->is_object() &&
-            embeddedIt->value("present", false)) {
-            existingEmbeddedRaw = std::move(*embeddedIt);
-            existingRawWorkspaceData.erase(embeddedIt);
-            preserveEmbeddedRaw = true;
-        }
-    }
-    if (source->project.status == Stack::RawWorkspace::ProjectStatus::Embedded &&
-        !preserveEmbeddedRaw) {
-        MarkDirty();
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            "Failed to preserve the embedded RAW source while saving.",
-            "raw-workspace-project-save");
-        return false;
-    }
-
-    const std::string projectName = m_CurrentProjectName.empty()
-        ? (source->stem.empty() ? source->fileName : source->stem)
-        : m_CurrentProjectName;
-    const nlohmann::json pipeline = SerializePipeline();
-    if (!explicitSave) {
-        document = {};
-        document.metadata.projectKind = StackBinaryFormat::kRawProjectKind;
-        document.metadata.projectName = projectName;
-        document.pipelineData = pipeline;
-        EnsureMinimalProjectDocument(document, projectName);
-    } else if (!BuildProjectDocumentForSave(projectName, document)) {
-        document = {};
-        document.metadata.projectKind = StackBinaryFormat::kRawProjectKind;
-        document.metadata.projectName = projectName;
-        document.pipelineData = pipeline;
-        document.nodeBrowserThumbnailEntries = GetPersistedNodeBrowserThumbnails();
-        EnsureMinimalProjectDocument(document, projectName);
-    }
-    Stack::RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
-        *source,
-        m_ActiveRawWorkspaceRecipe,
-        pipeline,
-        document,
-        m_ActiveRawWorkspaceMode,
-        !preserveEmbeddedRaw);
-    ApplyActiveRawWorkspaceModeDataToDocument(document);
-    if (loadedExistingRawWorkspaceData &&
-        existingRawWorkspaceData.is_object()) {
-        nlohmann::json mergedRawWorkspaceData =
-            std::move(existingRawWorkspaceData);
-        OverlayOwnedJsonFields(
-            mergedRawWorkspaceData,
-            document.rawWorkspaceData);
-        document.rawWorkspaceData = std::move(mergedRawWorkspaceData);
-    }
-    if (preserveEmbeddedRaw) {
-        document.rawWorkspaceData["embeddedRaw"] =
-            std::move(existingEmbeddedRaw);
-        document.rawWorkspaceData["rawSourceRef"]["linked"] = false;
-        document.rawWorkspaceData["rawSourceRef"]["embedded"] = true;
-    }
-
-    const Stack::RawWorkspace::RawProjectMode savedMode = m_ActiveRawWorkspaceMode;
-    const Stack::RawWorkspace::ProjectStatus savedProjectStatus =
-        source->project.status == Stack::RawWorkspace::ProjectStatus::Embedded
-            ? Stack::RawWorkspace::ProjectStatus::Embedded
-            : Stack::RawWorkspace::ProjectStatus::Existing;
-    const std::filesystem::path projectRelativePath = source->project.relativePath.empty()
-        ? Stack::RawWorkspace::BuildProjectRelativePathForSource(*source)
-        : source->project.relativePath;
-
-    if (!explicitSave && !requireSynchronousSave) {
-        RawWorkspaceProjectSaveJob job;
-        job.workspaceRoot = workspaceRoot;
-        job.projectPath = projectPath;
-        job.projectRelativePath = projectRelativePath;
-        job.sourceKey = sourceKey;
-        job.projectName = projectName;
-        job.sourceRevision = saveRevision;
-        job.mode = savedMode;
-        job.projectStatus = savedProjectStatus;
-        job.previousAbsolutePath = source->project.absolutePath;
-        job.previousRelativePath = source->project.relativePath;
-        job.previousProjectStatus = source->project.status;
-        job.previousMode = source->project.mode;
-        job.previousAutosaved = source->project.autosaved;
-        job.previousDirty = source->project.dirty;
-        job.document = std::move(document);
-        EnqueueRawWorkspaceProjectSave(std::move(job));
-
-        if (source->project.absolutePath.empty()) {
-            source->project.absolutePath = projectPath;
-            source->project.relativePath = projectRelativePath;
-        }
-        if (source->project.status == Stack::RawWorkspace::ProjectStatus::Unknown ||
-            source->project.status == Stack::RawWorkspace::ProjectStatus::NoProject) {
-            source->project.status = Stack::RawWorkspace::ProjectStatus::Existing;
-        }
-        source->project.mode = savedMode;
-        // A queued snapshot is not durable yet. Keep the source and current
-        // revision dirty until the matching worker completion succeeds.
-        source->project.autosaved = false;
-        source->project.dirty = true;
+    // An ordinary save changes revisions, not membership. Update the active
+    // browser record in place; rescanning the whole RAW folder after every
+    // autosave wastes I/O and can contend with rendering and continued edits.
+    if (Stack::RawWorkspace::SourceRecord* source =
+            FindRawWorkspaceSourceByKey(m_Project->rawSourceKey)) {
+        source->project.status = Stack::RawWorkspace::ProjectStatus::Existing;
+        source->project.absolutePath = m_Project->storePath;
+        source->project.relativePath =
+            m_Project->storePath.filename();
+        source->project.autosaved = true;
+        source->project.dirty = false;
         InvalidateRawWorkspaceGalleryPresentation();
-        SetCurrentProjectName(projectName);
-        SetCurrentProjectFileName(projectPath.string());
-        m_LastAutoSaveTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
-        PersistRawWorkspaceCatalog();
-        return true;
-    }
-
-    std::error_code ec;
-    bool wroteProject = false;
-    {
-        std::lock_guard<std::mutex> fileLock(m_RawWorkspaceProjectFileWriteMutex);
-        std::filesystem::create_directories(projectPath.parent_path(), ec);
-        wroteProject = !ec && StackBinaryFormat::WriteProjectFile(projectPath, document);
-    }
-    if (!wroteProject) {
-        MarkDirty();
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            "Failed to save the RAW project.",
-            "raw-workspace-project-save");
-        return false;
-    }
-
-    ApplyRawWorkspaceProjectInfoToSource(
-        *source,
-        document,
-        projectPath,
-        projectRelativePath,
-        !explicitSave,
-        false,
-        explicitSave ? "explicit-save" : "autosave");
-    InvalidateRawWorkspaceGalleryPresentation();
-    for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind == EditorNodeGraph::NodeKind::RawDevelopment &&
-            node.rawDevelopment.recipe.source.relativePathKey == m_ActiveRawWorkspaceSourceKey) {
-            node.rawDevelopment.projectStatus = "Edited";
-            node.rawDevelopment.edited = true;
-            node.rawDevelopment.autosaved = !explicitSave;
+        if (persistCatalog) {
+            PersistRawWorkspaceCatalog();
         }
     }
 
-    PersistRawWorkspaceCatalog();
-    SetCurrentProjectName(projectName);
-    SetCurrentProjectFileName(projectPath.string());
-    ClearDirty();
-    m_LastAutoSaveTime = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
-    QueueUiNotification(
-        UiNotificationSeverity::Success,
-        explicitSave ? "RAW project saved." : "RAW project autosaved.",
-        explicitSave ? "raw-workspace-project-save" : "raw-workspace-project-autosave");
-    return true;
+    if (projectMembershipChanged) {
+        LibraryManager::Get().RequestRefreshLibraryAsync();
+        // First publication, adoption, and version creation genuinely change
+        // the shared project population and still require rediscovery.
+        PreserveActiveRawProjectSourceForLibraryNavigation();
+        RescanRawWorkspace();
+    }
 }
 
-bool EditorModule::SaveActiveRawWorkspaceProjectIfDirty() {
-    if (!IsRawWorkspaceProjectActive() || !m_Dirty) {
-        return true;
+void EditorModule::RequestCreateProjectVersion(
+    const std::filesystem::path& sourceProject) {
+    if (sourceProject.empty()) return;
+    std::filesystem::path destinationRoot = AppPaths::GetProjectsDirectory();
+    if (!m_RawWorkspace.workspaceRoot.empty()) {
+        const std::filesystem::path workspaceProjects =
+            Stack::RawWorkspace::BuildManagedLayout(
+                m_RawWorkspace.workspaceRoot).projectsDirectory;
+        std::error_code relativeError;
+        const std::filesystem::path relative = std::filesystem::absolute(
+            sourceProject, relativeError).lexically_normal().lexically_relative(
+                workspaceProjects.lexically_normal());
+        if (!relativeError && !relative.empty() && !relative.is_absolute() &&
+            (relative.begin() == relative.end() ||
+             *relative.begin() != std::filesystem::path(".."))) {
+            destinationRoot = workspaceProjects;
+        }
     }
-    if (!IsMultiFrameRawProjectActive() &&
-        m_RawWorkspaceProjectSaveInFlightCount > 0) {
-        return true;
+    std::error_code writableError;
+    std::filesystem::create_directories(destinationRoot, writableError);
+    if (writableError) {
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "The project version folder is not writable: " +
+                destinationRoot.string() + ": " + writableError.message(),
+            "raw-gallery-version-project-root");
+        return;
     }
-    return SaveActiveRawWorkspaceProject(false);
+    PostNotification(
+        UiNotificationSeverity::Info,
+        "Creating an independent project version...",
+        "raw-gallery-version-create");
+    const bool submitted = ProjectTasks().SubmitHighPriority("Saving version",[
+        this,
+        sourceProject,
+        destinationRoot
+    ]() {
+        std::filesystem::path createdPath;
+        std::string error;
+        const bool success = Stack::Project::ProjectIndex::Get().CloneVersion(
+            sourceProject,
+            destinationRoot,
+            createdPath,
+            &error);
+        ProjectTasks().PostToMain([
+            this,
+            success,
+            createdPath,
+            error = std::move(error)
+        ]() mutable {
+            if (success) {
+                RefreshUnifiedProjectViewsAfterSave(true);
+                PostNotification(
+                    UiNotificationSeverity::Success,
+                    "Created " + createdPath.filename().string() + ".",
+                    "raw-gallery-version-create");
+            } else {
+                PostNotification(
+                    UiNotificationSeverity::Error,
+                    error.empty()
+                        ? "The independent project version could not be created."
+                        : error,
+                    "raw-gallery-version-create");
+            }
+        });
+    });
+    if (!submitted) {
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "The project version operation could not be queued.",
+            "raw-gallery-version-create");
+    }
 }
 
-bool EditorModule::FlushActiveRawWorkspaceProjectIfDirty() {
-    if (!IsRawWorkspaceProjectActive()) {
-        return true;
+bool EditorModule::EnqueueCurrentProjectSave(
+    Stack::Project::ProjectSaveReason reason,
+    const std::string& fallbackName,
+    std::function<void(bool)> onComplete) {
+    if (!m_DocumentPersistenceEnabled) {
+        if (onComplete) onComplete(false);
+        return false;
     }
-    if (!m_Dirty &&
-        (IsMultiFrameRawProjectActive() ||
-         m_RawWorkspaceProjectSaveInFlightCount == 0)) {
-        return true;
+    if (GetProjectSessionKind() == ProjectSessionKind::Empty) {
+        if (onComplete) onComplete(false);
+        return false;
     }
-    // Project replacement and shutdown require a durable write before the
-    // active session can be discarded. This lightweight autosave avoids
-    // full-resolution output/source readbacks and PNG copies on the UI thread.
-    return SaveActiveRawWorkspaceProject(false, true);
+    if (HasPendingGraphImageImports()) {
+        PostNotification(
+            UiNotificationSeverity::Warning,
+            "Finishing imported slices before saving the project.",
+            "editor-graph-image-save-wait");
+        if (onComplete) onComplete(false);
+        return false;
+    }
+
+    const auto firstNameCharacter = fallbackName.find_first_not_of(" \t\r\n");
+    const std::string requestedName = firstNameCharacter == std::string::npos
+        ? std::string{}
+        : fallbackName.substr(firstNameCharacter,
+            fallbackName.find_last_not_of(" \t\r\n") - firstNameCharacter + 1);
+    if (!requestedName.empty() && requestedName != m_Project->name) {
+        m_Project->name = requestedName;
+        MarkDirty();
+    }
+    const std::string projectId = EnsureProjectDocumentId();
+    const std::uint64_t requestedRevision = m_Project->editRevision;
+    const std::string projectName = !requestedName.empty()
+        ? requestedName
+        : (m_Project->name.empty() ? "Untitled Project" : m_Project->name);
+
+    Stack::Project::ProjectSaveCoordinator::Request request;
+    request.projectId = projectId;
+    request.editRevision = requestedRevision;
+    request.reason = reason;
+    auto write = [this, projectId, projectName, reason](
+        Stack::Project::ProjectSaveCoordinator::Completion completion,
+        bool requireNewStore) mutable {
+        if (projectId != m_Project->documentId) {
+            Stack::Project::ProjectSaveResult result;
+            result.status = Stack::Project::ProjectSaveStatus::Canceled;
+            result.projectId = projectId;
+            result.message = "The active project changed before the save started.";
+            completion(std::move(result));
+            return;
+        }
+
+        const std::uint64_t capturedRevision = m_Project->editRevision;
+        if (IsUnifiedProjectStoreActive() && !requireNewStore) {
+            StartManagedProjectSaveAsync(
+                capturedRevision,
+                reason,
+                std::move(completion));
+            return;
+        }
+        if (requireNewStore && m_Project->snapshot &&
+            (std::any_of(m_Project->snapshot->embeddedAssets.begin(),m_Project->snapshot->embeddedAssets.end(),
+                [&](const auto& asset) { return asset.assetId != m_Project->snapshot->sourceAssetId; }) ||
+             m_Project->snapshot->sourceWidth != 1 || m_Project->snapshot->sourceHeight != 1 ||
+             std::any_of(m_Project->graph.GetNodes().begin(),m_Project->graph.GetNodes().end(),
+                [](const auto& node) { return node.kind == EditorNodeGraph::NodeKind::Image; }))) {
+            Stack::Project::ProjectSaveResult result;
+            result.status = Stack::Project::ProjectSaveStatus::Failed;
+            result.projectId = projectId;
+            result.message = "The project store is missing. Its embedded sources must be recovered before saving.";
+            completion(std::move(result));
+            return;
+        }
+
+        const bool adopting = !m_Project->adoptionSourcePath.empty();
+        if (IsRawWorkspaceProjectActive()) {
+            Stack::Project::ProjectSaveResult result;
+            result.status = Stack::Project::ProjectSaveStatus::Failed;
+            result.projectId = projectId;
+            result.message = "The current RAW project store is unavailable.";
+            completion(std::move(result));
+            return;
+        }
+
+        std::filesystem::path destination;
+        if (adopting) {
+            const std::filesystem::path destinationRoot =
+                IsRawWorkspaceProjectActive() &&
+                        !m_RawWorkspace.workspaceRoot.empty()
+                    ? Stack::RawWorkspace::BuildManagedLayout(
+                          m_RawWorkspace.workspaceRoot).projectsDirectory
+                    : AppPaths::GetProjectsDirectory();
+            destination = Stack::Project::ProjectIndex::BuildUniqueProjectPath(
+                destinationRoot,
+                projectName,
+                projectId);
+        } else if (!m_Project->fileName.empty()) {
+            const std::filesystem::path current(m_Project->fileName);
+            if (current.is_absolute()) destination = current.lexically_normal();
+        } else if (!m_RawWorkspace.workspaceRoot.empty()) {
+            // An unsaved Graph document belongs to the loaded workspace just
+            // like a RAW or bracket document. Keep its first save discoverable
+            // in that folder's Projects section.
+            destination = Stack::Project::ProjectIndex::BuildUniqueProjectPath(
+                Stack::RawWorkspace::BuildManagedLayout(
+                    m_RawWorkspace.workspaceRoot).projectsDirectory,
+                projectName, projectId);
+        }
+
+        auto finish = [
+            this,
+            projectId,
+            capturedRevision,
+            adopting,
+            completion = std::move(completion)
+        ](bool success) mutable {
+            Stack::Project::ProjectSaveResult result;
+            result.status = success
+                ? Stack::Project::ProjectSaveStatus::Saved
+                : Stack::Project::ProjectSaveStatus::Failed;
+            result.projectId = projectId;
+            result.persistedEditRevision = success ? capturedRevision : 0;
+            result.path = m_Project->fileName;
+            result.message = success ? std::string() : "Failed to save the project.";
+            if (success) {
+                if (adopting) m_Project->adoptionSourcePath.clear();
+                RefreshUnifiedProjectViewsAfterSave(adopting);
+            }
+            completion(std::move(result));
+        };
+
+        if (!destination.empty()) {
+            LibraryManager::Get().RequestSaveProjectToPath(
+                projectName,
+                this,
+                destination,
+                std::move(finish),
+                requireNewStore);
+        } else {
+            LibraryManager::Get().RequestSaveProject(
+                projectName,
+                this,
+                m_Project->fileName,
+                std::move(finish),
+                requireNewStore);
+        }
+    };
+    request.start = [this, reason, write = std::move(write)](
+        Stack::Project::ProjectSaveCoordinator::Completion completion) mutable {
+        if (reason == Stack::Project::ProjectSaveReason::Explicit &&
+            !IsDirty() && m_Project->adoptionSourcePath.empty() &&
+            !m_Project->rawInteractionDraft.active &&
+            (IsUnifiedProjectStoreActive() || m_Project->savedFileStamp.has_value())) {
+            CheckCurrentProjectSaveAsync(std::move(completion), write);
+        } else {
+            write(std::move(completion), false);
+        }
+    };
+    const auto saveNotifier = GetNotifier();
+    const auto saveOperation = reason == Stack::Project::ProjectSaveReason::Explicit
+        ? saveNotifier.NewOperation() : 0;
+    const std::weak_ptr<Stack::Project::ProjectSession> saveOwner = m_Project;
+    request.completion = [saveNotifier, saveOperation, saveOwner, projectName,
+        onComplete = std::move(onComplete)](Stack::Project::ProjectSaveResult result) mutable {
+        if (saveOperation != 0) {
+            Stack::Notifications::NoticeSpec notice;
+            notice.title = "Save";
+            notice.context = projectName;
+            notice.operationId = saveOperation;
+            const auto execution = Async::TaskSystem::CurrentActivity();
+            if (execution.ownerId == saveNotifier.GetOwner().id &&
+                execution.ownerGeneration == saveNotifier.GetOwner().generation && execution.operationId != 0)
+                notice.operationId = execution.operationId;
+            notice.dedupeKey = "explicit-project-save";
+            notice.details = result.path;
+            if (result.status == Stack::Project::ProjectSaveStatus::Saved) {
+                const auto owner = saveOwner.lock();
+                const bool newerEdits = owner && owner->documentId == result.projectId &&
+                    owner->editRevision > result.persistedEditRevision;
+                notice.severity = UiNotificationSeverity::Success;
+                notice.outcome = Stack::Notifications::Outcome::Success;
+                notice.message = newerEdits
+                    ? "Project snapshot saved. Newer edits are still pending."
+                    : "Project saved.";
+            } else if (result.status == Stack::Project::ProjectSaveStatus::Canceled) {
+                notice.outcome = Stack::Notifications::Outcome::Cancelled;
+                notice.message = result.message.empty() ? "Save cancelled." : result.message;
+                notice.preview = false;
+            } else {
+                notice.severity = UiNotificationSeverity::Error;
+                notice.outcome = Stack::Notifications::Outcome::Failure;
+                notice.message = result.message.empty() ? "Could not save the project." : result.message;
+            }
+            saveNotifier.Post(std::move(notice));
+        }
+        if (onComplete) onComplete(static_cast<bool>(result));
+    };
+    return m_Project->saves.Enqueue(std::move(request));
 }
 
 bool EditorModule::RequestSaveCurrentProject(
     const std::string& fallbackName,
     std::function<void(bool)> onComplete) {
-    if (IsRawWorkspaceProjectActive()) {
-        const bool success = SaveActiveRawWorkspaceProject(true);
-        if (onComplete) {
-            onComplete(success);
-        }
-        return success;
-    }
-
-    if (HasPendingGraphImageImports()) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
-            "Finishing imported slices before saving the project.",
-            "editor-graph-image-save-wait");
-        if (onComplete) {
-            onComplete(false);
-        }
+    if (m_Project->rawInteractionDraft.active && !ResolveRawWorkspaceInteractionDraft(false)) {
+        if (onComplete) onComplete(false);
         return false;
     }
-
-    const std::string projectName = !fallbackName.empty()
-        ? fallbackName
-        : (m_CurrentProjectName.empty() ? "Untitled Project" : m_CurrentProjectName);
-    const std::filesystem::path currentPath(m_CurrentProjectFileName);
-    if (!currentPath.empty() && currentPath.is_absolute()) {
-        LibraryManager::Get().RequestSaveProjectToPath(
-            projectName,
-            this,
-            currentPath.lexically_normal(),
-            std::move(onComplete));
-        return true;
-    }
-    LibraryManager::Get().RequestSaveProject(projectName, this, m_CurrentProjectFileName, std::move(onComplete));
-    return true;
+    return EnqueueCurrentProjectSave(
+        Stack::Project::ProjectSaveReason::Explicit,
+        fallbackName,
+        std::move(onComplete));
 }
 
 bool EditorModule::RequestSaveProjectAs(
     const std::filesystem::path& requestedDestination,
     std::function<void(bool)> onComplete) {
-    if (requestedDestination.empty() ||
-        GetProjectSessionKind() == ProjectSessionKind::Empty ||
-        IsProjectFileSaveBusy()) {
+    if (requestedDestination.empty()) {
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "Save As did not receive a destination.",
+            "project-file-save-as-missing-destination");
+        if (onComplete) {
+            onComplete(false);
+        }
+        return false;
+    }
+    if (GetProjectSessionKind() == ProjectSessionKind::Empty) {
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "There is no open project to save.",
+            "project-file-save-as-empty-session");
+        if (onComplete) {
+            onComplete(false);
+        }
+        return false;
+    }
+    const ProjectFileCommandContext saveAsContext =
+        GetProjectFileCommandContext();
+    const bool recoverySaveAs =
+        saveAsContext.conflict || saveAsContext.readOnlyRecovery;
+    if (saveAsContext.busy && !recoverySaveAs) {
+        PostNotification(
+            UiNotificationSeverity::Warning,
+            saveAsContext.busyReason.empty()
+                ? "Finish the current project operation before using Save As."
+                : saveAsContext.busyReason,
+            "project-file-save-as-busy");
         if (onComplete) {
             onComplete(false);
         }
         return false;
     }
 
-    if (IsMultiFrameRawProjectActive()) {
-        const Stack::Project::ProjectStorageKind storageKind =
-            m_ActiveRawProjectStore->StorageKind();
+    if (IsUnifiedProjectStoreActive()) {
         std::string error;
         const bool success = SaveActiveMultiFrameRawProjectAs(
             requestedDestination,
-            storageKind,
+            Stack::Project::ProjectStorageKind::DirectoryBundle,
             &error);
         if (!success) {
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Error,
                 error.empty() ? "Failed to save the project copy." : error,
                 "project-file-save-as");
         } else {
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Success,
                 "Project saved to the new location.",
                 "project-file-save-as");
@@ -2110,8 +2189,8 @@ bool EditorModule::RequestSaveProjectAs(
     }
 
     if (HasPendingGraphImageImports()) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Finishing imported slices before saving the project.",
             "project-file-save-as-wait");
         if (onComplete) {
@@ -2127,13 +2206,22 @@ bool EditorModule::RequestSaveProjectAs(
         destinationExtension.end(),
         destinationExtension.begin(),
         [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    if (destinationExtension != ".stack") {
-        destination += ".stack";
+    std::string destinationName = destination.filename().string();
+    std::transform(
+        destinationName.begin(),
+        destinationName.end(),
+        destinationName.begin(),
+        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    if (destinationName == "project.stack") {
+        destination = destination.parent_path();
+    } else if (destinationExtension == ".stack" ||
+               destinationExtension == ".stackbundle") {
+        destination = destination.parent_path() / destination.stem();
     }
     std::error_code absoluteError;
     destination = std::filesystem::absolute(destination, absoluteError).lexically_normal();
     if (absoluteError) {
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             "The selected project destination is invalid.",
             "project-file-save-as");
@@ -2143,9 +2231,9 @@ bool EditorModule::RequestSaveProjectAs(
         return false;
     }
 
-    std::filesystem::path currentPath = m_ActiveRawWorkspaceProjectPath;
-    if (currentPath.empty() && !m_CurrentProjectFileName.empty()) {
-        currentPath = std::filesystem::path(m_CurrentProjectFileName);
+    std::filesystem::path currentPath = m_Project->storePath;
+    if (currentPath.empty() && !m_Project->fileName.empty()) {
+        currentPath = std::filesystem::path(m_Project->fileName);
         if (currentPath.is_relative()) {
             currentPath = LibraryManager::Get().GetLibraryPath() / currentPath;
         }
@@ -2155,79 +2243,31 @@ bool EditorModule::RequestSaveProjectAs(
         return RequestSaveCurrentProject({}, std::move(onComplete));
     }
 
-    const bool rawSession = IsRawWorkspaceProjectActive();
-    const std::string sourceKey = rawSession
-        ? m_ActiveRawWorkspaceSourceKey
-        : std::string();
-    const std::string projectName = m_CurrentProjectName.empty()
-        ? (destination.stem().string().empty()
+    const std::string projectName = m_Project->name.empty()
+        ? (destination.filename().string().empty()
             ? std::string("Untitled Project")
-            : destination.stem().string())
-        : m_CurrentProjectName;
+            : destination.filename().string())
+        : m_Project->name;
 
     auto document = std::make_shared<StackBinaryFormat::ProjectDocument>();
     if (!BuildProjectDocumentForSave(projectName, *document)) {
-        if (!rawSession) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "Failed to capture the current project for Save As.",
-                "project-file-save-as");
-            if (onComplete) {
-                onComplete(false);
-            }
-            return false;
+        PostNotification(
+            UiNotificationSeverity::Error,
+            "Failed to capture the current project for Save As.",
+            "project-file-save-as");
+        if (onComplete) {
+            onComplete(false);
         }
-
-        const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(sourceKey);
-        if (!source) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "The active RAW source is no longer available.",
-                "project-file-save-as");
-            if (onComplete) {
-                onComplete(false);
-            }
-            return false;
-        }
-        document->metadata.projectKind = StackBinaryFormat::kRawProjectKind;
-        document->metadata.projectName = projectName;
-        document->pipelineData = SerializePipeline();
-        document->nodeBrowserThumbnailEntries = GetPersistedNodeBrowserThumbnails();
-        EnsureMinimalProjectDocument(*document, projectName);
-        Stack::RawWorkspace::ApplyRawWorkspaceDataToProjectDocument(
-            *source,
-            m_ActiveRawWorkspaceRecipe,
-            document->pipelineData,
-            *document,
-            m_ActiveRawWorkspaceMode,
-            true);
-        ApplyActiveRawWorkspaceModeDataToDocument(*document);
+        return false;
     }
 
-    if (rawSession) {
-        const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(sourceKey);
-        std::string embedError;
-        if (!source ||
-            !Stack::RawWorkspace::EmbedRawSourceInProjectDocument(
-                *source,
-                *document,
-                &embedError)) {
-            m_ShowRawWorkspaceRelinkPopup = true;
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                embedError.empty()
-                    ? "The linked RAW original must be relinked before Save As."
-                    : embedError + " Relink the RAW original before trying Save As again.",
-                "project-file-save-as");
-            if (onComplete) {
-                onComplete(false);
-            }
-            return false;
-        }
+    document->projectId = Stack::Project::GenerateStableUuid();
+    if (document->rawProjectSnapshot) {
+        document->rawProjectSnapshot = std::make_shared<Stack::Project::RawProjectSnapshot>(*document->rawProjectSnapshot);
+        document->rawProjectSnapshot->projectId = document->projectId;
     }
-
+    const std::uint64_t capturedEditRevision = GetProjectEditRevision();
+    const auto savedStore = std::make_shared<Stack::Project::ProjectStoreOpenResult>();
     ++m_ProjectFileSaveGeneration;
     const std::uint64_t generation = m_ProjectFileSaveGeneration;
     m_ProjectFileSaveTaskState = Async::TaskState::Running;
@@ -2235,14 +2275,14 @@ bool EditorModule::RequestSaveProjectAs(
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit([
+        submitted = ProjectTasks().Submit("Saving",[
             this,
             generation,
             destination,
             projectName,
-            rawSession,
-            sourceKey,
+            capturedEditRevision,
             document,
+            savedStore,
             onComplete = std::move(onComplete)
         ]() mutable {
             bool success = false;
@@ -2256,37 +2296,21 @@ bool EditorModule::RequestSaveProjectAs(
                 success = !directoryError &&
                     StackBinaryFormat::WriteProjectFile(destination, *document);
                 if (success) {
-                    StackBinaryFormat::ProjectDocument verification;
-                    StackBinaryFormat::ProjectLoadOptions options;
-                    options.includeThumbnail = false;
-                    options.includeSourceImage = false;
-                    options.includePipelineData = false;
-                    options.includeNodeBrowserThumbnails = false;
-                    options.includeRawWorkspaceData = rawSession;
-                    success = StackBinaryFormat::ReadProjectFile(
-                        destination,
-                        verification,
-                        options);
-                    if (success && rawSession) {
-                        success = verification.rawWorkspaceData.is_object() &&
-                            verification.rawWorkspaceData.value(
-                                "embeddedRaw",
-                                nlohmann::json::object())
-                                .value("present", false);
-                    }
+                    *savedStore = Stack::Project::OpenProjectStore(destination);
+                    success = static_cast<bool>(*savedStore);
                 }
             } catch (...) {
                 success = false;
             }
 
-            Async::TaskSystem::Get().PostToMain([
+            ProjectTasks().PostToMain([
                 this,
                 generation,
                 destination,
                 projectName,
-                rawSession,
-                sourceKey,
+                capturedEditRevision,
                 document,
+                savedStore,
                 success,
                 onComplete = std::move(onComplete)
             ]() mutable {
@@ -2297,49 +2321,49 @@ bool EditorModule::RequestSaveProjectAs(
                     return;
                 }
 
+                bool completionSuccess = false;
+                try {
                 if (!success) {
                     m_ProjectFileSaveTaskState = Async::TaskState::Failed;
                     m_ProjectFileSaveStatusText =
                         "Failed to save the project to the new location.";
                     MarkDirty();
-                    QueueUiNotification(
+                    PostNotification(
                         UiNotificationSeverity::Error,
                         m_ProjectFileSaveStatusText,
                         "project-file-save-as");
-                    if (onComplete) {
-                        onComplete(false);
-                    }
-                    return;
+                } else {
+                    if (GetProjectEditRevision() == capturedEditRevision)
+                        SetCurrentProjectName(projectName);
+                    SetCurrentProjectFileName(destination.string());
+                    m_Project->documentId = document->projectId;
+                    if (!AdoptSavedProjectStore(savedStore->store,
+                            std::move(savedStore->snapshot), document->projectId, capturedEditRevision))
+                        throw std::runtime_error("The saved project store could not be adopted.");
+                    m_Project->adoptionSourcePath.clear();
+                    m_Project->saves.Reset(m_Project->documentId, capturedEditRevision);
+                    const bool clearedCurrentSnapshot =
+                        ClearDirtyIfRevision(capturedEditRevision);
+                    m_ProjectFileSaveTaskState = Async::TaskState::Idle;
+                    m_ProjectFileSaveStatusText = clearedCurrentSnapshot
+                        ? "Project saved to the new location."
+                        : "Project copy saved; newer edits are still unsaved.";
+                    PostNotification(
+                        UiNotificationSeverity::Success,
+                        m_ProjectFileSaveStatusText,
+                        clearedCurrentSnapshot
+                            ? "project-file-save-as"
+                            : "project-file-save-as-newer-edits");
+                    completionSuccess = clearedCurrentSnapshot;
                 }
-
-                if (rawSession) {
-                    if (Stack::RawWorkspace::SourceRecord* source =
-                            FindRawWorkspaceSourceByKey(sourceKey)) {
-                        ApplyRawWorkspaceProjectInfoToSource(
-                            *source,
-                            *document,
-                            destination,
-                            {},
-                            false,
-                            false,
-                            "save-as");
-                    }
-                    m_ActiveRawWorkspaceProjectPath = destination;
-                    InvalidateRawWorkspaceGalleryPresentation();
-                    PersistRawWorkspaceCatalog();
+                } catch (...) {
+                    m_ProjectFileSaveTaskState = Async::TaskState::Failed;
+                    m_ProjectFileSaveStatusText =
+                        "The project was written, but Save As finalization failed.";
+                    MarkDirty();
                 }
-                SetCurrentProjectName(projectName);
-                SetCurrentProjectFileName(destination.string());
-                ClearDirty();
-                m_ProjectFileSaveTaskState = Async::TaskState::Idle;
-                m_ProjectFileSaveStatusText =
-                    "Project saved to the new location.";
-                QueueUiNotification(
-                    UiNotificationSeverity::Success,
-                    m_ProjectFileSaveStatusText,
-                    "project-file-save-as");
                 if (onComplete) {
-                    onComplete(true);
+                    onComplete(completionSuccess);
                 }
             });
         });
@@ -2355,7 +2379,7 @@ bool EditorModule::RequestSaveProjectAs(
         m_ProjectFileSaveTaskState = Async::TaskState::Failed;
         m_ProjectFileSaveStatusText = "The Save As task could not be queued.";
         MarkDirty();
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             m_ProjectFileSaveStatusText,
             "project-file-save-as");
@@ -2366,102 +2390,77 @@ bool EditorModule::RequestSaveProjectAs(
     return false;
 }
 
-bool EditorModule::RelinkActiveRawWorkspaceProjectToSelectedSource() {
-    Stack::RawWorkspace::SourceRecord* source =
-        FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
-    if (!source || source->project.absolutePath.empty()) {
-        return false;
+bool EditorModule::PackCurrentProject(
+    const std::filesystem::path& requestedDestination,
+    std::string* errorMessage) {
+    const auto finish = [&](bool success, std::string message = {}) {
+        if (errorMessage) {
+            *errorMessage = std::move(message);
+        }
+        return success;
+    };
+    if (requestedDestination.empty() ||
+        GetProjectSessionKind() == ProjectSessionKind::Empty) {
+        return finish(false, "No project is available to pack.");
+    }
+    if (IsUnifiedProjectStoreActive()) {
+        return SaveActiveMultiFrameRawProjectAs(
+            requestedDestination,
+            Stack::Project::ProjectStorageKind::PortableFile,
+            errorMessage);
     }
 
-    BumpRawWorkspaceProjectSaveRevision(m_RawWorkspace.workspaceRoot, source->relativePathKey);
-    StackBinaryFormat::ProjectDocument document;
-    {
-        std::lock_guard<std::mutex> fileLock(m_RawWorkspaceProjectFileWriteMutex);
-        if (!StackBinaryFormat::ReadProjectFile(source->project.absolutePath, document)) {
-            return false;
+    std::filesystem::path workingPath(m_Project->fileName);
+    if (workingPath.empty()) {
+        return finish(false, "Save the working project before packing it.");
+    }
+    if (workingPath.is_relative()) {
+        workingPath = LibraryManager::Get().GetLibraryPath() / workingPath;
+    }
+    workingPath = workingPath.lexically_normal();
+
+    if (IsDirty()) {
+        StackBinaryFormat::ProjectDocument document;
+        const std::string name = m_Project->name.empty()
+            ? workingPath.filename().string()
+            : m_Project->name;
+        if (!BuildProjectDocumentForSave(name, document) ||
+            !StackBinaryFormat::WriteProjectFile(workingPath, document)) {
+            return finish(false, "The latest project state could not be saved before packing.");
         }
-        std::string error;
-        if (!Stack::RawWorkspace::RelinkProjectDocumentToSource(*source, document, &error)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                error.empty() ? "Failed to relink RAW project." : error,
-                "raw-workspace-project-relink");
-            return false;
-        }
-        if (!StackBinaryFormat::WriteProjectFile(source->project.absolutePath, document)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "Failed to write the relinked RAW project.",
-                "raw-workspace-project-relink");
-            return false;
-        }
+        ClearDirty();
     }
 
-    ApplyRawWorkspaceProjectInfoToSource(
-        *source,
-        document,
-        source->project.absolutePath,
-        source->project.relativePath.empty()
-            ? Stack::RawWorkspace::BuildProjectRelativePathForSource(*source)
-            : source->project.relativePath,
-        false,
-        false,
-        "relinked-selected-source");
-    PersistRawWorkspaceCatalog();
-    QueueUiNotification(
-        UiNotificationSeverity::Success,
-        "RAW project relinked.",
-        "raw-workspace-project-relink");
-    return true;
-}
-
-bool EditorModule::EmbedActiveRawWorkspaceProject() {
-    Stack::RawWorkspace::SourceRecord* source =
-        FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
-    if (!source || source->project.absolutePath.empty()) {
-        return false;
+    Stack::Project::ProjectStoreOpenResult opened =
+        Stack::Project::OpenProjectStore(workingPath);
+    if (!opened) {
+        return finish(
+            false,
+            opened.message.empty()
+                ? "The current working project could not be opened for packing."
+                : opened.message);
     }
-
-    BumpRawWorkspaceProjectSaveRevision(m_RawWorkspace.workspaceRoot, source->relativePathKey);
-    StackBinaryFormat::ProjectDocument document;
-    {
-        std::lock_guard<std::mutex> fileLock(m_RawWorkspaceProjectFileWriteMutex);
-        if (!StackBinaryFormat::ReadProjectFile(source->project.absolutePath, document)) {
-            return false;
-        }
-        std::string error;
-        if (!Stack::RawWorkspace::EmbedRawSourceInProjectDocument(*source, document, &error)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                error.empty() ? "Failed to embed RAW source." : error,
-                "raw-workspace-project-embed");
-            return false;
-        }
-        if (!StackBinaryFormat::WriteProjectFile(source->project.absolutePath, document)) {
-            QueueUiNotification(
-                UiNotificationSeverity::Error,
-                "Failed to write the embedded RAW project.",
-                "raw-workspace-project-embed");
-            return false;
-        }
+    std::filesystem::path destination = requestedDestination.lexically_normal();
+    std::string extension = destination.extension().string();
+    std::transform(
+        extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+    if (extension != ".stack") {
+        destination += ".stack";
     }
-
-    ApplyRawWorkspaceProjectInfoToSource(
-        *source,
-        document,
-        source->project.absolutePath,
-        source->project.relativePath.empty()
-            ? Stack::RawWorkspace::BuildProjectRelativePathForSource(*source)
-            : source->project.relativePath,
-        false,
-        false,
-        "embedded-selected-source");
-    PersistRawWorkspaceCatalog();
-    QueueUiNotification(
-        UiNotificationSeverity::Success,
-        "RAW source embedded in the selected project.",
-        "raw-workspace-project-embed");
-    return true;
+    Stack::Project::ProjectStoreOpenResult packed =
+        Stack::Project::ConvertProjectStore(
+            opened.store,
+            opened.snapshot,
+            destination,
+            Stack::Project::ProjectStorageKind::PortableFile);
+    return packed
+        ? finish(true)
+        : finish(false, packed.message.empty()
+            ? "The project could not be packed."
+            : packed.message);
 }
 
 void EditorModule::ClearPendingRawWorkspaceProjectReplacement() {
@@ -2478,14 +2477,24 @@ void EditorModule::QueueRawWorkspaceProjectReplacement(
     std::string targetLabel,
     std::function<bool(std::string*)> action,
     std::string discardOpenSourceKey) {
+    if (IsWorkspaceTransitionPending() || !FinishWorkspaceInteraction()) return;
     m_RawWorkspaceReplacementActionLabel = std::move(actionLabel);
     m_RawWorkspaceReplacementTargetLabel = std::move(targetLabel);
     m_RawWorkspaceReplacementDiscardOpenSourceKey =
         std::move(discardOpenSourceKey);
     m_PendingRawWorkspaceProjectReplacement = std::move(action);
-    m_RawWorkspaceReplacementSavePending = false;
+    m_RawWorkspaceReplacementSavePending = true;
     m_RawWorkspaceReplacementExecuteAfterSave = false;
-    m_ShowRawWorkspaceReplaceProjectPopup = true;
+    m_ShowRawWorkspaceReplaceProjectPopup = false;
+    RequestSaveWorkspaceBeforeClose([this](bool success) {
+        m_RawWorkspaceReplacementSavePending = false;
+        if (success) m_RawWorkspaceReplacementExecuteAfterSave = true;
+        else {
+            ClearPendingRawWorkspaceProjectReplacement();
+            PostNotification(UiNotificationSeverity::Error,
+                "Could not save the current project. It will stay open.", "raw-workspace-transition-save-failed");
+        }
+    });
 }
 
 bool EditorModule::ExecutePendingRawWorkspaceProjectReplacement(
@@ -2505,12 +2514,12 @@ bool EditorModule::ExecutePendingRawWorkspaceProjectReplacement(
 
     m_RawWorkspaceReplacementAuthorized = discardCurrent;
     std::string error;
-    const bool success =
-        m_PendingRawWorkspaceProjectReplacement(&error);
+    const auto action = m_PendingRawWorkspaceProjectReplacement;
+    const bool success = action(&error);
     m_RawWorkspaceReplacementAuthorized = false;
     if (!success) {
         m_RawWorkspaceReplacementSkipSaveSourceKey.clear();
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             error.empty() ? "The requested project could not be opened." : error,
             "raw-workspace-project-replacement");
@@ -2532,10 +2541,14 @@ bool EditorModule::RequestOpenProjectFromPath(
     if (projectPath.empty()) {
         return false;
     }
+    if (m_PermanentGalleryWorkspace)
+        return RequestOpenRawWorkspaceProjectFromGallery(projectPath);
+    (void)currentDispositionApproved;
+    if (IsWorkspaceTransitionPending() || !FinishWorkspaceInteraction()) return false;
     if (IsDeferredLoadedProjectApplyActive() ||
         IsRawWorkspaceProjectLoadBusy()) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Finish opening the current selection before opening another project.",
             "raw-workspace-project-replacement-busy");
         return false;
@@ -2555,7 +2568,7 @@ bool EditorModule::RequestOpenProjectFromPath(
         return true;
     };
 
-    if (!currentDispositionApproved && HasProjectContent() && m_Dirty) {
+    if (NeedsWorkspaceSaveBeforeTransition() || IsProjectFileSaveBusy() || IsRawWorkspaceProjectSaveBusy()) {
         QueueRawWorkspaceProjectReplacement(
             "open project",
             normalized.filename().string(),
@@ -2565,7 +2578,7 @@ bool EditorModule::RequestOpenProjectFromPath(
     std::string error;
     const bool opened = openAction(&error);
     if (!opened && !error.empty()) {
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             error,
             "raw-workspace-project-open");
@@ -2576,190 +2589,24 @@ bool EditorModule::RequestOpenProjectFromPath(
 void EditorModule::RenderRawWorkspaceLifecyclePopups() {
     if (m_RawWorkspaceReplacementExecuteAfterSave) {
         m_RawWorkspaceReplacementExecuteAfterSave = false;
-        ExecutePendingRawWorkspaceProjectReplacement(false);
+        if (!ExecutePendingRawWorkspaceProjectReplacement(false))
+            ClearPendingRawWorkspaceProjectReplacement();
     }
+    m_ShowRawWorkspaceReplaceProjectPopup = false;
     if (m_ShowRawWorkspaceCloseProjectPopup) {
-        ImGui::OpenPopup("Close RAW Project##RawWorkspace");
         m_ShowRawWorkspaceCloseProjectPopup = false;
-    }
-    if (m_ShowRawWorkspaceRelinkPopup) {
-        ImGui::OpenPopup("Relink RAW Project##RawWorkspace");
-        m_ShowRawWorkspaceRelinkPopup = false;
-    }
-    if (m_ShowRawWorkspaceEmbedPopup) {
-        ImGui::OpenPopup("Bake / Embed RAW##RawWorkspace");
-        m_ShowRawWorkspaceEmbedPopup = false;
-    }
-    if (m_ShowRawWorkspaceReplaceProjectPopup) {
-        ImGui::OpenPopup("Switch Editing Project##RawWorkspace");
-        m_ShowRawWorkspaceReplaceProjectPopup = false;
-    }
-
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal(
-            "Close RAW Project##RawWorkspace",
-            nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize)) {
-        const bool busy =
-            IsRawWorkspaceProjectLoadBusy() || IsRawWorkspaceProjectSaveBusy();
-        ImGui::TextWrapped(
-            "Close the current project and return to the RAW gallery? The folder, "
-            "selection, and saved project on disk will remain available.");
-        ImGui::Spacing();
-        ImGui::BeginDisabled(busy);
-        if (m_Dirty) {
-            if (ImGui::Button("Save & Close", ImVec2(130.0f, 0.0f))) {
-                if (SaveActiveRawWorkspaceProject(true) &&
-                    CloseActiveRawWorkspaceProject(false)) {
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Discard & Close", ImVec2(140.0f, 0.0f))) {
-                if (CloseActiveRawWorkspaceProject(true)) {
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-        } else if (ImGui::Button("Close Project", ImVec2(130.0f, 0.0f))) {
-            if (CloseActiveRawWorkspaceProject(false)) {
-                ImGui::CloseCurrentPopup();
-            }
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f)) ||
-            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            ImGui::CloseCurrentPopup();
-        }
-        if (busy) {
-            ImGui::TextDisabled(
-                "Wait for the current project operation to finish before closing.");
-        }
-        ImGui::EndPopup();
-    }
-
-    ImGui::SetNextWindowPos(
-        viewport->GetCenter(),
-        ImGuiCond_Appearing,
-        ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal(
-            "Switch Editing Project##RawWorkspace",
-            nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize)) {
-        if (!m_PendingRawWorkspaceProjectReplacement) {
-            ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
-        } else {
-            const std::string action =
-                m_RawWorkspaceReplacementActionLabel.empty()
-                ? "switch projects"
-                : m_RawWorkspaceReplacementActionLabel;
-            ImGui::TextWrapped(
-                "The current project has unsaved changes. Save it before you %s, "
-                "discard those changes, or cancel and keep working?",
-                action.c_str());
-            if (!m_RawWorkspaceReplacementTargetLabel.empty()) {
-                ImGui::Spacing();
-                ImGui::TextDisabled(
-                    "Next: %s",
-                    m_RawWorkspaceReplacementTargetLabel.c_str());
-            }
-
-            const bool busy =
-                m_RawWorkspaceReplacementSavePending ||
-                IsRawWorkspaceProjectSaveBusy() ||
-                IsRawWorkspaceProjectLoadBusy();
-            ImGui::Spacing();
-            ImGui::BeginDisabled(busy);
-            if (ImGui::Button("Save & Continue", ImVec2(140.0f, 0.0f))) {
-                if (IsRawWorkspaceProjectActive()) {
-                    if (SaveActiveRawWorkspaceProject(true) &&
-                        ExecutePendingRawWorkspaceProjectReplacement(false)) {
-                        ImGui::CloseCurrentPopup();
-                    }
-                } else {
-                    m_RawWorkspaceReplacementSavePending = true;
-                    RequestSaveCurrentProject(
-                        {},
-                        [this](bool success) {
-                            m_RawWorkspaceReplacementSavePending = false;
-                            if (success) {
-                                m_RawWorkspaceReplacementExecuteAfterSave = true;
-                            }
-                        });
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Discard & Continue", ImVec2(150.0f, 0.0f))) {
-                if (ExecutePendingRawWorkspaceProjectReplacement(true)) {
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f)) ||
-                ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                m_RawWorkspaceReplacementSkipSaveSourceKey.clear();
-                ClearPendingRawWorkspaceProjectReplacement();
-                ImGui::CloseCurrentPopup();
-            }
-            if (busy) {
-                ImGui::TextDisabled(
-                    m_RawWorkspaceReplacementSavePending
-                    ? "Saving the current project..."
-                    : "Waiting for the current project operation...");
-            }
-            ImGui::EndPopup();
+        if (!m_RawWorkspaceReplacementSavePending && FinishWorkspaceInteraction()) {
+            m_RawWorkspaceReplacementSavePending = true;
+            RequestSaveWorkspaceBeforeClose([this](bool success) {
+                m_RawWorkspaceReplacementSavePending = false;
+                if (success) m_RawWorkspaceCloseAfterSave = true;
+                else PostNotification(UiNotificationSeverity::Error,
+                    "Could not save the current project. It will stay open.", "raw-workspace-close-save-failed");
+            });
         }
     }
-
-    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Relink RAW Project##RawWorkspace", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
-        ImGui::TextWrapped(
-            "Relink this project to the selected RAW file. Stack will update the linked source metadata in the project file.");
-        if (source != nullptr) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("%s", source->relativePathKey.c_str());
-        }
-        ImGui::Spacing();
-        ImGui::BeginDisabled(source == nullptr || source->project.absolutePath.empty());
-        if (ImGui::Button("Relink", ImVec2(120.0f, 0.0f))) {
-            RelinkActiveRawWorkspaceProjectToSelectedSource();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-
-    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Bake / Embed RAW##RawWorkspace", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(m_RawWorkspace.selectedSourceKey);
-        ImGui::TextWrapped(
-            "Linked projects stay smaller and depend on the original RAW file. Embedded projects are larger but keep a copy of this RAW inside the selected project.");
-        if (source != nullptr) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("%s", source->relativePathKey.c_str());
-        }
-        ImGui::Spacing();
-        ImGui::BeginDisabled(source == nullptr || source->project.absolutePath.empty());
-        if (ImGui::Button("Embed In This Project", ImVec2(180.0f, 0.0f))) {
-            EmbedActiveRawWorkspaceProject();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
+    if (m_RawWorkspaceCloseAfterSave) {
+        m_RawWorkspaceCloseAfterSave = false;
+        CloseActiveRawWorkspaceProject(false);
     }
 }
-

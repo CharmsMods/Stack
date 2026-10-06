@@ -846,12 +846,8 @@ const char* WhiteBalanceBadgeLabel(Stack::RawRecipe::WhiteBalanceMode mode) {
     switch (mode) {
         case Stack::RawRecipe::WhiteBalanceMode::AsShot:
             return "WB as shot";
-        case Stack::RawRecipe::WhiteBalanceMode::Auto:
-            return "WB auto";
         case Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers:
             return "WB custom";
-        case Stack::RawRecipe::WhiteBalanceMode::SampledGrayPoint:
-            return "WB gray point";
         default:
             return "WB set";
     }
@@ -887,18 +883,18 @@ void EditorModule::CancelRawWorkspacePendingStartingPoint(std::string reason) {
 
 void EditorModule::CaptureRawWorkspaceAutoBaseRevertSnapshotForSelectedSource(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
-    if (m_ActiveRawWorkspaceSourceKey.empty()) {
+    if (m_Project->rawSourceKey.empty()) {
         return;
     }
 
     const Stack::RawWorkspace::SourceRecord* source =
-        FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+        FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
     const bool hasSourceIdentity = source != nullptr;
     const std::uint64_t sourceHash =
         hasSourceIdentity ? BuildRawWorkspaceAutoBaseSourceHash(*source) : 0;
     m_RawWorkspaceAutoBaseUi.beforeAutoBase = recipe;
     m_RawWorkspaceAutoBaseUi.hasRevertSnapshot = true;
-    m_RawWorkspaceAutoBaseUi.sourceKey = m_ActiveRawWorkspaceSourceKey;
+    m_RawWorkspaceAutoBaseUi.sourceKey = m_Project->rawSourceKey;
     if (hasSourceIdentity) {
         m_RawWorkspaceAutoBaseUi.sourceHash = sourceHash;
     }
@@ -929,20 +925,20 @@ bool EditorModule::RawWorkspaceViewTransformAutoOwnedForSource(const std::string
 }
 
 Stack::RawAnalysis::RawMetadataSummary EditorModule::ResolveRawWorkspaceMetadataSummaryForAutoBase() const {
-    const std::string activeSourcePath = m_ActiveRawWorkspaceRecipe.source.sourcePath;
+    const std::string activeSourcePath = m_Project->rawRecipe.source.sourcePath;
     auto summaryFromMetadata = [](const Raw::RawMetadata& metadata) {
         return Stack::RawAnalysis::BuildRawMetadataSummary(metadata);
     };
 
-    if (m_ActiveManagedRawSection.rawSourceNodeId > 0) {
+    if (m_Project->managedRaw.rawSourceNodeId > 0) {
         const EditorNodeGraph::Node* rawSourceNode =
-            m_NodeGraph.FindNode(m_ActiveManagedRawSection.rawSourceNodeId);
+            m_Project->graph.FindNode(m_Project->managedRaw.rawSourceNodeId);
         if (rawSourceNode && rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource) {
             return summaryFromMetadata(rawSourceNode->rawSource.metadata);
         }
     }
 
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (const EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::RawSource) {
             continue;
         }
@@ -964,8 +960,8 @@ void EditorModule::RefreshRawWorkspaceAutoBaseRecommendations(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
     const Stack::RawAutoBase::AutoBaseRecommendations previousRecommendations =
         m_RawWorkspaceAutoBaseUi.recommendations;
-    if (m_ActiveRawWorkspaceSourceKey.empty() ||
-        m_RawWorkspaceAnalysis.sourceKey != m_ActiveRawWorkspaceSourceKey ||
+    if (m_Project->rawSourceKey.empty() ||
+        m_RawWorkspaceAnalysis.sourceKey != m_Project->rawSourceKey ||
         !m_RawWorkspaceAnalysis.currentFrameStats.valid) {
         m_RawWorkspaceAutoBaseUi.recommendations =
             Stack::RawAutoBase::AutoBaseRecommendations();
@@ -994,8 +990,8 @@ void EditorModule::RefreshRawWorkspaceAutoBaseRecommendations(
 }
 
 void EditorModule::MarkRawWorkspaceViewTransformUserEdited() {
-    if (m_ActiveRawWorkspaceSourceKey.empty() ||
-        m_RawWorkspaceAutoBaseUi.sourceKey != m_ActiveRawWorkspaceSourceKey) {
+    if (m_Project->rawSourceKey.empty() ||
+        m_RawWorkspaceAutoBaseUi.sourceKey != m_Project->rawSourceKey) {
         return;
     }
     if (m_RawWorkspaceAutoBaseUi.viewTransformOwner != RawAutoValueOwner::AutoBase) {
@@ -1013,8 +1009,9 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseViewFitForSource(
     const Stack::RawWorkspace::SourceRecord& source,
     Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     bool explicitApply) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     if (source.relativePathKey.empty() ||
-        source.relativePathKey != m_ActiveRawWorkspaceSourceKey ||
+        source.relativePathKey != m_Project->rawSourceKey ||
         source.relativePathKey != m_RawWorkspace.selectedSourceKey) {
         return false;
     }
@@ -1047,8 +1044,8 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseViewFitForSource(
             ? "Display Fit pending: render preview to analyze the frame."
             : decision.summary;
         if (explicitApply) {
-            QueueUiNotification(
-                UiNotificationSeverity::Info,
+            PostNotification(
+                UiNotificationSeverity::Warning,
                 "Render a RAW preview before fitting the display.",
                 "raw-workspace-auto-base-no-stats");
         }
@@ -1066,7 +1063,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseViewFitForSource(
         return false;
     }
 
-    recipe = m_ActiveRawWorkspaceRecipe;
+    recipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.sourceKey = source.relativePathKey;
     m_RawWorkspaceAutoBaseUi.sourceHash = sourceHash;
     m_RawWorkspaceAutoBaseUi.appliedAnalysisHash = BuildAnalysisHash(m_RawWorkspaceAnalysis);
@@ -1081,8 +1078,9 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseViewFitForSource(
 bool EditorModule::ApplyRawWorkspaceBuildStartingPointForSource(
     const Stack::RawWorkspace::SourceRecord& source,
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     if (source.relativePathKey.empty() ||
-        source.relativePathKey != m_ActiveRawWorkspaceSourceKey ||
+        source.relativePathKey != m_Project->rawSourceKey ||
         source.relativePathKey != m_RawWorkspace.selectedSourceKey) {
         return false;
     }
@@ -1120,7 +1118,7 @@ bool EditorModule::ApplyRawWorkspaceBuildStartingPointForSource(
             "Preview analysis pending",
             "Preview analysis pending");
         MarkRenderRefreshDirty();
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Info,
             "Analyzing this RAW before building the Starting Point.",
             "raw-workspace-starting-point-base-no-stats");
@@ -1174,8 +1172,8 @@ bool EditorModule::ApplyRawWorkspaceBuildStartingPointForSource(
             JoinPlanSummaries(plan.withheldSummaries),
             JoinPlanSummaries(plan.evidenceSummaries),
             JoinPlanSummaries(plan.warnings));
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Build Starting Point needs current analysis before applying visible controls.",
             "raw-workspace-starting-point-base-no-candidate");
         return false;
@@ -1196,8 +1194,8 @@ bool EditorModule::ApplyRawWorkspaceBuildStartingPointForSource(
                 "Display Fit pending",
                 JoinPlanSummaries(plan.evidenceSummaries),
                 JoinPlanSummaries(plan.warnings));
-            QueueUiNotification(
-                UiNotificationSeverity::Info,
+            PostNotification(
+                UiNotificationSeverity::Warning,
                 "Render a RAW preview before finishing Display Fit.",
                 "raw-workspace-starting-point-no-fit");
             return false;
@@ -1212,7 +1210,7 @@ bool EditorModule::ApplyRawWorkspaceBuildStartingPointForSource(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
+    editedRecipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.sourceKey = source.relativePathKey;
     m_RawWorkspaceAutoBaseUi.sourceHash = sourceHash;
     const bool waitingForPostApplyDisplayFit =
@@ -1278,26 +1276,27 @@ bool EditorModule::ApplyRawWorkspaceBuildStartingPointForSource(
 bool EditorModule::BeginRawWorkspacePreciseStartingPointForSource(
     const Stack::RawWorkspace::SourceRecord& source,
     const Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     if (source.relativePathKey.empty() ||
-        source.relativePathKey != m_ActiveRawWorkspaceSourceKey ||
+        source.relativePathKey != m_Project->rawSourceKey ||
         source.relativePathKey != m_RawWorkspace.selectedSourceKey ||
         !IsRawWorkspaceProjectActive()) {
         return false;
     }
-    if (!m_RenderWorkerAvailable) {
+    if (!m_RenderWorkerAvailable && m_RawRenderClientId == 0) {
         m_RawWorkspaceAutoBaseUi.summary =
             "Precise Starting Point unavailable: background renderer is not available. Fast mode remains available.";
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             m_RawWorkspaceAutoBaseUi.summary,
             "raw-workspace-precise-no-worker");
         return false;
     }
-    if (m_ActiveRawWorkspaceMode != Stack::RawWorkspace::RawProjectMode::RecipeBacked) {
+    if (m_Project->rawMode != Stack::RawWorkspace::RawProjectMode::UnifiedLayers) {
         m_RawWorkspaceAutoBaseUi.summary =
             "Precise Starting Point preserves managed or custom graphs; use the recipe-backed RAW view or Fast mode.";
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             m_RawWorkspaceAutoBaseUi.summary,
             "raw-workspace-precise-recipe-backed-only");
         return false;
@@ -1332,7 +1331,7 @@ bool EditorModule::BeginRawWorkspacePreciseStartingPointForSource(
         "Precise solve in progress",
         "Analyzing raw evidence; no candidate has been applied.");
     MarkRenderRefreshDirty();
-    QueueUiNotification(
+    PostNotification(
         UiNotificationSeverity::Info,
         "Precise Starting Point is evaluating rendered alternatives.",
         "raw-workspace-precise-started");
@@ -1343,9 +1342,7 @@ void EditorModule::CancelRawWorkspacePreciseStartingPoint(std::string reason) {
     Stack::PreciseIntegration::IntegrationState& precise =
         m_RawWorkspaceAutoBaseUi.preciseStartingPoint;
     if (!Stack::PreciseIntegration::Cancel(precise, std::move(reason))) return;
-    if (m_RenderWorkerAvailable) {
-        m_RenderWorker.InvalidateSnapshotsBefore(m_RenderGeneration + 1);
-    }
+    InvalidateRenderSnapshotsBefore(m_RenderGeneration + 1);
     m_RawWorkspaceAutoBaseUi.summary =
         "Precise Starting Point canceled. The current recipe was not changed.";
     SetStartingPointUiResult(
@@ -1360,7 +1357,7 @@ void EditorModule::CancelRawWorkspacePreciseStartingPoint(std::string reason) {
         "Local Range: unchanged (canceled before apply); "
         "Finish Tone: unchanged (canceled before apply); "
         "Display Fit / View Transform: unchanged (canceled before apply)";
-    QueueUiNotification(
+    PostNotification(
         UiNotificationSeverity::Info,
         m_RawWorkspaceAutoBaseUi.summary,
         "raw-workspace-precise-canceled");
@@ -1371,16 +1368,17 @@ bool EditorModule::ApplyRawWorkspacePreciseCandidateAtomically(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     const std::string& expectedBaseRecipeIdentity,
     std::string& reason) {
+    if (!RawStartingPointGraphSupported(reason)) return false;
     reason.clear();
     if (!IsRawWorkspaceProjectActive() ||
-        m_ActiveRawWorkspaceMode != Stack::RawWorkspace::RawProjectMode::RecipeBacked ||
+        m_Project->rawMode != Stack::RawWorkspace::RawProjectMode::UnifiedLayers ||
         source.relativePathKey.empty() ||
-        source.relativePathKey != m_ActiveRawWorkspaceSourceKey ||
+        source.relativePathKey != m_Project->rawSourceKey ||
         source.relativePathKey != m_RawWorkspace.selectedSourceKey) {
         reason = "Precise apply preflight no longer matches the active recipe-backed RAW project.";
         return false;
     }
-    if (Stack::PreciseRaw::RecipeIdentity(m_ActiveRawWorkspaceRecipe) !=
+    if (Stack::PreciseRaw::RecipeIdentity(ReadRawControlRecipe()) !=
         expectedBaseRecipeIdentity) {
         reason = "The RAW recipe changed before the atomic precise apply.";
         return false;
@@ -1394,12 +1392,9 @@ bool EditorModule::ApplyRawWorkspacePreciseCandidateAtomically(
     }
 
     std::vector<EditorNodeGraph::Node*> targetNodes;
-    for (EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
-        if (node.kind != EditorNodeGraph::NodeKind::RawDevelopment) continue;
-        const std::string& key = node.rawDevelopment.recipe.source.relativePathKey;
-        if (key.empty() || key == m_ActiveRawWorkspaceSourceKey) {
-            targetNodes.push_back(&node);
-        }
+    const int boundSource = ResolveRawWorkspaceStageOutputNodeId();
+    for (EditorNodeGraph::Node& node : m_Project->graph.GetNodes()) {
+        if (node.id == boundSource && node.kind == EditorNodeGraph::NodeKind::RawDevelopment) targetNodes.push_back(&node);
     }
     if (targetNodes.empty()) {
         reason = "The active recipe-backed project has no RAW Development node.";
@@ -1407,7 +1402,7 @@ bool EditorModule::ApplyRawWorkspacePreciseCandidateAtomically(
     }
 
     Stack::RawWorkspace::SourceRecord* mutableSource =
-        FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+        FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
     if (!mutableSource || mutableSource->project.absolutePath.empty()) {
         reason = "The active RAW project is not ready for an atomic persisted recipe write.";
         return false;
@@ -1433,19 +1428,24 @@ bool EditorModule::ApplyRawWorkspacePreciseCandidateAtomically(
         }
     }
 
+    Stack::Project::RawLayerStackState operationCandidate;
+    bool operationsChanged = false;
+    if (!PrepareRawControlRecipeEdit(recipe, operationCandidate, operationsChanged, reason)) return false;
+    if (!m_Project->rawLayers.ApplySourceEdit(std::move(operationCandidate), m_Project->rawRecipe,
+            preparedActive, reason, &m_Project->graph, boundSource)) return false;
+
     // Everything that can reject has completed. Move the fully prepared recipe
     // into the live model as one main-thread transaction; no candidate value was
     // exposed before this point.
-    m_ActiveRawWorkspaceRecipe = std::move(preparedActive);
     for (std::size_t i = 0; i < targetNodes.size(); ++i) {
         EditorNodeGraph::Node& node = *targetNodes[i];
-        node.rawDevelopment.recipe = std::move(preparedNodes[i]);
+        node.rawDevelopment.recipe = m_Project->rawRecipe;
         node.rawDevelopment.projectStatus = "Edited";
         node.rawDevelopment.edited = true;
         node.rawDevelopment.autosaved = false;
     }
     mutableSource->project.status = Stack::RawWorkspace::ProjectStatus::Existing;
-    mutableSource->project.mode = m_ActiveRawWorkspaceMode;
+    mutableSource->project.mode = m_Project->rawMode;
     mutableSource->project.autosaved = false;
     mutableSource->project.dirty = true;
 
@@ -1489,16 +1489,16 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
     }
 
     Stack::RawWorkspace::SourceRecord* source =
-        FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey);
+        FindRawWorkspaceSourceByKey(m_Project->rawSourceKey);
     Stack::PreciseIntegration::ApplyContext context;
     context.expected = precise.identity;
-    context.activeSourceKey = m_ActiveRawWorkspaceSourceKey;
+    context.activeSourceKey = m_Project->rawSourceKey;
     context.selectedSourceKey = m_RawWorkspace.selectedSourceKey;
     context.activeSourceHash = source ? BuildRawWorkspaceAutoBaseSourceHash(*source) : 0;
     context.projectActive = IsRawWorkspaceProjectActive();
     context.recipeBacked =
-        m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::RecipeBacked;
-    context.currentRecipe = m_ActiveRawWorkspaceRecipe;
+        m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
+    context.currentRecipe = ReadRawControlRecipe();
     const Stack::PreciseIntegration::ApplyDecision decision =
         Stack::PreciseIntegration::ValidateForAtomicApply(result.candidate, context);
     if (!decision.allowed || !source) {
@@ -1522,7 +1522,7 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
             "All controls left unchanged",
             "Full-resolution or identity gate did not authorize apply.",
             failureReason);
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             m_RawWorkspaceAutoBaseUi.summary,
             "raw-workspace-precise-failed-safe");
@@ -1556,7 +1556,7 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
             warnings);
         m_RawWorkspaceAutoBaseUi.startingPointControlStatusSummary =
             projection.controlStatus;
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Success,
             m_RawWorkspaceAutoBaseUi.summary,
             "raw-workspace-precise-no-change");
@@ -1587,7 +1587,7 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
             "All controls left unchanged",
             evidence,
             applyReason);
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             m_RawWorkspaceAutoBaseUi.summary,
             "raw-workspace-precise-atomic-apply-failed");
@@ -1604,7 +1604,7 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
     m_RawWorkspaceAutoBaseUi.appliedAnalysisHash = 0;
     m_RawWorkspaceAutoBaseUi.preciseAppliedDisplayFitAwaitingRender = true;
     m_RawWorkspaceAutoBaseUi.preciseAppliedRecipeIdentity =
-        Stack::PreciseRaw::RecipeIdentity(m_ActiveRawWorkspaceRecipe);
+        Stack::PreciseRaw::RecipeIdentity(ReadRawControlRecipe());
     Stack::PreciseIntegration::MarkTerminal(
         precise,
         Stack::PreciseIntegration::LifecycleState::Applied,
@@ -1640,8 +1640,8 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
         "Available",
         "One Undo restores the complete recipe from before this precise action."
     });
-    RefreshRawWorkspaceAutoBaseRecommendations(m_ActiveRawWorkspaceRecipe);
-    QueueUiNotification(
+    RefreshRawWorkspaceAutoBaseRecommendations(ReadRawControlRecipe());
+    PostNotification(
         UiNotificationSeverity::Success,
         m_RawWorkspaceAutoBaseUi.summary,
         "raw-workspace-precise-applied");
@@ -1650,10 +1650,10 @@ void EditorModule::HandleRawWorkspacePreciseSolveResult(
 void EditorModule::AdoptRawWorkspacePreciseAppliedRender() {
     RawWorkspaceAutoBaseUiState& ui = m_RawWorkspaceAutoBaseUi;
     if (!ui.preciseAppliedDisplayFitAwaitingRender) return;
-    if (ui.sourceKey != m_ActiveRawWorkspaceSourceKey ||
+    if (ui.sourceKey != m_Project->rawSourceKey ||
         ui.preciseAppliedRecipeIdentity.empty() ||
         ui.preciseAppliedRecipeIdentity !=
-            Stack::PreciseRaw::RecipeIdentity(m_ActiveRawWorkspaceRecipe)) {
+            Stack::PreciseRaw::RecipeIdentity(ReadRawControlRecipe())) {
         ui.preciseAppliedDisplayFitAwaitingRender = false;
         ui.preciseAppliedRecipeIdentity.clear();
         ui.startingPointDisplayFitPending = false;
@@ -1668,8 +1668,9 @@ void EditorModule::AdoptRawWorkspacePreciseAppliedRender() {
 bool EditorModule::ApplyRawWorkspaceStartingPointBalancedLocalForSource(
     const Stack::RawWorkspace::SourceRecord& source,
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     if (source.relativePathKey.empty() ||
-        source.relativePathKey != m_ActiveRawWorkspaceSourceKey ||
+        source.relativePathKey != m_Project->rawSourceKey ||
         source.relativePathKey != m_RawWorkspace.selectedSourceKey) {
         return false;
     }
@@ -1686,8 +1687,8 @@ bool EditorModule::ApplyRawWorkspaceStartingPointBalancedLocalForSource(
         !m_RawWorkspaceAnalysis.currentFrameStats.valid) {
         m_RawWorkspaceAutoBaseUi.summary =
             "Balanced Local pending: render a RAW preview before applying Local Range.";
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Render a RAW preview before adding Balanced Local Range.",
             "raw-workspace-starting-point-balanced-local-no-stats");
         return false;
@@ -1700,8 +1701,8 @@ bool EditorModule::ApplyRawWorkspaceStartingPointBalancedLocalForSource(
     if (selectedSuggestions.empty()) {
         m_RawWorkspaceAutoBaseUi.summary =
             "Balanced Local unavailable: no Local Range suggestion passed the confidence/delta caps.";
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "No Balanced Local Range point passed the confidence and delta caps.",
             "raw-workspace-starting-point-balanced-local-no-candidate");
         m_RawWorkspaceStartPointDiagnostics =
@@ -1731,8 +1732,8 @@ bool EditorModule::ApplyRawWorkspaceStartingPointBalancedLocalForSource(
     if (appliedSuggestions.empty()) {
         m_RawWorkspaceAutoBaseUi.summary =
             "Balanced Local unavailable: Local Range graph is full or overlaps an existing point.";
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Balanced Local Range overlaps an existing point or the graph is full.",
             "raw-workspace-starting-point-balanced-local-overlap");
         return false;
@@ -1744,7 +1745,7 @@ bool EditorModule::ApplyRawWorkspaceStartingPointBalancedLocalForSource(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
+    editedRecipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.sourceKey = source.relativePathKey;
     m_RawWorkspaceAutoBaseUi.sourceHash = sourceHash;
     m_RawWorkspaceAutoBaseUi.appliedAnalysisHash = BuildAnalysisHash(m_RawWorkspaceAnalysis);
@@ -1776,8 +1777,9 @@ bool EditorModule::ApplyRawWorkspaceStartingPointBalancedLocalForSource(
 bool EditorModule::ApplyRawWorkspaceStartingPointMildToneForSource(
     const Stack::RawWorkspace::SourceRecord& source,
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     if (source.relativePathKey.empty() ||
-        source.relativePathKey != m_ActiveRawWorkspaceSourceKey ||
+        source.relativePathKey != m_Project->rawSourceKey ||
         source.relativePathKey != m_RawWorkspace.selectedSourceKey) {
         return false;
     }
@@ -1794,8 +1796,8 @@ bool EditorModule::ApplyRawWorkspaceStartingPointMildToneForSource(
         !m_RawWorkspaceAnalysis.currentFrameStats.valid) {
         m_RawWorkspaceAutoBaseUi.summary =
             "Mild Finish Tone pending: render a RAW preview before applying Finish Tone.";
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Render a RAW preview before adding Mild Finish Tone.",
             "raw-workspace-starting-point-mild-tone-no-stats");
         return false;
@@ -1818,8 +1820,8 @@ bool EditorModule::ApplyRawWorkspaceStartingPointMildToneForSource(
         m_RawWorkspaceAutoBaseUi.summary = proposal.summary.empty()
             ? "Mild Finish Tone unavailable: no conservative visible tone proposal is ready."
             : proposal.summary;
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Mild Finish Tone was withheld for this RAW file.",
             "raw-workspace-starting-point-mild-tone-no-candidate");
         return false;
@@ -1835,7 +1837,7 @@ bool EditorModule::ApplyRawWorkspaceStartingPointMildToneForSource(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
+    editedRecipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.sourceKey = source.relativePathKey;
     m_RawWorkspaceAutoBaseUi.sourceHash = sourceHash;
     m_RawWorkspaceAutoBaseUi.appliedAnalysisHash = BuildAnalysisHash(m_RawWorkspaceAnalysis);
@@ -1859,6 +1861,7 @@ bool EditorModule::ApplyRawWorkspaceStartingPointMildToneForSource(
 
 bool EditorModule::ApplyRawWorkspaceAutoBaseExposureSuggestion(
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     const Stack::RawAutoBase::RawExposureRecommendation recommendation =
         m_RawWorkspaceAutoBaseUi.recommendations.exposure;
     if (!recommendation.valid ||
@@ -1874,7 +1877,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseExposureSuggestion(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
+    editedRecipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.summary =
         "Applied RAW Exposure suggestion: " + FormatSignedEv(recommendation.deltaEv) + ".";
     RefreshRawWorkspaceAutoBaseRecommendations(editedRecipe);
@@ -1883,6 +1886,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseExposureSuggestion(
 
 bool EditorModule::ApplyRawWorkspaceAutoBaseWhiteBalanceSuggestion(
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     const Stack::RawAutoBase::WhiteBalanceRecommendation recommendation =
         m_RawWorkspaceAutoBaseUi.recommendations.whiteBalance;
     if (!recommendation.valid ||
@@ -1899,7 +1903,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseWhiteBalanceSuggestion(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
+    editedRecipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.summary =
         std::string("Applied WB suggestion: ") + WhiteBalanceMethodLabel(recommendation.method) + ".";
     RefreshRawWorkspaceAutoBaseRecommendations(editedRecipe);
@@ -1908,6 +1912,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseWhiteBalanceSuggestion(
 
 bool EditorModule::ApplyRawWorkspaceAutoBaseHighlightProtection(
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     const Stack::RawAutoBase::HighlightRecommendation recommendation =
         m_RawWorkspaceAutoBaseUi.recommendations.highlight;
     if (!recommendation.valid ||
@@ -1925,7 +1930,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseHighlightProtection(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
+    editedRecipe = ReadRawControlRecipe();
     m_RawWorkspaceAutoBaseUi.viewTransformOwner = RawAutoValueOwner::AutoBase;
     m_RawWorkspaceAutoBaseUi.summary =
         "Applied highlight protection to View Transform shoulder/white EV. RAW Exposure unchanged.";
@@ -1936,6 +1941,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseHighlightProtection(
 bool EditorModule::ApplyRawWorkspaceAutoBaseLocalSuggestion(
     std::size_t suggestionIndex,
     Stack::RawRecipe::RawDevelopmentRecipe& editedRecipe) {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     const std::vector<Stack::RawAutoBase::SuggestedLocalAdjustment>& suggestions =
         m_RawWorkspaceAutoBaseUi.recommendations.localAdjustments;
     if (suggestionIndex >= suggestions.size()) {
@@ -1946,8 +1952,8 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseLocalSuggestion(
         suggestions[suggestionIndex];
     Stack::RawRecipe::RawDevelopmentRecipe recipe = editedRecipe;
     if (!Stack::RawAutoBase::ApplySuggestedLocalAdjustment(suggestion, recipe)) {
-        QueueUiNotification(
-            UiNotificationSeverity::Info,
+        PostNotification(
+            UiNotificationSeverity::Warning,
             "Local Range suggestion overlaps an existing point or the graph is full.",
             "raw-workspace-auto-base-local-overlap");
         return false;
@@ -1959,10 +1965,10 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseLocalSuggestion(
         return false;
     }
 
-    editedRecipe = m_ActiveRawWorkspaceRecipe;
-    m_RawWorkspaceAutoBaseUi.sourceKey = m_ActiveRawWorkspaceSourceKey;
+    editedRecipe = ReadRawControlRecipe();
+    m_RawWorkspaceAutoBaseUi.sourceKey = m_Project->rawSourceKey;
     if (const Stack::RawWorkspace::SourceRecord* source =
-            FindRawWorkspaceSourceByKey(m_ActiveRawWorkspaceSourceKey)) {
+            FindRawWorkspaceSourceByKey(m_Project->rawSourceKey)) {
         m_RawWorkspaceAutoBaseUi.sourceHash = BuildRawWorkspaceAutoBaseSourceHash(*source);
     }
     m_RawWorkspaceAutoBaseUi.summary =
@@ -1980,6 +1986,7 @@ bool EditorModule::ApplyRawWorkspaceAutoBaseLocalSuggestion(
 }
 
 bool EditorModule::RevertRawWorkspaceAutoBaseForSelectedSource() {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) return false;
     if (!m_RawWorkspaceAutoBaseUi.hasRevertSnapshot ||
         m_RawWorkspaceAutoBaseUi.sourceKey.empty() ||
         m_RawWorkspaceAutoBaseUi.sourceKey != m_RawWorkspace.selectedSourceKey) {
@@ -1992,7 +1999,7 @@ bool EditorModule::RevertRawWorkspaceAutoBaseForSelectedSource() {
         return false;
     }
 
-    const std::string sourceKey = m_ActiveRawWorkspaceSourceKey;
+    const std::string sourceKey = m_Project->rawSourceKey;
     const std::uint64_t sourceHash = m_RawWorkspaceAutoBaseUi.sourceHash;
     ResetRawWorkspaceAutoBaseState();
     m_RawWorkspaceAutoBaseUi.sourceKey = sourceKey;
@@ -2004,6 +2011,10 @@ bool EditorModule::RevertRawWorkspaceAutoBaseForSelectedSource() {
 }
 
 void EditorModule::TryContinueRawWorkspaceStartingPointOnAnalysis() {
+    if (!RawStartingPointGraphSupported(m_RawWorkspaceAutoBaseUi.summary)) {
+        CancelRawWorkspacePendingStartingPoint(m_RawWorkspaceAutoBaseUi.summary);
+        return;
+    }
     Stack::EditorModuleTypes::RawWorkspaceStartingPointPendingAction& pending =
         m_RawWorkspaceAutoBaseUi.pendingStartingPoint;
     if (!pending.active) {
@@ -2020,10 +2031,10 @@ void EditorModule::TryContinueRawWorkspaceStartingPointOnAnalysis() {
     // boundary.
     const Stack::RawWorkspace::SourceRecord* source =
         FindRawWorkspaceSourceByKey(pending.sourceKey);
-    Stack::RawRecipe::RawDevelopmentRecipe recipe = m_ActiveRawWorkspaceRecipe;
+    Stack::RawRecipe::RawDevelopmentRecipe recipe = ReadRawControlRecipe();
     Stack::EditorModuleTypes::RawStartingPointContinuationContext continuation;
     continuation.sourceExists = source != nullptr;
-    continuation.activeSourceKey = m_ActiveRawWorkspaceSourceKey;
+    continuation.activeSourceKey = m_Project->rawSourceKey;
     continuation.selectedSourceKey = m_RawWorkspace.selectedSourceKey;
     continuation.sourceHash = source ? BuildRawWorkspaceAutoBaseSourceHash(*source) : 0;
     continuation.analysisSourceKey = m_RawWorkspaceAnalysis.sourceKey;
@@ -2089,7 +2100,7 @@ void EditorModule::TryContinueRawWorkspaceStartingPointOnAnalysis() {
             return;
         }
 
-        recipe = m_ActiveRawWorkspaceRecipe;
+        recipe = ReadRawControlRecipe();
         Stack::EditorModuleTypes::RawWorkspaceStartingPointPendingAction continuedPending =
             pendingBeforeContinuation;
         continuedPending.upstreamApplyPassCount =
@@ -2202,7 +2213,7 @@ void EditorModule::TryContinueRawWorkspaceStartingPointOnAnalysis() {
             pendingBeforeCompletion,
             BuildAnalysisHash(m_RawWorkspaceAnalysis),
             FormatStartingPointDisplayFitValueSummary(decision.fit));
-    recipe = m_ActiveRawWorkspaceRecipe;
+    recipe = ReadRawControlRecipe();
     RefreshRawWorkspaceAutoBaseRecommendations(recipe);
     m_RawWorkspaceStartPointDiagnostics =
         Stack::RawAutoStartPoint::BuildDryRunCandidateDiagnostics(
@@ -2247,6 +2258,12 @@ bool EditorModule::RenderRawWorkspaceAutoBasePanel(
         return false;
     }
 
+    std::string graphReason;
+    if (!RawStartingPointGraphSupported(graphReason)) {
+        ImGui::TextWrapped("%s",graphReason.c_str());
+        return false;
+    }
+
     const std::uint64_t sourceHash = BuildRawWorkspaceAutoBaseSourceHash(*selectedSource);
     if (!m_RawWorkspaceAutoBaseUi.sourceKey.empty() &&
         (m_RawWorkspaceAutoBaseUi.sourceKey != selectedSource->relativePathKey ||
@@ -2260,7 +2277,7 @@ bool EditorModule::RenderRawWorkspaceAutoBasePanel(
 
     bool recipeUpdated = false;
     const bool hasUsableStats =
-        selectedSource->relativePathKey == m_ActiveRawWorkspaceSourceKey &&
+        selectedSource->relativePathKey == m_Project->rawSourceKey &&
         m_RawWorkspaceAnalysis.sourceKey == selectedSource->relativePathKey &&
         m_RawWorkspaceAnalysis.currentFrameStats.valid;
     if (hasUsableStats) {
@@ -2274,9 +2291,9 @@ bool EditorModule::RenderRawWorkspaceAutoBasePanel(
     const bool preciseRunning =
         preciseState.active && Stack::PreciseIntegration::IsRunning(preciseState.state);
     const bool preciseAvailable =
-        m_RenderWorkerAvailable &&
+        (m_RenderWorkerAvailable || m_RawRenderClientId != 0) &&
         IsRawWorkspaceProjectActive() &&
-        m_ActiveRawWorkspaceMode == Stack::RawWorkspace::RawProjectMode::RecipeBacked;
+        m_Project->rawMode == Stack::RawWorkspace::RawProjectMode::UnifiedLayers;
     const bool canBuildStartingPoint =
         !preciseRunning &&
         (preciseState.mode == Stack::PreciseIntegration::ProductMode::Fast ||
@@ -2387,7 +2404,8 @@ bool EditorModule::RenderRawWorkspaceAutoBasePanel(
         "In Precise mode, searches isolated rendered candidates and applies only the full-resolution-verified visible recipe. In Fast mode, runs the existing bounded heuristic path.",
         ImGuiHoveredFlags_AllowWhenDisabled);
     if (preciseRunning) {
-        const EditorRenderWorker::RenderProgress progress = m_RenderWorker.GetProgress();
+        const EditorRenderWorker::RenderProgress progress =
+            GetActiveRenderBackendProgress();
         RenderDisabledSummaryLine(
             progress.label.empty() ? preciseState.statusText : progress.label,
             controlWidth);
@@ -2430,7 +2448,8 @@ bool EditorModule::RenderRawWorkspaceAutoBasePanel(
         buildStatusSummary = "Build Starting Point completed. Open Details for the full result.";
     }
     if (preciseRunning) {
-        const EditorRenderWorker::RenderProgress progress = m_RenderWorker.GetProgress();
+        const EditorRenderWorker::RenderProgress progress =
+            GetActiveRenderBackendProgress();
         buildStatusSummary = progress.label.empty()
             ? preciseState.statusText
             : progress.label;
@@ -2609,7 +2628,7 @@ bool EditorModule::RenderRawWorkspaceAutoBasePanel(
         if (ImGuiExtras::RichFullWidthButton("Undo##RawStartingPointUndo", buttonWidth, 0.0f)) {
             recipeUpdated = RevertRawWorkspaceAutoBaseForSelectedSource();
             if (recipeUpdated) {
-                editedRecipe = m_ActiveRawWorkspaceRecipe;
+                editedRecipe = ReadRawControlRecipe();
             }
         }
         ImGui::EndDisabled();

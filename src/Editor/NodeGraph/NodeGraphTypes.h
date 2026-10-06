@@ -229,7 +229,9 @@ enum class NodeKind {
     Reformat,
     RawProjectFrame,
     MultiFrameDenoise,
+    MultiFrameHdr,
     RawProjectSourceSet,
+    RawOperation,
     Count
 };
 
@@ -243,7 +245,10 @@ enum class MaskGeneratorKind {
     Solid,
     LinearGradient,
     RadialGradient,
-    Noise
+    Noise,
+    Square,
+    RawGradient,
+    PaintedArea
 };
 
 enum class MaskUtilityKind {
@@ -425,6 +430,11 @@ enum class SocketType {
 
 struct OutputSettings {
     static constexpr int kSchemaVersion = 1;
+
+    // Numeric coverage endpoint in a layer's mask-authoring workspace.
+    bool maskOutput = false;
+    // Invalid retains the ordinary image/coverage inspection boundary.
+    Stack::NodeMath::LogicalValueType publishedType = Stack::NodeMath::LogicalValueType::Invalid;
 
     Stack::NodeMath::OutputChannelViewMode channelViewMode =
         Stack::NodeMath::OutputChannelViewMode::Neutral;

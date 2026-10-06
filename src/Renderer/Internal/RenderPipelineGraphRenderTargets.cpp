@@ -9,8 +9,26 @@
 #include <new>
 #include <stdexcept>
 
+void RenderPipeline::EnsureGraphFloat32Targets() {
+    if (m_GraphFloat32Targets) return;
+    DestroyGraphCache(m_GraphImageCache);
+    DestroyGraphCache(m_GraphMaskCache);
+    DestroyGraphTransientTargets();
+    DestroyRawDevelopStageCache();
+    m_GraphFloat32Targets = true;
+}
+
 unsigned int RenderPipeline::CreateGraphRenderTargetTexture() const {
-    return GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+    return m_GraphFloat32Targets
+        ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
+        : GLHelpers::CreateEmptyTexture(m_Width, m_Height);
+}
+
+std::uint64_t RenderPipeline::EstimateGraphTargetBytes(int width, int height) const {
+    const auto bytes = Stack::Renderer::GraphExecution::EstimateRawDevelopStageCacheTextureBytes(width, height);
+    if (!m_GraphFloat32Targets) return bytes;
+    return bytes > std::numeric_limits<std::uint64_t>::max() / 2
+        ? std::numeric_limits<std::uint64_t>::max() : bytes * 2;
 }
 
 bool RenderPipeline::RenderIntoGraphTargetTextureImpl(
@@ -149,7 +167,7 @@ void RenderPipeline::TrimGraphTransientTargetsToBudget() {
 
     std::uint64_t totalBytes = GraphTransientTargetBytes();
     while (m_GraphTransientTargets.size() > kGraphTransientTargetMaximumEntries ||
-           totalBytes > kGraphTransientTargetSoftByteBudget) {
+           totalBytes > m_GraphTransientTargetBudgetBytes) {
         const auto victim = std::min_element(
             m_GraphTransientTargets.begin(),
             m_GraphTransientTargets.end(),
@@ -164,7 +182,7 @@ void RenderPipeline::TrimGraphTransientTargetsToBudget() {
         }
 
         const std::uint64_t victimBytes =
-            EstimateRawDevelopStageCacheTextureBytes(victim->width, victim->height);
+            EstimateGraphTargetBytes(victim->width, victim->height);
         if (victim->texture != 0) {
             glDeleteTextures(1, &victim->texture);
         }
@@ -185,7 +203,7 @@ std::uint64_t RenderPipeline::GraphTransientTargetBytes() const {
     std::uint64_t total = 0;
     for (const GraphTransientTarget& target : m_GraphTransientTargets) {
         const std::uint64_t bytes =
-            Stack::Renderer::GraphExecution::EstimateRawDevelopStageCacheTextureBytes(
+            EstimateGraphTargetBytes(
             target.width,
             target.height);
         if (bytes > std::numeric_limits<std::uint64_t>::max() - total) {

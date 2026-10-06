@@ -2,6 +2,7 @@
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -42,6 +43,31 @@ float PercentileFromSorted(const std::vector<float>& sorted, float percentile) {
 
 float LerpFloat(float a, float b, float t) {
     return a + (b - a) * t;
+}
+
+std::array<float, 3> WorkingLumaWeights(
+    Raw::RawWorkingSpace workingSpace) {
+    return workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
+        ? std::array<float, 3>{ 0.2627f, 0.6780f, 0.0593f }
+        : std::array<float, 3>{ 0.2126729f, 0.7151522f, 0.0721750f };
+}
+
+void SetRawDetailFusionColorContract(
+    unsigned int program,
+    const Raw::RawDetailFusionSettings& settings,
+    bool includeSignedPolicy) {
+    const std::array<float, 3> weights =
+        WorkingLumaWeights(settings.workingSpace);
+    glUniform3f(
+        glGetUniformLocation(program, "uLumaWeights"),
+        weights[0],
+        weights[1],
+        weights[2]);
+    if (includeSignedPolicy) {
+        glUniform1i(
+            glGetUniformLocation(program, "uPreserveSigned"),
+            1);
+    }
 }
 
 } // namespace
@@ -339,6 +365,8 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uInputImage"), 0);
+        SetRawDetailFusionColorContract(
+            m_RawDetailFusionMetricsProgram, settings, false);
         glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uSmoothGradientProtection"), settings.smoothGradientProtection);
         glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uTextureSensitivity"), settings.textureSensitivity);
         glUniform1f(glGetUniformLocation(m_RawDetailFusionMetricsProgram, "uSkyBias"), settings.skyBias);
@@ -358,6 +386,8 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uInputImage"), 0);
+        SetRawDetailFusionColorContract(
+            m_RawDetailFusionAnalysisProgram, settings, false);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, metricsTexture);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionAnalysisProgram, "uMetrics"), 1);
@@ -405,6 +435,8 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uInputImage"), 2);
+        SetRawDetailFusionColorContract(
+            m_RawDetailFusionSmoothProgram, settings, false);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uRadius"), std::clamp(settings.smoothnessRadius, 0, 16));
         glUniform1i(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uSmoothAreaRadius"), std::clamp(settings.smoothAreaRadius, 0, 32));
         glUniform1f(glGetUniformLocation(m_RawDetailFusionSmoothProgram, "uEdgeAwareness"), settings.edgeAwareness);
@@ -428,6 +460,8 @@ unsigned int RenderPipeline::RenderRawDetailAutoMask(
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, inputTexture);
                 glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uInputImage"), 0);
+                SetRawDetailFusionColorContract(
+                    m_RawDetailFusionApplyProgram, settings, true);
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(GL_TEXTURE_2D, smoothTexture);
                 glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uExposureMap"), 1);
@@ -482,6 +516,8 @@ unsigned int RenderPipeline::RenderRawDetailFusion(
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uInputImage"), 0);
+        SetRawDetailFusionColorContract(
+            m_RawDetailFusionApplyProgram, settings, true);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, maskTexture);
         glUniform1i(glGetUniformLocation(m_RawDetailFusionApplyProgram, "uExposureMap"), 1);

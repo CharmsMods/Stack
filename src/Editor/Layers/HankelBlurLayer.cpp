@@ -64,14 +64,16 @@ void main() {
             float weight = besselJ0(r * 2.0);
             weight = abs(weight) + 0.01;
             
-            color += texture(uInputTex, vUV + offset) * weight;
+            vec4 sampleColor = texture(uInputTex, vUV + offset);
+            weight *= sampleColor.a;
+            color += sampleColor * weight;
             totalWeight += weight;
         }
     }
     
     vec4 blurred = color / max(0.001, totalWeight);
     vec4 original = texture(uInputTex, vUV);
-    FragColor = mix(original, blurred, uIntensity);
+    FragColor = vec4(mix(original.rgb, blurred.rgb, uIntensity), original.a);
 }
 )";
 

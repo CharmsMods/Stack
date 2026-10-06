@@ -65,6 +65,37 @@ bool OpenUrl(const std::string& url, std::string* errorMessage) {
 #endif
 }
 
+bool OpenPath(const std::filesystem::path& path, std::string* errorMessage) {
+#if defined(_WIN32)
+    if (path.empty() || !std::filesystem::exists(path)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "The requested file or folder does not exist.";
+        }
+        return false;
+    }
+    const HINSTANCE result = ShellExecuteW(
+        nullptr,
+        L"open",
+        path.c_str(),
+        nullptr,
+        nullptr,
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "Windows could not open the requested file or folder.";
+        }
+        return false;
+    }
+    return true;
+#else
+    (void)path;
+    if (errorMessage != nullptr) {
+        *errorMessage = "Opening local files is not supported on this platform.";
+    }
+    return false;
+#endif
+}
+
 bool RevealPathInExplorer(const std::filesystem::path& path, std::string* errorMessage) {
 #if defined(_WIN32)
     const std::wstring widePath = path.wstring();

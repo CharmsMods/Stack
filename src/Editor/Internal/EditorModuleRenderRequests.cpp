@@ -12,9 +12,6 @@ constexpr int kScalableGeneratorBaseRaster = 1024;
 constexpr int kScalableGeneratorMaxRaster = 4096;
 constexpr double kPreviewLikeRefreshQuietSeconds = 0.18;
 
-std::vector<unsigned char> BuildTransparentPixels(int width, int height) {
-    return Stack::PixelBuffer::BuildTransparentRgbaPixels(width, height);
-}
 
 } // namespace
 
@@ -34,7 +31,7 @@ bool EditorModule::CanRefreshPreviewLikeNodes() const {
 }
 
 bool EditorModule::ShouldDeferPreviewLikeWork(double now) const {
-    if (m_RenderDirty || m_RenderPending || m_RenderWorker.IsBusy()) {
+    if (m_RenderDirty || m_RenderPending || IsAnyRenderBackendBusy()) {
         return true;
     }
 
@@ -60,13 +57,15 @@ bool EditorModule::HasPendingPreviewRefreshes() const {
         return true;
     }
 
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (const EditorNodeGraph::Node& node : GetNodeGraph().GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::Preview &&
             node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
-            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter) {
+            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter &&
+            node.kind != EditorNodeGraph::NodeKind::Scope) {
             continue;
         }
-        if (node.kind == EditorNodeGraph::NodeKind::FrequencyFilter &&
+        if ((node.kind == EditorNodeGraph::NodeKind::FrequencyFilter ||
+             node.kind == EditorNodeGraph::NodeKind::Scope) &&
             !node.expanded) {
             continue;
         }
@@ -145,8 +144,12 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
         }
 
         EditorRenderWorker::CompositeOutputRequest request;
+        request.preparePixels = true;
+        request.trimPadding = scalableGenerator ? 2 : 0;
+        request.keepFullFrame = scalableGenerator &&
+            CompletedChainSourceKeepsFullRasterFrame(chainState.info.outputNodeId);
         request.outputNodeId = chainState.info.outputNodeId;
-        request.sourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(chainState.info.outputNodeId);
+        request.sourceNodeId = m_Project->graph.ResolveReferenceSourceNodeIdForOutput(chainState.info.outputNodeId);
         if (request.sourceNodeId <= 0) {
             request.sourceNodeId = chainState.info.sourceNodeId;
         }
@@ -169,7 +172,8 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
             m_Pipeline.GetCanvasWidth() > 0 &&
             m_Pipeline.GetCanvasHeight() > 0) {
             if (pipelineSourcePixels.empty()) {
-                pipelineSourcePixels = MakeSharedSourcePixelBufferCopy(m_Pipeline.GetSourcePixelsRaw());
+                int sourceWidth = 0, sourceHeight = 0, sourceChannels = 4;
+                pipelineSourcePixels = m_Pipeline.ShareSourcePixels(sourceWidth, sourceHeight, sourceChannels);
             }
             request.sourcePixels = pipelineSourcePixels;
             request.width = m_Pipeline.GetCanvasWidth();
@@ -179,12 +183,12 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
             request.width = desiredRasterWidth;
             request.height = desiredRasterHeight;
             request.channels = 4;
-            request.sourcePixels = MakeSharedPixelBufferOwned(BuildTransparentPixels(request.width, request.height));
+            request.sourcePixels = {}; // Worker-owned transparent canvas.
         } else {
             request.width = 256;
             request.height = 256;
             request.channels = 4;
-            request.sourcePixels = MakeSharedPixelBufferOwned(BuildTransparentPixels(request.width, request.height));
+            request.sourcePixels = {}; // Worker-owned transparent canvas.
         }
 
         request.dirtyGeneration = dirtyGeneration;
@@ -202,18 +206,28 @@ std::vector<EditorRenderWorker::CompositeOutputRequest> EditorModule::BuildCompo
 
 std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewRequests() {
     std::vector<EditorRenderWorker::PreviewRequest> requests;
+    AppendRawLayerThumbnailRequests(requests);
+    for (auto it = m_PreviewPixelCache.begin(); it != m_PreviewPixelCache.end();) {
+        if (GetNodeGraph().FindNode(it->first)) { ++it; continue; }
+        m_PreviewRequestedGenerations.erase(it->first);
+        m_PreviewCompletedGenerations.erase(it->first);
+        m_PreviewDisplayedRevisions.erase(it->first);
+        it = m_PreviewPixelCache.erase(it);
+    }
     SharedPixelBuffer pipelineSourcePixels;
     SharedPixelBuffer fallbackImagePixels;
     int fallbackImageWidth = 0;
     int fallbackImageHeight = 0;
     int fallbackImageChannels = 4;
-    for (const EditorNodeGraph::Node& node : m_NodeGraph.GetNodes()) {
+    for (const EditorNodeGraph::Node& node : GetNodeGraph().GetNodes()) {
         if (node.kind != EditorNodeGraph::NodeKind::Preview &&
             node.kind != EditorNodeGraph::NodeKind::RawDetailAutoMask &&
-            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter) {
+            node.kind != EditorNodeGraph::NodeKind::FrequencyFilter &&
+            node.kind != EditorNodeGraph::NodeKind::Scope) {
             continue;
         }
-        if (node.kind == EditorNodeGraph::NodeKind::FrequencyFilter &&
+        if ((node.kind == EditorNodeGraph::NodeKind::FrequencyFilter ||
+             node.kind == EditorNodeGraph::NodeKind::Scope) &&
             !node.expanded) {
             continue;
         }
@@ -222,16 +236,19 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         const bool frequencySpectrumPreview =
             node.kind == EditorNodeGraph::NodeKind::FrequencyFilter;
         const EditorNodeGraph::Link* input = generatedAutoMaskPreview
-            ? m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId)
-            : m_NodeGraph.FindAnyInputLink(
+            ? GetNodeGraph().FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId)
+            : GetNodeGraph().FindAnyInputLink(
                 node.id,
                 frequencySpectrumPreview
                     ? EditorNodeGraph::kChannelInputSocketId
-                    : EditorNodeGraph::kPreviewInputSocketId);
+                    : (node.kind == EditorNodeGraph::NodeKind::Scope
+                        ? EditorNodeGraph::kScopeInputSocketId
+                        : EditorNodeGraph::kPreviewInputSocketId));
         if (!input) {
             m_PreviewRequestedGenerations.erase(node.id);
             m_PreviewCompletedGenerations.erase(node.id);
             m_PreviewPixelCache.erase(node.id);
+            m_PreviewDisplayedRevisions.erase(node.id);
             continue;
         }
 
@@ -240,7 +257,7 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         const std::string sourceSocketId = generatedAutoMaskPreview
             ? EditorNodeGraph::kMaskOutputSocketId
             : input->fromSocketId;
-        if (!m_NodeGraph.FindSocket(sourceNodeId, sourceSocketId, &sourceSocket)) {
+        if (!GetNodeGraph().FindSocket(sourceNodeId, sourceSocketId, &sourceSocket)) {
             continue;
         }
         if (sourceSocket.type != EditorNodeGraph::SocketType::Image &&
@@ -263,6 +280,7 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
 
         EditorRenderWorker::PreviewRequest request;
         request.previewNodeId = node.id;
+        request.scopeAnalysis = node.kind == EditorNodeGraph::NodeKind::Scope;
         request.sourceNodeId = sourceNodeId;
         request.sourceSocketId = sourceSocketId;
         request.maskInput = sourceSocket.type == EditorNodeGraph::SocketType::Mask;
@@ -272,7 +290,7 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
         request.directSourceOutput = !frequencySpectrumPreview;
         request.dirtyGeneration = dirtyGeneration;
 
-        if (TryResolveReferenceSourceBuffer(
+        if (!IsEditingRawLayerMaskGraph() && TryResolveReferenceSourceBuffer(
                 sourceNodeId,
                 sourceSocketId,
                 request.sourcePixels,
@@ -280,7 +298,7 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
                 request.height,
                 request.channels)) {
             // Preview channel/combined streams on their resolved reference canvas.
-        } else if (TryCopyImageNodeSharedPixels(
+        } else if (!IsEditingRawLayerMaskGraph() && TryCopyImageNodeSharedPixels(
             sourceNodeId,
             request.sourcePixels,
             request.width,
@@ -289,16 +307,17 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             // Direct image/RAW source preview.
         } else {
             if (pipelineSourcePixels.empty() && !m_Pipeline.GetSourcePixelsRaw().empty()) {
-                pipelineSourcePixels = MakeSharedSourcePixelBufferCopy(m_Pipeline.GetSourcePixelsRaw());
+                int sourceWidth = 0, sourceHeight = 0, sourceChannels = 4;
+                pipelineSourcePixels = m_Pipeline.ShareSourcePixels(sourceWidth, sourceHeight, sourceChannels);
             }
             request.sourcePixels = pipelineSourcePixels;
             request.width = m_Pipeline.GetCanvasWidth();
             request.height = m_Pipeline.GetCanvasHeight();
             request.channels = std::max(1, m_Pipeline.GetSourceChannels());
         }
-        if (request.sourcePixels.empty()) {
+        if (request.sourcePixels.empty() && (request.width <= 0 || request.height <= 0)) {
             if (fallbackImagePixels.empty()) {
-                for (const EditorNodeGraph::Node& graphNode : m_NodeGraph.GetNodes()) {
+                for (const EditorNodeGraph::Node& graphNode : GetNodeGraph().GetNodes()) {
                     if (graphNode.kind != EditorNodeGraph::NodeKind::Image ||
                         graphNode.image.pixels.empty() ||
                         graphNode.image.width <= 0 ||
@@ -317,12 +336,11 @@ std::vector<EditorRenderWorker::PreviewRequest> EditorModule::BuildPreviewReques
             request.height = fallbackImageHeight;
             request.channels = fallbackImageChannels;
         }
-        if (request.sourcePixels.empty() || request.width <= 0 || request.height <= 0) {
+        if (request.width <= 0 || request.height <= 0) {
             request.width = 256;
             request.height = 256;
             request.channels = 4;
-            request.sourcePixels = MakeSharedPixelBufferOwned(
-                BuildTransparentPixels(request.width, request.height));
+            request.sourcePixels = {}; // Worker-owned transparent canvas.
         }
 
         m_PreviewRequestedGenerations[node.id] = dirtyGeneration;

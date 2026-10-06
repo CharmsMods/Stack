@@ -813,7 +813,7 @@ void EditorModule::RefreshDeferredDevelopCandidateFeedbackIfReady(double now) {
     }
     for (int nodeId : readyNodeIds) {
         m_DeferredDevelopCandidateFeedbackTimes.erase(nodeId);
-        const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+        const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
         if (!node ||
             node->kind != EditorNodeGraph::NodeKind::RawDevelop ||
             node->rawDevelop.uiMode != EditorNodeGraph::RawDevelopUiMode::Auto) {
@@ -866,7 +866,7 @@ std::vector<EditorRenderWorker::DevelopCandidateRenderRequest> EditorModule::Bui
             continue;
         }
 
-        const EditorNodeGraph::Node* editorNode = m_NodeGraph.FindNode(renderNode.nodeId);
+        const EditorNodeGraph::Node* editorNode = m_Project->graph.FindNode(renderNode.nodeId);
         if (!editorNode ||
             editorNode->kind != EditorNodeGraph::NodeKind::RawDevelop ||
             editorNode->rawDevelop.uiMode != EditorNodeGraph::RawDevelopUiMode::Auto) {

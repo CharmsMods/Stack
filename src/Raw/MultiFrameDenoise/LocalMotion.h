@@ -105,6 +105,34 @@ struct LocalMotionOptions {
     RegistrationParameters registration;
 };
 
+// Discrete coarse-to-fine search is the large, embarrassingly parallel part
+// of local registration.  An optional accelerator may score a batch in FP32;
+// the CPU still verifies a conservative shortlist in FP64 before accepting a
+// best/second-best pair, and every later covariance/safety decision remains
+// on the reference path.
+struct LocalMotionDiscreteCandidate {
+    RawCoordinate centerRaw;
+    RawCoordinate residualRaw;
+    std::uint32_t level = 0u;
+    std::uint32_t patchLevelPixels = 0u;
+};
+
+struct LocalMotionDiscreteScore {
+    bool valid = false;
+    std::uint64_t validCount = 0u;
+    double validFraction = 0.0;
+    double robustCost = 0.0;
+    double cappedChiSquared = 0.0;
+};
+
+struct LocalMotionDirectionRequest;
+struct LocalMotionGrid;
+using LocalMotionDiscreteBatchEvaluator = std::function<bool(
+    const LocalMotionDirectionRequest& request,
+    const std::vector<LocalMotionDiscreteCandidate>& candidates,
+    std::vector<LocalMotionDiscreteScore>& scores,
+    std::string& error)>;
+
 using GlobalWarpCovarianceEvaluator = std::function<bool(
     RawCoordinate referenceRaw,
     SymmetricRawCovariance& covariance)>;
@@ -116,8 +144,13 @@ struct LocalMotionDirectionRequest {
     double exposureScale = 1.0;
     GlobalWarpCovarianceEvaluator globalCovariance;
     LocalMotionOptions options;
+    // Independent nodes inside one wavefront/refinement pass may use these
+    // workers. Search dependencies between wavefronts remain ordered.
+    std::uint32_t workerCount = 1u;
+    LocalMotionDiscreteBatchEvaluator evaluateDiscreteCandidates;
     std::function<bool()> shouldCancel;
     std::function<void(double)> reportProgress;
+    std::function<void(const LocalMotionGrid&,bool)> reportObservation;
 };
 
 enum class LocalMotionFailure : std::uint8_t {
@@ -189,8 +222,14 @@ struct BidirectionalLocalMotionRequest {
     GlobalWarpCovarianceEvaluator forwardGlobalCovariance;
     GlobalWarpCovarianceEvaluator reverseGlobalCovariance;
     LocalMotionOptions options;
+    LocalMotionDiscreteBatchEvaluator evaluateDiscreteCandidates;
+    // Forward and reverse grids are independent until closure evaluation.
+    // A value of two or more permits those two exact computations to run in
+    // parallel without changing either grid's deterministic math.
+    std::uint32_t workerCount = 1u;
     std::function<bool()> shouldCancel;
     std::function<void(double)> reportProgress;
+    std::function<void(const LocalMotionGrid&,bool)> reportObservation;
 };
 
 struct BidirectionalLocalMotionResult {
@@ -202,6 +241,11 @@ struct BidirectionalLocalMotionResult {
     std::uint64_t closureAcceptedCount = 0u;
     std::uint64_t closureRejectedCount = 0u;
 };
+
+// One local refinement from an already accepted warp, without another global
+// or discrete search. Failure leaves the caller's original field authoritative.
+bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest&,
+    RawCoordinate referenceRaw,RawCoordinate sourceRaw,MotionNode& result);
 
 bool EstimateBidirectionalLocalMotion(
     const BidirectionalLocalMotionRequest& request,

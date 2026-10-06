@@ -17,7 +17,7 @@ namespace Stack::RawEvidence {
 inline constexpr int kRawTechnicalEvidenceSchemaVersion = 1;
 inline constexpr const char* kRawTechnicalEvidenceVersion = "raw-technical-evidence-v1";
 inline constexpr const char* kRawNormalizationVersion = "dng-linear-reference-v1";
-inline constexpr const char* kRawDecoderIdentityVersion = "stack-libraw-dng-supplement-v2";
+inline constexpr const char* kRawDecoderIdentityVersion = "stack-libraw-decoded-exif-v4";
 
 enum class EvidenceProvenance {
     Measured,
@@ -177,7 +177,8 @@ struct BuildOptions {
     std::function<bool()> shouldCancel;
 };
 
-SourceIdentity ComputeSourceIdentity(const std::filesystem::path& path);
+SourceIdentity ComputeSourceIdentity(const std::filesystem::path& path,
+    const std::function<bool()>& shouldCancel = {});
 SourceIdentity ComputeSourceIdentity(const std::vector<std::uint8_t>& bytes);
 DecodeIdentity BuildDecodeIdentity(
     const Raw::RawMetadata& metadata,

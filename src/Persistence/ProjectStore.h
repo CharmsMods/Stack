@@ -3,6 +3,7 @@
 #include "Persistence/RawProjectModel.h"
 
 #include <filesystem>
+#include <functional>
 #include <istream>
 #include <memory>
 #include <string>
@@ -58,6 +59,8 @@ public:
     virtual ProjectStorageKind StorageKind() const = 0;
     virtual const std::filesystem::path& StoragePath() const = 0;
     virtual std::uint64_t StorageRevision() const = 0;
+    // Read the committed generation from storage without loading image assets.
+    virtual bool ReadStorageRevision(std::uint64_t& revision, std::string& error) const = 0;
     virtual bool IsReadOnlyRecovery() const = 0;
 
     virtual ProjectStoreTransaction BeginTransaction(
@@ -103,6 +106,8 @@ using ProjectStoreHandle = std::shared_ptr<ProjectStore>;
 
 bool IsDirectoryProjectBundle(const std::filesystem::path& path);
 bool IsPortableV3Project(const std::filesystem::path& path);
+std::filesystem::path ResolveProjectStoreRoot(const std::filesystem::path& path);
+std::filesystem::path WorkingProjectDocumentPath(const std::filesystem::path& projectRoot);
 
 ProjectStoreOpenResult CreateProjectStore(
     const std::filesystem::path& path,
@@ -115,6 +120,8 @@ ProjectStoreOpenResult ConvertProjectStore(
     const ProjectStoreHandle& sourceStore,
     const RawProjectSnapshot& snapshot,
     const std::filesystem::path& destinationPath,
-    ProjectStorageKind destinationKind);
+    ProjectStorageKind destinationKind,
+    const std::function<bool(const ProjectStoreHandle&, const ProjectStoreTransaction&,
+        RawProjectSnapshot&, std::string&)>& prepareCopy = {});
 
 } // namespace Stack::Project

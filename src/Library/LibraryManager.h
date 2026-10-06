@@ -1,13 +1,15 @@
 #pragma once
 
 #include "Async/TaskState.h"
-#include "Editor/LoadedProjectData.h"
+#include "Async/TaskSystem.h"
+#include "Utils/UiActivity.h"
+#include "Persistence/LoadedProjectData.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "ProjectData.h"
 #include "Utils/UiNotifications.h"
+#include "Notifications/Notifier.h"
 #include <chrono>
 #include <cstdint>
-#include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -32,6 +34,9 @@ enum class AssetConflictAction {
 };
 
 struct ImportConflict {
+    std::uint64_t id = 0;
+    std::string pendingCopyFileName;
+    bool pendingCopySaved = false;
     int importedProjectIndex = -1; 
     std::string localProjectFileName;
     
@@ -55,6 +60,8 @@ struct ImportConflict {
 };
 
 struct AssetImportConflict {
+    std::uint64_t id = 0;
+    Stack::Notifications::ActivityHandle activity;
     std::string localAssetFileName;
     std::string localDisplayName;
     std::string localTimestamp;
@@ -78,6 +85,13 @@ struct AssetImportConflict {
     unsigned int importedPreviewTex = 0;
     bool areIdentical = false;
     bool previewsReady = false;
+};
+
+enum class ConflictResolutionState { Resolved, Pending, Failed };
+
+struct ConflictResolutionResult {
+    ConflictResolutionState state = ConflictResolutionState::Failed;
+    std::string message;
 };
 
 struct LibraryRefreshSnapshot {
@@ -130,27 +144,35 @@ public:
     void CancelLibraryRefreshRequests();
     LibraryRefreshSnapshot GetRefreshSnapshot() const;
     bool IsRefreshBusy() const;
+    void CollectActivity(Stack::UiActivity::Snapshot& snapshot) const;
+    void SetNotificationScope(Stack::Notifications::Notifier notifier);
+    Stack::Notifications::Notifier& GetNotifier() { return m_Notifier; }
+    const Stack::Notifications::Notifier& GetNotifier() const { return m_Notifier; }
     void SetThumbnailWarmupPriority(std::vector<std::string> projectFileNames, std::vector<std::string> assetFileNames);
     LibraryTextureUploadStats UploadLibraryTextures(double maxMainThreadMs = 2.0);
     LibraryAutoRefreshStats TickAutoRefresh();
 
     int GetProjectCount() const;
 
-    void RequestSaveProject(const std::string& name, EditorModule* editor, const std::string& existingFileName = "", std::function<void(bool)> onComplete = {});
+    void RequestSaveProject(const std::string& name, EditorModule* editor,
+        const std::string& existingFileName = "", std::function<void(bool)> onComplete = {},
+        bool requireNewStore = false);
     void RequestSaveProjectToPath(
         const std::string& name,
         EditorModule* editor,
         const std::filesystem::path& absoluteDestination,
-        std::function<void(bool)> onComplete = {});
+        std::function<void(bool)> onComplete = {},
+        bool requireNewStore = false);
     void RequestPersistNodeBrowserThumbnails(
         const std::string& fileName,
         std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry> entries);
     void RequestLoadProject(const std::string& fileName, EditorModule* editor, std::function<void(bool)> onComplete = {});
     void RequestLoadProjectDeferredApply(
         const std::string& fileName,
-        std::function<void(bool, std::shared_ptr<EditorLoadedProjectData>)> onReady);
-    void SetProjectLoadApplyingStatus(const std::string& statusText);
-    void FinishDeferredProjectLoad(bool success, const std::string& message = "");
+        EditorModule* editor,
+        std::function<void(bool, std::shared_ptr<Stack::Project::LoadedProjectData>)> onReady);
+    void SetProjectLoadApplyingStatus(EditorModule* editor, const std::string& statusText);
+    void FinishDeferredProjectLoad(EditorModule* editor, bool success, const std::string& message = "");
     bool OverwriteEditorProject(
         const std::string& fileName,
         const std::string& projectName,
@@ -172,6 +194,7 @@ public:
 
     void RequestExportLibraryBundle(const std::string& destinationPath);
     void RequestImportLibraryBundle(const std::string& sourcePath);
+    void RequestImportFolderAssets(std::filesystem::path path, bool png, bool jpg, bool bmp, bool tga);
     void RequestSaveCompositeProject(const std::string& name, CompositeModule* composite, const std::string& existingFileName = "", std::function<void(bool)> onComplete = {});
     void RequestLoadCompositeProject(const std::string& fileName, CompositeModule* composite, std::function<void(bool)> onComplete = {});
     void RequestLoadCompositeProjectFromPath(const std::filesystem::path& absolutePath, CompositeModule* composite, std::function<void(bool)> onComplete = {});
@@ -181,7 +204,8 @@ public:
         const std::string& preferredFileName = "",
         const std::string& projectFileName = "",
         const std::string& projectName = "",
-        const std::string& projectKind = "");
+        const std::string& projectKind = "",
+        bool meaningful = true);
     void MirrorCompositeEmbeddedAssets(const StackBinaryFormat::ProjectDocument& document);
 
     void RequestImportAndLoad(
@@ -198,13 +222,16 @@ public:
 
     bool HasPendingConflicts() const { return !m_PendingConflicts.empty(); }
     const std::vector<ImportConflict>& GetPendingConflicts() const { return m_PendingConflicts; }
-    void ResolveConflict(int index, ConflictAction action, const std::string& newName = "");
+    Stack::Notifications::OperationId GetImportOperationId() const { return m_ImportActivity.operationId; }
+    ConflictResolutionResult ResolveConflict(std::uint64_t id, ConflictAction action, const std::string& newName = "");
+    int FindConflictIndex(std::uint64_t id) const;
     void ClearConflicts();
     void PrepareConflictPreview(int index);
     void ResetConflictPreview(int index);
     bool HasPendingAssetConflicts() const { return !m_PendingAssetConflicts.empty(); }
     const std::vector<AssetImportConflict>& GetPendingAssetConflicts() const { return m_PendingAssetConflicts; }
-    void ResolveAssetConflict(int index, AssetConflictAction action);
+    ConflictResolutionResult ResolveAssetConflict(std::uint64_t id, AssetConflictAction action);
+    int FindAssetConflictIndex(std::uint64_t id) const;
     void ClearAssetConflicts();
     void PrepareAssetConflictPreview(int index);
     void ProcessDeferredDeletions();
@@ -222,21 +249,24 @@ public:
     const std::vector<std::shared_ptr<ProjectEntry>>& GetProjects() const { return m_Projects; }
     const std::vector<std::shared_ptr<AssetEntry>>& GetAssets() const { return m_Assets; }
 
-    Async::TaskState GetSaveTaskState() const { return m_SaveTaskState; }
-    const std::string& GetSaveStatusText() const { return m_SaveStatusText; }
+    Async::TaskState GetSaveTaskState(const EditorModule* editor = nullptr) const;
+    const std::string& GetSaveStatusText(const EditorModule* editor = nullptr) const;
 
-    Async::TaskState GetProjectLoadTaskState() const { return m_ProjectLoadTaskState; }
-    const std::string& GetProjectLoadStatusText() const { return m_ProjectLoadStatusText; }
+    Async::TaskState GetProjectLoadTaskState(const EditorModule* editor = nullptr) const;
+    const std::string& GetProjectLoadStatusText(const EditorModule* editor = nullptr) const;
 
     Async::TaskState GetImportTaskState() const { return m_ImportTaskState; }
     const std::string& GetImportStatusText() const { return m_ImportStatusText; }
 
     Async::TaskState GetExportTaskState() const { return m_ExportTaskState; }
     const std::string& GetExportStatusText() const { return m_ExportStatusText; }
-    bool ConsumeUiNotification(UiNotificationEvent& outEvent);
 
     const std::filesystem::path& GetLibraryPath() const { return m_LibraryPath; }
     const std::filesystem::path& GetAssetsPath() const { return m_AssetsPath; }
+    bool IsProjectRootWritable() const { return m_ProjectRootWritable; }
+    const std::string& GetProjectRootWriteError() const {
+        return m_ProjectRootWriteError;
+    }
     bool ConsumeSavedProjectEvent(std::string& outFileName, std::string& outProjectKind);
 
 private:
@@ -245,7 +275,8 @@ private:
         EditorModule* editor,
         const std::string& existingFileName,
         const std::filesystem::path& absoluteDestination,
-        std::function<void(bool)> onComplete);
+        std::function<void(bool)> onComplete,
+        bool requireNewStore);
     void InitializeThumbnail(std::shared_ptr<ProjectEntry> project);
     void InitializeAssetThumbnail(std::shared_ptr<AssetEntry> asset);
     void QueueProjectThumbnailDecode(const std::shared_ptr<ProjectEntry>& project);
@@ -259,6 +290,7 @@ private:
         const std::string& fileName,
         StackBinaryFormat::ProjectDocument& outDocument,
         const StackBinaryFormat::ProjectLoadOptions& options);
+    std::filesystem::path ResolveProjectPath(const std::string& projectKey) const;
     std::uint64_t BumpNodeBrowserThumbnailPersistRevision(
         const std::filesystem::path& projectPath);
     bool IsNodeBrowserThumbnailPersistRevisionCurrent(
@@ -267,13 +299,17 @@ private:
 
     bool WriteLibraryBundle(const std::string& destinationPath);
     bool ImportLibraryBundle(const std::string& sourcePath);
-    void FinalizeImport(const StackBinaryFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices);
+    bool FinalizeImport(const StackBinaryFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices);
 
     std::uintmax_t BuildLibrarySignature() const;
     void RequestLibrarySignatureAsync();
     std::filesystem::path BuildAssetPathForProjectFile(const std::string& projectFileName) const;
     void QueueSavedProjectEvent(const std::string& fileName, const std::string& projectKind);
-    void QueueUiNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
+    void PostNotification(UiNotificationSeverity severity, std::string message, std::string dedupeKey = "");
+    Async::ActivityMetadata MakeActivityMetadata(std::string label, bool maintenance = false) const;
+    void ReportPreviewProblem(const std::shared_ptr<ProjectEntry>& project);
+    void ReportPreviewProblem(const std::shared_ptr<AssetEntry>& asset);
+    void ResolvePreviewProblem(const std::string& key);
 
     std::vector<std::shared_ptr<ProjectEntry>> m_Projects;
     std::vector<std::shared_ptr<AssetEntry>> m_Assets;
@@ -286,6 +322,8 @@ private:
 
     std::filesystem::path m_LibraryPath;
     std::filesystem::path m_AssetsPath;
+    bool m_ProjectRootWritable = true;
+    std::string m_ProjectRootWriteError;
     std::uintmax_t m_LastLibrarySignature = 0;
     std::uint64_t m_LibraryRefreshGeneration = 0;
     LibraryRefreshSnapshot m_LibraryRefreshSnapshot;
@@ -316,10 +354,15 @@ private:
 
     std::uint64_t m_ProjectPreviewGeneration = 0;
     std::uint64_t m_AssetPreviewGeneration = 0;
-    std::deque<UiNotificationEvent> m_UiNotifications;
+    Stack::Notifications::Notifier m_Notifier;
+    Stack::Notifications::ActivityHandle m_ImportActivity;
+    Stack::Notifications::ActivityHandle m_ExportActivity;
+    std::unordered_map<std::string, Stack::Notifications::EventId> m_PreviewProblems;
+    Stack::Notifications::EventId m_RefreshProblem = 0;
 
     std::vector<ImportConflict> m_PendingConflicts;
     std::vector<AssetImportConflict> m_PendingAssetConflicts;
+    std::uint64_t m_NextConflictId = 1;
     StackBinaryFormat::LibraryBundleDocument m_ActiveImportBundle;
     std::vector<unsigned int> m_DeferredTextureDeletions;
     std::string m_PendingSavedProjectFileName;

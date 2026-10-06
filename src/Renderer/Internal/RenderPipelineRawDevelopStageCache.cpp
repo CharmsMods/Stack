@@ -19,9 +19,71 @@ namespace {
 constexpr std::size_t kManualRawSubstageHistoryLimit = 2;
 
 bool IsManualRawSubstageCacheKey(std::string_view key) {
-    return key.find(":__rawDevelopmentPostLocalExposure") != std::string_view::npos ||
-           key.find(":__rawDevelopmentPostLocalRange") != std::string_view::npos ||
-           key.find(":__rawDevelopmentPostFinishTone") != std::string_view::npos;
+    return key.find(":__rawDevelopmentPostLocalRange") != std::string_view::npos ||
+           key.find(":__rawDevelopmentPostFinishTone") != std::string_view::npos ||
+           key.find(":__rawDevelopmentPostColorWarp") != std::string_view::npos ||
+           key.find(":__rawDevelopmentPostViewTransform") != std::string_view::npos ||
+           key.find(":__rawDevelopmentPostOutputCrop") != std::string_view::npos;
+}
+
+bool IsTransientExposureDependentCacheKey(std::string_view key) {
+    return key.find(":__rawDevelopmentPlacement") != std::string_view::npos ||
+           IsManualRawSubstageCacheKey(key);
+}
+
+bool IsTransientExposureProtectedCacheKey(std::string_view key) {
+    return key.find(":__rawDevelopmentNeutral") != std::string_view::npos ||
+           key.find(":__rawDevelopmentRgbBase") != std::string_view::npos ||
+           key.find(":__rawDevelopmentRawBase") != std::string_view::npos;
+}
+
+bool CacheKeyMatchesStage(
+    std::string_view key,
+    Stack::Renderer::RawDevelopmentCache::Stage stage) {
+    using Stage = Stack::Renderer::RawDevelopmentCache::Stage;
+    switch (stage) {
+        case Stage::RawBase:
+            return key.find(":__rawDevelopmentRawBase") != std::string_view::npos ||
+                   key.find(":__rawDevelopmentRgbBase") != std::string_view::npos;
+        case Stage::NeutralPlacement:
+            return key.find(":__rawDevelopmentNeutral") != std::string_view::npos ||
+                   key.find(":__rawDevelopmentRgbDenoise") != std::string_view::npos;
+        case Stage::RawPlacement:
+            return key.find(":__rawDevelopmentPlacement") != std::string_view::npos;
+        case Stage::PostLocalRange:
+            return key.find(":__rawDevelopmentPostLocalRange") != std::string_view::npos;
+        case Stage::PostFinishTone:
+            return key.find(":__rawDevelopmentPostFinishTone") != std::string_view::npos;
+        case Stage::PostColorWarp:
+            return key.find(":__rawDevelopmentPostColorWarp") != std::string_view::npos;
+        case Stage::PostViewTransform:
+            return key.find(":__rawDevelopmentPostViewTransform") != std::string_view::npos;
+        case Stage::PostOutputCrop:
+            return key.find(":__rawDevelopmentPostOutputCrop") != std::string_view::npos;
+    }
+    return false;
+}
+
+int RawDevelopStageCacheEvictionPriority(
+    std::string_view key,
+    std::size_t entryCount) {
+    // Discard history before the current boundary, then downstream authored
+    // stages before expensive sensor-domain bases. This preserves CFA and RGB
+    // denoise reuse for Lift/zones/curve/color/view edits whenever the shared
+    // memory budget can retain at least one native upstream texture.
+    if (entryCount > 1u) return 40;
+    if (IsManualRawSubstageCacheKey(key)) return 30;
+    if (key.find(":__rawDevelopmentPlacement") != std::string_view::npos) {
+        return 20;
+    }
+    if (key.find(":__rawDevelopmentNeutral") != std::string_view::npos ||
+        key.find(":__rawDevelopmentRgbBase") != std::string_view::npos) {
+        return 10;
+    }
+    if (key.find(":__rawDevelopmentRawBase") != std::string_view::npos) {
+        return 0;
+    }
+    return 20;
 }
 
 } // namespace
@@ -71,8 +133,21 @@ RenderPipeline::CachedGraphTexture RenderPipeline::FindRawDevelopStageCacheEntry
         return {};
     }
     auto& entries = cacheIt->second;
-    for (auto entryIt = entries.begin(); entryIt != entries.end(); ++entryIt) {
-        if (entryIt->fingerprint != fingerprint || entryIt->texture == 0) {
+    for (auto entryIt = entries.begin(); entryIt != entries.end(); ) {
+        if (entryIt->fingerprint != fingerprint) {
+            ++entryIt;
+            continue;
+        }
+        if (entryIt->texture == 0 ||
+            entryIt->width <= 0 ||
+            entryIt->height <= 0 ||
+            glIsTexture(entryIt->texture) != GL_TRUE) {
+            // A cache entry can outlive the texture it refers to when a
+            // render target is rebuilt or a shared GL resource is discarded.
+            // Do not let a stale name pass the cache lookup and become the
+            // next RAW presentation.
+            DeleteRawDevelopStageCacheEntry(*entryIt);
+            entryIt = entries.erase(entryIt);
             continue;
         }
         const CachedGraphTexture hit = *entryIt;
@@ -84,7 +159,31 @@ RenderPipeline::CachedGraphTexture RenderPipeline::FindRawDevelopStageCacheEntry
         }
         return hit;
     }
+    if (entries.empty()) {
+        m_RawDevelopStageImageCache.erase(cacheIt);
+    }
     return {};
+}
+
+void RenderPipeline::InvalidateRawDevelopStageCacheEntry(
+    const std::string& key,
+    std::size_t fingerprint) {
+    const auto cacheIt = m_RawDevelopStageImageCache.find(key);
+    if (cacheIt == m_RawDevelopStageImageCache.end()) {
+        return;
+    }
+    auto& entries = cacheIt->second;
+    for (auto entryIt = entries.begin(); entryIt != entries.end(); ) {
+        if (fingerprint != 0 && entryIt->fingerprint != fingerprint) {
+            ++entryIt;
+            continue;
+        }
+        DeleteRawDevelopStageCacheEntry(*entryIt);
+        entryIt = entries.erase(entryIt);
+    }
+    if (entries.empty()) {
+        m_RawDevelopStageImageCache.erase(cacheIt);
+    }
 }
 
 unsigned int RenderPipeline::CloneTextureForRawDevelopStageCache(unsigned int sourceTexture) {
@@ -103,7 +202,7 @@ std::uint64_t RenderPipeline::RawDevelopStageCacheEntryBytes(const RenderPipelin
     if (!entry.owned || entry.texture == 0) {
         return 0;
     }
-    return EstimateRawDevelopStageCacheTextureBytes(entry.width, entry.height);
+    return EstimateGraphTargetBytes(entry.width, entry.height);
 }
 
 std::uint64_t RenderPipeline::RawDevelopStageCacheTotalBytes() const {
@@ -122,10 +221,15 @@ std::uint64_t RenderPipeline::RawDevelopStageCacheTotalBytes() const {
 }
 
 void RenderPipeline::TrimRawDevelopStageCacheVector(std::vector<RenderPipeline::CachedGraphTexture>& entries, std::size_t maxEntries) {
+    // A native denoise dependency and the newest preview can coexist even
+    // when ordinary stage history is restricted to a single raster.
+    if (std::any_of(entries.begin(), entries.end(), [](const auto& entry) { return entry.viewportNativeDependency; }))
+        maxEntries = std::max(maxEntries, std::size_t{2});
     while (entries.size() > maxEntries) {
-        CachedGraphTexture& stale = entries.back();
-        DeleteRawDevelopStageCacheEntry(stale);
-        entries.pop_back();
+        auto victim = std::find_if(entries.rbegin(), entries.rend(), [](const auto& entry) { return !entry.viewportNativeDependency; });
+        if (victim == entries.rend()) break;
+        DeleteRawDevelopStageCacheEntry(*victim);
+        entries.erase(std::next(victim).base());
     }
 }
 
@@ -136,18 +240,39 @@ std::uint64_t RenderPipeline::TrimRawDevelopStageCacheToBudget(
     while (currentTotalBytes > maximumBytes) {
         const std::string* victimKey = nullptr;
         std::uint64_t victimBytes = 0;
+        int victimPriority = std::numeric_limits<int>::min();
+        std::size_t victimIndex = 0;
         for (const auto& [cacheKey, entries] : m_RawDevelopStageImageCache) {
             if (entries.empty()) {
                 continue;
             }
-            const CachedGraphTexture& candidate = entries.back();
-            if (candidate.texture == protectedTexture) {
+            if (m_RawDevelopmentGlobalExposureInteraction &&
+                IsTransientExposureProtectedCacheKey(cacheKey)) {
                 continue;
             }
-            const std::uint64_t bytes = RawDevelopStageCacheEntryBytes(candidate);
-            if (bytes > victimBytes) {
-                victimKey = &cacheKey;
-                victimBytes = bytes;
+            if (m_RawDevelopmentPreferredCacheInputStage.has_value() &&
+                entries.size() == 1u &&
+                RawDevelopStageCacheEntryBytes(entries.front()) <= m_RawDevelopStageCacheBudgetBytes &&
+                CacheKeyMatchesStage(
+                    cacheKey,
+                    *m_RawDevelopmentPreferredCacheInputStage)) {
+                // The active editor's immediate input is more useful than an
+                // arbitrary authored boundary. Historical entries remain
+                // evictable so preference never creates unbounded retention.
+                continue;
+            }
+            for (std::size_t index = entries.size(); index-- > 0;) {
+                const CachedGraphTexture& candidate = entries[index];
+                if (candidate.texture == protectedTexture || candidate.viewportNativeDependency) continue;
+                const std::uint64_t bytes = RawDevelopStageCacheEntryBytes(candidate);
+                const int priority = RawDevelopStageCacheEvictionPriority(cacheKey, index > 0 ? 2u : 1u);
+                if (priority > victimPriority ||
+                    (priority == victimPriority && bytes > victimBytes)) {
+                    victimKey = &cacheKey;
+                    victimBytes = bytes;
+                    victimPriority = priority;
+                    victimIndex = index;
+                }
             }
         }
         if (victimKey == nullptr || victimBytes == 0) {
@@ -157,9 +282,9 @@ std::uint64_t RenderPipeline::TrimRawDevelopStageCacheToBudget(
         if (victimIt == m_RawDevelopStageImageCache.end() || victimIt->second.empty()) {
             break;
         }
-        CachedGraphTexture& stale = victimIt->second.back();
+        CachedGraphTexture& stale = victimIt->second[victimIndex];
         DeleteRawDevelopStageCacheEntry(stale);
-        victimIt->second.pop_back();
+        victimIt->second.erase(victimIt->second.begin() + victimIndex);
         currentTotalBytes =
             currentTotalBytes > victimBytes
                 ? currentTotalBytes - victimBytes
@@ -171,9 +296,21 @@ std::uint64_t RenderPipeline::TrimRawDevelopStageCacheToBudget(
     return currentTotalBytes;
 }
 
-void RenderPipeline::StoreRawDevelopStageCacheEntry(const std::string& key, unsigned int texture, std::size_t fingerprint) {
+bool RenderPipeline::StoreRawDevelopStageCacheEntry(
+    const std::string& key,
+    unsigned int texture,
+    std::size_t fingerprint,
+    bool takeTextureOwnership) {
     if (key.empty() || texture == 0 || fingerprint == 0 || m_Width <= 0 || m_Height <= 0) {
-        return;
+        return false;
+    }
+    if (m_RawDevelopmentGlobalExposureInteraction &&
+        IsTransientExposureDependentCacheKey(key)) {
+        // Pointer samples have distinct exposure fingerprints, so retaining
+        // full-frame clones provides no useful reuse and can evict the neutral
+        // placement that makes Global Exposure inexpensive. The settled
+        // command restores ordinary cache population.
+        return false;
     }
 
     std::size_t maxEntriesForDimensions = ResolveRawDevelopStageCacheMaxEntries(m_Width, m_Height);
@@ -185,16 +322,24 @@ void RenderPipeline::StoreRawDevelopStageCacheEntry(const std::string& key, unsi
             kManualRawSubstageHistoryLimit);
     }
     if (maxEntriesForDimensions == 0) {
-        return;
+        return false;
     }
 
     const std::uint64_t entryBytes =
-        EstimateRawDevelopStageCacheTextureBytes(m_Width, m_Height);
-    if (entryBytes == 0 || entryBytes > kRawDevelopStageCacheSoftByteBudget) {
-        return;
+        EstimateGraphTargetBytes(m_Width, m_Height);
+    if (entryBytes == 0 || entryBytes > m_RawDevelopStageCacheBudgetBytes) {
+        return false;
+    }
+    if (m_RawDevelopmentCachePrewarmActive &&
+        (entryBytes > m_RawDevelopmentCachePrewarmByteBudget ||
+         m_RawDevelopmentCachePrewarmStoredBytes >
+             m_RawDevelopmentCachePrewarmByteBudget - entryBytes)) {
+        // Hover work is speculative. Never let it allocate beyond its small
+        // request budget, even when the normal RAW stage cache has room.
+        return false;
     }
     const std::uint64_t preallocationBudget =
-        kRawDevelopStageCacheSoftByteBudget - entryBytes;
+        m_RawDevelopStageCacheBudgetBytes - entryBytes;
     const std::uint64_t remainingBytes =
         TrimRawDevelopStageCacheToBudget(
             RawDevelopStageCacheTotalBytes(),
@@ -203,17 +348,21 @@ void RenderPipeline::StoreRawDevelopStageCacheEntry(const std::string& key, unsi
     if (remainingBytes > preallocationBudget) {
         // The only remaining cache owner may be the texture being cloned.
         // Do not exceed the cache budget just to create another alias.
-        return;
+        return false;
     }
 
-    Stack::Renderer::ScopedGLTexture copyTexture(
-        CloneTextureForRawDevelopStageCache(texture));
-    if (!copyTexture) {
-        return;
+    Stack::Renderer::ScopedGLTexture copyTexture;
+    unsigned int cachedTexture = texture;
+    if (!takeTextureOwnership) {
+        copyTexture.Reset(CloneTextureForRawDevelopStageCache(texture));
+        if (!copyTexture) {
+            return false;
+        }
+        cachedTexture = copyTexture.Get();
     }
 
     CachedGraphTexture newEntry;
-    newEntry.texture = copyTexture.Get();
+    newEntry.texture = cachedTexture;
     newEntry.fingerprint = fingerprint;
     newEntry.width = m_Width;
     newEntry.height = m_Height;
@@ -233,14 +382,19 @@ void RenderPipeline::StoreRawDevelopStageCacheEntry(const std::string& key, unsi
         if (insertedCacheKey) {
             m_RawDevelopStageImageCache.erase(cacheLocation);
         }
-        return;
+        return false;
     } catch (const std::length_error&) {
         if (insertedCacheKey) {
             m_RawDevelopStageImageCache.erase(cacheLocation);
         }
-        return;
+        return false;
     }
-    copyTexture.Release();
+    if (!takeTextureOwnership) {
+        copyTexture.Release();
+    }
+    if (m_RawDevelopmentCachePrewarmActive) {
+        m_RawDevelopmentCachePrewarmStoredBytes += entryBytes;
+    }
 
     auto& entries = cacheLocation->second;
     for (auto entryIt = std::next(entries.begin());
@@ -257,7 +411,9 @@ void RenderPipeline::StoreRawDevelopStageCacheEntry(const std::string& key, unsi
     TrimRawDevelopStageCacheVector(entries, maxEntriesForDimensions);
     (void)TrimRawDevelopStageCacheToBudget(
         RawDevelopStageCacheTotalBytes(),
-        kRawDevelopStageCacheSoftByteBudget);
+        m_RawDevelopStageCacheBudgetBytes,
+        cachedTexture);
+    return true;
 }
 
 std::uint64_t RenderPipeline::EstimateRawDevelopStageCacheTextureBytesForValidation(int width, int height) {

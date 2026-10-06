@@ -152,11 +152,31 @@ bool TryReadJsonFloat(const nlohmann::json& value, const std::string& key, float
 
 } // namespace
 
+Stack::Timeline::TimelineAnimationState& EditorModule::GetGraphAnimation() {
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->animation : m_Project->timeline;
+}
+const Stack::Timeline::TimelineAnimationState& EditorModule::GetGraphAnimation() const {
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->animation : m_Project->timeline;
+}
+std::string EditorModule::GetEditedGraphId() const {
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->layerId : "project";
+}
+std::vector<EditorModule::CachedCompositeChainState> EditorModule::BuildTimelineGraphChains() const {
+    std::vector<CachedCompositeChainState> chains;
+    for (const auto& info : GetNodeGraph().GetCompletedChains()) {
+        CachedCompositeChainState chain; chain.info = info;
+        const auto* output = GetNodeGraph().FindNode(info.outputNodeId);
+        chain.label = output ? output->title : "Output";
+        chains.push_back(std::move(chain));
+    }
+    return chains;
+}
+
 std::vector<Stack::Timeline::AnimatableParameterDefinition> EditorModule::BuildTimelineAnimatableParametersForChain(
     const EditorNodeGraph::CompletedChainInfo& chain) const {
     std::vector<Stack::Timeline::AnimatableParameterDefinition> parameters;
     for (int nodeId : chain.nodeIds) {
-        const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+        const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
         if (!node) {
             continue;
         }
@@ -164,13 +184,13 @@ std::vector<Stack::Timeline::AnimatableParameterDefinition> EditorModule::BuildT
         const LayerBase* layer = nullptr;
         if (node->kind == EditorNodeGraph::NodeKind::Layer &&
             node->layerIndex >= 0 &&
-            node->layerIndex < static_cast<int>(m_Layers.size()) &&
-            m_Layers[node->layerIndex]) {
-            layer = m_Layers[node->layerIndex].get();
+            node->layerIndex < static_cast<int>(GetLayers().size()) &&
+            GetLayers()[node->layerIndex]) {
+            layer = GetLayers()[node->layerIndex].get();
         }
 
         std::vector<Stack::Timeline::AnimatableParameterDefinition> nodeParameters =
-            Stack::Timeline::CollectAnimatableParametersForNode(*node, layer);
+            Stack::Timeline::CollectAnimatableParametersForNode(*node, layer, GetEditedGraphId());
         parameters.insert(
             parameters.end(),
             std::make_move_iterator(nodeParameters.begin()),
@@ -199,7 +219,7 @@ bool EditorModule::AddTimelineKeyframeForSelectedParameter() {
         return false;
     }
 
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(m_TimelineUi.selectedParameterTarget.nodeId);
+    const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(m_TimelineUi.selectedParameterTarget.nodeId);
     if (!node) {
         return false;
     }
@@ -207,9 +227,9 @@ bool EditorModule::AddTimelineKeyframeForSelectedParameter() {
     const LayerBase* layer = nullptr;
     if (node->kind == EditorNodeGraph::NodeKind::Layer &&
         node->layerIndex >= 0 &&
-        node->layerIndex < static_cast<int>(m_Layers.size()) &&
-        m_Layers[node->layerIndex]) {
-        layer = m_Layers[node->layerIndex].get();
+        node->layerIndex < static_cast<int>(GetLayers().size()) &&
+        GetLayers()[node->layerIndex]) {
+        layer = GetLayers()[node->layerIndex].get();
     }
 
     float value = 0.0f;
@@ -222,10 +242,11 @@ bool EditorModule::AddTimelineKeyframeForSelectedParameter() {
     }
 
     Stack::Timeline::SetOrReplaceKeyframe(
-        m_TimelineAnimation,
+        GetGraphAnimation(),
         m_TimelineUi.selectedParameterTarget,
         m_TimelineUi.currentFrame,
         value);
+    MarkGraphEdited();
     ClearTimelineLiveEditPreview();
     MarkTimelineFrameRenderDirty();
     return true;
@@ -236,12 +257,12 @@ nlohmann::json EditorModule::SerializeTimelinePersistence() const {
     document.currentFrame = m_TimelineUi.currentFrame;
     document.durationFrames = m_TimelineUi.durationFrames;
     document.framesPerSecond = m_TimelineUi.framesPerSecond;
-    document.animation = m_TimelineAnimation;
+    document.animation = m_Project->timeline;
     return Stack::Timeline::SerializeTimelineDocument(document);
 }
 
 void EditorModule::DeserializeTimelinePersistence(const nlohmann::json& pipelineData) {
-    m_TimelineAnimation = {};
+    m_Project->timeline = {};
     m_TimelineUi.selectedParameterTarget = {};
     m_TimelineUi.playing = false;
     m_TimelineUi.loopPlayback = true;
@@ -258,7 +279,7 @@ void EditorModule::DeserializeTimelinePersistence(const nlohmann::json& pipeline
         Stack::Timeline::DeserializeTimelineDocument(
             timeline,
             [this](const Stack::Timeline::AnimatableParameterTarget& target) {
-                const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(target.nodeId);
+                const EditorNodeGraph::Node* node = m_Project->graph.FindNode(target.nodeId);
                 if (!node) {
                     return false;
                 }
@@ -266,9 +287,9 @@ void EditorModule::DeserializeTimelinePersistence(const nlohmann::json& pipeline
                 const LayerBase* layer = nullptr;
                 if (node->kind == EditorNodeGraph::NodeKind::Layer &&
                     node->layerIndex >= 0 &&
-                    node->layerIndex < static_cast<int>(m_Layers.size()) &&
-                    m_Layers[node->layerIndex]) {
-                    layer = m_Layers[node->layerIndex].get();
+                    node->layerIndex < static_cast<int>(m_Project->layers.size()) &&
+                    m_Project->layers[node->layerIndex]) {
+                    layer = m_Project->layers[node->layerIndex].get();
                 }
 
                 const std::vector<Stack::Timeline::AnimatableParameterDefinition> definitions =
@@ -284,7 +305,7 @@ void EditorModule::DeserializeTimelinePersistence(const nlohmann::json& pipeline
     m_TimelineUi.currentFrame = document.currentFrame;
     m_TimelineUi.durationFrames = document.durationFrames;
     m_TimelineUi.framesPerSecond = document.framesPerSecond;
-    m_TimelineAnimation = document.animation;
+    m_Project->timeline = document.animation;
 }
 
 void EditorModule::SetTimelineFrame(int frame) {
@@ -335,9 +356,9 @@ void EditorModule::StopTimelinePlayback(bool resetToStart) {
 
 int EditorModule::ResolveTimelinePlaybackEndFrame() const {
     const int finalFrame = std::max(0, m_TimelineUi.durationFrames - 1);
-    const int lastKeyframeFrame = Stack::Timeline::FindLastTimelineKeyframeFrame(m_TimelineAnimation);
+    const int lastKeyframeFrame = Stack::Timeline::FindLastTimelineKeyframeFrame(GetGraphAnimation());
     const std::size_t distinctKeyframeFrames =
-        Stack::Timeline::CountDistinctTimelineKeyframeFrames(m_TimelineAnimation);
+        Stack::Timeline::CountDistinctTimelineKeyframeFrames(GetGraphAnimation());
     if (distinctKeyframeFrames >= 2 && lastKeyframeFrame > 0) {
         return std::clamp(lastKeyframeFrame, 0, finalFrame);
     }
@@ -347,16 +368,16 @@ int EditorModule::ResolveTimelinePlaybackEndFrame() const {
 void EditorModule::MarkTimelineFrameRenderDirty() {
     MarkRenderRefreshDirty();
 
-    if (m_TimelineAnimation.tracks.empty()) {
+    if (IsEditingRawLayerMaskGraph() || GetGraphAnimation().tracks.empty()) {
         return;
     }
 
-    RefreshCompletedChainCacheIfNeeded();
+    const auto timelineChains = BuildTimelineGraphChains();
     std::vector<int> affectedOutputNodeIds;
-    for (const CachedCompositeChainState& chain : m_CachedCompletedChains) {
+    for (const CachedCompositeChainState& chain : timelineChains) {
         const bool affected = std::any_of(
-            m_TimelineAnimation.tracks.begin(),
-            m_TimelineAnimation.tracks.end(),
+            GetGraphAnimation().tracks.begin(),
+            GetGraphAnimation().tracks.end(),
             [&chain](const Stack::Timeline::TimelineTrack& track) {
                 return Stack::Timeline::TrackAffectsCompletedChain(track, chain.info);
             });
@@ -401,14 +422,14 @@ bool EditorModule::UpdateTimelineExistingKeyframesForLayerEdit(
     const nlohmann::json& before,
     const nlohmann::json& after) {
     if (!m_TimelineUi.open ||
-        m_TimelineAnimation.tracks.empty() ||
+        GetGraphAnimation().tracks.empty() ||
         node.kind != EditorNodeGraph::NodeKind::Layer) {
         return false;
     }
 
     bool updatedAnyKeyframe = false;
     const std::vector<Stack::Timeline::AnimatableParameterDefinition> definitions =
-        Stack::Timeline::CollectAnimatableParametersForNode(node, nullptr);
+        Stack::Timeline::CollectAnimatableParametersForNode(node, nullptr, GetEditedGraphId());
     for (const Stack::Timeline::AnimatableParameterDefinition& definition : definitions) {
         if (definition.storageKey.empty()) {
             continue;
@@ -425,7 +446,7 @@ bool EditorModule::UpdateTimelineExistingKeyframesForLayerEdit(
         }
 
         const bool updatedKeyframe = Stack::Timeline::UpdateExistingKeyframeValue(
-            m_TimelineAnimation,
+            GetGraphAnimation(),
             definition.target,
             m_TimelineUi.currentFrame,
             afterValue);
@@ -437,6 +458,7 @@ bool EditorModule::UpdateTimelineExistingKeyframesForLayerEdit(
     }
 
     if (updatedAnyKeyframe) {
+        MarkGraphEdited();
         MarkTimelineFrameRenderDirty();
     }
     return updatedAnyKeyframe;
@@ -504,9 +526,9 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
     }
     const int frameBeforeInteraction = m_TimelineUi.currentFrame;
 
-    RefreshCompletedChainCacheIfNeeded();
+    const auto timelineChains = BuildTimelineGraphChains();
     const CachedCompositeChainState* selectedChain = nullptr;
-    for (const CachedCompositeChainState& chain : m_CachedCompletedChains) {
+    for (const CachedCompositeChainState& chain : timelineChains) {
         if (chain.info.outputNodeId == m_TimelineUi.selectedOutputNodeId) {
             selectedChain = &chain;
             break;
@@ -752,7 +774,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
     const float rowsTrackMinX = rowsOrigin.x + rowsLabelWidth;
     const float rowsTrackWidth = std::max(1.0f, rowsWidth - rowsLabelWidth);
 
-    if (m_CachedCompletedChains.empty()) {
+    if (timelineChains.empty()) {
         ImGui::Dummy(ImVec2(1.0f, 8.0f));
         ImGui::TextDisabled("No completed output chains");
     } else {
@@ -761,11 +783,11 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
                 const LayerBase* layer = nullptr;
                 if (node.kind == EditorNodeGraph::NodeKind::Layer &&
                     node.layerIndex >= 0 &&
-                    node.layerIndex < static_cast<int>(m_Layers.size()) &&
-                    m_Layers[node.layerIndex]) {
-                    layer = m_Layers[node.layerIndex].get();
+                    node.layerIndex < static_cast<int>(GetLayers().size()) &&
+                    GetLayers()[node.layerIndex]) {
+                    layer = GetLayers()[node.layerIndex].get();
                 }
-                return Stack::Timeline::CollectAnimatableParametersForNode(node, layer);
+                return Stack::Timeline::CollectAnimatableParametersForNode(node, layer, GetEditedGraphId());
             };
 
         const auto drawRowBase =
@@ -800,7 +822,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
 
         const auto drawTrackKeyframes =
             [&](const auto& trackPredicate, float keyframeCenterY, float radius, float alpha) {
-                for (const Stack::Timeline::TimelineTrack& track : m_TimelineAnimation.tracks) {
+                for (const Stack::Timeline::TimelineTrack& track : GetGraphAnimation().tracks) {
                     if (!trackPredicate(track)) {
                         continue;
                     }
@@ -833,7 +855,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
         };
 
         int rowIndex = 0;
-        for (const CachedCompositeChainState& chain : m_CachedCompletedChains) {
+        for (const CachedCompositeChainState& chain : timelineChains) {
             const int outputNodeId = chain.info.outputNodeId;
             const bool selected = outputNodeId == m_TimelineUi.selectedOutputNodeId;
             const bool chainCollapsed = ContainsInt(m_TimelineUi.collapsedChainOutputNodeIds, outputNodeId);
@@ -887,7 +909,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
             }
 
             for (int nodeId : chain.info.nodeIds) {
-                const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+                const EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
                 if (!node) {
                     continue;
                 }
@@ -899,7 +921,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
                 }
 
                 const bool nodeCollapsed = ContainsInt(m_TimelineUi.collapsedNodeIds, nodeId);
-                const bool nodeSelected = m_NodeGraph.GetSelectedNodeId() == nodeId &&
+                const bool nodeSelected = GetNodeGraph().GetSelectedNodeId() == nodeId &&
                     outputNodeId == m_TimelineUi.selectedOutputNodeId;
                 const ImVec2 nodeRowMin = ImGui::GetCursorScreenPos();
                 const ImVec2 nodeRowMax(nodeRowMin.x + rowsWidth, nodeRowMin.y + kTimelineNodeRowHeight);
@@ -1000,7 +1022,7 @@ void EditorModule::RenderTimelinePanel(const ImVec2& workspacePos, const ImVec2&
 
     ImGui::EndChild();
     if (m_TimelineUi.currentFrame != frameBeforeInteraction &&
-        !m_TimelineAnimation.tracks.empty()) {
+        !GetGraphAnimation().tracks.empty()) {
         ClearTimelineLiveEditPreview();
         MarkTimelineFrameRenderDirty();
     }

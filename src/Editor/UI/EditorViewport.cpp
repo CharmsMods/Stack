@@ -1,10 +1,13 @@
+#include "Editor/UI/ViewportNavigation.h"
 #include "EditorViewport.h"
 #include "App/Resources/EmbeddedTabIcons.h"
 #include "Editor/EditorModule.h"
 #include "App/settings/AppearanceTheme.h"
 #include "EditorViewportHelpers.h"
+#include "EditorViewportPreviewState.h"
 #include "Library/LibraryManager.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/GLStateGuards.h"
 #include "ThirdParty/stb_image.h"
 #include "Utils/FileDialogs.h"
 #include "Utils/ImGuiExtras.h"
@@ -12,7 +15,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <vector>
 #include <string>
 
@@ -39,6 +46,433 @@ ImU32 ApplyAlpha(ImU32 color, float alpha) {
 
 float AnimateUiValue(float current, float target, float deltaTime, float onSpeed = 16.0f, float offSpeed = 10.0f) {
     return ImGuiExtras::AnimateTowards(current, target, deltaTime, target > current ? onSpeed : offSpeed);
+}
+
+bool ReadPixelInspectionTextureRegion(
+    unsigned int texture,
+    int textureWidth,
+    int textureHeight,
+    int regionX,
+    int regionY,
+    int regionWidth,
+    int regionHeight,
+    std::vector<unsigned char>& outPixels) {
+    outPixels.clear();
+    if (texture == 0 || textureWidth <= 0 || textureHeight <= 0 ||
+        regionX < 0 || regionY < 0 || regionWidth <= 0 || regionHeight <= 0 ||
+        regionX + regionWidth > textureWidth || regionY + regionHeight > textureHeight) {
+        return false;
+    }
+
+    const std::size_t rowBytes = static_cast<std::size_t>(regionWidth) * 4u;
+    try {
+        outPixels.resize(
+            rowBytes * static_cast<std::size_t>(regionHeight));
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+
+    const Stack::Renderer::GLState::FramebufferState savedFramebuffer(true);
+    const Stack::Renderer::GLState::PixelPackState savedPixelPack;
+    savedPixelPack.ConfigureTightCpuReadback();
+    const unsigned int readFbo = GLHelpers::CreateFBO(texture);
+    if (readFbo == 0) {
+        savedPixelPack.Restore();
+        savedFramebuffer.Restore(true);
+        outPixels.clear();
+        return false;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, readFbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(
+        regionX,
+        textureHeight - regionY - regionHeight,
+        regionWidth,
+        regionHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        outPixels.data());
+    const bool readbackReady = glGetError() == GL_NO_ERROR;
+
+    savedPixelPack.Restore();
+    savedFramebuffer.Restore(true);
+    glDeleteFramebuffers(1, &readFbo);
+    if (!readbackReady) {
+        outPixels.clear();
+        return false;
+    }
+
+    for (int y = 0; y < regionHeight / 2; ++y) {
+        unsigned char* topRow = outPixels.data() + static_cast<std::size_t>(y) * rowBytes;
+        unsigned char* bottomRow = outPixels.data() +
+            static_cast<std::size_t>(regionHeight - 1 - y) * rowBytes;
+        for (std::size_t x = 0; x < rowBytes; ++x) {
+            std::swap(topRow[x], bottomRow[x]);
+        }
+    }
+    return readbackReady;
+}
+
+std::uint64_t PixelInspectionTextureSignature(
+    unsigned int outputTexture,
+    const EditorRenderWorker::SharedTextureTileSet& tiles,
+    int width,
+    int height,
+    std::uint64_t outputGeneration) {
+    std::uint64_t signature = 1469598103934665603ull;
+    const auto add = [&signature](std::uint64_t value) {
+        signature ^= value;
+        signature *= 1099511628211ull;
+    };
+    add(outputTexture);
+    add(static_cast<std::uint64_t>(std::max(0, width)));
+    add(static_cast<std::uint64_t>(std::max(0, height)));
+    add(outputGeneration);
+    for (const EditorRenderWorker::SharedTextureTile& tile : tiles.tiles) {
+        add(tile.texture);
+        add(static_cast<std::uint64_t>(std::max(0, tile.x)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.y)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.width)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.height)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.haloX)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.haloY)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.haloWidth)));
+        add(static_cast<std::uint64_t>(std::max(0, tile.haloHeight)));
+    }
+    return signature;
+}
+
+struct PixelInspectionBounds {
+    int firstX = 0;
+    int lastX = -1;
+    int firstY = 0;
+    int lastY = -1;
+
+    bool Valid() const {
+        return firstX <= lastX && firstY <= lastY;
+    }
+};
+
+PixelInspectionBounds ComputePixelInspectionBounds(
+    int pixelWidth,
+    int pixelHeight,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax,
+    const ImVec2& clipMin,
+    const ImVec2& clipMax) {
+    PixelInspectionBounds bounds;
+    if (pixelWidth <= 0 || pixelHeight <= 0 ||
+        imageMax.x <= imageMin.x || imageMax.y <= imageMin.y ||
+        clipMax.x <= clipMin.x || clipMax.y <= clipMin.y) {
+        return bounds;
+    }
+
+    const float cellWidth = (imageMax.x - imageMin.x) / static_cast<float>(pixelWidth);
+    const float cellHeight = (imageMax.y - imageMin.y) / static_cast<float>(pixelHeight);
+    if (cellWidth <= 0.0f || cellHeight <= 0.0f) {
+        return bounds;
+    }
+
+    bounds.firstX = std::clamp(
+        static_cast<int>(std::floor((clipMin.x - imageMin.x) / cellWidth)),
+        0,
+        pixelWidth - 1);
+    bounds.lastX = std::clamp(
+        static_cast<int>(std::ceil((clipMax.x - imageMin.x) / cellWidth)) - 1,
+        0,
+        pixelWidth - 1);
+    bounds.firstY = std::clamp(
+        static_cast<int>(std::floor((clipMin.y - imageMin.y) / cellHeight)),
+        0,
+        pixelHeight - 1);
+    bounds.lastY = std::clamp(
+        static_cast<int>(std::ceil((clipMax.y - imageMin.y) / cellHeight)) - 1,
+        0,
+        pixelHeight - 1);
+    return bounds;
+}
+
+bool ReadPixelInspectionTileSetRegion(
+    const EditorRenderWorker::SharedTextureTileSet& tiles,
+    int regionX,
+    int regionY,
+    int regionWidth,
+    int regionHeight,
+    std::vector<unsigned char>& outPixels) {
+    outPixels.clear();
+    if (!tiles.complete || tiles.fullWidth <= 0 || tiles.fullHeight <= 0 || tiles.tiles.empty() ||
+        regionX < 0 || regionY < 0 || regionWidth <= 0 || regionHeight <= 0 ||
+        regionX + regionWidth > tiles.fullWidth || regionY + regionHeight > tiles.fullHeight) {
+        return false;
+    }
+
+    try {
+        outPixels.assign(
+            static_cast<std::size_t>(regionWidth) *
+            static_cast<std::size_t>(regionHeight) *
+            4u,
+            0u);
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+
+    for (const EditorRenderWorker::SharedTextureTile& tile : tiles.tiles) {
+        if (tile.texture == 0 || tile.width <= 0 || tile.height <= 0 ||
+            tile.haloWidth <= 0 || tile.haloHeight <= 0 ||
+            tile.x < 0 || tile.y < 0 ||
+            tile.x + tile.width > tiles.fullWidth ||
+            tile.y + tile.height > tiles.fullHeight ||
+            tile.x - tile.haloX < 0 || tile.y - tile.haloY < 0 ||
+            tile.x - tile.haloX + tile.width > tile.haloWidth ||
+            tile.y - tile.haloY + tile.height > tile.haloHeight) {
+            outPixels.clear();
+            return false;
+        }
+
+        const int tileTop = tiles.fullHeight - tile.y - tile.height;
+        const int overlapLeft = std::max(regionX, tile.x);
+        const int overlapTop = std::max(regionY, tileTop);
+        const int overlapRight = std::min(regionX + regionWidth, tile.x + tile.width);
+        const int overlapBottom = std::min(regionY + regionHeight, tileTop + tile.height);
+        if (overlapLeft >= overlapRight || overlapTop >= overlapBottom) {
+            continue;
+        }
+
+        const int overlapWidth = overlapRight - overlapLeft;
+        const int overlapHeight = overlapBottom - overlapTop;
+        const int localX = overlapLeft - tile.x + tile.haloX;
+        const int globalBottomY = tiles.fullHeight - overlapBottom;
+        const int localBottomY = globalBottomY - tile.y + tile.haloY;
+        const int localTopY = tile.haloHeight - localBottomY - overlapHeight;
+        std::vector<unsigned char> tilePixels;
+        if (!ReadPixelInspectionTextureRegion(
+                tile.texture,
+                tile.haloWidth,
+                tile.haloHeight,
+                localX,
+                localTopY,
+                overlapWidth,
+                overlapHeight,
+                tilePixels)) {
+            outPixels.clear();
+            return false;
+        }
+
+        for (int y = 0; y < overlapHeight; ++y) {
+            for (int x = 0; x < overlapWidth; ++x) {
+                const std::size_t sourceIndex =
+                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(overlapWidth) +
+                     static_cast<std::size_t>(x)) * 4u;
+                const std::size_t targetIndex =
+                    (static_cast<std::size_t>(overlapTop - regionY + y) * static_cast<std::size_t>(regionWidth) +
+                     static_cast<std::size_t>(overlapLeft - regionX + x)) * 4u;
+                std::copy_n(tilePixels.data() + sourceIndex, 4u, outPixels.data() + targetIndex);
+            }
+        }
+    }
+    return true;
+}
+
+constexpr const char* kPixelInspectionVertexShader = R"GLSL(
+#version 430 core
+const vec2 kQuad[6] = vec2[](
+    vec2(0.0, 0.0),
+    vec2(1.0, 0.0),
+    vec2(1.0, 1.0),
+    vec2(0.0, 0.0),
+    vec2(1.0, 1.0),
+    vec2(0.0, 1.0));
+
+uniform vec2 uImageMin;
+uniform vec2 uImageSize;
+uniform vec2 uDisplayPos;
+uniform vec2 uDisplaySize;
+
+out vec2 vImagePosition;
+
+void main() {
+    const vec2 p = kQuad[gl_VertexID];
+    const vec2 screenPosition = uImageMin + p * uImageSize;
+    const vec2 ndc = ((screenPosition - uDisplayPos) / uDisplaySize) * 2.0 - 1.0;
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    vImagePosition = p * uImageSize;
+}
+)GLSL";
+
+constexpr const char* kPixelInspectionFragmentShader = R"GLSL(
+#version 430 core
+uniform sampler2D uTexture;
+uniform ivec2 uFullSize;
+uniform ivec2 uTileOrigin;
+uniform ivec2 uTileHaloOrigin;
+uniform int uTiled;
+uniform float uRevealAlpha;
+uniform vec2 uImageSize;
+
+in vec2 vImagePosition;
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    const vec2 normalizedPosition = clamp(
+        vImagePosition / uImageSize,
+        vec2(0.0),
+        vec2(0.99999994));
+    const ivec2 topLeftPixel = ivec2(
+        floor(normalizedPosition * vec2(uFullSize)));
+    const int bottomLeftY = uFullSize.y - 1 - topLeftPixel.y;
+    ivec2 texturePixel = ivec2(topLeftPixel.x, bottomLeftY);
+    if (uTiled != 0) {
+        texturePixel = ivec2(
+            topLeftPixel.x - uTileOrigin.x + uTileHaloOrigin.x,
+            bottomLeftY - uTileOrigin.y + uTileHaloOrigin.y);
+    }
+    fragColor = texelFetch(uTexture, texturePixel, 0);
+    fragColor.a *= clamp(uRevealAlpha, 0.0, 1.0);
+}
+)GLSL";
+
+void DrawPixelInspectionOverlay(
+    ImDrawList* drawList,
+    const std::vector<unsigned char>& pixels,
+    int cachedWidth,
+    int cachedHeight,
+    int originX,
+    int originY,
+    int fullWidth,
+    int fullHeight,
+    const ImVec2& imageMin,
+    const ImVec2& imageMax,
+    const ImVec2& clipMin,
+    const ImVec2& clipMax,
+    bool showLabels) {
+    if (!drawList || pixels.empty() || cachedWidth <= 0 || cachedHeight <= 0 ||
+        fullWidth <= 0 || fullHeight <= 0) {
+        return;
+    }
+
+    const float imageWidth = imageMax.x - imageMin.x;
+    const float imageHeight = imageMax.y - imageMin.y;
+    const float cellWidth = imageWidth / static_cast<float>(fullWidth);
+    const float cellHeight = imageHeight / static_cast<float>(fullHeight);
+    if (cellWidth <= 0.0f || cellHeight <= 0.0f) {
+        return;
+    }
+
+    const PixelInspectionBounds bounds = ComputePixelInspectionBounds(
+        fullWidth,
+        fullHeight,
+        imageMin,
+        imageMax,
+        clipMin,
+        clipMax);
+    const bool labelsFit = showLabels && cellWidth >= 42.0f && cellHeight >= 28.0f;
+
+    drawList->PushClipRect(clipMin, clipMax, true);
+    for (int y = bounds.firstY; y <= bounds.lastY; ++y) {
+        for (int x = bounds.firstX; x <= bounds.lastX; ++x) {
+            const ImVec2 cellMin(
+                imageMin.x + static_cast<float>(x) * cellWidth,
+                imageMin.y + static_cast<float>(y) * cellHeight);
+
+            if (!labelsFit) {
+                continue;
+            }
+
+            if (x < originX || y < originY ||
+                x >= originX + cachedWidth || y >= originY + cachedHeight) {
+                continue;
+            }
+            const std::size_t pixelIndex =
+                (static_cast<std::size_t>(y - originY) * static_cast<std::size_t>(cachedWidth) +
+                 static_cast<std::size_t>(x - originX)) * 4u;
+            if (pixelIndex + 2u >= pixels.size()) {
+                continue;
+            }
+            const unsigned int red = pixels[pixelIndex];
+            const unsigned int green = pixels[pixelIndex + 1u];
+            const unsigned int blue = pixels[pixelIndex + 2u];
+            char hexLabel[16] = {};
+            char rgbLabel[32] = {};
+            std::snprintf(hexLabel, sizeof(hexLabel), "#%02X%02X%02X", red, green, blue);
+            std::snprintf(rgbLabel, sizeof(rgbLabel), "RGB %u/%u/%u", red, green, blue);
+
+            const float luminance =
+                (0.299f * static_cast<float>(red) +
+                 0.587f * static_cast<float>(green) +
+                 0.114f * static_cast<float>(blue)) / 255.0f;
+            const ImU32 textColor = luminance > 0.56f ? IM_COL32(8, 10, 12, 245) : IM_COL32(248, 250, 252, 245);
+            const ImU32 shadowColor = luminance > 0.56f ? IM_COL32(248, 250, 252, 155) : IM_COL32(8, 10, 12, 175);
+            const float fontSize = std::clamp(std::min(cellWidth, cellHeight) * 0.14f, 6.0f, 11.0f);
+            ImFont* font = ImGui::GetFont();
+            const ImVec2 scaledHexSize = font->CalcTextSizeA(
+                fontSize, std::numeric_limits<float>::max(), 0.0f, hexLabel);
+            const ImVec2 scaledRgbSize = font->CalcTextSizeA(
+                fontSize, std::numeric_limits<float>::max(), 0.0f, rgbLabel);
+            const float textHeight = scaledHexSize.y + scaledRgbSize.y + 1.0f;
+            const float textX = cellMin.x + std::max(2.0f, (cellWidth - std::max(scaledHexSize.x, scaledRgbSize.x)) * 0.5f);
+            const float textY = cellMin.y + std::max(1.0f, (cellHeight - textHeight) * 0.5f);
+            const ImVec2 hexPos(textX, textY);
+            const ImVec2 rgbPos(textX, textY + scaledHexSize.y + 1.0f);
+
+            drawList->AddText(font, fontSize, ImVec2(hexPos.x + 1.0f, hexPos.y + 1.0f), shadowColor, hexLabel);
+            drawList->AddText(font, fontSize, hexPos, textColor, hexLabel);
+            drawList->AddText(font, fontSize, ImVec2(rgbPos.x + 1.0f, rgbPos.y + 1.0f), shadowColor, rgbLabel);
+            drawList->AddText(font, fontSize, rgbPos, textColor, rgbLabel);
+        }
+    }
+    drawList->PopClipRect();
+}
+
+void DrawPixelInspectionCursorReadout(
+    const ImVec2& mousePos,
+    const std::vector<unsigned char>& pixels,
+    int pixelWidth,
+    int pixelHeight,
+    float revealAlpha) {
+    if (pixels.size() < 3u || pixelWidth <= 0 || pixelHeight <= 0) {
+        return;
+    }
+
+    const unsigned int red = pixels[0];
+    const unsigned int green = pixels[1];
+    const unsigned int blue = pixels[2];
+    char hexLabel[16] = {};
+    char rgbLabel[32] = {};
+    std::snprintf(hexLabel, sizeof(hexLabel), "#%02X%02X%02X", red, green, blue);
+    std::snprintf(rgbLabel, sizeof(rgbLabel), "RGB %u/%u/%u", red, green, blue);
+
+    ImFont* font = ImGui::GetFont();
+    const float fontSize = 13.0f;
+    const ImVec2 hexSize = font->CalcTextSizeA(
+        fontSize, std::numeric_limits<float>::max(), 0.0f, hexLabel);
+    const ImVec2 rgbSize = font->CalcTextSizeA(
+        fontSize, std::numeric_limits<float>::max(), 0.0f, rgbLabel);
+    const float width = std::max(hexSize.x, rgbSize.x) + 18.0f;
+    const float height = hexSize.y + rgbSize.y + 16.0f;
+    ImVec2 boxMin(mousePos.x + 16.0f, mousePos.y + 16.0f);
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    if (boxMin.x + width > displaySize.x) {
+        boxMin.x = mousePos.x - width - 16.0f;
+    }
+    if (boxMin.y + height > displaySize.y) {
+        boxMin.y = mousePos.y - height - 16.0f;
+    }
+    boxMin.x = std::max(4.0f, boxMin.x);
+    boxMin.y = std::max(4.0f, boxMin.y);
+    const ImVec2 boxMax(boxMin.x + width, boxMin.y + height);
+
+    ImDrawList* foreground = ImGui::GetForegroundDrawList();
+    const ImU32 background = ApplyAlpha(IM_COL32(16, 21, 27, 238), revealAlpha);
+    const ImU32 text = ApplyAlpha(IM_COL32(246, 250, 252, 250), revealAlpha);
+    foreground->AddRectFilled(boxMin, boxMax, background, 6.0f);
+    foreground->AddText(font, fontSize, ImVec2(boxMin.x + 9.0f, boxMin.y + 6.0f), text, hexLabel);
+    foreground->AddText(font, fontSize, ImVec2(boxMin.x + 9.0f, boxMin.y + 6.0f + hexSize.y + 1.0f), text, rgbLabel);
 }
 
 bool SeamlessSurfaceStylingEnabled(EditorModule* editor) {
@@ -487,6 +921,98 @@ void DrawDevelopSubjectBrushCursor(
 
 } // namespace
 
+void EditorViewport::DrawPixelInspectionCallback(
+    const ImDrawList* /*parentList*/,
+    const ImDrawCmd* command) {
+    if (!command || !command->UserCallbackData) {
+        return;
+    }
+    const PixelInspectionDrawCommand* draw =
+        static_cast<const PixelInspectionDrawCommand*>(command->UserCallbackData);
+    if (draw->program == 0 || draw->vertexArray == 0 || draw->texture == 0 ||
+        draw->fullWidth <= 0 || draw->fullHeight <= 0 ||
+        draw->imageMax.x <= draw->imageMin.x || draw->imageMax.y <= draw->imageMin.y ||
+        draw->displaySize.x <= 0.0f || draw->displaySize.y <= 0.0f) {
+        return;
+    }
+
+    const int framebufferWidth = static_cast<int>(std::round(
+        draw->displaySize.x * draw->framebufferScale.x));
+    const int framebufferHeight = static_cast<int>(std::round(
+        draw->displaySize.y * draw->framebufferScale.y));
+    if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+        return;
+    }
+
+    const float clipMinX = (command->ClipRect.x - draw->displayPos.x) * draw->framebufferScale.x;
+    const float clipMinY = (command->ClipRect.y - draw->displayPos.y) * draw->framebufferScale.y;
+    const float clipMaxX = (command->ClipRect.z - draw->displayPos.x) * draw->framebufferScale.x;
+    const float clipMaxY = (command->ClipRect.w - draw->displayPos.y) * draw->framebufferScale.y;
+    const int scissorMinX = std::clamp(static_cast<int>(std::floor(clipMinX)), 0, framebufferWidth);
+    const int scissorMaxX = std::clamp(static_cast<int>(std::ceil(clipMaxX)), 0, framebufferWidth);
+    const int scissorMinY = std::clamp(static_cast<int>(std::floor(clipMinY)), 0, framebufferHeight);
+    const int scissorMaxY = std::clamp(static_cast<int>(std::ceil(clipMaxY)), 0, framebufferHeight);
+    if (scissorMinX >= scissorMaxX || scissorMinY >= scissorMaxY) {
+        return;
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(
+        scissorMinX,
+        framebufferHeight - scissorMaxY,
+        scissorMaxX - scissorMinX,
+        scissorMaxY - scissorMinY);
+
+    glUseProgram(draw->program);
+    glBindVertexArray(draw->vertexArray);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, draw->texture);
+    glUniform1i(glGetUniformLocation(draw->program, "uTexture"), 0);
+    glUniform2f(
+        glGetUniformLocation(draw->program, "uImageMin"),
+        draw->imageMin.x,
+        draw->imageMin.y);
+    glUniform2f(
+        glGetUniformLocation(draw->program, "uImageSize"),
+        draw->imageMax.x - draw->imageMin.x,
+        draw->imageMax.y - draw->imageMin.y);
+    glUniform2f(
+        glGetUniformLocation(draw->program, "uDisplayPos"),
+        draw->displayPos.x,
+        draw->displayPos.y);
+    glUniform2f(
+        glGetUniformLocation(draw->program, "uDisplaySize"),
+        draw->displaySize.x,
+        draw->displaySize.y);
+    glUniform2i(
+        glGetUniformLocation(draw->program, "uFullSize"),
+        draw->fullWidth,
+        draw->fullHeight);
+    glUniform2i(
+        glGetUniformLocation(draw->program, "uTileOrigin"),
+        draw->tileX,
+        draw->tileY);
+    glUniform2i(
+        glGetUniformLocation(draw->program, "uTileHaloOrigin"),
+        draw->tileHaloX,
+        draw->tileHaloY);
+    glUniform1i(
+        glGetUniformLocation(draw->program, "uTiled"),
+        draw->tiled ? 1 : 0);
+    glUniform1f(
+        glGetUniformLocation(draw->program, "uRevealAlpha"),
+        std::clamp(draw->revealAlpha, 0.0f, 1.0f));
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
 EditorViewport::EditorViewport() 
     : m_ZoomLevel(1.0f), m_PanX(0.0f), m_PanY(0.0f), m_IsLocked(false) 
 {}
@@ -494,10 +1020,14 @@ EditorViewport::EditorViewport()
 EditorViewport::~EditorViewport() {
     if (m_CheckerTex) glDeleteTextures(1, &m_CheckerTex);
     if (m_DetachedToggleTexture) glDeleteTextures(1, &m_DetachedToggleTexture);
+    if (m_PixelInspectionVertexArray) glDeleteVertexArrays(1, &m_PixelInspectionVertexArray);
+    if (m_PixelInspectionProgram) glDeleteProgram(m_PixelInspectionProgram);
 }
 
 void EditorViewport::ResetSinglePreviewState() {
-    m_ZoomLevel = 1.0f;
+    m_FrameTransition.Reset();
+    m_ZoomLevel = m_ZoomTarget = 1.0f;
+    m_ZoomAnimating = m_Panning = false;
     m_PanX = 0.0f;
     m_PanY = 0.0f;
     m_IsLocked = false;
@@ -515,6 +1045,13 @@ void EditorViewport::ResetSinglePreviewState() {
     m_ActiveDevelopSubjectRegionId = -1;
     m_ActiveDevelopSubjectStrokeId = -1;
     m_DevelopSubjectBrushStrokeActive = false;
+    m_PixelInspectionPixels.clear();
+    m_PixelInspectionTextureSignature = 0;
+    m_PixelInspectionWidth = 0;
+    m_PixelInspectionHeight = 0;
+    m_PixelInspectionOriginX = 0;
+    m_PixelInspectionOriginY = 0;
+    m_PixelInspectionDrawCommands.clear();
 }
 
 void EditorViewport::Initialize() {
@@ -537,13 +1074,21 @@ void EditorViewport::Initialize() {
             EmbeddedTabIcons::PopoutCanvasWindow_png_size,
             "PopoutCanvasWindow");
     }
+
+    if (m_PixelInspectionProgram == 0) {
+        m_PixelInspectionProgram = GLHelpers::CreateShaderProgram(
+            kPixelInspectionVertexShader,
+            kPixelInspectionFragmentShader);
+    }
+    if (m_PixelInspectionProgram != 0 && m_PixelInspectionVertexArray == 0) {
+        glGenVertexArrays(1, &m_PixelInspectionVertexArray);
+    }
 }
 
 void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode hostMode) {
     const float viewportRevealAlpha = std::clamp(revealAlpha, 0.0f, 1.0f);
     const float deltaTime = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
     const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(editor);
-    auto& pipeline = editor->GetPipeline();
     const bool compositeMode = editor->IsCompositeViewportMode();
     const ImVec2 hostAvail = ImGui::GetContentRegionAvail();
     const ImVec2 hostScreen = ImGui::GetCursorScreenPos();
@@ -565,6 +1110,23 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     }
 
     if (compositeMode) {
+        m_FrameTransition.Reset();
+        RenderCompositeMode(editor, viewportRevealAlpha, deltaTime, wallpaperSurfaces, hostAvail, hostScreen, hostDrawList, inputBlocked);
+        return;
+    }
+
+    RenderSingleImageMode(editor, viewportRevealAlpha, deltaTime, wallpaperSurfaces, hostAvail, hostScreen, hostDrawList, inputBlocked);
+}
+
+void EditorViewport::RenderCompositeMode(
+    EditorModule* editor,
+    float viewportRevealAlpha,
+    float deltaTime,
+    bool wallpaperSurfaces,
+    const ImVec2& hostAvail,
+    const ImVec2& hostScreen,
+    ImDrawList* hostDrawList,
+    bool inputBlocked) {
         if (m_PendingCompositeAddImageDialog) {
             m_PendingCompositeAddImageDialog = false;
             const std::string path = FileDialogs::OpenImageFileDialog("Add image to composite");
@@ -801,7 +1363,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
             }
         }
 
-        if (hovered && ImGui::GetIO().MouseWheel != 0.0f) {
+        if (hovered && !editor->IsLibraryWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
             const float nextZoom = std::clamp(
                 editor->GetCompositeViewZoom() * (1.0f + ImGui::GetIO().MouseWheel * 0.1f),
                 0.05f,
@@ -1559,12 +2121,33 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
                 IM_COL32(190, 205, 212, 220),
                 emptyMessage);
         }
-        return;
-    }
+}
 
-    const bool outputConnected = editor->GetNodeGraph().IsOutputConnected();
+void EditorViewport::RenderSingleImageMode(
+    EditorModule* editor,
+    float viewportRevealAlpha,
+    float deltaTime,
+    bool wallpaperSurfaces,
+    const ImVec2& hostAvail,
+    const ImVec2& hostScreen,
+    ImDrawList* hostDrawList,
+    bool inputBlocked) {
+    auto& pipeline = editor->GetPipeline();
+
+    const bool outputConnected = editor->IsGraphOutputConnected();
     const bool hasViewportTiles = editor->HasViewportOutputTiles();
-    const bool hasOutputTexture = pipeline.GetOutputTexture() != 0 || hasViewportTiles;
+    unsigned int rawPresentationTexture = 0;
+    int rawPresentationWidth = 0;
+    int rawPresentationHeight = 0;
+    const bool hasRawPresentationTexture =
+        editor->TryGetActiveRawWorkspacePresentationTexture(
+            rawPresentationTexture,
+            rawPresentationWidth,
+            rawPresentationHeight);
+    const bool hasOutputTexture =
+        pipeline.GetOutputTexture() != 0 ||
+        hasRawPresentationTexture ||
+        hasViewportTiles;
     if (!outputConnected || !hasOutputTexture) {
         editor->ClearToneCurveViewportProbe();
         const char* emptyMessage = nullptr;
@@ -1586,41 +2169,6 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         return;
     }
 
-    constexpr float kSemanticFooterHeight = 27.0f;
-    auto drawSemanticFooter = [&]() {
-        Stack::NodeMath::ValueDescriptor descriptor;
-        std::string text = "Direct graph result | Output state: analyzing";
-        if (editor->TryGetGraphOutputSemanticDescriptor(descriptor)) {
-            text = "Direct graph result | " + Stack::NodeMath::CompactDescriptorLabel(descriptor);
-        }
-        std::size_t warningCount = 0;
-        for (const Stack::NodeMath::Diagnostic& diagnostic : editor->GetGraphSemanticDiagnostics()) {
-            if (diagnostic.severity == Stack::NodeMath::DiagnosticSeverity::Warning ||
-                diagnostic.severity == Stack::NodeMath::DiagnosticSeverity::HardError) {
-                ++warningCount;
-            }
-        }
-        if (warningCount > 0) {
-            text += " | " + std::to_string(warningCount) +
-                (warningCount == 1 ? " notice" : " notices");
-        }
-        const ImVec2 footerMin(
-            hostScreen.x + 8.0f,
-            hostScreen.y + hostAvail.y - kSemanticFooterHeight + 2.0f);
-        const ImVec2 footerMax(
-            hostScreen.x + hostAvail.x - 8.0f,
-            hostScreen.y + hostAvail.y - 2.0f);
-        hostDrawList->AddRectFilled(
-            footerMin, footerMax,
-            ApplyAlpha(IM_COL32(18, 22, 27, 220), viewportRevealAlpha), 6.0f);
-        hostDrawList->AddText(
-            ImVec2(footerMin.x + 8.0f, footerMin.y + 4.0f),
-            ApplyAlpha(
-                warningCount > 0 ? IM_COL32(235, 197, 112, 245) : IM_COL32(192, 207, 216, 235),
-                viewportRevealAlpha),
-            text.c_str());
-    };
-
     // ── Inputs & Zoom Logic ──────────────────────────────────────────────────
     
     // Toggle Lock with 'L' key
@@ -1628,47 +2176,55 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         m_IsLocked = !m_IsLocked;
     }
 
-    bool isHovered = !inputBlocked && ImGui::IsWindowHovered();
+    bool isHovered = !inputBlocked && !editor->IsLibraryWindowHovered() && ImGui::IsWindowHovered();
     ImVec2 avail = hostAvail;
-    avail.y = std::max(1.0f, avail.y - kSemanticFooterHeight);
     ImVec2 mousePos = ImGui::GetMousePos();
     ImVec2 contentScreen = hostScreen;
     ImVec2 relativeMouse = ImVec2(mousePos.x - contentScreen.x, mousePos.y - contentScreen.y);
 
-    if (isHovered && !m_IsLocked) {
-        // Zoom with Scroll
-        float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.0f) {
-            m_ZoomLevel += wheel * m_ZoomLevel * 0.1f;
-            m_ZoomLevel = std::max(1.0f, std::min(m_ZoomLevel, 100.0f)); // Min 1.0 (Fit), Max 100x
-        }
-    }
-
     // ── Rendering Logic ──────────────────────────────────────────────────────
     
-    unsigned int outputTex = pipeline.GetOutputTexture();
-    unsigned int sourceTex = pipeline.GetCompareSourceTexture();
+    unsigned int outputTex = hasRawPresentationTexture
+        ? rawPresentationTexture
+        : pipeline.GetOutputTexture();
+    unsigned int sourceTex = hasRawPresentationTexture
+        ? 0
+        : pipeline.GetCompareSourceTexture();
+    const bool rawWorkspaceContext =
+        hasRawPresentationTexture &&
+        editor->IsRawWorkspaceProjectActive();
     const EditorRenderWorker::SharedTextureTileSet& viewportTiles = editor->GetViewportOutputTiles();
-    int imgW = hasViewportTiles ? viewportTiles.fullWidth : pipeline.GetCanvasWidth();
-    int imgH = hasViewportTiles ? viewportTiles.fullHeight : pipeline.GetCanvasHeight();
+    int imgW = hasViewportTiles
+        ? viewportTiles.fullWidth
+        : (hasRawPresentationTexture
+            ? rawPresentationWidth
+            : pipeline.GetCanvasWidth());
+    int imgH = hasViewportTiles
+        ? viewportTiles.fullHeight
+        : (hasRawPresentationTexture
+            ? rawPresentationHeight
+            : pipeline.GetCanvasHeight());
     const bool singleOutputMode = editor->GetViewportMode() == EditorModule::ViewportMode::SingleOutputPreview;
     EditorModule::DevelopSubjectViewportState developSubjectState;
     const bool hasDevelopSubjectOverlay =
         singleOutputMode && editor->GetDevelopSubjectImportanceViewportState(developSubjectState);
-    const bool canStaticCompare = singleOutputMode && sourceTex != 0 && (hasViewportTiles || sourceTex != outputTex);
-    if (!canStaticCompare || !singleOutputMode) {
-        m_ShowStaticSingleCompare = false;
-    }
-    if (!canStaticCompare) {
-        m_StaticSingleCompareBlend = 0.0f;
-        m_StaticCompareRectsInitialized = false;
-    }
+    bool canStaticCompare =
+        singleOutputMode && sourceTex != 0 && sourceTex != outputTex;
     if (!inputBlocked &&
+        !rawWorkspaceContext &&
+        singleOutputMode &&
         canStaticCompare &&
         editor->CanConsumeEditorCommandKeys() &&
         ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
         m_ShowStaticSingleCompare = !m_ShowStaticSingleCompare;
         editor->SetHoverFade(0.0f);
+    }
+    if (!canStaticCompare || rawWorkspaceContext || !singleOutputMode) {
+        m_ShowStaticSingleCompare = false;
+    }
+    if (!canStaticCompare) {
+        m_StaticSingleCompareBlend = 0.0f;
+        m_StaticCompareRectsInitialized = false;
     }
 
     // Base scale to fit screen
@@ -1676,24 +2232,34 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     float scaleY = avail.y / (float)imgH;
     float baseScale = std::min(scaleX, scaleY) * 0.94f; // Use more of the pane so detail holds up better before zooming
 
+    Stack::ViewportNavigation::State navigation {
+        m_ZoomLevel, m_ZoomTarget, m_PanX, m_PanY,
+        m_ZoomAnimating, m_Panning, m_ZoomFocusScreen, m_ZoomFocusUv };
+    Stack::ViewportNavigation::Input navigationInput;
+    const auto& navigationIo = ImGui::GetIO();
+    navigationInput.mouse = mousePos;
+    navigationInput.delta = navigationIo.MouseDelta;
+    navigationInput.wheel = navigationIo.MouseWheel;
+    navigationInput.seconds = navigationIo.DeltaTime;
+    navigationInput.hovered = isHovered && !m_IsLocked;
+    navigationInput.middleClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Middle);
+    navigationInput.middleDown = !inputBlocked && !m_IsLocked &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+    navigationInput.reset = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle);
+    if (inputBlocked || m_IsLocked) m_ZoomAnimating = m_Panning = false;
+    Stack::ViewportNavigation::Update(navigation, navigationInput,
+        ImVec2(imgW * baseScale, imgH * baseScale), contentScreen,
+        ImVec2(contentScreen.x + avail.x, contentScreen.y + avail.y),
+        [&](ImVec2 size) {
+            return ImVec2(contentScreen.x + (avail.x - size.x) * 0.5f,
+                          contentScreen.y + (avail.y - size.y) * 0.5f);
+        });
+    if (m_Panning || m_ZoomAnimating || navigationInput.reset)
+        m_FrameTransition.Clear();
+    if (m_Panning) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
     float finalScale = baseScale * m_ZoomLevel;
-    float dispW = (float)imgW * finalScale;
-    float dispH = (float)imgH * finalScale;
-
-    // Panning (Follow mouse if zoomed in and not locked)
-    if (!m_IsLocked && finalScale > baseScale) {
-        // Map mouse position [0, avail] to pan offset
-        // Normalizing relativeMouse to [0, 1] across the available region
-        float mouseNormX = (relativeMouse.x / avail.x) - 0.5f;
-        float mouseNormY = (relativeMouse.y / avail.y) - 0.5f;
-
-        // The overflow is how much larger the image is than the viewport
-        float overflowX = std::max(0.0f, dispW - avail.x);
-        float overflowY = std::max(0.0f, dispH - avail.y);
-
-        m_PanX = -mouseNormX * overflowX;
-        m_PanY = -mouseNormY * overflowY;
-    }
+    float dispW = imgW * finalScale;
+    float dispH = imgH * finalScale;
 
     const ImVec2 contentCursor = ImGui::GetCursorPos();
     ImDrawList* drawList = hostDrawList;
@@ -1714,6 +2280,7 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     }
 
     if (canStaticCompare && (m_ShowStaticSingleCompare || m_StaticSingleCompareBlend > 0.001f)) {
+        m_FrameTransition.Clear();
         editor->SetHoverFade(0.0f);
         ImGui::InvisibleButton("StaticSingleCompareSurface", avail);
 
@@ -1861,11 +2428,10 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         const float sourceAlpha = SmoothStep01(m_StaticSingleCompareBlend);
         drawAnimatedImage(sourceTex, m_StaticCompareSourceMin, m_StaticCompareSourceMax, sourceAlpha);
         drawAnimatedImage(outputTex, m_StaticCompareOutputMin, m_StaticCompareOutputMax, 1.0f);
-        drawSemanticFooter();
         return;
     }
 
-    const bool showHud = m_IsLocked || editor->IsEditorRenderBusy() || editor->IsAutoGainMaskPreviewActive();
+    const bool showHud = m_IsLocked || editor->IsAutoGainMaskPreviewActive();
     m_ViewportHudAnim = AnimateUiValue(m_ViewportHudAnim, showHud ? 1.0f : 0.0f, deltaTime, 13.0f, 9.0f);
     if (m_ViewportHudAnim > 0.01f) {
         const float hudBaseY = contentScreen.y + 10.0f + (1.0f - m_ViewportHudAnim) * -6.0f;
@@ -1874,14 +2440,8 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         if (m_IsLocked) {
             drawList->AddText(hudPos, ApplyAlpha(IM_COL32(255, 150, 40, 255), hudAlpha), "[ ZOOM LOCKED ] - Press 'L' to unlock");
         }
-        if (editor->IsEditorRenderBusy()) {
-            const float busyOffsetY = m_IsLocked ? 22.0f : 0.0f;
-            drawList->AddText(ImVec2(contentScreen.x + 10.0f, hudBaseY + busyOffsetY),
-                              ApplyAlpha(IM_COL32(190, 195, 205, 230), hudAlpha),
-                              "Rendering...");
-        }
         if (editor->IsAutoGainMaskPreviewActive()) {
-            const float maskOffsetY = (m_IsLocked ? 22.0f : 0.0f) + (editor->IsEditorRenderBusy() ? 22.0f : 0.0f);
+            const float maskOffsetY = (m_IsLocked ? 22.0f : 0.0f);
             drawList->AddText(ImVec2(contentScreen.x + 10.0f, hudBaseY + maskOffsetY),
                               ApplyAlpha(IM_COL32(180, 215, 255, 235), hudAlpha),
                               "Pre-Local Exposure preview - click image to return");
@@ -2023,6 +2583,139 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     const bool imageHovered = ImGui::IsItemHovered();
     const ImVec2 imageMin = ImGui::GetItemRectMin();
     const ImVec2 imageMax = ImGui::GetItemRectMax();
+    const bool sourceAvailable = sourceTex != 0 && sourceTex != outputTex;
+    const bool labelsFit = finalScale >= 42.0f;
+    const EditorViewportPreview::StateInput previewInput {
+        hasOutputTexture,
+        sourceAvailable,
+        imageHovered,
+        canStaticCompare && (m_ShowStaticSingleCompare || m_StaticSingleCompareBlend > 0.001f),
+        !inputBlocked && editor->CanConsumeEditorCommandKeys(),
+        ImGui::GetIO().WantTextInput,
+        ImGui::GetIO().KeyCtrl,
+        ImGui::GetIO().KeyShift,
+        ImGui::IsKeyDown(ImGuiKey_V),
+        labelsFit,
+    };
+    const EditorViewportPreview::Presentation previewPresentation =
+        EditorViewportPreview::ResolvePresentation(previewInput);
+    const bool pixelCleanModeRequested =
+        previewPresentation == EditorViewportPreview::Presentation::CleanProcessed ||
+        previewPresentation == EditorViewportPreview::Presentation::CleanProcessedCursorReadout ||
+        previewPresentation == EditorViewportPreview::Presentation::CleanProcessedInlineValues;
+    // Pixel-value inspection is explicitly auxiliary and still uses a small
+    // synchronous fallback readback. Never issue it while a RAW gesture is in
+    // flight; the accepted cached values can resume after release without
+    // extending edit-to-present latency.
+    const bool pixelValuesRequested =
+        !editor->IsRawWorkspaceUiInteractionActive() &&
+        (previewPresentation ==
+             EditorViewportPreview::Presentation::CleanProcessedCursorReadout ||
+         previewPresentation ==
+             EditorViewportPreview::Presentation::CleanProcessedInlineValues);
+    const bool inlinePixelValuesRequested =
+        previewPresentation == EditorViewportPreview::Presentation::CleanProcessedInlineValues;
+    const ImVec2 viewportMin = contentScreen;
+    const ImVec2 viewportMax(contentScreen.x + avail.x, contentScreen.y + avail.y);
+    const ImVec2 pixelInspectionClipMin(
+        std::max(imageMin.x, viewportMin.x),
+        std::max(imageMin.y, viewportMin.y));
+    const ImVec2 pixelInspectionClipMax(
+        std::min(imageMax.x, viewportMax.x),
+        std::min(imageMax.y, viewportMax.y));
+    const PixelInspectionBounds pixelInspectionBounds = ComputePixelInspectionBounds(
+        imgW,
+        imgH,
+        imageMin,
+        imageMax,
+        pixelInspectionClipMin,
+        pixelInspectionClipMax);
+
+    if (!pixelValuesRequested) {
+        m_PixelInspectionPixels.clear();
+        m_PixelInspectionTextureSignature = 0;
+        m_PixelInspectionWidth = 0;
+        m_PixelInspectionHeight = 0;
+        m_PixelInspectionOriginX = 0;
+        m_PixelInspectionOriginY = 0;
+    } else {
+        const std::uint64_t textureSignature = PixelInspectionTextureSignature(
+            outputTex,
+            hasViewportTiles ? viewportTiles : EditorRenderWorker::SharedTextureTileSet{},
+            imgW,
+            imgH,
+            editor->GetViewportOutputRenderGeneration());
+        int readbackOriginX = 0;
+        int readbackOriginY = 0;
+        int readbackWidth = 0;
+        int readbackHeight = 0;
+        if (inlinePixelValuesRequested && pixelInspectionBounds.Valid()) {
+            readbackOriginX = pixelInspectionBounds.firstX;
+            readbackOriginY = pixelInspectionBounds.firstY;
+            readbackWidth = pixelInspectionBounds.lastX - pixelInspectionBounds.firstX + 1;
+            readbackHeight = pixelInspectionBounds.lastY - pixelInspectionBounds.firstY + 1;
+        } else if (imageHovered && imgW > 0 && imgH > 0) {
+            readbackOriginX = std::clamp(static_cast<int>(imageU * static_cast<float>(imgW)), 0, imgW - 1);
+            readbackOriginY = std::clamp(static_cast<int>(imageV * static_cast<float>(imgH)), 0, imgH - 1);
+            readbackWidth = 1;
+            readbackHeight = 1;
+        }
+        std::uint64_t readbackSignature = textureSignature;
+        const auto addSignature = [&readbackSignature](std::uint64_t value) {
+            readbackSignature ^= value;
+            readbackSignature *= 1099511628211ull;
+        };
+        addSignature(static_cast<std::uint64_t>(std::max(0, readbackOriginX)));
+        addSignature(static_cast<std::uint64_t>(std::max(0, readbackOriginY)));
+        addSignature(static_cast<std::uint64_t>(std::max(0, readbackWidth)));
+        addSignature(static_cast<std::uint64_t>(std::max(0, readbackHeight)));
+        addSignature(inlinePixelValuesRequested ? 1u : 0u);
+
+        if (readbackSignature != m_PixelInspectionTextureSignature) {
+            std::vector<unsigned char> readbackPixels;
+            bool readbackReady = false;
+            if (readbackWidth > 0 && readbackHeight > 0 && hasViewportTiles) {
+                readbackReady = ReadPixelInspectionTileSetRegion(
+                    viewportTiles,
+                    readbackOriginX,
+                    readbackOriginY,
+                    readbackWidth,
+                    readbackHeight,
+                    readbackPixels);
+            } else if (readbackWidth > 0 && readbackHeight > 0 && outputTex != 0) {
+                readbackReady = ReadPixelInspectionTextureRegion(
+                    outputTex,
+                    imgW,
+                    imgH,
+                    readbackOriginX,
+                    readbackOriginY,
+                    readbackWidth,
+                    readbackHeight,
+                    readbackPixels);
+            }
+            if (readbackReady &&
+                readbackPixels.size() ==
+                    static_cast<std::size_t>(readbackWidth) *
+                    static_cast<std::size_t>(readbackHeight) * 4u) {
+                m_PixelInspectionPixels = std::move(readbackPixels);
+                m_PixelInspectionWidth = readbackWidth;
+                m_PixelInspectionHeight = readbackHeight;
+                m_PixelInspectionOriginX = readbackOriginX;
+                m_PixelInspectionOriginY = readbackOriginY;
+            } else {
+                m_PixelInspectionPixels.clear();
+                m_PixelInspectionWidth = 0;
+                m_PixelInspectionHeight = 0;
+                m_PixelInspectionOriginX = 0;
+                m_PixelInspectionOriginY = 0;
+            }
+            m_PixelInspectionTextureSignature = readbackSignature;
+        }
+    }
+    const bool pixelInspectionDataReady =
+        m_PixelInspectionWidth > 0 &&
+        m_PixelInspectionHeight > 0 &&
+        !m_PixelInspectionPixels.empty();
     bool developSubjectRegionHandled = false;
     const bool developSubjectCanInteract =
         hasDevelopSubjectOverlay &&
@@ -2202,11 +2895,21 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
     }
 
     // Handle Fade Factor (hover to compare with original)
-    float hoverTarget = (imageHovered && !m_IsLocked && !editor->IsPickingColor() && !toneCurveProbeActive && !editor->IsToneCurveTargeting()) ? 1.0f : 0.0f;
     float currentFactor = editor->GetHoverFade();
-    const float fadeStep = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.2f);
-    currentFactor += (hoverTarget - currentFactor) * fadeStep;
-    currentFactor = std::max(0.0f, std::min(currentFactor, 1.0f));
+    if (pixelCleanModeRequested) {
+        currentFactor = 0.0f;
+    } else {
+        const float hoverTarget =
+            previewPresentation == EditorViewportPreview::Presentation::HoverOriginal &&
+            !editor->IsPickingColor() &&
+            !toneCurveProbeActive &&
+            !editor->IsToneCurveTargeting()
+            ? 1.0f
+            : 0.0f;
+        const float fadeStep = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.2f);
+        currentFactor += (hoverTarget - currentFactor) * fadeStep;
+        currentFactor = std::max(0.0f, std::min(currentFactor, 1.0f));
+    }
     editor->SetHoverFade(currentFactor);
 
     // 2) Draw processed output fully opaque, then fade the original over it.
@@ -2252,9 +2955,89 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         }
         drawList->PopClipRect();
     };
-    if (hasViewportTiles) {
+    m_PixelInspectionDrawCommands.clear();
+    const ImGuiViewport* windowViewport = ImGui::GetWindowViewport();
+    auto queuePixelInspectionDraw = [&](unsigned int texture,
+                                        const EditorRenderWorker::SharedTextureTile* tile,
+                                        const ImVec2& clipMin,
+                                        const ImVec2& clipMax) {
+        if (m_PixelInspectionProgram == 0 ||
+            m_PixelInspectionVertexArray == 0 ||
+            texture == 0 ||
+            clipMax.x <= clipMin.x ||
+            clipMax.y <= clipMin.y) {
+            return false;
+        }
+
+        PixelInspectionDrawCommand& command = m_PixelInspectionDrawCommands.emplace_back();
+        command.program = m_PixelInspectionProgram;
+        command.vertexArray = m_PixelInspectionVertexArray;
+        command.texture = texture;
+        command.fullWidth = imgW;
+        command.fullHeight = imgH;
+        command.imageMin = imageMin;
+        command.imageMax = imageMax;
+        command.displayPos = windowViewport ? windowViewport->Pos : ImVec2(0.0f, 0.0f);
+        command.displaySize = windowViewport ? windowViewport->Size : ImGui::GetIO().DisplaySize;
+        command.framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+        command.revealAlpha = viewportRevealAlpha;
+        if (tile) {
+            command.tileX = tile->x;
+            command.tileY = tile->y;
+            command.tileHaloX = tile->haloX;
+            command.tileHaloY = tile->haloY;
+            command.tiled = true;
+        }
+
+        drawList->PushClipRect(clipMin, clipMax, true);
+        drawList->AddCallback(
+            &EditorViewport::DrawPixelInspectionCallback,
+            &command);
+        if (ImGui::GetPlatformIO().DrawCallback_ResetRenderState) {
+            drawList->AddCallback(
+                ImGui::GetPlatformIO().DrawCallback_ResetRenderState,
+                nullptr);
+        }
+        drawList->PopClipRect();
+        return true;
+    };
+    bool drewPixelInspectionColors = false;
+    if (pixelCleanModeRequested) {
+        m_FrameTransition.Clear();
+        if (hasViewportTiles) {
+            for (const EditorRenderWorker::SharedTextureTile& tile : viewportTiles.tiles) {
+                if (tile.texture == 0 || tile.width <= 0 || tile.height <= 0 ||
+                    tile.haloWidth <= 0 || tile.haloHeight <= 0) {
+                    continue;
+                }
+                const float drawW = std::max(1.0f, imageMax.x - imageMin.x);
+                const float drawH = std::max(1.0f, imageMax.y - imageMin.y);
+                const ImVec2 tileMin(
+                    imageMin.x + (static_cast<float>(tile.x) / static_cast<float>(viewportTiles.fullWidth)) * drawW,
+                    imageMax.y - (static_cast<float>(tile.y + tile.height) / static_cast<float>(viewportTiles.fullHeight)) * drawH);
+                const ImVec2 tileMax(
+                    imageMin.x + (static_cast<float>(tile.x + tile.width) / static_cast<float>(viewportTiles.fullWidth)) * drawW,
+                    imageMax.y - (static_cast<float>(tile.y) / static_cast<float>(viewportTiles.fullHeight)) * drawH);
+                drewPixelInspectionColors = queuePixelInspectionDraw(
+                    tile.texture,
+                    &tile,
+                    tileMin,
+                    tileMax) || drewPixelInspectionColors;
+            }
+        } else {
+            drewPixelInspectionColors = queuePixelInspectionDraw(
+                outputTex,
+                nullptr,
+                imageMin,
+                imageMax);
+        }
+    }
+    if (!drewPixelInspectionColors && hasViewportTiles) {
         drawViewportTileSet(imageMin, imageMax, viewportRevealAlpha);
-    } else {
+    } else if (!drewPixelInspectionColors && !m_FrameTransition.Draw(
+        drawList, outputTex, imageMin, imageMax, ImGui::GetTime(),
+        ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset),
+        IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding)) {
         drawList->AddImageRounded((ImTextureID)(intptr_t)outputTex, imageMin, imageMax,
                                   ImVec2(uInset, 1.0f - vInset), ImVec2(1.0f - uInset, vInset), IM_COL32(255, 255, 255, static_cast<int>(255.0f * viewportRevealAlpha)), kImageRounding);
     }
@@ -2308,5 +3091,32 @@ void EditorViewport::Render(EditorModule* editor, float revealAlpha, HostMode ho
         }
         drawList->PopClipRect();
     }
-    drawSemanticFooter();
+
+    if (pixelValuesRequested && pixelInspectionDataReady) {
+        if (inlinePixelValuesRequested &&
+            pixelInspectionClipMin.x < pixelInspectionClipMax.x &&
+            pixelInspectionClipMin.y < pixelInspectionClipMax.y) {
+            DrawPixelInspectionOverlay(
+                drawList,
+                m_PixelInspectionPixels,
+                m_PixelInspectionWidth,
+                m_PixelInspectionHeight,
+                m_PixelInspectionOriginX,
+                m_PixelInspectionOriginY,
+                imgW,
+                imgH,
+                imageMin,
+                imageMax,
+                pixelInspectionClipMin,
+                pixelInspectionClipMax,
+                true);
+        } else if (!inlinePixelValuesRequested && imageHovered) {
+            DrawPixelInspectionCursorReadout(
+                mousePos,
+                m_PixelInspectionPixels,
+                m_PixelInspectionWidth,
+                m_PixelInspectionHeight,
+                viewportRevealAlpha);
+        }
+    }
 }

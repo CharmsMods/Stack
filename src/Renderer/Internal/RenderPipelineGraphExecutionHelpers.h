@@ -55,12 +55,18 @@ using ScopedFramebufferState =
 
 struct QuickTextureStats {
     bool valid = false;
+    bool allFinite = false;
     float maxRgb = 0.0f;
     float maxLuma = 0.0f;
     float p99Luma = 0.0f;
 };
 
 QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height);
+bool IsImplausiblyDamagedTextureOutput(
+    const QuickTextureStats& input,
+    const QuickTextureStats& output);
+bool LayerPayloadExplicitlyRequestsCollapsedOutput(
+    const nlohmann::json& layerJson);
 bool IsDefaultToneCurvePayload(const nlohmann::json& layerJson);
 
 bool HasHdrMergeCaptureExposure(const Raw::RawMetadata& metadata);

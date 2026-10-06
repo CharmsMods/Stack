@@ -170,16 +170,6 @@ CustomMaskObject DeserializeCustomMaskObject(const nlohmann::json& value) {
         finiteOr(value.value("blur", object.blur), 0.0f),
         0.0f,
         static_cast<float>(kMaximumCustomMaskDimension));
-    const bool legacyDefaultShapeFeather =
-        value.contains("feather") &&
-        std::abs(object.feather - 0.02f) <= 0.00001f &&
-        (object.type == CustomMaskObjectType::Rectangle ||
-         object.type == CustomMaskObjectType::Ellipse ||
-         object.type == CustomMaskObjectType::Polygon) &&
-        object.blur <= 0.00001f;
-    if (legacyDefaultShapeFeather) {
-        object.feather = 0.0f;
-    }
     const nlohmann::json points = value.value("points", nlohmann::json::array());
     if (points.is_array()) {
         for (const nlohmann::json& pointJson : points) {

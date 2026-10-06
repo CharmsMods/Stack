@@ -226,6 +226,8 @@ bool RunMfdCorpusEntry(
     const std::string& outputDirectory,
     std::uint64_t memoryBudgetBytes,
     std::uint32_t workerCount,
+    const std::string& backendId,
+    const std::string& alignmentModeId,
     std::string* errorMessage) {
     const std::filesystem::path definition =
         std::filesystem::u8path(definitionPath).lexically_normal();
@@ -285,6 +287,25 @@ bool RunMfdCorpusEntry(
     }
 
     Raw::Mfd::MfdProcessingRequest request;
+    if (backendId == "shared-burst") {
+        request.fusionBackend = Raw::Mfd::MfdFusionBackend::SharedBurstV1;
+    } else if (backendId == "legacy-ra-cfa") {
+        request.fusionBackend = Raw::Mfd::MfdFusionBackend::LegacyRaCfaV1;
+    } else {
+        std::filesystem::remove_all(staging, filesystemError);
+        return Finish(
+            errorMessage,
+            "The MFD corpus backend must be shared-burst or legacy-ra-cfa.",
+            false);
+    }
+    if (!Raw::Mfd::ParseMfdAlignmentMode(
+            alignmentModeId, request.alignmentMode)) {
+        std::filesystem::remove_all(staging, filesystemError);
+        return Finish(
+            errorMessage,
+            "The MFD corpus alignment mode must be full, translation-only, or identity.",
+            false);
+    }
     request.referenceFrameIndex = found->referenceFrameIndex;
     request.workingDirectory = staging / "working-cache";
     request.memoryBudgetBytes = memoryBudgetBytes;
@@ -315,12 +336,16 @@ bool RunMfdCorpusEntry(
         processing.status == Raw::Mfd::MfdProcessingStatus::Failed ||
         processing.status == Raw::Mfd::MfdProcessingStatus::Canceled) {
         std::filesystem::remove_all(staging, filesystemError);
-        return Finish(
-            errorMessage,
-            processing.message.empty()
-                ? "The MFD processor did not publish a complete result."
-                : processing.message,
-            false);
+        std::string failure = processing.message.empty()
+            ? "The MFD processor did not publish a complete result."
+            : processing.message;
+        for (const Raw::Mfd::MfdProcessingFrameDiagnostic& frame :
+             processing.diagnostics.frames) {
+            failure += "\n- " + frame.stableFrameId + ": " +
+                Raw::Mfd::DecisionReasonName(frame.decisionReason) +
+                " - " + frame.message;
+        }
+        return Finish(errorMessage, failure, false);
     }
 
     const Raw::CfaPattern cfaPattern = ParseCfaPattern(

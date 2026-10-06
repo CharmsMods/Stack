@@ -1,16 +1,15 @@
 #include "LibRawDecoder.h"
+#include "Raw/DngMetadataSupplement.h"
 #include "Raw/RawTechnicalEvidence.h"
+#include "Raw/RawOrientation.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <limits>
-#include <numeric>
 #include <string>
 #include <vector>
 
@@ -23,14 +22,24 @@ namespace {
 
 constexpr std::size_t kCancellationCheckInterval = 65536;
 
+std::filesystem::path NativeRawPath(const std::string& path) {
+    try {
+        const auto utf8 = std::filesystem::u8path(path);
+        std::error_code error;
+        if (std::filesystem::exists(utf8, error) && !error) return utf8;
+    } catch (const std::exception&) {
+    }
+    return std::filesystem::path(path);
+}
+
 bool IsCancelled(const std::function<bool()>& shouldCancel) {
     return shouldCancel && shouldCancel();
 }
 
 void MarkCancelled(RawImageData& outData) {
-    outData.rawBuffer.clear();
-    outData.linearUInt16Buffer.clear();
-    outData.linearFloatBuffer.clear();
+    auto sourcePath = std::move(outData.metadata.sourcePath);
+    outData = {};
+    outData.metadata.sourcePath = std::move(sourcePath);
     outData.metadata.error = "RAW load canceled.";
 }
 
@@ -46,6 +55,22 @@ float SafePositive(float value, float fallback) {
 }
 
 #ifdef STACK_ENABLE_LIBRAW
+struct LibRawCancellation {
+    const std::function<bool()>& shouldCancel;
+    bool cancelled = false;
+
+    static int Progress(void* context, LibRaw_progress, int, int) noexcept {
+        auto& state = *static_cast<LibRawCancellation*>(context);
+        // A user callback must not unwind through LibRaw's C callback boundary.
+        try {
+            state.cancelled = state.cancelled || IsCancelled(state.shouldCancel);
+        } catch (...) {
+            state.cancelled = true;
+        }
+        return state.cancelled ? 1 : 0;
+    }
+};
+
 bool HasMatrix3x3(const std::array<float, 9>& matrix) {
     for (float value : matrix) {
         if (std::abs(value) > 0.000001f) {
@@ -69,599 +94,6 @@ CfaPattern PatternFromString(const std::string& pattern) {
     if (pattern == "GBRG") return CfaPattern::GBRG;
     if (pattern == "GRBG") return CfaPattern::GRBG;
     return CfaPattern::Unknown;
-}
-
-class DngTiffReader {
-public:
-    explicit DngTiffReader(std::vector<std::uint8_t> bytes)
-        : m_Bytes(std::move(bytes)) {
-        if (m_Bytes.size() >= 8) {
-            if (m_Bytes[0] == 'I' && m_Bytes[1] == 'I') {
-                m_LittleEndian = true;
-                m_Valid = ReadU16(2) == 42;
-                m_FirstIfd = ReadU32(4);
-            } else if (m_Bytes[0] == 'M' && m_Bytes[1] == 'M') {
-                m_LittleEndian = false;
-                m_Valid = ReadU16(2) == 42;
-                m_FirstIfd = ReadU32(4);
-            }
-        }
-    }
-
-    struct Entry {
-        std::uint16_t tag = 0;
-        std::uint16_t type = 0;
-        std::uint32_t count = 0;
-        std::uint32_t valueOffset = 0;
-        std::size_t entryOffset = 0;
-    };
-
-    bool Valid() const { return m_Valid; }
-    std::uint32_t FirstIfd() const { return m_FirstIfd; }
-
-    std::uint16_t ReadU16(std::size_t offset) const {
-        if (offset + 2 > m_Bytes.size()) return 0;
-        if (m_LittleEndian) {
-            return static_cast<std::uint16_t>(m_Bytes[offset] | (m_Bytes[offset + 1] << 8));
-        }
-        return static_cast<std::uint16_t>((m_Bytes[offset] << 8) | m_Bytes[offset + 1]);
-    }
-
-    std::uint32_t ReadU32(std::size_t offset) const {
-        if (offset + 4 > m_Bytes.size()) return 0;
-        if (m_LittleEndian) {
-            return static_cast<std::uint32_t>(m_Bytes[offset]) |
-                (static_cast<std::uint32_t>(m_Bytes[offset + 1]) << 8) |
-                (static_cast<std::uint32_t>(m_Bytes[offset + 2]) << 16) |
-                (static_cast<std::uint32_t>(m_Bytes[offset + 3]) << 24);
-        }
-        return (static_cast<std::uint32_t>(m_Bytes[offset]) << 24) |
-            (static_cast<std::uint32_t>(m_Bytes[offset + 1]) << 16) |
-            (static_cast<std::uint32_t>(m_Bytes[offset + 2]) << 8) |
-            static_cast<std::uint32_t>(m_Bytes[offset + 3]);
-    }
-
-    std::int32_t ReadI32(std::size_t offset) const {
-        return static_cast<std::int32_t>(ReadU32(offset));
-    }
-
-    float ReadFloat(std::size_t offset) const {
-        const std::uint32_t bits = ReadU32(offset);
-        float value = 0.0f;
-        std::memcpy(&value, &bits, sizeof(float));
-        return value;
-    }
-
-    double ReadDouble(std::size_t offset) const {
-        if (offset + 8 > m_Bytes.size()) return 0.0;
-        std::uint64_t bits = 0;
-        if (m_LittleEndian) {
-            for (int i = 7; i >= 0; --i) bits = (bits << 8) | m_Bytes[offset + static_cast<std::size_t>(i)];
-        } else {
-            for (int i = 0; i < 8; ++i) bits = (bits << 8) | m_Bytes[offset + static_cast<std::size_t>(i)];
-        }
-        double value = 0.0;
-        std::memcpy(&value, &bits, sizeof(double));
-        return value;
-    }
-
-    std::vector<Entry> ReadEntries(std::uint32_t ifdOffset) const {
-        std::vector<Entry> entries;
-        if (!m_Valid || ifdOffset == 0 || static_cast<std::size_t>(ifdOffset) + 2 > m_Bytes.size()) {
-            return entries;
-        }
-        const std::uint16_t count = ReadU16(ifdOffset);
-        std::size_t p = static_cast<std::size_t>(ifdOffset) + 2;
-        for (std::uint16_t i = 0; i < count && p + 12 <= m_Bytes.size(); ++i, p += 12) {
-            Entry entry;
-            entry.tag = ReadU16(p);
-            entry.type = ReadU16(p + 2);
-            entry.count = ReadU32(p + 4);
-            entry.valueOffset = ReadU32(p + 8);
-            entry.entryOffset = p;
-            entries.push_back(entry);
-        }
-        return entries;
-    }
-
-    std::uint32_t NextIfdOffset(std::uint32_t ifdOffset) const {
-        if (!m_Valid || ifdOffset == 0 || static_cast<std::size_t>(ifdOffset) + 2 > m_Bytes.size()) return 0;
-        const std::uint16_t count = ReadU16(ifdOffset);
-        const std::size_t offset = static_cast<std::size_t>(ifdOffset) + 2 + static_cast<std::size_t>(count) * 12;
-        return offset + 4 <= m_Bytes.size() ? ReadU32(offset) : 0;
-    }
-
-    std::vector<std::uint32_t> ReadIfdTree() const {
-        std::vector<std::uint32_t> result;
-        std::vector<std::uint32_t> pending;
-        if (m_FirstIfd != 0) pending.push_back(m_FirstIfd);
-        while (!pending.empty() && result.size() < 64) {
-            const std::uint32_t offset = pending.back();
-            pending.pop_back();
-            if (offset == 0 || std::find(result.begin(), result.end(), offset) != result.end()) continue;
-            const std::vector<Entry> entries = ReadEntries(offset);
-            if (entries.empty()) continue;
-            result.push_back(offset);
-            const std::uint32_t next = NextIfdOffset(offset);
-            if (next != 0) pending.push_back(next);
-            for (const Entry& entry : entries) {
-                if (entry.tag != 330) continue;
-                for (double value : NumberValues(entry)) {
-                    if (std::isfinite(value) && value > 0.0 && value <= std::numeric_limits<std::uint32_t>::max()) {
-                        pending.push_back(static_cast<std::uint32_t>(value));
-                    }
-                }
-            }
-        }
-        return result;
-    }
-
-    std::vector<std::uint8_t> RawBytes(const Entry& entry) const {
-        const std::size_t bytes = TypeSize(entry.type) * static_cast<std::size_t>(entry.count);
-        const std::size_t offset = bytes <= 4 ? ValueInlineOffset(entry) : static_cast<std::size_t>(entry.valueOffset);
-        if (offset + bytes > m_Bytes.size()) return {};
-        return std::vector<std::uint8_t>(m_Bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-            m_Bytes.begin() + static_cast<std::ptrdiff_t>(offset + bytes));
-    }
-
-    std::string StringValue(const Entry& entry) const {
-        std::vector<std::uint8_t> bytes = RawBytes(entry);
-        while (!bytes.empty() && bytes.back() == 0) bytes.pop_back();
-        return std::string(bytes.begin(), bytes.end());
-    }
-
-    std::vector<double> NumberValues(const Entry& entry) const {
-        std::vector<double> values;
-        const std::size_t typeSize = TypeSize(entry.type);
-        if (typeSize == 0 || entry.count == 0) return values;
-        const std::size_t bytes = typeSize * static_cast<std::size_t>(entry.count);
-        const std::size_t base = bytes <= 4 ? ValueInlineOffset(entry) : static_cast<std::size_t>(entry.valueOffset);
-        if (base + bytes > m_Bytes.size()) return values;
-        values.reserve(entry.count);
-        for (std::uint32_t i = 0; i < entry.count; ++i) {
-            const std::size_t p = base + static_cast<std::size_t>(i) * typeSize;
-            switch (entry.type) {
-                case 1:
-                case 7: values.push_back(m_Bytes[p]); break;
-                case 3: values.push_back(ReadU16(p)); break;
-                case 4: values.push_back(ReadU32(p)); break;
-                case 5: {
-                    const double num = ReadU32(p);
-                    const double den = std::max(1.0, static_cast<double>(ReadU32(p + 4)));
-                    values.push_back(num / den);
-                    break;
-                }
-                case 9: values.push_back(ReadI32(p)); break;
-                case 10: {
-                    const double num = ReadI32(p);
-                    const double den = static_cast<double>(ReadI32(p + 4));
-                    values.push_back(den == 0.0 ? 0.0 : num / den);
-                    break;
-                }
-                case 11: values.push_back(ReadFloat(p)); break;
-                case 12: values.push_back(ReadDouble(p)); break;
-                default: break;
-            }
-        }
-        return values;
-    }
-
-    static std::size_t TypeSize(std::uint16_t type) {
-        switch (type) {
-            case 1:
-            case 2:
-            case 6:
-            case 7:
-                return 1;
-            case 3:
-            case 8:
-                return 2;
-            case 4:
-            case 9:
-            case 11:
-                return 4;
-            case 5:
-            case 10:
-            case 12:
-                return 8;
-            default:
-                return 0;
-        }
-    }
-
-private:
-    std::size_t ValueInlineOffset(const Entry& entry) const {
-        return entry.entryOffset + 8;
-    }
-
-    std::vector<std::uint8_t> m_Bytes;
-    bool m_LittleEndian = true;
-    bool m_Valid = false;
-    std::uint32_t m_FirstIfd = 0;
-};
-
-CfaPattern PatternFromDngCfa(const std::array<int, 4>& pattern, const std::array<int, 3>& planeColors) {
-    std::string text;
-    text.reserve(4);
-    for (int plane : pattern) {
-        if (plane < 0 || plane >= static_cast<int>(planeColors.size())) {
-            return CfaPattern::Unknown;
-        }
-        const int color = planeColors[static_cast<std::size_t>(plane)];
-        if (color == 0) text.push_back('R');
-        else if (color == 1) text.push_back('G');
-        else if (color == 2) text.push_back('B');
-        else return CfaPattern::Unknown;
-    }
-    return PatternFromString(text);
-}
-
-double ReadBeDouble(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
-    if (offset + 8 > bytes.size()) return 0.0;
-    std::uint64_t bits = 0;
-    for (int i = 0; i < 8; ++i) bits = (bits << 8) | bytes[offset + static_cast<std::size_t>(i)];
-    double value = 0.0;
-    std::memcpy(&value, &bits, sizeof(double));
-    return value;
-}
-
-std::uint32_t ReadBeU32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
-    if (offset + 4 > bytes.size()) return 0;
-    return (static_cast<std::uint32_t>(bytes[offset]) << 24) |
-        (static_cast<std::uint32_t>(bytes[offset + 1]) << 16) |
-        (static_cast<std::uint32_t>(bytes[offset + 2]) << 8) |
-        static_cast<std::uint32_t>(bytes[offset + 3]);
-}
-
-std::int32_t ReadBeI32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
-    return static_cast<std::int32_t>(ReadBeU32(bytes, offset));
-}
-
-float ReadBeFloat(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
-    const std::uint32_t bits = ReadBeU32(bytes, offset);
-    float value = 0.0f;
-    std::memcpy(&value, &bits, sizeof(float));
-    return value;
-}
-
-int CountDngOpcodes(const std::vector<std::uint8_t>& bytes) {
-    if (bytes.size() < 4) return 0;
-    const std::uint32_t declared = ReadBeU32(bytes, 0);
-    std::size_t p = 4;
-    int count = 0;
-    for (std::uint32_t i = 0; i < declared && p + 16 <= bytes.size(); ++i) {
-        const std::uint32_t byteCount = ReadBeU32(bytes, p + 12);
-        p += 16;
-        if (p + byteCount > bytes.size()) break;
-        ++count;
-        p += byteCount;
-    }
-    return count;
-}
-
-void ParseDngOpcodeList2(const std::vector<std::uint8_t>& bytes, RawMetadata& metadata) {
-    if (bytes.size() < 4) return;
-    metadata.dngOpcodeCount[1] = CountDngOpcodes(bytes);
-    const std::uint32_t count = ReadBeU32(bytes, 0);
-    std::size_t p = 4;
-    for (std::uint32_t i = 0; i < count && p + 16 <= bytes.size(); ++i) {
-        const std::uint32_t opcodeId = ReadBeU32(bytes, p);
-        const std::uint32_t byteCount = ReadBeU32(bytes, p + 12);
-        p += 16;
-        if (p + byteCount > bytes.size()) {
-            metadata.warnings.push_back("DNG OpcodeList2 is truncated.");
-            return;
-        }
-        if (opcodeId != 9) {
-            ++metadata.dngUnsupportedOpcodeCount;
-            p += byteCount;
-            continue;
-        }
-
-        if (byteCount < 76) {
-            ++metadata.dngUnsupportedOpcodeCount;
-            p += byteCount;
-            continue;
-        }
-
-        DngGainMapOpcode map;
-        map.top = ReadBeI32(bytes, p + 0);
-        map.left = ReadBeI32(bytes, p + 4);
-        map.bottom = ReadBeI32(bytes, p + 8);
-        map.right = ReadBeI32(bytes, p + 12);
-        map.plane = ReadBeI32(bytes, p + 16);
-        map.planes = ReadBeI32(bytes, p + 20);
-        map.rowPitch = ReadBeI32(bytes, p + 24);
-        map.colPitch = ReadBeI32(bytes, p + 28);
-        map.mapPointsV = ReadBeI32(bytes, p + 32);
-        map.mapPointsH = ReadBeI32(bytes, p + 36);
-        map.mapSpacingV = ReadBeDouble(bytes, p + 40);
-        map.mapSpacingH = ReadBeDouble(bytes, p + 48);
-        map.mapOriginV = ReadBeDouble(bytes, p + 56);
-        map.mapOriginH = ReadBeDouble(bytes, p + 64);
-        map.mapPlanes = ReadBeI32(bytes, p + 72);
-        const std::size_t gainOffset = p + 76;
-        const bool validShape =
-            map.top < map.bottom &&
-            map.left < map.right &&
-            map.plane >= 0 &&
-            map.planes > 0 &&
-            map.rowPitch > 0 &&
-            map.colPitch > 0 &&
-            map.mapPointsV > 0 &&
-            map.mapPointsH > 0 &&
-            map.mapPlanes == 1 &&
-            std::isfinite(map.mapSpacingV) &&
-            std::isfinite(map.mapSpacingH) &&
-            std::isfinite(map.mapOriginV) &&
-            std::isfinite(map.mapOriginH) &&
-            map.mapSpacingV > 0.0 &&
-            map.mapSpacingH > 0.0;
-        if (!validShape) {
-            ++metadata.dngUnsupportedOpcodeCount;
-            p += byteCount;
-            continue;
-        }
-        const std::size_t gainCount = static_cast<std::size_t>(map.mapPointsV) *
-            static_cast<std::size_t>(map.mapPointsH);
-        if (gainCount >
-                (std::numeric_limits<std::size_t>::max() - gainOffset) / sizeof(float) ||
-            gainOffset + gainCount * sizeof(float) > p + byteCount) {
-            ++metadata.dngUnsupportedOpcodeCount;
-            p += byteCount;
-            continue;
-        }
-        map.gains.resize(gainCount);
-        for (std::size_t g = 0; g < gainCount; ++g) {
-            map.gains[g] = ReadBeFloat(bytes, gainOffset + g * sizeof(float));
-        }
-        if (!std::all_of(map.gains.begin(), map.gains.end(), [](float gain) {
-                return std::isfinite(gain) && gain >= 0.0f;
-            })) {
-            ++metadata.dngUnsupportedOpcodeCount;
-            p += byteCount;
-            continue;
-        }
-        metadata.dngGainMaps.push_back(std::move(map));
-        p += byteCount;
-    }
-    metadata.dngGainMapCount = static_cast<int>(metadata.dngGainMaps.size());
-    metadata.dngAppliedOpcodeCountByList[1] = metadata.dngGainMapCount;
-    metadata.dngUnsupportedOpcodeCountByList[1] =
-        std::max(0, metadata.dngOpcodeCount[1] - metadata.dngAppliedOpcodeCountByList[1]);
-    if (metadata.dngGainMapCount > 0) {
-        metadata.uploadFormat = "R16UI + DNG GainMap R32F";
-    }
-}
-
-template <typename T, std::size_t N>
-void CopyNumbers(const std::vector<double>& values, std::array<T, N>& target) {
-    for (std::size_t i = 0; i < N && i < values.size(); ++i) {
-        target[i] = static_cast<T>(values[i]);
-    }
-}
-
-void ApplyDngSupplement(const std::string& path, RawMetadata& metadata) {
-    if (!metadata.isDng) {
-        return;
-    }
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        metadata.warnings.push_back("DNG supplement parser could not open file.");
-        return;
-    }
-    std::vector<std::uint8_t> bytes(
-        (std::istreambuf_iterator<char>(file)),
-        std::istreambuf_iterator<char>());
-    DngTiffReader reader(std::move(bytes));
-    if (!reader.Valid()) {
-        metadata.warnings.push_back("DNG supplement parser only supports classic TIFF DNG files.");
-        return;
-    }
-
-    const std::vector<std::uint32_t> ifdOffsets = reader.ReadIfdTree();
-    std::uint32_t rawIfd = reader.FirstIfd();
-    int bestScore = std::numeric_limits<int>::min();
-    std::uint64_t bestArea = 0;
-    for (std::uint32_t offset : ifdOffsets) {
-        const std::vector<DngTiffReader::Entry> entries = reader.ReadEntries(offset);
-        int score = 0;
-        std::uint64_t width = 0;
-        std::uint64_t height = 0;
-        for (const DngTiffReader::Entry& entry : entries) {
-            const std::vector<double> values = reader.NumberValues(entry);
-            if (entry.tag == 262 && !values.empty() && static_cast<int>(values[0]) == 32803) score += 100;
-            if ((entry.tag == 50714 || entry.tag == 50717 || entry.tag == 50829) && !values.empty()) score += 20;
-            if (entry.tag == 254 && !values.empty() && static_cast<std::uint32_t>(values[0]) == 0) score += 10;
-            if (entry.tag == 256 && !values.empty()) width = static_cast<std::uint64_t>(values[0]);
-            if (entry.tag == 257 && !values.empty()) height = static_cast<std::uint64_t>(values[0]);
-        }
-        const std::uint64_t area = width * height;
-        if (score > bestScore || (score == bestScore && area > bestArea)) {
-            bestScore = score;
-            bestArea = area;
-            rawIfd = offset;
-        }
-    }
-
-    std::vector<std::uint32_t> selectedIfds { reader.FirstIfd() };
-    if (rawIfd != reader.FirstIfd()) selectedIfds.push_back(rawIfd);
-    for (std::uint32_t offset : selectedIfds) {
-        const std::vector<DngTiffReader::Entry> entries = reader.ReadEntries(offset);
-        for (const DngTiffReader::Entry& entry : entries) {
-            const std::vector<double> values = reader.NumberValues(entry);
-            switch (entry.tag) {
-                case 274:
-                    if (!values.empty()) {
-                        const int orientation = static_cast<int>(std::lround(values[0]));
-                        if (orientation >= 1 && orientation <= 8) metadata.orientation = orientation;
-                    }
-                    break;
-                case 259: if (!values.empty()) metadata.dngCompression = static_cast<int>(values[0]); break;
-                case 262: if (!values.empty()) metadata.dngPhotometricInterpretation = static_cast<int>(values[0]); break;
-                case 50706: if (values.size() >= 4) metadata.isDng = true; break;
-                case 50708: metadata.dngUniqueCameraModel = reader.StringValue(entry); break;
-                case 50710: CopyNumbers(values, metadata.dngCfaPlaneColor); break;
-                case 50711: if (!values.empty()) metadata.dngCfaLayout = static_cast<int>(values[0]); break;
-                case 50712:
-                    metadata.dngLinearizationTable.clear();
-                    metadata.dngLinearizationTable.reserve(values.size());
-                    for (double value : values) {
-                        metadata.dngLinearizationTable.push_back(static_cast<std::uint16_t>(
-                            std::clamp(std::lround(value), 0l, 65535l)));
-                    }
-                    break;
-                case 50713: CopyNumbers(values, metadata.dngBlackLevelRepeatDim); break;
-                case 50714: {
-                    CopyNumbers(values, metadata.dngBlackLevelPattern);
-                    metadata.dngBlackLevelValues.clear();
-                    metadata.dngBlackLevelValues.reserve(values.size());
-                    for (double value : values) metadata.dngBlackLevelValues.push_back(static_cast<float>(value));
-                    if (!values.empty()) {
-                        const double sum = std::accumulate(values.begin(), values.end(), 0.0);
-                        metadata.blackLevel = static_cast<float>(sum / static_cast<double>(values.size()));
-                        metadata.perChannelBlack = metadata.dngBlackLevelPattern;
-                        metadata.blackLevelSource = "DNG BlackLevel tag";
-                    }
-                    break;
-                }
-                case 50715:
-                    metadata.dngBlackLevelDeltaH.clear();
-                    for (double value : values) metadata.dngBlackLevelDeltaH.push_back(static_cast<float>(value));
-                    break;
-                case 50716:
-                    metadata.dngBlackLevelDeltaV.clear();
-                    for (double value : values) metadata.dngBlackLevelDeltaV.push_back(static_cast<float>(value));
-                    break;
-                case 50717:
-                    metadata.dngWhiteLevelValues.clear();
-                    for (double value : values) metadata.dngWhiteLevelValues.push_back(static_cast<float>(value));
-                    if (!values.empty()) {
-                        metadata.whiteLevel = static_cast<float>(values[0]);
-                        metadata.whiteLevelSource = "DNG WhiteLevel tag";
-                        metadata.bitDepth = EstimateBitDepth(metadata.whiteLevel);
-                    }
-                    break;
-                case 50721: CopyNumbers(values, metadata.dngColorMatrix1); metadata.hasDngColorMatrix1 = values.size() >= 9; break;
-                case 50722: CopyNumbers(values, metadata.dngColorMatrix2); metadata.hasDngColorMatrix2 = values.size() >= 9; break;
-                case 50723: CopyNumbers(values, metadata.dngCameraCalibration1); metadata.hasDngCameraCalibration1 = values.size() >= 9; break;
-                case 50724: CopyNumbers(values, metadata.dngCameraCalibration2); metadata.hasDngCameraCalibration2 = values.size() >= 9; break;
-                case 50727:
-                    CopyNumbers(values, metadata.dngAnalogBalance);
-                    metadata.hasDngAnalogBalance = values.size() >= 3;
-                    break;
-                case 50728:
-                    CopyNumbers(values, metadata.dngAsShotNeutral);
-                    metadata.hasDngAsShotNeutral = values.size() >= 3 &&
-                        metadata.dngAsShotNeutral[0] > 0.0001f &&
-                        metadata.dngAsShotNeutral[1] > 0.0001f &&
-                        metadata.dngAsShotNeutral[2] > 0.0001f;
-                    if (metadata.hasDngAsShotNeutral) {
-                        for (std::size_t plane = 0; plane < 3; ++plane) {
-                            const int mappedColor = metadata.dngCfaPlaneColor[plane];
-                            const std::size_t color = mappedColor >= 0 && mappedColor < 3
-                                ? static_cast<std::size_t>(mappedColor)
-                                : plane;
-                            metadata.cameraWhiteBalance[color] =
-                                1.0f / (metadata.dngAsShotNeutral[plane] * metadata.dngAnalogBalance[plane]);
-                        }
-                        metadata.cameraWhiteBalance[3] = metadata.cameraWhiteBalance[1];
-                        metadata.whiteBalanceSource = "DNG AsShotNeutral tag";
-                    }
-                    break;
-                case 50730:
-                    if (!values.empty()) {
-                        metadata.dngBaselineExposure = static_cast<float>(values[0]);
-                        metadata.hasDngBaselineExposure = true;
-                    }
-                    break;
-                case 50731:
-                    if (!values.empty() && std::isfinite(values[0]) && values[0] > 0.0) {
-                        metadata.dngBaselineNoise = static_cast<float>(values[0]);
-                        metadata.hasDngBaselineNoise = true;
-                    }
-                    break;
-                case 50734:
-                    if (!values.empty() && std::isfinite(values[0]) && values[0] > 0.0 && values[0] <= 1.0) {
-                        metadata.dngLinearResponseLimit = static_cast<float>(values[0]);
-                        metadata.hasDngLinearResponseLimit = true;
-                    }
-                    break;
-                case 50829:
-                    if (values.size() >= 4) {
-                        metadata.dngActiveArea = {
-                            static_cast<int>(values[0]), static_cast<int>(values[1]),
-                            static_cast<int>(values[2]), static_cast<int>(values[3])
-                        };
-                        metadata.hasDngActiveArea = true;
-                    }
-                    break;
-                case 50830:
-                    metadata.dngMaskedAreas.clear();
-                    for (std::size_t i = 0; i + 3 < values.size(); i += 4) {
-                        metadata.dngMaskedAreas.push_back({
-                            static_cast<int>(values[i]), static_cast<int>(values[i + 1]),
-                            static_cast<int>(values[i + 2]), static_cast<int>(values[i + 3])
-                        });
-                    }
-                    break;
-                case 50778: if (!values.empty()) metadata.dngIlluminant1 = static_cast<int>(values[0]); break;
-                case 50779: if (!values.empty()) metadata.dngIlluminant2 = static_cast<int>(values[0]); break;
-                case 50964: CopyNumbers(values, metadata.dngForwardMatrix1); metadata.hasDngForwardMatrix1 = values.size() >= 9; break;
-                case 50965: CopyNumbers(values, metadata.dngForwardMatrix2); metadata.hasDngForwardMatrix2 = values.size() >= 9; break;
-                case 51008: {
-                    const std::vector<std::uint8_t> bytes = reader.RawBytes(entry);
-                    metadata.dngOpcodeCount[0] = CountDngOpcodes(bytes);
-                    metadata.dngUnsupportedOpcodeCountByList[0] = metadata.dngOpcodeCount[0];
-                    break;
-                }
-                case 51009: ParseDngOpcodeList2(reader.RawBytes(entry), metadata); break;
-                case 51022: {
-                    const std::vector<std::uint8_t> bytes = reader.RawBytes(entry);
-                    metadata.dngOpcodeCount[2] = CountDngOpcodes(bytes);
-                    metadata.dngUnsupportedOpcodeCountByList[2] = metadata.dngOpcodeCount[2];
-                    break;
-                }
-                case 51041:
-                    metadata.dngNoiseProfile.clear();
-                    if (values.size() >= 2 && (values.size() == 2 || (values.size() % 2) == 0)) {
-                        for (std::size_t i = 0; i + 1 < values.size(); i += 2) {
-                            metadata.dngNoiseProfile.push_back({ values[i], values[i + 1] });
-                        }
-                        metadata.hasDngNoiseProfile = std::all_of(
-                            metadata.dngNoiseProfile.begin(), metadata.dngNoiseProfile.end(),
-                            [](const DngNoiseProfilePlane& plane) {
-                                return std::isfinite(plane.shotScale) && plane.shotScale > 0.0 &&
-                                    std::isfinite(plane.readNoiseVariance) && plane.readNoiseVariance >= 0.0;
-                            });
-                    }
-                    break;
-                case 52525: metadata.hasDngProfileGainTableMap = entry.count > 0; break;
-                case 52544: metadata.hasDngProfileGainTableMap2 = entry.count > 0; break;
-                case 33421: CopyNumbers(values, metadata.dngCfaRepeatPatternDim); break;
-                case 33422: CopyNumbers(values, metadata.dngCfaPattern); break;
-                default: break;
-            }
-        }
-    }
-
-    if (metadata.dngCfaRepeatPatternDim[0] == 2 && metadata.dngCfaRepeatPatternDim[1] == 2) {
-        const CfaPattern dngPattern = PatternFromDngCfa(metadata.dngCfaPattern, metadata.dngCfaPlaneColor);
-        if (dngPattern != CfaPattern::Unknown) {
-            metadata.cfaPattern = dngPattern;
-            metadata.pixelLayout = RawPixelLayout::MosaicBayer;
-            metadata.mosaiced = true;
-            metadata.dngTypeStatus = "DNG type: Mosaic RAW / 2x2 Bayer";
-        }
-    } else if (metadata.pixelLayout == RawPixelLayout::MosaicBayer && metadata.dngCfaRepeatPatternDim[0] > 0) {
-        metadata.warnings.push_back("Unsupported DNG CFA layout: only 2x2 Bayer is supported in this pass.");
-    }
-
-    if (metadata.hasDngForwardMatrix1 || metadata.hasDngForwardMatrix2) {
-        metadata.cameraMatrixSource = "DNG Auto ForwardMatrix";
-    } else if (metadata.hasDngColorMatrix1 || metadata.hasDngColorMatrix2) {
-        metadata.cameraMatrixSource = "DNG Auto ColorMatrix inverse";
-    }
 }
 
 CfaPattern ExtractCfaPattern(LibRaw& processor, const libraw_data_t& image) {
@@ -823,7 +255,8 @@ void ExtractMetadata(
     LibRaw& processor,
     const std::string& path,
     RawMetadata& metadata,
-    bool includeDngSupplement = true) {
+    bool includeDngSupplement = true,
+    const std::function<bool()>& shouldCancel = {}) {
     const libraw_data_t& image = processor.imgdata;
     const libraw_imgother_t& capture = image.other;
     metadata.cameraMake = image.idata.make ? image.idata.make : "";
@@ -834,7 +267,7 @@ void ExtractMetadata(
     metadata.visibleHeight = image.sizes.height > 0 ? image.sizes.height : image.sizes.iheight;
     metadata.leftMargin = image.sizes.left_margin;
     metadata.topMargin = image.sizes.top_margin;
-    metadata.orientation = image.sizes.flip;
+    metadata.orientation = ExifOrientationFromLibRawFlip(image.sizes.flip);
     metadata.isDng = image.idata.dng_version != 0;
     metadata.whiteLevel = SafePositive(static_cast<float>(image.color.maximum), 65535.0f);
     metadata.blackLevel = std::max(0.0f, static_cast<float>(image.color.black));
@@ -842,12 +275,15 @@ void ExtractMetadata(
     metadata.exposureTimeSeconds = std::max(0.0f, capture.shutter);
     metadata.isoSpeed = std::max(0.0f, capture.iso_speed);
     metadata.apertureFNumber = std::max(0.0f, capture.aperture);
+    metadata.focalLengthMm = std::max(0.0f, capture.focal_len);
+    metadata.lensModel = image.lens.Lens ? image.lens.Lens : "";
     metadata.captureTimestamp = capture.timestamp > 0
         ? static_cast<std::int64_t>(capture.timestamp)
         : 0;
     metadata.hasExposureTime = metadata.exposureTimeSeconds > 0.0f;
     metadata.hasIsoSpeed = metadata.isoSpeed > 0.0f;
     metadata.hasApertureFNumber = metadata.apertureFNumber > 0.0f;
+    metadata.hasFocalLength = metadata.focalLengthMm > 0.0f;
     metadata.hasCaptureTimestamp = metadata.captureTimestamp > 0;
     metadata.mosaiced = image.idata.filters != 0 && image.idata.colors >= 3;
     metadata.pixelLayout = metadata.mosaiced ? RawPixelLayout::MosaicBayer : RawPixelLayout::Unknown;
@@ -868,6 +304,19 @@ void ExtractMetadata(
         metadata.daylightWhiteBalance[i] = SafePositive(image.color.pre_mul[i], 1.0f);
     }
     ExtractDngLevels(processor, metadata);
+    // ARW2 encodes an eleven-bit value and decodes it through this curve.
+    // Its largest reachable value can be below color.maximum. Comparing
+    // against the nominal white level then treats the clipped plateau as
+    // valid HDR evidence. Use the codec endpoint, never an observed image max.
+    const auto* decoder=processor.unpack_function_name();
+    if(!metadata.isDng&&decoder&&std::string(decoder)=="sony_arw2_load_raw()") {
+        const float decodedWhite=static_cast<float>(image.color.curve[0x7ffu<<1u]);
+        if(decodedWhite>metadata.blackLevel&&decodedWhite<metadata.whiteLevel) {
+            metadata.whiteLevel=decodedWhite;
+            metadata.whiteLevelSource="LibRaw ARW2 decoded curve endpoint";
+            metadata.bitDepth=EstimateBitDepth(metadata.whiteLevel);
+        }
+    }
 
     bool hasMatrix = false;
     for (int r = 0; r < 3; ++r) {
@@ -880,7 +329,10 @@ void ExtractMetadata(
     metadata.hasCameraMatrix = hasMatrix;
     ExtractDngColorMetadata(image, metadata);
     if (includeDngSupplement) {
-        ApplyDngSupplement(path, metadata);
+        if (!ApplyDngSupplement(NativeRawPath(path), metadata, shouldCancel)) {
+            metadata.error = "RAW load canceled.";
+            return;
+        }
     }
 
     if (metadata.visibleWidth <= 0 || metadata.visibleHeight <= 0) {
@@ -899,38 +351,6 @@ void ExtractMetadata(
         !(metadata.dngCfaRepeatPatternDim[0] == 2 && metadata.dngCfaRepeatPatternDim[1] == 2)) {
         metadata.error = "Unsupported DNG CFA layout. Only 2x2 Bayer mosaics are supported.";
     }
-}
-
-bool ExtractRawStats(RawImageData& data, const std::function<bool()>& shouldCancel) {
-    if (data.rawBuffer.empty()) {
-        return !IsCancelled(shouldCancel);
-    }
-
-    std::uint16_t minValue = data.rawBuffer.front();
-    std::uint16_t maxValue = data.rawBuffer.front();
-    std::size_t clipped = 0;
-    const float white = data.metadata.whiteLevel;
-    for (std::size_t i = 0; i < data.rawBuffer.size(); ++i) {
-        if ((i % kCancellationCheckInterval) == 0 && IsCancelled(shouldCancel)) {
-            return false;
-        }
-        const std::uint16_t value = data.rawBuffer[i];
-        minValue = std::min(minValue, value);
-        maxValue = std::max(maxValue, value);
-        if (white > 0.0f && static_cast<float>(value) >= white) {
-            ++clipped;
-        }
-    }
-    data.metadata.rawMinimum = static_cast<float>(minValue);
-    data.metadata.rawMaximum = static_cast<float>(maxValue);
-
-    if (white <= 0.0f) {
-        data.metadata.defaultWhiteClipPercent = 0.0f;
-        return !IsCancelled(shouldCancel);
-    }
-
-    data.metadata.defaultWhiteClipPercent = 100.0f * static_cast<float>(clipped) / static_cast<float>(data.rawBuffer.size());
-    return !IsCancelled(shouldCancel);
 }
 
 bool ExtractLinearStats(RawImageData& data, const std::function<bool()>& shouldCancel) {
@@ -963,8 +383,8 @@ bool ExtractLinearStats(RawImageData& data, const std::function<bool()>& shouldC
     return !IsCancelled(shouldCancel);
 }
 
-template <typename T>
-bool CopyColorImageToUInt16(
+template <typename T, typename Sample>
+bool CopyColorImage(
     const T* source,
     int width,
     int height,
@@ -973,80 +393,76 @@ bool CopyColorImageToUInt16(
     int stridePixels,
     int sourceChannels,
     int outputChannels,
-    std::vector<std::uint16_t>& output,
+    std::vector<Sample>& output,
     const std::function<bool()>& shouldCancel) {
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     output.assign(pixelCount * static_cast<std::size_t>(outputChannels), 0);
     const int safeStride = stridePixels > 0 ? stridePixels : width;
     for (int y = 0; y < height; ++y) {
-        if ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) % kCancellationCheckInterval == 0 &&
-            IsCancelled(shouldCancel)) {
-            output.clear();
-            return false;
-        }
-        for (int x = 0; x < width; ++x) {
-            const std::size_t outPixel = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
-            const int inPixel = (top + y) * safeStride + (left + x);
-            for (int c = 0; c < outputChannels; ++c) {
-                const int srcC = std::min(c, std::max(0, sourceChannels - 1));
-                output[outPixel * static_cast<std::size_t>(outputChannels) + static_cast<std::size_t>(c)] =
-                    static_cast<std::uint16_t>(source[inPixel][srcC]);
-            }
-        }
-    }
-    return !IsCancelled(shouldCancel);
-}
-
-template <typename T>
-bool CopyColorImageToFloat(
-    const T* source,
-    int width,
-    int height,
-    int left,
-    int top,
-    int stridePixels,
-    int sourceChannels,
-    int outputChannels,
-    std::vector<float>& output,
-    const std::function<bool()>& shouldCancel) {
-    const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    output.assign(pixelCount * static_cast<std::size_t>(outputChannels), 0.0f);
-    const int safeStride = stridePixels > 0 ? stridePixels : width;
-    for (int y = 0; y < height; ++y) {
-        if ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) % kCancellationCheckInterval == 0 &&
-            IsCancelled(shouldCancel)) {
-            output.clear();
-            return false;
-        }
-        for (int x = 0; x < width; ++x) {
-            const std::size_t outPixel = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
-            const int inPixel = (top + y) * safeStride + (left + x);
-            for (int c = 0; c < outputChannels; ++c) {
-                const int srcC = std::min(c, std::max(0, sourceChannels - 1));
-                output[outPixel * static_cast<std::size_t>(outputChannels) + static_cast<std::size_t>(c)] =
-                    static_cast<float>(source[inPixel][srcC]);
-            }
-        }
-    }
-    return !IsCancelled(shouldCancel);
-}
-
-bool CopyRawImageToBuffer(
-    const std::uint16_t* source,
-    std::size_t pixelCount,
-    std::vector<std::uint16_t>& output,
-    const std::function<bool()>& shouldCancel) {
-    output.assign(pixelCount, 0);
-    std::size_t copied = 0;
-    while (copied < pixelCount) {
         if (IsCancelled(shouldCancel)) {
             output.clear();
             return false;
         }
-        const std::size_t count = std::min(kCancellationCheckInterval, pixelCount - copied);
-        std::copy(source + copied, source + copied + count, output.begin() + static_cast<std::ptrdiff_t>(copied));
-        copied += count;
+        for (int x = 0; x < width; ++x) {
+            const std::size_t outPixel = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
+            const std::size_t inPixel = static_cast<std::size_t>(top + y) *
+                static_cast<std::size_t>(safeStride) + static_cast<std::size_t>(left + x);
+            for (int c = 0; c < outputChannels; ++c) {
+                const int srcC = std::min(c, std::max(0, sourceChannels - 1));
+                output[outPixel * static_cast<std::size_t>(outputChannels) + static_cast<std::size_t>(c)] =
+                    static_cast<Sample>(source[inPixel][srcC]);
+            }
+        }
     }
+    return !IsCancelled(shouldCancel);
+}
+
+bool CopyRawImageToBufferAndStats(
+    const std::uint16_t* source,
+    int width,
+    int height,
+    int strideSamples,
+    std::vector<std::uint16_t>& output,
+    RawMetadata& metadata,
+    const std::function<bool()>& shouldCancel) {
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(std::max(0, width)) *
+        static_cast<std::size_t>(std::max(0, height));
+    if (source == nullptr || width <= 0 || height <= 0 || pixelCount == 0) {
+        output.clear();
+        return false;
+    }
+    output.assign(pixelCount, 0);
+    const int safeStride = std::max(width, strideSamples);
+    std::uint16_t minimum = source[0];
+    std::uint16_t maximum = source[0];
+    std::size_t clipped = 0;
+    const float white = metadata.whiteLevel;
+    for (int y = 0; y < height; ++y) {
+        if (IsCancelled(shouldCancel)) {
+            output.clear();
+            return false;
+        }
+        const std::uint16_t* sourceRow =
+            source + static_cast<std::ptrdiff_t>(y) * safeStride;
+        std::uint16_t* destinationRow =
+            output.data() + static_cast<std::ptrdiff_t>(y) * width;
+        for (int x = 0; x < width; ++x) {
+            const std::uint16_t value = sourceRow[x];
+            destinationRow[x] = value;
+            minimum = std::min(minimum, value);
+            maximum = std::max(maximum, value);
+            if (white > 0.0f && static_cast<float>(value) >= white) {
+                ++clipped;
+            }
+        }
+    }
+    metadata.rawMinimum = static_cast<float>(minimum);
+    metadata.rawMaximum = static_cast<float>(maximum);
+    metadata.defaultWhiteClipPercent = white > 0.0f
+        ? 100.0f * static_cast<float>(clipped) /
+            static_cast<float>(pixelCount)
+        : 0.0f;
     return !IsCancelled(shouldCancel);
 }
 #endif
@@ -1067,7 +483,7 @@ bool ProbeMetadataWithLibRaw(
         return false;
     }
     LibRaw processor;
-    const int status = processor.open_file(path.c_str());
+    const int status = processor.open_file(NativeRawPath(path).c_str());
     if (status != LIBRAW_SUCCESS) {
         outMetadata.error = std::string("LibRaw open_file failed: ") +
             libraw_strerror(status);
@@ -1103,16 +519,26 @@ bool DecodeWithLibRaw(
     }
 
     const Stack::RawEvidence::SourceIdentity sourceIdentity =
-        Stack::RawEvidence::ComputeSourceIdentity(std::filesystem::path(path));
+        Stack::RawEvidence::ComputeSourceIdentity(NativeRawPath(path), shouldCancel);
     if (!sourceIdentity.valid) {
+        if (sourceIdentity.reason == "source-hash-canceled") {
+            MarkCancelled(outData);
+            return false;
+        }
         outData.metadata.error = "RAW source identity could not be computed: " + sourceIdentity.reason;
         return false;
     }
     outData.metadata.sourceContentSha256 = sourceIdentity.sha256;
     outData.metadata.sourceByteSize = sourceIdentity.byteSize;
 
+    LibRawCancellation cancellation { shouldCancel };
     LibRaw processor;
-    int status = processor.open_file(path.c_str());
+    processor.set_progress_handler(&LibRawCancellation::Progress, &cancellation);
+    int status = processor.open_file(NativeRawPath(path).c_str());
+    if (status == LIBRAW_CANCELLED_BY_CALLBACK || cancellation.cancelled || IsCancelled(shouldCancel)) {
+        MarkCancelled(outData);
+        return false;
+    }
     if (status != LIBRAW_SUCCESS) {
         outData.metadata.error = std::string("LibRaw open_file failed: ") + libraw_strerror(status);
         return false;
@@ -1124,6 +550,10 @@ bool DecodeWithLibRaw(
     }
 
     status = processor.unpack();
+    if (status == LIBRAW_CANCELLED_BY_CALLBACK || cancellation.cancelled || IsCancelled(shouldCancel)) {
+        MarkCancelled(outData);
+        return false;
+    }
     if (status != LIBRAW_SUCCESS) {
         outData.metadata.error = std::string("LibRaw unpack failed: ") + libraw_strerror(status);
         processor.recycle();
@@ -1135,7 +565,11 @@ bool DecodeWithLibRaw(
         return false;
     }
 
-    ExtractMetadata(processor, path, outData.metadata);
+    ExtractMetadata(processor, path, outData.metadata, true, shouldCancel);
+    if (outData.metadata.error == "RAW load canceled.") {
+        MarkCancelled(outData);
+        return false;
+    }
     if (!outData.metadata.error.empty()) {
         processor.recycle();
         return false;
@@ -1145,6 +579,16 @@ bool DecodeWithLibRaw(
         processor.recycle();
         return false;
     }
+    const Stack::RawEvidence::DecodeIdentity decodeIdentity =
+        Stack::RawEvidence::BuildDecodeIdentity(
+            outData.metadata,
+            Stack::RawEvidence::DecodeIdentityOptions {});
+    outData.decoderIdentityVersion =
+        Stack::RawEvidence::kRawDecoderIdentityVersion;
+    outData.contentIdentity = sourceIdentity.sha256 + ":" +
+        decodeIdentity.sha256;
+    outData.contentIdentityHash = static_cast<std::uint64_t>(
+        std::hash<std::string>{}(outData.contentIdentity));
 
     const int rawWidth = outData.metadata.rawWidth;
     const int rawHeight = outData.metadata.rawHeight;
@@ -1164,7 +608,7 @@ bool DecodeWithLibRaw(
         const auto& rawdata = processor.imgdata.rawdata;
         if (rawdata.color3_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(3 * sizeof(std::uint16_t)) : rawWidth;
-            if (!CopyColorImageToUInt16(
+            if (!CopyColorImage(
                     rawdata.color3_image,
                     visibleWidth,
                     visibleHeight,
@@ -1182,7 +626,7 @@ bool DecodeWithLibRaw(
             outData.metadata.linearSampleFormat = RawSampleFormat::UInt16;
         } else if (rawdata.color4_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(4 * sizeof(std::uint16_t)) : rawWidth;
-            if (!CopyColorImageToUInt16(
+            if (!CopyColorImage(
                     rawdata.color4_image,
                     visibleWidth,
                     visibleHeight,
@@ -1200,7 +644,7 @@ bool DecodeWithLibRaw(
             outData.metadata.linearSampleFormat = RawSampleFormat::UInt16;
         } else if (rawdata.float3_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(3 * sizeof(float)) : rawWidth;
-            if (!CopyColorImageToFloat(
+            if (!CopyColorImage(
                     rawdata.float3_image,
                     visibleWidth,
                     visibleHeight,
@@ -1218,7 +662,7 @@ bool DecodeWithLibRaw(
             outData.metadata.linearSampleFormat = RawSampleFormat::Float32;
         } else if (rawdata.float4_image) {
             const int stride = processor.imgdata.sizes.raw_pitch > 0 ? processor.imgdata.sizes.raw_pitch / static_cast<int>(4 * sizeof(float)) : rawWidth;
-            if (!CopyColorImageToFloat(
+            if (!CopyColorImage(
                     rawdata.float4_image,
                     visibleWidth,
                     visibleHeight,
@@ -1258,21 +702,22 @@ bool DecodeWithLibRaw(
         return false;
     }
 
-    if (!CopyRawImageToBuffer(
+    const int rawStrideSamples = processor.imgdata.sizes.raw_pitch > 0
+        ? processor.imgdata.sizes.raw_pitch /
+            static_cast<int>(sizeof(std::uint16_t))
+        : rawWidth;
+    if (!CopyRawImageToBufferAndStats(
             processor.imgdata.rawdata.raw_image,
-            pixelCount,
+            rawWidth,
+            rawHeight,
+            rawStrideSamples,
             outData.rawBuffer,
+            outData.metadata,
             shouldCancel)) {
         MarkCancelled(outData);
         processor.recycle();
         return false;
     }
-    if (!ExtractRawStats(outData, shouldCancel)) {
-        MarkCancelled(outData);
-        processor.recycle();
-        return false;
-    }
-
     const int warnings = processor.imgdata.process_warnings;
     if (warnings != 0) {
         outData.metadata.warnings.push_back("LibRaw reported process warnings: " + std::to_string(warnings));

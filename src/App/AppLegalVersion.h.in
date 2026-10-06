@@ -1,0 +1,10 @@
+#pragma once
+
+namespace AppLegalVersion {
+
+inline constexpr int kAcceptanceSchemaVersion = 1;
+inline constexpr const char* kEulaVersion = "@STACK_EULA_VERSION@";
+inline constexpr const char* kEulaSha256 = "@STACK_EULA_SHA256@";
+inline constexpr const char* kPrivacyVersion = "@STACK_PRIVACY_VERSION@";
+
+} // namespace AppLegalVersion

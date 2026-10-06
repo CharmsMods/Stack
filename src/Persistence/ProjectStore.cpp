@@ -1,5 +1,7 @@
 #include "Persistence/ProjectStore.h"
+#include "Persistence/ProjectCatalogChanges.h"
 
+#include "Persistence/RawProjectEditPipeline.h"
 #include "Raw/RawTechnicalEvidence.h"
 
 #include <algorithm>
@@ -7,6 +9,7 @@
 #include <cctype>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -17,6 +20,9 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace Stack::Project {
@@ -29,9 +35,10 @@ std::string LowerAscii(std::string value) {
     return value;
 }
 
-constexpr const char* kBundleManifestName = "project.stackmanifest";
-constexpr const char* kBundlePreviousManifestName = "project.stackmanifest.previous";
-constexpr const char* kBundleMediaDirectoryName = "media";
+constexpr const char* kWorkingProjectManifestName = "project.stack";
+constexpr const char* kWorkingProjectPreviousManifestName = "project.stack.previous";
+constexpr const char* kWorkingProjectAssetsDirectoryName = "assets";
+constexpr const char* kWorkingProjectPreviewName = "preview.png";
 constexpr const char* kBundleStagingDirectoryName = ".staging";
 constexpr std::array<char, 8> kPortableHeader = { 'S', 'T', 'K', 'R', 'A', 'W', '3', '\0' };
 constexpr std::array<char, 4> kRecordMagic = { 'S', 'R', '3', 'R' };
@@ -65,6 +72,80 @@ std::string FileNameForAsset(const EmbeddedAssetRecord& asset) {
     return asset.sha256 + "-" + std::to_string(asset.byteLength) + ".original";
 }
 
+std::string SanitizeManagedFileName(std::string name) {
+    if (name.empty()) name = "asset";
+    for (char& character : name) {
+        const unsigned char value = static_cast<unsigned char>(character);
+        if (value < 32u || character == '<' || character == '>' ||
+            character == ':' || character == '"' || character == '/' ||
+            character == '\\' || character == '|' || character == '?' ||
+            character == '*') {
+            character = '_';
+        }
+    }
+    while (!name.empty() && (name.back() == '.' || name.back() == ' ')) {
+        name.pop_back();
+    }
+    return name.empty() ? std::string("asset") : name;
+}
+
+bool IsSafeManagedAssetPath(const std::filesystem::path& path) {
+    if (path.empty() || path.is_absolute()) return false;
+    auto component = path.begin();
+    if (component == path.end() ||
+        LowerAscii(component->string()) != kWorkingProjectAssetsDirectoryName) {
+        return false;
+    }
+    for (; component != path.end(); ++component) {
+        if (*component == "." || *component == "..") return false;
+    }
+    return true;
+}
+
+std::filesystem::path NormalizeDirectoryStorePath(
+    const std::filesystem::path& requestedPath) {
+    if (LowerAscii(requestedPath.filename().u8string()) ==
+        kWorkingProjectManifestName) {
+        return requestedPath.parent_path().lexically_normal();
+    }
+    return requestedPath.lexically_normal();
+}
+
+struct StorePathLess {
+    bool operator()(const std::filesystem::path& a, const std::filesystem::path& b) const {
+#if defined(_WIN32)
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+#else
+        return a < b;
+#endif
+    }
+};
+
+std::shared_ptr<std::mutex> CommitMutexForPath(const std::filesystem::path& path) {
+    std::error_code error;
+    auto key = std::filesystem::weakly_canonical(path, error);
+    if (error) {
+        error.clear();
+        key = std::filesystem::absolute(path, error);
+        if (error) key = path;
+    }
+    key = key.lexically_normal();
+    static std::mutex registryMutex;
+    static std::map<std::filesystem::path, std::weak_ptr<std::mutex>, StorePathLess> registry;
+    std::lock_guard<std::mutex> lock(registryMutex);
+    for (auto entry = registry.begin(); entry != registry.end();) {
+        if (entry->second.expired()) entry = registry.erase(entry);
+        else ++entry;
+    }
+    auto& existing = registry[key];
+    auto mutex = existing.lock();
+    if (!mutex) {
+        mutex = std::make_shared<std::mutex>();
+        existing = mutex;
+    }
+    return mutex;
+}
+
 std::string FileNameForStagedAsset() {
     // Transaction directories already isolate staged files. A generated short
     // name avoids pushing otherwise valid project locations over the Windows
@@ -95,9 +176,15 @@ bool ReplaceFileAtomically(
 bool MoveFileWithoutOverwrite(
     const std::filesystem::path& source,
     const std::filesystem::path& destination) {
+#if defined(_WIN32)
+    return MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+#else
     std::error_code error;
-    std::filesystem::rename(source, destination, error);
-    return !error;
+    std::filesystem::create_hard_link(source, destination, error);
+    if (error) return false;
+    std::filesystem::remove(source, error);
+    return true;
+#endif
 }
 
 bool EnsureParentDirectory(const std::filesystem::path& path, std::string& error) {
@@ -265,7 +352,7 @@ json SerializeStoreEnvelope(
             { "checksum", entry.second.checksum }
         };
         if (!entry.second.relativePath.empty()) {
-            location["relativePath"] = entry.second.relativePath.generic_string();
+            location["relativePath"] = entry.second.relativePath.generic_u8string();
         }
         storage["assets"][entry.first] = std::move(location);
     }
@@ -277,7 +364,7 @@ json SerializeStoreEnvelope(
         };
         if (!coverLocation->relativePath.empty()) {
             storage["coverThumbnail"]["relativePath"] =
-                coverLocation->relativePath.generic_string();
+                coverLocation->relativePath.generic_u8string();
         }
     }
     value["_store"] = std::move(storage);
@@ -288,6 +375,7 @@ json SerializeStoreEnvelope(
 bool SameLogicalProjectSnapshot(
     const RawProjectSnapshot& left,
     const RawProjectSnapshot& right) {
+    if (left.coverThumbnailBytes != right.coverThumbnailBytes) return false;
     json leftValue = SerializeRawProjectSnapshot(left);
     json rightValue = SerializeRawProjectSnapshot(right);
     // The storage generation is the result of a commit, not authored project
@@ -306,7 +394,7 @@ bool DeserializeStoreEnvelope(
     std::unordered_map<std::string, AssetLocation>& locations,
     AssetLocation& coverLocation,
     bool& hasCover,
-    std::string& error) {
+    std::string& error) try {
     const json storage = value.value("_store", json::object());
     ProjectStorageKind kind;
     if (!ParseProjectStorageKind(storage.value("kind", std::string()), kind) ||
@@ -338,7 +426,7 @@ bool DeserializeStoreEnvelope(
         location.payloadOffset = iterator.value().value("payloadOffset", 0ull);
         location.payloadLength = iterator.value().value("payloadLength", 0ull);
         location.checksum = iterator.value().value("checksum", std::string());
-        location.relativePath = iterator.value().value("relativePath", std::string());
+        location.relativePath = std::filesystem::u8path(iterator.value().value("relativePath", std::string()));
         locations.emplace(iterator.key(), std::move(location));
     }
     hasCover = false;
@@ -347,10 +435,15 @@ bool DeserializeStoreEnvelope(
         coverLocation.payloadOffset = cover->value("payloadOffset", 0ull);
         coverLocation.payloadLength = cover->value("payloadLength", 0ull);
         coverLocation.checksum = cover->value("checksum", std::string());
-        coverLocation.relativePath = cover->value("relativePath", std::string());
+        coverLocation.relativePath = std::filesystem::u8path(cover->value("relativePath", std::string()));
         hasCover = true;
     }
     return true;
+} catch (const std::exception& exception) {
+    // A malformed current manifest must still allow Load to try the previous
+    // committed generation. Do not let typed JSON access bypass recovery.
+    error = std::string("Project manifest storage data is invalid: ") + exception.what();
+    return false;
 }
 
 struct RecordHeader {
@@ -518,11 +611,24 @@ bool AppendRecordHeader(
 class TransactionalProjectStore final : public ProjectStore {
 public:
     TransactionalProjectStore(std::filesystem::path path, ProjectStorageKind kind)
-        : m_Path(std::move(path)), m_Kind(kind) {}
+        : m_Path(kind == ProjectStorageKind::DirectoryBundle
+              ? NormalizeDirectoryStorePath(path)
+              : std::move(path)),
+          m_Kind(kind), m_CommitMutex(CommitMutexForPath(m_Path)) {}
 
     ProjectStorageKind StorageKind() const override { return m_Kind; }
     const std::filesystem::path& StoragePath() const override { return m_Path; }
     std::uint64_t StorageRevision() const override { return m_StorageRevision; }
+    bool ReadStorageRevision(std::uint64_t& revision, std::string& error) const override {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        try {
+            if (ReadCurrentRevision(revision, error)) return true;
+            if (error.empty()) error = "The project has no valid storage generation.";
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+        return false;
+    }
     bool IsReadOnlyRecovery() const override { return m_ReadOnlyRecovery; }
 
     bool Load(RawProjectSnapshot& snapshot, bool& recoveredPrevious, std::string& error) {
@@ -534,9 +640,63 @@ public:
                     m_CoverLocation, hasCover, loadError)) {
                 return false;
             }
-            m_HasCover = hasCover;
-            if (hasCover && !LoadCoverThumbnail(snapshot.coverThumbnailBytes, loadError)) {
+            // Opening validates only the cheap structural asset facts. Full
+            // decoding and checksums remain lazy, but a manifest cannot become
+            // an active session when a required asset is absent or truncated.
+            std::error_code sizeError;
+            const std::uint64_t portableSize =
+                m_Kind == ProjectStorageKind::PortableFile
+                ? static_cast<std::uint64_t>(
+                    std::filesystem::file_size(m_Path, sizeError))
+                : 0u;
+            if (m_Kind == ProjectStorageKind::PortableFile && sizeError) {
+                loadError = "The portable project size could not be read.";
                 return false;
+            }
+            for (const EmbeddedAssetRecord& asset : snapshot.embeddedAssets) {
+                // Bracket pixels are a derived measurement. The saved originals
+                // remain usable if this optional result must be reconstructed.
+                if (asset.managedRole == "bracketing-result") continue;
+                const auto location = m_AssetLocations.find(asset.assetId);
+                if (location == m_AssetLocations.end()) {
+                    loadError = "A required managed asset is missing: " +
+                        asset.assetId;
+                    return false;
+                }
+                if (m_Kind == ProjectStorageKind::DirectoryBundle) {
+                    sizeError.clear();
+                    const std::uint64_t actualSize =
+                        static_cast<std::uint64_t>(std::filesystem::file_size(
+                            m_Path / location->second.relativePath,
+                            sizeError));
+                    if (sizeError || actualSize != asset.byteLength) {
+                        loadError = "A required managed asset is missing or has the wrong size: " +
+                            asset.assetId;
+                        return false;
+                    }
+                } else if (
+                    location->second.payloadOffset > portableSize ||
+                    location->second.payloadLength != asset.byteLength ||
+                    location->second.payloadLength >
+                        portableSize - location->second.payloadOffset) {
+                    loadError = "A portable managed asset is missing or truncated: " +
+                        asset.assetId;
+                    return false;
+                }
+            }
+            m_HasCover = hasCover;
+            if (hasCover) {
+                std::string coverError;
+                if (!LoadCoverThumbnail(
+                        snapshot.coverThumbnailBytes, coverError)) {
+                    // preview.png is a rebuildable Library/UI artifact. A
+                    // missing or stale preview must never reject an otherwise
+                    // valid authoritative project generation.
+                    snapshot.coverThumbnailBytes.clear();
+                    m_HasCover = false;
+                    loadError = "Project loaded without its rebuildable preview (" +
+                        coverError + ").";
+                }
             }
             return true;
         };
@@ -544,16 +704,17 @@ public:
         if (m_Kind == ProjectStorageKind::DirectoryBundle) {
             json currentManifest;
             std::string currentError;
-            if (ReadJsonFile(m_Path / kBundleManifestName, currentManifest, currentError) &&
+            if (ReadJsonFile(CurrentManifestPath(), currentManifest, currentError) &&
                 applyManifest(currentManifest, currentError)) {
                 m_Snapshot = snapshot;
+                error = currentError;
                 return true;
             }
 
             json previousManifest;
             std::string previousError;
             if (!ReadJsonFile(
-                    m_Path / kBundlePreviousManifestName,
+                    PreviousManifestPath(),
                     previousManifest,
                     previousError) ||
                 !applyManifest(previousManifest, previousError)) {
@@ -563,6 +724,11 @@ public:
             }
             recoveredPrevious = true;
             m_ReadOnlyRecovery = true;
+            error = "Recovered the previous project generation because the current manifest is invalid: " +
+                currentError;
+            if (!previousError.empty()) {
+                error += " " + previousError;
+            }
         } else {
             json manifest;
             std::uint64_t generation = 0;
@@ -605,11 +771,27 @@ public:
         record.assetId = MakeAssetId(identity.sha256, identity.byteSize);
         record.sha256 = identity.sha256;
         record.byteLength = identity.byteSize;
-        record.originalFileName = sourcePath.filename().string();
-        record.originalExtension = sourcePath.extension().string();
+        record.originalFilename = sourcePath.filename().u8string();
+        record.displayName = record.originalFilename;
+        record.originalSourcePath = sourcePath.u8string();
+        // Provenance is relative to the enclosing photo workspace, when this
+        // store belongs to one. Asset playback always uses projectAssetPath.
+        for (auto parent = m_Path.parent_path(); !parent.empty();) {
+            std::error_code provenanceError;
+            if (LowerAscii(parent.filename().u8string()) == "closet" &&
+                std::filesystem::is_regular_file(parent / "workspace.json", provenanceError)) {
+                const auto relative = sourcePath.lexically_normal().lexically_relative(parent.parent_path());
+                if (!relative.empty() && !relative.is_absolute() && *relative.begin() != "..")
+                    record.workspaceRelativeSourcePath = relative.generic_u8string();
+                break;
+            }
+            const auto next = parent.parent_path();
+            if (next == parent) break;
+            parent = next;
+        }
+        record.originalFileFingerprint = identity.sha256;
         record.inputFamily = inputFamily;
         record.captureMetadataSummary = captureMetadataSummary;
-        record.informationalOriginPath = sourcePath.string();
 
         std::lock_guard<std::mutex> lock(m_Mutex);
         TransactionState* state = FindTransaction(transaction, error);
@@ -618,6 +800,35 @@ public:
             state->assets.find(record.assetId) != state->assets.end()) {
             return Finish(errorMessage, std::string(), true);
         }
+        std::string managedName = SanitizeManagedFileName(record.originalFilename);
+        std::filesystem::path managedPath =
+            std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
+            std::filesystem::u8path(managedName);
+        const auto pathAlreadyUsed = [&](const std::filesystem::path& candidate) {
+            const std::string key = LowerAscii(candidate.generic_u8string());
+            for (const auto& [assetId, location] : m_AssetLocations) {
+                (void)assetId;
+                if (LowerAscii(location.relativePath.generic_u8string()) == key) {
+                    return true;
+                }
+            }
+            for (const auto& [assetId, staged] : state->assets) {
+                (void)assetId;
+                if (LowerAscii(staged.record.projectAssetPath) == key) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (pathAlreadyUsed(managedPath)) {
+            const auto namePath = std::filesystem::u8path(managedName);
+            const std::string identitySuffix = identity.sha256.substr(0u, 8u);
+            managedName = namePath.stem().u8string() + "-" + identitySuffix +
+                namePath.extension().u8string();
+            managedPath = std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
+                std::filesystem::u8path(managedName);
+        }
+        record.projectAssetPath = managedPath.generic_u8string();
         const std::filesystem::path stagedPath =
             state->stagingDirectory / FileNameForStagedAsset();
         std::ifstream input(sourcePath, std::ios::binary);
@@ -656,6 +867,47 @@ public:
             state->assets.find(expectedRecord.assetId) != state->assets.end()) {
             return Finish(errorMessage, std::string(), true);
         }
+        EmbeddedAssetRecord stagedRecord = expectedRecord;
+        if (stagedRecord.displayName.empty()) {
+            stagedRecord.displayName = stagedRecord.originalFilename;
+        }
+        if (stagedRecord.originalFileFingerprint.empty()) {
+            stagedRecord.originalFileFingerprint = stagedRecord.sha256;
+        }
+        if (!IsSafeManagedAssetPath(stagedRecord.projectAssetPath)) {
+            std::string managedName = SanitizeManagedFileName(
+                stagedRecord.originalFilename.empty()
+                    ? stagedRecord.assetId.substr(0u, 16u)
+                    : stagedRecord.originalFilename);
+            stagedRecord.projectAssetPath = (
+                std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
+                std::filesystem::u8path(managedName)).generic_u8string();
+        }
+        const auto pathAlreadyUsedByAnotherAsset = [&]() {
+            const std::string key = LowerAscii(stagedRecord.projectAssetPath);
+            for (const auto& [assetId, location] : m_AssetLocations) {
+                if (assetId != stagedRecord.assetId &&
+                    LowerAscii(location.relativePath.generic_u8string()) == key) {
+                    return true;
+                }
+            }
+            for (const auto& [assetId, staged] : state->assets) {
+                if (assetId != stagedRecord.assetId &&
+                    LowerAscii(staged.record.projectAssetPath) == key) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (pathAlreadyUsedByAnotherAsset()) {
+            const auto authoredPath = std::filesystem::u8path(stagedRecord.projectAssetPath);
+            const std::string identitySuffix =
+                stagedRecord.sha256.substr(0u, 8u);
+            stagedRecord.projectAssetPath = (
+                authoredPath.parent_path() /
+                (authoredPath.stem().u8string() + "-" + identitySuffix +
+                 authoredPath.extension().u8string())).generic_u8string();
+        }
         const std::filesystem::path stagedPath =
             state->stagingDirectory / FileNameForStagedAsset();
         std::ofstream output(stagedPath, std::ios::binary | std::ios::trunc);
@@ -665,20 +917,20 @@ public:
                 expectedRecord.assetId + ".";
             return Finish(errorMessage, error, false);
         }
-        if (!CopyStream(source, output, &copied, expectedRecord.byteLength) ||
-            copied != expectedRecord.byteLength) {
+        if (!CopyStream(source, output, &copied, stagedRecord.byteLength) ||
+            copied != stagedRecord.byteLength) {
             error = "Could not stream the source asset into project staging (" +
-                expectedRecord.assetId + "; expected " +
-                std::to_string(expectedRecord.byteLength) + " bytes, copied " +
+                stagedRecord.assetId + "; expected " +
+                std::to_string(stagedRecord.byteLength) + " bytes, copied " +
                 std::to_string(copied) + ").";
             return Finish(errorMessage, error, false);
         }
         output.close();
-        if (!output.good() || !VerifyFileIdentity(stagedPath, expectedRecord, error)) {
+        if (!output.good() || !VerifyFileIdentity(stagedPath, stagedRecord, error)) {
             return Finish(errorMessage, error, false);
         }
         state->assets.emplace(
-            expectedRecord.assetId, StagedAsset { expectedRecord, stagedPath });
+            stagedRecord.assetId, StagedAsset { stagedRecord, stagedPath });
         return Finish(errorMessage, std::string(), true);
     }
 
@@ -754,13 +1006,26 @@ public:
         if (!EnsureParentDirectory(destinationPath, error)) {
             return Finish(errorMessage, error, false);
         }
-        std::filesystem::path temporary = destinationPath;
-        temporary += ".tmp-" + GenerateStableUuid();
+        // Stage beside the destination so publication remains an atomic rename,
+        // but do not append to the already content-addressed destination name.
+        // MultiFrame cache paths contain several identity segments; appending
+        // even a shortened UUID to that full name can push an otherwise valid
+        // Windows path past MAX_PATH before the processor starts.
+        const std::string temporaryId = GenerateStableUuid();
+        const std::filesystem::path temporary =
+            destinationPath.parent_path() /
+            (".asset-copy-" + temporaryId.substr(0u, 16u) + ".tmp");
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            error = "Could not create the temporary project-asset copy.";
+            return Finish(errorMessage, error, false);
+        }
         std::uint64_t copied = 0;
-        if (!output || !CopyStream(*source.stream, output, &copied, source.byteLength) ||
+        if (!CopyStream(*source.stream, output, &copied, source.byteLength) ||
             copied != source.byteLength) {
-            error = "Could not copy embedded project asset.";
+            error = "Could not read the complete embedded project asset (expected " +
+                std::to_string(source.byteLength) + " bytes, copied " +
+                std::to_string(copied) + ").";
             std::error_code cleanupError;
             std::filesystem::remove(temporary, cleanupError);
             return Finish(errorMessage, error, false);
@@ -842,14 +1107,31 @@ public:
             cleanupError.clear();
             std::filesystem::remove_all(PortableStagingRoot(temporary), cleanupError);
         };
-        const std::uint64_t expectedSourceRevision = m_StorageRevision;
+        std::uint64_t expectedSourceRevision = 0;
+        RawProjectSnapshot sourceSnapshot;
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            expectedSourceRevision = m_StorageRevision;
+            sourceSnapshot = m_Snapshot;
+        }
         if (expectedSourceRevision == std::numeric_limits<std::uint64_t>::max()) {
             return Finish(errorMessage, "The project storage revision is exhausted.", false);
         }
-        RawProjectSnapshot bootstrap = m_Snapshot;
+        RawProjectSnapshot bootstrap = sourceSnapshot;
         bootstrap.embeddedAssets.clear();
         bootstrap.sourceSets.clear();
+        bootstrap.multiFrameGraph = {};
+        bootstrap.pipelineData = json::object();
+        bootstrap.rawWorkspaceData = json::object();
+        bootstrap.nodeBrowserThumbnails = json::array();
+        bootstrap.coverThumbnailBytes.clear();
+        bootstrap.sourceAssetId.clear();
+        bootstrap.lifecycle.initialAssetIds.clear();
         bootstrap.activeSourceSetId.clear();
+        bootstrap.activeFrameId.clear();
+        bootstrap.mfdInputRevision = 0;
+        bootstrap.hdrInputRevision = 0;
+        bootstrap.postRecipeRevision = 0;
         bootstrap.dirtyRevision = 0;
         bootstrap.persistedStorageRevision = 0;
         ProjectStoreOpenResult target = CreateProjectStore(
@@ -865,7 +1147,7 @@ public:
             cleanupTemporary();
             return Finish(errorMessage, "Could not begin compact project transaction.", false);
         }
-        for (const EmbeddedAssetRecord& asset : m_Snapshot.embeddedAssets) {
+        for (const EmbeddedAssetRecord& asset : sourceSnapshot.embeddedAssets) {
             std::string streamError;
             ProjectAssetStream stream = OpenAssetStream(asset.assetId, &streamError);
             if (!stream || !target.store->StageAssetStream(
@@ -876,7 +1158,7 @@ public:
                 return Finish(errorMessage, streamError, false);
             }
         }
-        RawProjectSnapshot compactSnapshot = m_Snapshot;
+        RawProjectSnapshot compactSnapshot = std::move(sourceSnapshot);
         compactSnapshot.persistedStorageRevision = target.snapshot.persistedStorageRevision;
         const auto targetImplementation =
             std::dynamic_pointer_cast<TransactionalProjectStore>(target.store);
@@ -909,6 +1191,9 @@ public:
             return Finish(errorMessage, compactError, false);
         }
         compactCheck.store.reset();
+        // Another handle may have committed while the compact copy was built.
+        // Hold the same path lock as Commit through revision check and replace.
+        std::lock_guard<std::mutex> commitLock(*m_CommitMutex);
         std::uint64_t currentSourceRevision = 0;
         std::string revisionError;
         if (!ReadCurrentRevision(currentSourceRevision, revisionError) ||
@@ -931,7 +1216,6 @@ public:
         bool recovered = false;
         std::string loadError;
         RawProjectSnapshot reloaded;
-        m_AssetLocations.clear();
         if (!Load(reloaded, recovered, loadError)) {
             return Finish(errorMessage, loadError, false);
         }
@@ -948,6 +1232,9 @@ private:
         const ProjectStoreTransaction& transaction,
         const RawProjectSnapshot& requestedSnapshot,
         std::optional<std::uint64_t> requestedStorageRevision) {
+        // The storage generation check and publication are one operation for
+        // every handle to this path, including projects open in separate tabs.
+        std::lock_guard<std::mutex> commitLock(*m_CommitMutex);
         std::lock_guard<std::mutex> lock(m_Mutex);
         if (m_ReadOnlyRecovery) {
             return { ProjectStoreCommitStatus::ReadOnlyRecovery, m_StorageRevision,
@@ -1010,6 +1297,7 @@ private:
         const std::filesystem::path stagingDirectory = state->stagingDirectory;
         m_Transactions.erase(transaction.transactionId);
         RemoveStagingDirectory(stagingDirectory);
+        NotifyProjectCatalogChanged();
         return { ProjectStoreCommitStatus::Committed, newRevision, std::string() };
     }
 
@@ -1017,6 +1305,14 @@ private:
         return m_Kind == ProjectStorageKind::DirectoryBundle
             ? m_Path / kBundleStagingDirectoryName
             : PortableStagingRoot(m_Path);
+    }
+
+    std::filesystem::path CurrentManifestPath() const {
+        return m_Path / kWorkingProjectManifestName;
+    }
+
+    std::filesystem::path PreviousManifestPath() const {
+        return m_Path / kWorkingProjectPreviousManifestName;
     }
 
     void RemoveStagingDirectory(const std::filesystem::path& path) const {
@@ -1042,7 +1338,7 @@ private:
     bool ReadCurrentRevision(std::uint64_t& revision, std::string& error) const {
         json manifest;
         if (m_Kind == ProjectStorageKind::DirectoryBundle) {
-            if (!ReadJsonFile(m_Path / kBundleManifestName, manifest, error)) return false;
+            if (!ReadJsonFile(CurrentManifestPath(), manifest, error)) return false;
             revision = manifest.value("_store", json::object()).value("generation", 0ull);
             return revision > 0u;
         }
@@ -1099,7 +1395,8 @@ private:
         std::uint64_t revision,
         std::string& error) {
         std::error_code filesystemError;
-        const std::filesystem::path mediaRoot = m_Path / kBundleMediaDirectoryName;
+        const std::filesystem::path mediaRoot =
+            m_Path / kWorkingProjectAssetsDirectoryName;
         std::filesystem::create_directories(mediaRoot, filesystemError);
         if (filesystemError) {
             error = "Could not create bundle media directory.";
@@ -1108,14 +1405,26 @@ private:
         auto newLocations = m_AssetLocations;
         for (const auto& entry : state.assets) {
             const EmbeddedAssetRecord& asset = entry.second.record;
-            const std::filesystem::path relative =
-                std::filesystem::path(kBundleMediaDirectoryName) / FileNameForAsset(asset);
+            const auto authoredPath = std::filesystem::u8path(asset.projectAssetPath);
+            const std::filesystem::path relative = IsSafeManagedAssetPath(authoredPath)
+                ? authoredPath
+                : std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
+                    FileNameForAsset(asset);
             const std::filesystem::path destination = m_Path / relative;
+            std::filesystem::create_directories(
+                destination.parent_path(), filesystemError);
+            if (filesystemError) {
+                error = "Could not create the managed asset directory.";
+                return false;
+            }
             if (std::filesystem::exists(destination, filesystemError)) {
+                if (!VerifyFileIdentity(destination, asset, error)) return false;
                 std::filesystem::remove(entry.second.stagingPath, filesystemError);
             } else if (!MoveFileWithoutOverwrite(entry.second.stagingPath, destination)) {
-                error = "Could not publish staged asset into the project bundle.";
-                return false;
+                // A file published by another process may have won the claim.
+                // Reuse it only when it has exactly the staged content.
+                if (!VerifyFileIdentity(destination, asset, error)) return false;
+                std::filesystem::remove(entry.second.stagingPath, filesystemError);
             }
             newLocations[asset.assetId] = AssetLocation {
                 0u, asset.byteLength, asset.sha256, relative
@@ -1123,56 +1432,74 @@ private:
         }
 
         AssetLocation coverLocation;
-        bool hasCover = !snapshot.coverThumbnailBytes.empty();
-        if (hasCover) {
+        bool hasCover = false;
+        if (!snapshot.coverThumbnailBytes.empty()) {
             const RawEvidence::SourceIdentity identity = RawEvidence::ComputeSourceIdentity(
                 std::vector<std::uint8_t>(snapshot.coverThumbnailBytes.begin(),
                                           snapshot.coverThumbnailBytes.end()));
             const std::filesystem::path relative =
-                std::filesystem::path("cover") / (identity.sha256 + ".thumbnail");
+                std::filesystem::path(kWorkingProjectPreviewName);
             const std::filesystem::path coverPath = m_Path / relative;
+            bool coverPublished = true;
+            filesystemError.clear();
             std::filesystem::create_directories(coverPath.parent_path(), filesystemError);
             if (filesystemError) {
-                error = "Could not create bundle cover directory.";
-                return false;
+                coverPublished = false;
             }
-            if (!std::filesystem::exists(coverPath, filesystemError)) {
-                std::filesystem::path temporary = coverPath;
-                temporary += ".tmp-" + state.stagingDirectory.filename().string();
-                std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            std::filesystem::path temporary = coverPath;
+            temporary += ".tmp-" + state.stagingDirectory.filename().u8string();
+            if (coverPublished) {
+                std::ofstream output(
+                    temporary, std::ios::binary | std::ios::trunc);
                 if (!output) {
-                    error = "Could not stage project cover thumbnail.";
-                    return false;
-                }
-                output.write(
-                    reinterpret_cast<const char*>(snapshot.coverThumbnailBytes.data()),
-                    static_cast<std::streamsize>(snapshot.coverThumbnailBytes.size()));
-                output.close();
-                if (!output.good() || !MoveFileWithoutOverwrite(temporary, coverPath)) {
-                    error = "Could not publish project cover thumbnail.";
-                    return false;
+                    coverPublished = false;
+                } else {
+                    output.write(
+                        reinterpret_cast<const char*>(
+                            snapshot.coverThumbnailBytes.data()),
+                        static_cast<std::streamsize>(
+                            snapshot.coverThumbnailBytes.size()));
+                    output.close();
+                    coverPublished = output.good() &&
+                        ReplaceFileAtomically(temporary, coverPath);
                 }
             }
-            coverLocation = AssetLocation {
-                0u, static_cast<std::uint64_t>(snapshot.coverThumbnailBytes.size()),
-                identity.sha256, relative
-            };
+            if (!coverPublished) {
+                std::error_code cleanupError;
+                std::filesystem::remove(temporary, cleanupError);
+                if (std::any_of(snapshot.sourceSets.begin(),snapshot.sourceSets.end(),[](const auto& set) {
+                    return set.settings.contains("bracketingResult");
+                })) {
+                    error = "Could not publish the saved bracket cover.";
+                    return false;
+                }
+            } else {
+                coverLocation = AssetLocation {
+                    0u,
+                    static_cast<std::uint64_t>(
+                        snapshot.coverThumbnailBytes.size()),
+                    identity.sha256,
+                    relative
+                };
+                hasCover = true;
+            }
         }
 
         const json manifest = SerializeStoreEnvelope(
             snapshot, m_Kind, revision, newLocations,
             hasCover ? &coverLocation : nullptr);
-        const std::filesystem::path manifestPath = m_Path / kBundleManifestName;
+        const std::filesystem::path manifestPath = CurrentManifestPath();
         std::filesystem::path temporary = manifestPath;
-        temporary += ".tmp-" + state.stagingDirectory.filename().string();
+        temporary += ".tmp-" + state.stagingDirectory.filename().u8string();
         if (!WriteTextFile(temporary, manifest.dump(2))) {
             error = "Could not write staged bundle manifest.";
             return false;
         }
+        filesystemError.clear();
         if (std::filesystem::exists(manifestPath, filesystemError)) {
-            const std::filesystem::path previous = m_Path / kBundlePreviousManifestName;
+            const std::filesystem::path previous = PreviousManifestPath();
             std::filesystem::path previousTemporary = previous;
-            previousTemporary += ".tmp-" + state.stagingDirectory.filename().string();
+            previousTemporary += ".tmp-" + state.stagingDirectory.filename().u8string();
             std::filesystem::copy_file(
                 manifestPath, previousTemporary,
                 std::filesystem::copy_options::overwrite_existing, filesystemError);
@@ -1310,27 +1637,43 @@ private:
     bool m_HasCover = false;
     std::unordered_map<std::string, TransactionState> m_Transactions;
     mutable std::mutex m_Mutex;
+    std::shared_ptr<std::mutex> m_CommitMutex;
 };
 
 bool InitializeStorage(
     const std::filesystem::path& path,
     ProjectStorageKind kind,
     std::string& error) {
+    const std::filesystem::path storagePath = kind == ProjectStorageKind::DirectoryBundle
+        ? NormalizeDirectoryStorePath(path)
+        : path;
     std::error_code filesystemError;
     if (kind == ProjectStorageKind::DirectoryBundle) {
-        if (std::filesystem::exists(path, filesystemError)) {
-            error = "A project or directory already exists at the requested bundle path.";
+        if (!EnsureParentDirectory(storagePath, error)) return false;
+        // Claim the root in one filesystem operation. Checking existence and
+        // then creating nested directories lets two creators share a root,
+        // overwrite each other's manifest, or delete each other's assets.
+        if (!std::filesystem::create_directory(storagePath, filesystemError)) {
+            error = filesystemError
+                ? "Could not create project bundle: " + filesystemError.message()
+                : "A project or directory already exists at the requested bundle path.";
             return false;
         }
-        std::filesystem::create_directories(path / kBundleMediaDirectoryName, filesystemError);
+        std::filesystem::create_directories(
+            storagePath / kWorkingProjectAssetsDirectoryName,
+            filesystemError);
         if (filesystemError) {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(storagePath, cleanupError);
             error = "Could not create project bundle.";
             return false;
         }
-        std::filesystem::create_directories(path / kBundleStagingDirectoryName, filesystemError);
+        std::filesystem::create_directories(
+            storagePath / kBundleStagingDirectoryName,
+            filesystemError);
         if (filesystemError) {
             std::error_code cleanupError;
-            std::filesystem::remove_all(path, cleanupError);
+            std::filesystem::remove_all(storagePath, cleanupError);
             error = "Could not create project bundle staging directory.";
             return false;
         }
@@ -1338,18 +1681,30 @@ bool InitializeStorage(
     }
 
     if (!EnsureParentDirectory(path, error)) return false;
-    if (std::filesystem::exists(path, filesystemError)) {
-        error = "A project already exists at the requested portable path.";
+#if defined(_WIN32)
+    const HANDLE output = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (output == INVALID_HANDLE_VALUE) {
+        error = "Could not claim a new portable project file.";
         return false;
     }
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) {
-        error = "Could not create portable project.";
+    DWORD written = 0;
+    const bool headerWritten = WriteFile(output, kPortableHeader.data(),
+        static_cast<DWORD>(kPortableHeader.size()), &written, nullptr) &&
+        written == kPortableHeader.size() && FlushFileBuffers(output);
+    const bool closed = CloseHandle(output) != FALSE;
+#else
+    const int output = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (output < 0) {
+        error = "Could not claim a new portable project file.";
         return false;
     }
-    output.write(kPortableHeader.data(), static_cast<std::streamsize>(kPortableHeader.size()));
-    output.close();
-    if (!output.good()) {
+    const bool headerWritten = write(output, kPortableHeader.data(), kPortableHeader.size()) ==
+        static_cast<ssize_t>(kPortableHeader.size()) && fsync(output) == 0;
+    const bool closed = close(output) == 0;
+#endif
+    if (!headerWritten || !closed) {
+        std::filesystem::remove(path, filesystemError);
         error = "Could not write portable project header.";
         return false;
     }
@@ -1367,19 +1722,33 @@ bool InitializeStorage(
 
 } // namespace
 
+std::filesystem::path ResolveProjectStoreRoot(const std::filesystem::path& path) {
+    return NormalizeDirectoryStorePath(path);
+}
+
+std::filesystem::path WorkingProjectDocumentPath(
+    const std::filesystem::path& projectRoot) {
+    return NormalizeDirectoryStorePath(projectRoot) /
+        kWorkingProjectManifestName;
+}
+
 bool IsDirectoryProjectBundle(const std::filesystem::path& path) {
+    const std::filesystem::path root = NormalizeDirectoryStorePath(path);
     std::error_code error;
-    if (LowerAscii(path.extension().string()) != ".stackbundle" ||
-        !std::filesystem::is_directory(path, error) || error) {
+    if (!std::filesystem::is_directory(root, error) || error) {
         return false;
     }
     error.clear();
-    if (std::filesystem::is_regular_file(path / kBundleManifestName, error) && !error) {
+    if (std::filesystem::is_regular_file(
+            root / kWorkingProjectManifestName, error) && !error) {
         return true;
     }
     error.clear();
-    return std::filesystem::is_regular_file(
-        path / kBundlePreviousManifestName, error) && !error;
+    if (std::filesystem::is_regular_file(
+            root / kWorkingProjectPreviousManifestName, error) && !error) {
+        return true;
+    }
+    return false;
 }
 
 bool IsPortableV3Project(const std::filesystem::path& path) {
@@ -1407,21 +1776,24 @@ ProjectStoreOpenResult CreateProjectStore(
             : validation.errors.front();
         return result;
     }
-    if (!InitializeStorage(path, storageKind, error)) {
+    const std::filesystem::path storagePath = storageKind == ProjectStorageKind::DirectoryBundle
+        ? NormalizeDirectoryStorePath(path)
+        : path;
+    if (!InitializeStorage(storagePath, storageKind, error)) {
         result.message = error;
         return result;
     }
     const auto cleanupInitializedStorage = [&]() {
         std::error_code cleanupError;
         if (storageKind == ProjectStorageKind::DirectoryBundle) {
-            std::filesystem::remove_all(path, cleanupError);
+            std::filesystem::remove_all(storagePath, cleanupError);
         } else {
-            std::filesystem::remove(path, cleanupError);
+            std::filesystem::remove(storagePath, cleanupError);
             cleanupError.clear();
-            std::filesystem::remove_all(PortableStagingRoot(path), cleanupError);
+            std::filesystem::remove_all(PortableStagingRoot(storagePath), cleanupError);
         }
     };
-    auto store = std::make_shared<TransactionalProjectStore>(path, storageKind);
+    auto store = std::make_shared<TransactionalProjectStore>(storagePath, storageKind);
     RawProjectSnapshot bootstrap = initialSnapshot;
     bootstrap.persistedStorageRevision = 0;
     const ProjectStoreTransaction transaction = store->BeginTransaction(0);
@@ -1439,16 +1811,17 @@ ProjectStoreOpenResult CreateProjectStore(
     if (storageKind == ProjectStorageKind::DirectoryBundle) {
         json manifest = SerializeStoreEnvelope(
             bootstrap, storageKind, 1u, {}, nullptr);
-        const std::filesystem::path manifestPath = path / kBundleManifestName;
+        const std::filesystem::path manifestPath =
+            storagePath / kWorkingProjectManifestName;
         std::filesystem::path temporary = manifestPath;
         temporary += ".tmp-initial";
         initialized = WriteTextFile(temporary, manifest.dump(2)) &&
             ReplaceFileAtomically(temporary, manifestPath);
     } else {
-        std::ofstream output(path, std::ios::binary | std::ios::app);
+        std::ofstream output(storagePath, std::ios::binary | std::ios::app);
         std::error_code sizeError;
         const std::uint64_t manifestOffset = static_cast<std::uint64_t>(
-            std::filesystem::file_size(path, sizeError));
+            std::filesystem::file_size(storagePath, sizeError));
         json manifest = SerializeStoreEnvelope(
             bootstrap, storageKind, 1u, {}, nullptr);
         const std::string manifestText = manifest.dump();
@@ -1480,6 +1853,7 @@ ProjectStoreOpenResult CreateProjectStore(
         return result;
     }
     result.store = std::move(store);
+    NotifyProjectCatalogChanged();
     return result;
 }
 
@@ -1491,10 +1865,14 @@ ProjectStoreOpenResult OpenProjectStore(const std::filesystem::path& path) {
     } else if (IsPortableV3Project(path)) {
         kind = ProjectStorageKind::PortableFile;
     } else {
-        result.message = "The path is not a RAW Workspace v3 project store.";
+        result.message =
+            "This is not a current Stack working project or packed project.";
         return result;
     }
-    auto store = std::make_shared<TransactionalProjectStore>(path, kind);
+    const std::filesystem::path storagePath = kind == ProjectStorageKind::DirectoryBundle
+        ? NormalizeDirectoryStorePath(path)
+        : path;
+    auto store = std::make_shared<TransactionalProjectStore>(storagePath, kind);
     if (!store->Load(
             result.snapshot, result.recoveredPreviousManifest, result.message)) {
         return result;
@@ -1507,7 +1885,9 @@ ProjectStoreOpenResult ConvertProjectStore(
     const ProjectStoreHandle& sourceStore,
     const RawProjectSnapshot& snapshot,
     const std::filesystem::path& destinationPath,
-    ProjectStorageKind destinationKind) {
+    ProjectStorageKind destinationKind,
+    const std::function<bool(const ProjectStoreHandle&, const ProjectStoreTransaction&,
+        RawProjectSnapshot&, std::string&)>& prepareCopy) {
     ProjectStoreOpenResult result;
     if (!sourceStore) {
         result.message = "Source project store is unavailable.";
@@ -1516,22 +1896,37 @@ ProjectStoreOpenResult ConvertProjectStore(
     RawProjectSnapshot bootstrap = snapshot;
     bootstrap.embeddedAssets.clear();
     bootstrap.sourceSets.clear();
+    bootstrap.multiFrameGraph = {};
+    bootstrap.pipelineData = json::object();
+    bootstrap.rawWorkspaceData = json::object();
+    bootstrap.nodeBrowserThumbnails = json::array();
+    bootstrap.coverThumbnailBytes.clear();
+    bootstrap.sourceAssetId.clear();
+    bootstrap.lifecycle.initialAssetIds.clear();
     bootstrap.activeSourceSetId.clear();
+    bootstrap.activeFrameId.clear();
+    bootstrap.mfdInputRevision = 0;
+    bootstrap.hdrInputRevision = 0;
+    bootstrap.postRecipeRevision = 0;
     bootstrap.dirtyRevision = 0;
     bootstrap.persistedStorageRevision = 0;
+    const std::filesystem::path normalizedDestination =
+        destinationKind == ProjectStorageKind::DirectoryBundle
+        ? NormalizeDirectoryStorePath(destinationPath)
+        : destinationPath;
     ProjectStoreOpenResult destination = CreateProjectStore(
-        destinationPath, destinationKind, bootstrap);
+        normalizedDestination, destinationKind, bootstrap);
     if (!destination) return destination;
     const auto cleanupDestination = [&]() {
         destination.store.reset();
         std::error_code cleanupError;
         if (destinationKind == ProjectStorageKind::DirectoryBundle) {
-            std::filesystem::remove_all(destinationPath, cleanupError);
+            std::filesystem::remove_all(normalizedDestination, cleanupError);
         } else {
-            std::filesystem::remove(destinationPath, cleanupError);
+            std::filesystem::remove(normalizedDestination, cleanupError);
             cleanupError.clear();
             std::filesystem::remove_all(
-                PortableStagingRoot(destinationPath), cleanupError);
+                PortableStagingRoot(normalizedDestination), cleanupError);
         }
     };
     const ProjectStoreTransaction transaction = destination.store->BeginTransaction(
@@ -1541,18 +1936,76 @@ ProjectStoreOpenResult ConvertProjectStore(
         cleanupDestination();
         return destination;
     }
-    for (const EmbeddedAssetRecord& asset : snapshot.embeddedAssets) {
+    RawProjectSnapshot converted = snapshot;
+    if (destinationKind == ProjectStorageKind::DirectoryBundle) {
+        for (EmbeddedAssetRecord& asset : converted.embeddedAssets) {
+            if (asset.displayName.empty()) {
+                asset.displayName = asset.originalFilename;
+            }
+            if (asset.originalFileFingerprint.empty()) {
+                asset.originalFileFingerprint = asset.sha256;
+            }
+            if (!IsSafeManagedAssetPath(asset.projectAssetPath)) {
+                const std::string managedName = SanitizeManagedFileName(
+                    asset.originalFilename.empty()
+                        ? asset.assetId.substr(0u, 16u)
+                        : asset.originalFilename);
+                asset.projectAssetPath = (
+                    std::filesystem::path(kWorkingProjectAssetsDirectoryName) /
+                    std::filesystem::u8path(managedName)).generic_u8string();
+            }
+        }
+        std::string rebaseError;
+        if (!RebaseSingleRawRecipeToManagedAsset(
+                converted, normalizedDestination, &rebaseError)) {
+            destination.store->Abort(transaction);
+            destination.message = rebaseError.empty()
+                ? "The copied RAW project could not bind its managed asset."
+                : std::move(rebaseError);
+            cleanupDestination();
+            return destination;
+        }
+    }
+    std::vector<std::string> unavailableResults;
+    for (const EmbeddedAssetRecord& asset : converted.embeddedAssets) {
         std::string error;
         ProjectAssetStream stream = sourceStore->OpenAssetStream(asset.assetId, &error);
         if (!stream || !destination.store->StageAssetStream(
                 transaction, *stream.stream, asset, &error)) {
+            if (asset.managedRole == "bracketing-result") {
+                unavailableResults.push_back(asset.assetId);
+                continue;
+            }
             destination.store->Abort(transaction);
             destination.message = error;
             cleanupDestination();
             return destination;
         }
     }
-    RawProjectSnapshot converted = snapshot;
+    for (const auto& id : unavailableResults) {
+        converted.embeddedAssets.erase(std::remove_if(converted.embeddedAssets.begin(),converted.embeddedAssets.end(),
+            [&](const auto& asset){return asset.assetId==id;}),converted.embeddedAssets.end());
+        for(auto& set:converted.sourceSets) {
+            const auto result=set.settings.find("bracketingResult");
+            if(result!=set.settings.end()&&result->value("assetId",std::string())==id)set.settings.erase(result);
+        }
+    }
+    // Stage session-owned additions in the destination transaction. Save As
+    // must also work when the original store is read-only or conflicted.
+    std::string preparationError;
+    bool prepared = true;
+    try {
+        if (prepareCopy) prepared = prepareCopy(destination.store, transaction, converted, preparationError);
+    } catch (const std::exception& e) {
+        prepared = false;
+        preparationError = e.what();
+    }
+    if (!prepared) {
+        destination.store->Abort(transaction);
+        destination.message = preparationError;
+        cleanupDestination();
+        return destination;
+    }
     converted.persistedStorageRevision = destination.snapshot.persistedStorageRevision;
     const ProjectStoreCommitResult commit = destination.store->Commit(transaction, converted);
     if (!commit) {
@@ -1561,7 +2014,7 @@ ProjectStoreOpenResult ConvertProjectStore(
         cleanupDestination();
         return destination;
     }
-    return OpenProjectStore(destinationPath);
+    return OpenProjectStore(normalizedDestination);
 }
 
 } // namespace Stack::Project

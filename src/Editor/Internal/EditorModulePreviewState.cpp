@@ -20,7 +20,7 @@ bool EditorModule::CanToggleActiveAutoGainMaskPreview() const {
         m_ActiveSubWindow != EditorSubWindow::ComplexNode) {
         return false;
     }
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(m_ActiveComplexNodeId);
+    const EditorNodeGraph::Node* node = m_Project->graph.FindNode(m_ActiveComplexNodeId);
     return node && node->kind == EditorNodeGraph::NodeKind::RawDetailFusion;
 }
 
@@ -47,10 +47,11 @@ void EditorModule::ClearAutoGainMaskPreview() {
 }
 
 std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(previewNodeId);
+    if (IsEditingRawLayerMaskGraph()) return std::max<std::uint64_t>(1, m_RenderRevision);
+    const EditorNodeGraph::Node* node = m_Project->graph.FindNode(previewNodeId);
     if (node && node->kind == EditorNodeGraph::NodeKind::RawDetailAutoMask) {
         const EditorNodeGraph::Link* input =
-            m_NodeGraph.FindInputLink(previewNodeId, EditorNodeGraph::kImageInputSocketId);
+            m_Project->graph.FindInputLink(previewNodeId, EditorNodeGraph::kImageInputSocketId);
         if (!input) {
             return 0;
         }
@@ -60,7 +61,7 @@ std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
     }
     if (node && node->kind == EditorNodeGraph::NodeKind::FrequencyFilter) {
         const EditorNodeGraph::Link* input =
-            m_NodeGraph.FindAnyInputLink(
+            m_Project->graph.FindAnyInputLink(
                 previewNodeId, EditorNodeGraph::kChannelInputSocketId);
         if (!input) return 0;
         return std::max<std::uint64_t>(
@@ -70,11 +71,14 @@ std::uint64_t EditorModule::GetPreviewNodeRevision(int previewNodeId) const {
                 GetNodeDirtyGeneration(input->fromNodeId)));
     }
     const EditorNodeGraph::Link* input =
-        m_NodeGraph.FindAnyInputLink(previewNodeId, EditorNodeGraph::kPreviewInputSocketId);
+        m_Project->graph.FindAnyInputLink(previewNodeId,
+            node && node->kind == EditorNodeGraph::NodeKind::Scope
+                ? EditorNodeGraph::kScopeInputSocketId : EditorNodeGraph::kPreviewInputSocketId);
     if (!input) {
         return 0;
     }
-    return std::max<std::uint64_t>(1, GetNodeDirtyGeneration(input->fromNodeId));
+    return std::max<std::uint64_t>(1,
+        std::max(GetNodeDirtyGeneration(previewNodeId), GetNodeDirtyGeneration(input->fromNodeId)));
 }
 
 const EditorModule::GraphPreviewPixels* EditorModule::GetCachedPreviewPixelsForNode(int previewNodeId) const {
@@ -83,17 +87,8 @@ const EditorModule::GraphPreviewPixels* EditorModule::GetCachedPreviewPixelsForN
 }
 
 std::uint64_t EditorModule::GetScopeNodeRevision(int sourceNodeId) const {
-    if (sourceNodeId <= 0) {
-        m_ScopeDisplayedRevisions[sourceNodeId] = 0;
-        return 0;
-    }
-
-    const std::uint64_t desiredRevision = GetNodeDirtyGeneration(sourceNodeId);
-    std::uint64_t& displayedRevision = m_ScopeDisplayedRevisions[sourceNodeId];
-    if (CanRefreshPreviewLikeNodes() && !HasPendingPreviewRefreshes()) {
-        displayedRevision = desiredRevision;
-    }
-    return displayedRevision;
+    const auto* cached = GetCachedPreviewPixelsForNode(sourceNodeId);
+    return cached ? cached->revision : 0;
 }
 
 ImVec4 EditorModule::GetWorkspaceBaseColor() const {
@@ -142,7 +137,8 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
     ImGui::TextUnformatted("Graph Performance");
     ImGui::Separator();
     ImGui::Text("Render dirty: %s", m_RenderDirty ? "Yes" : "No");
-    ImGui::Text("Worker busy: %s", (m_RenderPending || m_RenderWorker.IsBusy()) ? "Yes" : "No");
+    ImGui::Text("Worker busy: %s",
+        (m_RenderPending || IsAnyRenderBackendBusy()) ? "Yes" : "No");
     ImGui::Text("Preview idle gate: %s", previewDeferred ? "Deferred" : "Open");
     ImGui::Text("Invalidation: %s", stats.lastInvalidationWasFull ? "Full" : "Local");
     ImGui::Text("Touched node: %d", stats.lastTouchedNodeId);
@@ -169,6 +165,62 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
         if (stats.lastRawPreviewMaxDimension > 0) {
             ImGui::Text("RAW proxy max edge: %d px", stats.lastRawPreviewMaxDimension);
         }
+        if (!stats.lastRawRenderPurpose.empty()) {
+            ImGui::Text("RAW purpose: %s", stats.lastRawRenderPurpose.c_str());
+            ImGui::Text(
+                "RAW queue / worker / adopt: %.2f / %.2f / %.2f ms",
+                stats.lastRawQueueWaitMs,
+                stats.lastRawWorkerTotalMs,
+                stats.lastRawUiAdoptionMs);
+            ImGui::Text(
+                "RAW adaptive scale: %.0f%% / viewport cost estimate: %.2f ms",
+                static_cast<double>(stats.rawAdaptivePreviewScale) * 100.0,
+                stats.rawAdaptiveFrameTimeMs);
+            ImGui::Text(
+                "RAW source / publication / readback: %.2f / %.2f / %.2f MiB%s",
+                static_cast<double>(stats.lastRawSourceTransferredBytes) /
+                    (1024.0 * 1024.0),
+                static_cast<double>(stats.lastRawPublishedTextureBytes) /
+                    (1024.0 * 1024.0),
+                static_cast<double>(stats.lastRawReadbackTransferredBytes) /
+                    (1024.0 * 1024.0),
+                stats.lastRawSuperseded ? " (superseded)" : "");
+            if (stats.lastRawFullFrameRefinementRequested) {
+                ImGui::Text(
+                    "RAW full-frame release refine: %s (estimated %.0f MiB)",
+                    stats.lastRawFullFrameRefinementBudgetAllowed
+                        ? "Allowed"
+                        : "Retained 1.0x fit proxy",
+                    static_cast<double>(
+                        stats.lastRawFullFrameEstimatedWorkingSetBytes) /
+                        (1024.0 * 1024.0));
+            }
+            if (stats.rawVramWorkingBudgetBytes > 0u) {
+                ImGui::Text(
+                    "RAW VRAM working / available: %.0f / %.0f MiB%s",
+                    static_cast<double>(stats.rawVramWorkingBudgetBytes) /
+                        (1024.0 * 1024.0),
+                    static_cast<double>(stats.rawVramAvailableBytes) /
+                        (1024.0 * 1024.0),
+                    stats.rawMinimumMemoryTiling
+                        ? " (minimum-memory tiling)"
+                        : "");
+            }
+            const Raw::RawGpuResidencySnapshot sharedResidency =
+                Raw::RawGpuImageLease::Residency();
+            ImGui::Text(
+                "RAW shared image leases: %.1f MiB (presentation %.1f / overlay %.1f)",
+                static_cast<double>(sharedResidency.totalBytes) /
+                    (1024.0 * 1024.0),
+                static_cast<double>(sharedResidency.familyBytes[
+                    static_cast<std::size_t>(
+                        Raw::RawGpuImageFamily::Presentation)]) /
+                    (1024.0 * 1024.0),
+                static_cast<double>(sharedResidency.familyBytes[
+                    static_cast<std::size_t>(
+                        Raw::RawGpuImageFamily::AuxiliaryOverlay)]) /
+                    (1024.0 * 1024.0));
+        }
     }
     ImGui::Text("Main tiling: %s (%d)", stats.lastMainOutputTiled ? "Yes" : "No", stats.lastMainOutputTileCount);
     if (stats.lastMainRegionPlanAvailable) {
@@ -183,6 +235,16 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
     }
     ImGui::Text("Preview render: %.2f ms (%d)", stats.lastPreviewRenderMs, stats.lastRenderedPreviewCount);
     ImGui::Text("Composite render: %.2f ms (%d)", stats.lastCompositeRenderMs, stats.lastRenderedCompositeCount);
+    ImGui::Spacing();
+    ImGui::Text(
+        "Project save: %s",
+        m_Project->saves.IsBusy() ? "Background write active" : "Idle");
+    ImGui::Text(
+        "Save snapshot (UI): %.2f ms",
+        stats.lastProjectSaveSnapshotMs);
+    ImGui::Text(
+        "Save commit (worker): %.2f ms",
+        stats.lastProjectSaveCommitMs);
     if (stats.lastSliceImportWidth > 0 && stats.lastSliceImportHeight > 0) {
         ImGui::Spacing();
         ImGui::Text(
@@ -215,6 +277,48 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
         cacheStats.rawStageCacheHits,
         cacheStats.rawStageCacheMisses,
         totalRawCacheEvents == 0 ? " (idle)" : "");
+    const int totalRawPreprocessEvents =
+        cacheStats.rawGpuPreprocessDispatches +
+        cacheStats.rawPreprocessCacheHits +
+        cacheStats.rawCpuPreprocessFallbacks;
+    if (totalRawPreprocessEvents > 0) {
+        ImGui::Text(
+            "RAW cold preprocess: %d GPU / %d cache / %d CPU fallback",
+            cacheStats.rawGpuPreprocessDispatches,
+            cacheStats.rawPreprocessCacheHits,
+            cacheStats.rawCpuPreprocessFallbacks);
+        ImGui::Text(
+            "R16UI upload / metadata build / metadata upload: %.2f / %.2f / %.2f ms",
+            cacheStats.rawSensorUploadMs,
+            cacheStats.rawMetadataBuildMs,
+            cacheStats.rawMetadataUploadMs);
+        ImGui::Text(
+            "GPU preprocess submit: %.2f ms",
+            cacheStats.rawGpuPreprocessSubmitMs);
+        ImGui::Text(
+            "CPU normalize / variance: %.2f / %.2f ms",
+            cacheStats.rawCpuNormalizationMs,
+            cacheStats.rawCpuVarianceMs);
+        ImGui::Text(
+            "Float uploads corrected / variance: %.2f / %.2f ms",
+            cacheStats.rawCorrectedUploadMs,
+            cacheStats.rawVarianceUploadMs);
+        ImGui::Text(
+            "RAW cold transfer R16UI / metadata / float outputs: %.2f / %.3f / %.2f MiB",
+            static_cast<double>(cacheStats.rawSensorUploadBytes) /
+                (1024.0 * 1024.0),
+            static_cast<double>(cacheStats.rawMetadataUploadBytes) /
+                (1024.0 * 1024.0),
+            static_cast<double>(
+                cacheStats.rawCorrectedUploadBytes +
+                cacheStats.rawVarianceUploadBytes) /
+                (1024.0 * 1024.0));
+        if (!cacheStats.lastRawPreprocessFallback.empty()) {
+            ImGui::TextWrapped(
+                "RAW CPU fallback: %s",
+                cacheStats.lastRawPreprocessFallback.c_str());
+        }
+    }
     if (cacheStats.allocationFailed) {
         ImGui::TextColored(
             ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
@@ -252,13 +356,18 @@ void EditorModule::RenderGraphPerformancePopup(const ImVec2& graphPaneMin, const
             cacheStats.lastReductionFailure.c_str());
     }
     ImGui::Text(
+        "RAW stage cache memory: %.1f / %.1f MB",
+        static_cast<double>(cacheStats.rawStageCacheBytes) / (1024.0 * 1024.0),
+        static_cast<double>(cacheStats.rawStageCacheBudgetBytes) / (1024.0 * 1024.0));
+    ImGui::Text(
         "Persistent cache: %.1f / %.1f MB (%d evicted)",
         static_cast<double>(cacheStats.persistentCacheBytes) / (1024.0 * 1024.0),
         static_cast<double>(cacheStats.persistentCacheBudgetBytes) / (1024.0 * 1024.0),
         cacheStats.persistentCacheEvictions);
     ImGui::Text(
-        "Transient pool: %.1f MB (%d alloc / %d reuse)",
+        "Transient pool: %.1f / %.1f MB (%d alloc / %d reuse)",
         static_cast<double>(cacheStats.transientPoolBytes) / (1024.0 * 1024.0),
+        static_cast<double>(cacheStats.transientPoolBudgetBytes) / (1024.0 * 1024.0),
         cacheStats.transientTargetAllocations,
         cacheStats.transientTargetReuses);
     for (std::size_t index = 0;

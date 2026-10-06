@@ -153,8 +153,15 @@ RenderPipeline::SharedRawBaseStageResult RenderPipeline::RenderSharedRawBaseStag
     if (stage.texture == 0) {
         ++m_LastGraphExecutionStats.rawStageCacheMisses;
         const Raw::RawImageData& renderRawData =
-            ResolveRawPreviewRenderData(stage.rawSource->nodeId, rawData, cacheKeyPath);
-        stage.texture = m_RawPipelines[rawConsumer.nodeId].Render(renderRawData, settings, m_PreviewMaxDimension);
+            ResolveRawPreviewRenderData(
+                stage.rawSource->nodeId,
+                rawData,
+                cacheKeyPath);
+        stage.texture = RenderRawPipelineWithTelemetry(
+            rawConsumer.nodeId,
+            renderRawData,
+            settings,
+            m_PreviewMaxDimension);
         if (stage.texture == 0) {
             ReleaseGraphCacheEntry(m_GraphImageCache, rawBaseKey);
             const std::string& error = m_RawPipelines[rawConsumer.nodeId].GetLastError();

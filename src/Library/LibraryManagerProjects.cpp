@@ -5,6 +5,9 @@
 #include "Library/Internal/LibraryImageHelpers.h"
 #include "Library/Internal/LibraryStorageHelpers.h"
 #include "Library/TagManager.h"
+#include "Persistence/ProjectIndex.h"
+#include "Persistence/ProjectOpenCoordinator.h"
+#include "Persistence/ProjectSaveCapture.h"
 #include "Utils/PixelBufferUtils.h"
 
 #include <cstddef>
@@ -32,20 +35,47 @@ namespace LibraryImage = Stack::Library::ImageHelpers;
 
 using namespace Stack::Library::StorageHelpers;
 
+Async::TaskState LibraryManager::GetSaveTaskState(const EditorModule* editor) const {
+    return editor ? editor->GetProjectFileOperations()->save.state : m_SaveTaskState;
+}
+
+const std::string& LibraryManager::GetSaveStatusText(const EditorModule* editor) const {
+    return editor ? editor->GetProjectFileSaveStatusText() : m_SaveStatusText;
+}
+
+Async::TaskState LibraryManager::GetProjectLoadTaskState(const EditorModule* editor) const {
+    return editor ? editor->GetProjectLoadTaskState() : m_ProjectLoadTaskState;
+}
+
+const std::string& LibraryManager::GetProjectLoadStatusText(const EditorModule* editor) const {
+    return editor ? editor->GetProjectLoadStatusText() : m_ProjectLoadStatusText;
+}
+
 bool LibraryManager::LoadProjectDocument(
     const std::string& fileName,
     StackFormat::ProjectDocument& outDocument,
     const StackFormat::ProjectLoadOptions& options) {
 
-    const std::filesystem::path path = m_LibraryPath / fileName;
+    const std::filesystem::path path = ResolveProjectPath(fileName);
     if (!std::filesystem::exists(path)) return false;
 
     std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
-    if (StackFormat::ReadProjectFile(path, outDocument, options)) {
-        return true;
-    }
+    return StackFormat::ReadProjectFile(path, outDocument, options);
+}
 
-    return LoadLegacyProjectDocument(path, outDocument, options);
+std::filesystem::path LibraryManager::ResolveProjectPath(
+    const std::string& projectKey) const {
+    if (projectKey.empty()) return {};
+    const std::filesystem::path direct(projectKey);
+    if (direct.is_absolute()) return direct.lexically_normal();
+    std::lock_guard<std::mutex> projectLock(m_ProjectsMutex);
+    for (const std::shared_ptr<ProjectEntry>& project : m_Projects) {
+        if (project && project->fileName == projectKey &&
+            !project->absolutePath.empty()) {
+            return project->absolutePath.lexically_normal();
+        }
+    }
+    return (m_LibraryPath / direct).lexically_normal();
 }
 
 std::uint64_t LibraryManager::BumpNodeBrowserThumbnailPersistRevision(
@@ -134,27 +164,31 @@ void LibraryManager::RequestSaveProject(
     const std::string& name,
     EditorModule* editor,
     const std::string& existingFileName,
-    std::function<void(bool)> onComplete) {
+    std::function<void(bool)> onComplete,
+    bool requireNewStore) {
+    if (!editor) {
+        if (onComplete) onComplete(false);
+        return;
+    }
+    const auto operations = editor->GetProjectFileOperations();
     try {
         RequestSaveProjectImpl(
             name,
             editor,
             existingFileName,
             {},
-            onComplete);
+            onComplete,
+            requireNewStore);
     } catch (...) {
-        m_SaveTaskState = Async::TaskState::Failed;
+        operations->save.state = Async::TaskState::Failed;
         try {
-            m_SaveStatusText = "Failed to prepare the project save.";
-            QueueUiNotification(
+            operations->save.statusText = "Failed to prepare the project save.";
+            editor->ShowUiNotification(
                 UiNotificationSeverity::Error,
-                m_SaveStatusText,
+                operations->save.statusText,
                 "library-save-project");
         } catch (...) {
-            m_SaveStatusText.clear();
-        }
-        if (editor) {
-            editor->MarkDirty();
+            operations->save.statusText.clear();
         }
         if (onComplete) {
             try {
@@ -169,10 +203,16 @@ void LibraryManager::RequestSaveProjectToPath(
     const std::string& name,
     EditorModule* editor,
     const std::filesystem::path& absoluteDestination,
-    std::function<void(bool)> onComplete) {
+    std::function<void(bool)> onComplete,
+    bool requireNewStore) {
+    if (!editor) {
+        if (onComplete) onComplete(false);
+        return;
+    }
+    const auto operations = editor->GetProjectFileOperations();
     try {
         if (absoluteDestination.empty() || !absoluteDestination.is_absolute()) {
-            QueueUiNotification(
+            editor->ShowUiNotification(
                 UiNotificationSeverity::Error,
                 "The project save destination must be an absolute path.",
                 "library-save-project-path");
@@ -184,17 +224,15 @@ void LibraryManager::RequestSaveProjectToPath(
             editor,
             {},
             absoluteDestination.lexically_normal(),
-            std::move(onComplete));
+            std::move(onComplete),
+            requireNewStore);
     } catch (...) {
-        m_SaveTaskState = Async::TaskState::Failed;
-        m_SaveStatusText = "Failed to prepare the project save.";
-        QueueUiNotification(
+        operations->save.state = Async::TaskState::Failed;
+        operations->save.statusText = "Failed to prepare the project save.";
+        editor->ShowUiNotification(
             UiNotificationSeverity::Error,
-            m_SaveStatusText,
+            operations->save.statusText,
             "library-save-project-path");
-        if (editor) {
-            editor->MarkDirty();
-        }
         if (onComplete) onComplete(false);
     }
 }
@@ -204,20 +242,32 @@ void LibraryManager::RequestSaveProjectImpl(
     EditorModule* editor,
     const std::string& existingFileName,
     const std::filesystem::path& absoluteDestination,
-    std::function<void(bool)> onComplete) {
-    if (!editor || Async::IsBusy(m_SaveTaskState)) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to save the project to the library.", "library-save-project");
+    std::function<void(bool)> onComplete,
+    bool requireNewStore) {
+    if (!editor) {
+        if (onComplete) onComplete(false);
+        return;
+    }
+    const auto operations = editor->GetProjectFileOperations();
+    const std::weak_ptr<Stack::Project::FileOperationState> owner = operations;
+    if (Async::IsBusy(operations->save.state)) {
+        editor->ShowUiNotification(UiNotificationSeverity::Error, "Failed to save the project to the library.", "library-save-project");
         if (onComplete) onComplete(false);
         return;
     }
 
-    m_SaveTaskState = Async::TaskState::Applying;
-    m_SaveStatusText = "Capturing the project snapshot for the library...";
+    operations->save.state = Async::TaskState::Applying;
+    operations->save.statusText = "Capturing the project snapshot for the library...";
 
     const std::string trimmedName = TrimWhitespace(name).empty() ? "Untitled Project" : TrimWhitespace(name);
-    const StackFormat::json pipeline = editor->SerializePipeline();
-    const std::vector<StackFormat::NodeBrowserThumbnailEntry> nodeBrowserThumbnailEntries =
+    StackFormat::json pipeline = editor->SerializePipeline();
+    std::vector<StackFormat::NodeBrowserThumbnailEntry> nodeBrowserThumbnailEntries =
         editor->GetPersistedNodeBrowserThumbnails();
+    const std::uint64_t capturedEditRevision =
+        editor->GetProjectEditRevision();
+    const std::string capturedProjectId = editor->EnsureProjectDocumentId();
+    const std::filesystem::path capturedAdoptionSource =
+        editor->GetProjectAdoptionSourcePath();
 
     int renderedW = 0;
     int renderedH = 0;
@@ -227,47 +277,30 @@ void LibraryManager::RequestSaveProjectImpl(
     std::vector<unsigned char> sourcePixels;
     std::vector<unsigned char> sourcePngBytesOverride;
 
-    const bool compositeProject = editor->IsCompositeViewportMode();
-    if (compositeProject) {
-        editor->BuildCompositeExportRaster(renderedPixels, renderedW, renderedH);
-        if (!renderedPixels.empty() && renderedW > 0 && renderedH > 0) {
-            sourceW = renderedW;
-            sourceH = renderedH;
-            sourcePixels =
-                Stack::PixelBuffer::BuildTransparentRgbaPixels(sourceW, sourceH);
-        }
-    } else {
-        if (editor->IsRenderOnlyUpToActive()) {
-            editor->GetPipeline().Execute(editor->GetLayers());
-        }
-        renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
-        if ((renderedPixels.empty() || renderedW <= 0 || renderedH <= 0) && editor->GetNodeGraph().IsOutputConnected()) {
-            editor->BuildSingleOutputExportRaster(renderedPixels, renderedW, renderedH);
-        }
-        if (!renderedPixels.empty() && renderedW > 0 && renderedH > 0) {
-            sourcePixels = editor->GetPipeline().GetSourcePixels(sourceW, sourceH);
-            std::vector<unsigned char> graphSourcePngBytes;
-            if (LibraryImage::ExtractEmbeddedGraphSourcePng(pipeline, graphSourcePngBytes)) {
-                std::vector<unsigned char> decodedGraphSourcePixels;
-                int graphSourceW = 0;
-                int graphSourceH = 0;
-                int graphSourceChannels = 0;
-                if (DecodeImageBytes(graphSourcePngBytes, decodedGraphSourcePixels, graphSourceW, graphSourceH, graphSourceChannels) &&
-                    !decodedGraphSourcePixels.empty() &&
-                    graphSourceW > 0 &&
-                    graphSourceH > 0) {
-                    sourcePngBytesOverride = std::move(graphSourcePngBytes);
-                    sourcePixels = std::move(decodedGraphSourcePixels);
-                    sourceW = graphSourceW;
-                    sourceH = graphSourceH;
-                }
-            }
-            if (sourcePixels.empty() || sourceW <= 0 || sourceH <= 0) {
-                sourceW = renderedW;
-                sourceH = renderedH;
-                sourcePixels =
-                    Stack::PixelBuffer::BuildTransparentRgbaPixels(sourceW, sourceH);
-            }
+    // Saving captures existing state only. It must never initiate a render or
+    // require a cover; a missing/stale cover is rebuilt by the Library later.
+    renderedPixels = editor->GetPipeline().GetOutputPixels(renderedW, renderedH);
+    sourcePixels = editor->GetPipeline().GetSourcePixels(sourceW, sourceH);
+    std::vector<unsigned char> graphSourcePngBytes;
+    if (LibraryImage::ExtractEmbeddedGraphSourcePng(
+            pipeline,
+            graphSourcePngBytes)) {
+        std::vector<unsigned char> decodedGraphSourcePixels;
+        int graphSourceW = 0;
+        int graphSourceH = 0;
+        int graphSourceChannels = 0;
+        if (DecodeImageBytes(
+                graphSourcePngBytes,
+                decodedGraphSourcePixels,
+                graphSourceW,
+                graphSourceH,
+                graphSourceChannels) &&
+            !decodedGraphSourcePixels.empty() &&
+            graphSourceW > 0 && graphSourceH > 0) {
+            sourcePngBytesOverride = std::move(graphSourcePngBytes);
+            sourcePixels = std::move(decodedGraphSourcePixels);
+            sourceW = graphSourceW;
+            sourceH = graphSourceH;
         }
     }
 
@@ -304,8 +337,10 @@ void LibraryManager::RequestSaveProjectImpl(
         }
     }
     if (projectPath.empty() && fileName.empty()) {
-        const std::string safeStem = SanitizeFileStem(trimmedName);
-        fileName = safeStem + "_" + std::to_string(std::time(nullptr)) + ".stack";
+        projectPath = Stack::Project::ProjectIndex::BuildUniqueProjectPath(
+            m_LibraryPath,
+            trimmedName,
+            capturedProjectId);
     }
     if (projectPath.empty()) {
         projectPath = (m_LibraryPath / fileName).lexically_normal();
@@ -315,73 +350,87 @@ void LibraryManager::RequestSaveProjectImpl(
     const bool publishLibraryArtifacts =
         projectPath.parent_path().lexically_normal() ==
         m_LibraryPath.lexically_normal();
+    if (publishLibraryArtifacts && !m_ProjectRootWritable) {
+        operations->save.state = Async::TaskState::Failed;
+        operations->save.statusText = m_ProjectRootWriteError.empty()
+            ? "Stack Projects is read-only. Use Save As to choose a writable location."
+            : m_ProjectRootWriteError;
+        editor->ShowUiNotification(
+            UiNotificationSeverity::Error,
+            operations->save.statusText,
+            "library-project-root-read-only");
+        if (onComplete) onComplete(false);
+        return;
+    }
     const std::string assetFileName =
         BuildAssetPathForProjectFile(projectPath.filename().string())
             .filename()
             .string();
 
-    ++m_SaveGeneration;
-    const std::uint64_t generation = m_SaveGeneration;
-    m_SaveTaskState = Async::TaskState::Running;
-    m_SaveStatusText = "Packaging and writing project files in the background...";
+    Stack::Project::ProjectSaveCapture capture;
+    capture.document.projectId = capturedProjectId;
+    capture.document.adoptedFrom = capturedAdoptionSource;
+    capture.document.metadata.projectKind = StackFormat::kEditorProjectKind;
+    capture.document.metadata.projectName = trimmedName;
+    capture.document.metadata.timestamp = BuildTimestampString();
+    capture.document.metadata.sourceWidth = sourceW;
+    capture.document.metadata.sourceHeight = sourceH;
+    capture.document.sourceImageBytes = std::move(sourcePngBytesOverride);
+    capture.document.pipelineData = std::move(pipeline);
+    capture.document.nodeBrowserThumbnailEntries = std::move(nodeBrowserThumbnailEntries);
+    capture.sourcePixels = std::move(sourcePixels);
+    capture.renderedPixels = std::move(renderedPixels);
+    capture.renderedWidth = renderedW;
+    capture.renderedHeight = renderedH;
+    capture.includeLibraryPreview = publishLibraryArtifacts;
+    const std::string capturedTimestamp = capture.document.metadata.timestamp;
+
+    const std::uint64_t generation = operations->save.Begin(
+        capturedProjectId, capturedEditRevision);
+    operations->save.state = Async::TaskState::Running;
+    operations->save.statusText = "Packaging and writing project files in the background...";
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit([this,
+        submitted = editor->ProjectTasks().Submit("Saving",[this, owner,
                                          generation,
                                          trimmedName,
                                          fileName,
                                          projectPath,
                                          publishLibraryArtifacts,
                                          assetFileName,
-                                         pipeline = std::move(pipeline),
-                                         nodeBrowserThumbnailEntries = std::move(nodeBrowserThumbnailEntries),
+                                         capture = std::move(capture),
                                          renderedW,
                                          renderedH,
-                                         renderedPixels = std::move(renderedPixels),
-                                         sourceW,
-                                         sourceH,
-                                         sourcePixels = std::move(sourcePixels),
-                                         sourcePngBytesOverride = std::move(sourcePngBytesOverride),
+                                         capturedTimestamp,
+                                         capturedEditRevision,
+                                         capturedProjectId,
+                                         requireNewStore,
                                          editor,
                                          onComplete]() mutable {
         bool wroteProject = false;
         bool wroteAsset = false;
+        std::string projectError;
+        std::string previewWarning;
+        auto saved = std::make_shared<Stack::Project::CapturedProjectSaveResult>();
 
         try {
-            std::vector<unsigned char> sourcePngBytes = std::move(sourcePngBytesOverride);
-            if (sourcePngBytes.empty()) {
-                sourcePngBytes = Stack::PngEncoding::EncodeInterleaved(
-                    sourcePixels, sourceW, sourceH, 4);
-            }
-            if (sourcePngBytes.empty()) {
-                throw std::runtime_error(
-                    "Failed to encode the project source image.");
-            }
-
-            StackFormat::ProjectDocument document;
-            document.metadata.projectKind = StackFormat::kEditorProjectKind;
-            document.metadata.projectName = trimmedName;
-            document.metadata.timestamp = BuildTimestampString();
-            document.metadata.sourceWidth = sourceW;
-            document.metadata.sourceHeight = sourceH;
-            document.thumbnailBytes = GenerateThumbnailBytes(renderedPixels, renderedW, renderedH);
-            document.sourceImageBytes = std::move(sourcePngBytes);
-            document.pipelineData = pipeline;
-            document.nodeBrowserThumbnailEntries = nodeBrowserThumbnailEntries;
-
-            {
-                std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
-                wroteProject = StackFormat::WriteProjectFile(projectPath, document);
+            *saved = Stack::Project::WriteCapturedProject(projectPath, std::move(capture), requireNewStore);
+            wroteProject = static_cast<bool>(saved->project);
+            if (!wroteProject) {
+                projectError = saved->project.commit.message;
             }
             if (wroteProject && publishLibraryArtifacts) {
-                const std::vector<unsigned char> renderedPngBytes =
-                    Stack::PngEncoding::EncodeInterleaved(
-                        renderedPixels, renderedW, renderedH, 4);
+                const auto& renderedPngBytes = saved->libraryPreviewBytes;
                 wroteAsset = !renderedPngBytes.empty() &&
                     WriteFileBytes(
                         m_AssetsPath / assetFileName,
                         renderedPngBytes);
+                if (!wroteAsset) {
+                    previewWarning = !saved->previewWarning.empty()
+                        ? saved->previewWarning
+                        : "the preview image could not be written";
+                }
 
                 if (wroteAsset) {
                     std::string hash = ComputeImageHash(renderedPngBytes);
@@ -389,7 +438,7 @@ void LibraryManager::RequestSaveProjectImpl(
                         {"hash", hash},
                         {"projectFileName", fileName},
                         {"displayName", trimmedName},
-                        {"timestamp", document.metadata.timestamp},
+                        {"timestamp", capturedTimestamp},
                         {"width", renderedW},
                         {"height", renderedH}
                     };
@@ -399,80 +448,145 @@ void LibraryManager::RequestSaveProjectImpl(
                     }
                 }
 
-                // Sync all other embedded assets inside the project
-                SyncProjectAssets(fileName, document);
             } else if (wroteProject) {
                 // An externally located .stack file is self-contained. Do
                 // not create or overwrite managed-Library sidecars merely
                 // because that project is currently open in the Editor.
                 wroteAsset = true;
             }
+        } catch (const std::exception& exception) {
+            if (wroteProject) {
+                wroteAsset = false;
+                previewWarning = exception.what();
+            } else {
+                projectError = exception.what();
+            }
         } catch (...) {
-            wroteProject = false;
-            wroteAsset = false;
+            if (wroteProject) {
+                wroteAsset = false;
+                previewWarning = "an unknown error interrupted the rebuildable Library preview";
+            } else {
+                projectError = "an unknown error interrupted the authoritative project write";
+            }
         }
 
-        Async::TaskSystem::Get().PostToMain([
-            this,
+        editor->ProjectTasks().PostToMain([
+            this, owner, capturedProjectId,
             generation,
             wroteProject,
             wroteAsset,
+            projectError = std::move(projectError),
+            previewWarning = std::move(previewWarning),
             trimmedName,
             fileName,
             publishLibraryArtifacts,
+            capturedEditRevision,
+            saved,
             editor,
             onComplete = std::move(onComplete)
         ]() {
-            if (generation != m_SaveGeneration) {
+            const auto operations = owner.lock();
+            if (!operations) return;
+            if (generation != operations->save.generation) {
+                if (onComplete) onComplete(false);
+                return;
+            }
+            if (editor->GetProjectDocumentId() != capturedProjectId) {
+                operations->save.Invalidate();
                 if (onComplete) onComplete(false);
                 return;
             }
 
-            if (wroteProject && wroteAsset) {
-                m_SaveTaskState = Async::TaskState::Idle;
-                m_SaveStatusText = publishLibraryArtifacts
-                    ? "Project saved to the library."
-                    : "Project saved.";
-                QueueUiNotification(
-                    UiNotificationSeverity::Success,
-                    m_SaveStatusText,
-                    "library-save-project");
+            bool completionSuccess = false;
+            try {
+            if (wroteProject) {
+                operations->save.state = Async::TaskState::Idle;
                 if (publishLibraryArtifacts) {
                     m_LastLibrarySignature = 0;
                 }
+                bool savedSnapshotStillCurrent = true;
                 if (editor) {
-                    editor->SetCurrentProjectName(trimmedName);
+                    if (editor->GetProjectEditRevision() == capturedEditRevision) {
+                        editor->SetCurrentProjectName(trimmedName);
+                    }
                     editor->SetCurrentProjectFileName(fileName);
-                    editor->ClearDirty();
+                    if (!editor->AdoptSavedProjectStore(saved->project.store,
+                            std::move(saved->project.snapshot), capturedProjectId, capturedEditRevision)) {
+                        throw std::runtime_error("The saved snapshot no longer belongs to this project.");
+                    }
+                    savedSnapshotStillCurrent =
+                        editor->ClearDirtyIfRevision(capturedEditRevision);
                 }
-                if (onComplete) onComplete(true);
+                if (savedSnapshotStillCurrent) {
+                    if (publishLibraryArtifacts && !wroteAsset) {
+                        operations->save.statusText =
+                            "Project saved. The rebuildable Library preview was not updated" +
+                            (previewWarning.empty()
+                                ? std::string(".")
+                                : std::string(": ") + previewWarning + ".");
+                        Stack::Notifications::NoticeSpec warning;
+                        warning.title = "Preview not updated";
+                        warning.message = "The project was saved.";
+                        warning.details = operations->save.statusText;
+                        warning.context = trimmedName;
+                        warning.severity = Stack::Notifications::Severity::Warning;
+                        warning.outcome = Stack::Notifications::Outcome::Partial;
+                        warning.dedupeKey = "library-save-preview-warning";
+                        const auto work = Async::TaskSystem::CurrentActivity();
+                        if (work.ownerId == editor->GetNotifier().GetOwner().id) warning.operationId = work.operationId;
+                        editor->GetNotifier().Post(std::move(warning));
+                    } else {
+                        operations->save.statusText = publishLibraryArtifacts
+                            ? "Project saved to the library."
+                            : "Project saved.";
+                        // The project save coordinator reports explicit saves.
+                        // Autosaves and their low-level writer settle quietly.
+                    }
+                } else {
+                    operations->save.statusText =
+                        "Project snapshot saved; newer edits are still unsaved.";
+                    // Keep the status for the owning save coordinator, which
+                    // distinguishes explicit save feedback from autosave.
+                }
+                // The captured snapshot is durable even when newer edits are
+                // present. The save coordinator owns the follow-up revision.
+                completionSuccess = true;
             } else {
-                m_SaveTaskState = Async::TaskState::Failed;
-                m_SaveStatusText = publishLibraryArtifacts
+                operations->save.state = Async::TaskState::Failed;
+                operations->save.statusText = publishLibraryArtifacts
                     ? "Failed to save the project to the library."
                     : "Failed to save the project.";
-                QueueUiNotification(
-                    UiNotificationSeverity::Error,
-                    m_SaveStatusText,
-                    "library-save-project");
-                if (editor) {
-                    editor->MarkDirty();
+                if (!projectError.empty()) {
+                    operations->save.statusText += " " + projectError;
                 }
-                if (onComplete) onComplete(false);
+                editor->ShowUiNotification(
+                    UiNotificationSeverity::Error,
+                    operations->save.statusText,
+                    "library-save-project");
             }
+            } catch (const std::exception& error) {
+                operations->save.state = Async::TaskState::Failed;
+                operations->save.statusText =
+                    "The project was written, but save finalization failed: " +
+                    std::string(error.what());
+            } catch (...) {
+                operations->save.state = Async::TaskState::Failed;
+                operations->save.statusText =
+                    "The project save finalization failed unexpectedly.";
+            }
+            if (onComplete) onComplete(completionSuccess);
         });
         });
     } catch (...) {
         submitted = false;
     }
-    if (!submitted && generation == m_SaveGeneration) {
-        m_SaveTaskState = Async::TaskState::Failed;
-        m_SaveStatusText = "The project save could not be queued.";
-        QueueUiNotification(
+    if (!submitted && generation == operations->save.generation) {
+        operations->save.state = Async::TaskState::Failed;
+        operations->save.statusText = "The project save could not be queued.";
+        editor->ShowUiNotification(
             UiNotificationSeverity::Error,
-            m_SaveStatusText,
+            operations->save.statusText,
             "library-save-project");
-        editor->MarkDirty();
         if (onComplete) onComplete(false);
     }
 }
@@ -484,7 +598,11 @@ void LibraryManager::RequestPersistNodeBrowserThumbnails(
         return;
     }
 
-    const std::filesystem::path projectPath = m_LibraryPath / fileName;
+    const std::filesystem::path projectPath = ResolveProjectPath(fileName);
+    // Managed thumbnails are rebuildable runtime data. The legacy writer
+    // cannot update their manifest field and must not rewrite the project.
+    if (Stack::Project::IsDirectoryProjectBundle(projectPath) ||
+        Stack::Project::IsPortableV3Project(projectPath)) return;
     std::uint64_t revision = 0;
     try {
         revision = BumpNodeBrowserThumbnailPersistRevision(projectPath);
@@ -493,7 +611,7 @@ void LibraryManager::RequestPersistNodeBrowserThumbnails(
     }
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit(
+        submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Saving previews", true),
             [this, projectPath, revision, entries = std::move(entries)]() mutable {
         bool success = false;
         try {
@@ -512,8 +630,8 @@ void LibraryManager::RequestPersistNodeBrowserThumbnails(
             options.includeNodeBrowserThumbnails = true;
 
             StackFormat::ProjectDocument document;
-            success = StackFormat::ReadProjectFile(projectPath, document, options) ||
-                LoadLegacyProjectDocument(projectPath, document, options);
+            success = StackFormat::ReadProjectFile(
+                projectPath, document, options);
             if (!success) {
                 return;
             }
@@ -541,323 +659,111 @@ void LibraryManager::RequestPersistNodeBrowserThumbnails(
     (void)submitted;
 }
 
-void LibraryManager::RequestLoadProject(const std::string& fileName, EditorModule* editor, std::function<void(bool)> onComplete) {
-    if (fileName.empty() || !editor) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected project.", "library-load-project");
-        if (onComplete) onComplete(false);
-        return;
-    }
-
-    ++m_ProjectLoadGeneration;
-    const std::uint64_t generation = m_ProjectLoadGeneration;
-    m_ProjectLoadTaskState = Async::TaskState::Queued;
-    m_ProjectLoadStatusText = "Loading the project in the background...";
-
-    bool submitted = false;
-    try {
-        submitted = Async::TaskSystem::Get().Submit(
-            [this, generation, fileName, editor, onComplete]() mutable {
-        StackFormat::ProjectDocument document;
-        EditorModule::LoadedProjectData loadedProject;
-        bool success = false;
-        try {
-            StackFormat::ProjectLoadOptions options;
-            options.includeThumbnail = false;
-            options.includeSourceImage = true;
-            options.includePipelineData = true;
-            options.includeNodeBrowserThumbnails = true;
-
-            success = LoadProjectDocument(fileName, document, options);
-            if (success &&
-                (document.metadata.projectKind == StackFormat::kRenderProjectKind ||
-                 document.metadata.projectKind == StackFormat::kCompositeProjectKind)) {
-                success = false;
-            }
-            if (success) {
-                const bool isRawProject =
-                    document.metadata.projectKind == StackFormat::kRawProjectKind ||
-                    (document.rawWorkspaceData.is_object() &&
-                     document.rawWorkspaceData.value("schema", std::string()) ==
-                         "stack.rawWorkspace.project");
-                int width = 0;
-                int height = 0;
-                int channels = 0;
-                if (isRawProject) {
-                    loadedProject.sourcePixels.assign(4, 0);
-                    width = 1;
-                    height = 1;
-                    channels = 4;
-                } else {
-                    success = DecodeImageBytes(
-                        document.sourceImageBytes,
-                        loadedProject.sourcePixels,
-                        width,
-                        height,
-                        channels);
-                }
-                if (success) {
-                    loadedProject.width = width;
-                    loadedProject.height = height;
-                    loadedProject.channels = channels;
-                    loadedProject.pipelineData = document.pipelineData.is_null()
-                        ? StackFormat::json::array()
-                        : document.pipelineData;
-                    if (isRawProject && loadedProject.pipelineData.empty() &&
-                        document.rawWorkspaceData.is_object() &&
-                        document.rawWorkspaceData.contains("downstreamGraph")) {
-                        loadedProject.pipelineData =
-                            document.rawWorkspaceData["downstreamGraph"];
-                    }
-                    loadedProject.projectName = document.metadata.projectName;
-                    loadedProject.projectFileName = isRawProject
-                        ? (m_LibraryPath / fileName).lexically_normal().string()
-                        : fileName;
-                    loadedProject.projectKind = isRawProject
-                        ? StackFormat::kRawProjectKind
-                        : document.metadata.projectKind;
-                    loadedProject.rawWorkspaceData =
-                        std::move(document.rawWorkspaceData);
-                    loadedProject.projectStore = document.projectStore;
-                    loadedProject.rawProjectSnapshot = document.rawProjectSnapshot;
-                    loadedProject.nodeBrowserThumbnailEntries =
-                        std::move(document.nodeBrowserThumbnailEntries);
-                }
-            }
-        } catch (...) {
-            success = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this,
-                                             generation,
-                                             editor,
-                                             onComplete = std::move(onComplete),
-                                             loadedProject = std::move(loadedProject),
-                                             success]() mutable {
-            if (generation != m_ProjectLoadGeneration) {
-                if (onComplete) onComplete(false);
-                return;
-            }
-
-            try {
-                if (!success) {
-                    m_ProjectLoadTaskState = Async::TaskState::Failed;
-                    m_ProjectLoadStatusText =
-                        "Failed to load the selected project.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Error,
-                        "Failed to load the selected project.",
-                        "library-load-project");
-                    if (onComplete) onComplete(false);
-                    return;
-                }
-
-                auto projectData = std::make_shared<EditorLoadedProjectData>(
-                    std::move(loadedProject));
-                m_ProjectLoadTaskState = Async::TaskState::Applying;
-                m_ProjectLoadStatusText =
-                    "Applying project data to the editor...";
-
-                const bool started =
-                    editor->BeginDeferredLoadedProjectApply(projectData);
-                if (started) {
-                    m_ProjectLoadTaskState = Async::TaskState::Idle;
-                    m_ProjectLoadStatusText = "Project load handed to editor.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Success,
-                        "Project load started.",
-                        "library-load-project");
-                } else {
-                    m_ProjectLoadTaskState = Async::TaskState::Failed;
-                    m_ProjectLoadStatusText =
-                        "Failed to apply the loaded project.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Error,
-                        "Failed to apply the loaded project.",
-                        "library-load-project");
-                }
-
-                if (onComplete) onComplete(started);
-            } catch (...) {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                try {
-                    m_ProjectLoadStatusText =
-                        "Failed to apply the loaded project.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Error,
-                        m_ProjectLoadStatusText,
-                        "library-load-project");
-                } catch (...) {
-                    m_ProjectLoadStatusText.clear();
-                }
-                if (onComplete) {
-                    try {
-                        onComplete(false);
-                    } catch (...) {
-                    }
-                }
-            }
-        });
-            });
-    } catch (...) {
-        submitted = false;
-    }
-    if (!submitted && generation == m_ProjectLoadGeneration) {
-        m_ProjectLoadTaskState = Async::TaskState::Failed;
-        m_ProjectLoadStatusText = "The project load could not be queued.";
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            m_ProjectLoadStatusText,
-            "library-load-project");
-        if (onComplete) onComplete(false);
-    }
+void LibraryManager::RequestLoadProject(
+    const std::string& fileName,
+    EditorModule* editor,
+    std::function<void(bool)> onComplete) {
+    RequestLoadProjectFromPath(ResolveProjectPath(fileName), editor, std::move(onComplete));
 }
 
 void LibraryManager::RequestLoadProjectDeferredApply(
     const std::string& fileName,
-    std::function<void(bool, std::shared_ptr<EditorLoadedProjectData>)> onReady) {
-    if (fileName.empty()) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected project.", "library-load-project");
+    EditorModule* editor,
+    std::function<void(bool, std::shared_ptr<Stack::Project::LoadedProjectData>)> onReady) {
+    if (fileName.empty() || !editor) {
+        if (onReady) onReady(false, nullptr);
+        return;
+    }
+    if (editor->IsDeferredLoadedProjectApplyActive() ||
+        Async::IsBusy(editor->GetProjectLoadTaskState())) {
         if (onReady) onReady(false, nullptr);
         return;
     }
 
-    ++m_ProjectLoadGeneration;
-    const std::uint64_t generation = m_ProjectLoadGeneration;
-    m_ProjectLoadTaskState = Async::TaskState::Queued;
-    m_ProjectLoadStatusText = "Loading the project in the background...";
+    const auto operations = editor->GetProjectFileOperations();
+    const std::weak_ptr<Stack::Project::FileOperationState> owner = operations;
+    const auto generation = operations->load.Begin(
+        editor->GetProjectDocumentId(), editor->GetProjectEditRevision());
+    const std::string sourceDocumentId = operations->load.documentId;
+    const auto sourceEditRevision = operations->load.editRevision;
+    operations->load.statusText = "Loading the project in the background...";
+    const auto projectPath = ResolveProjectPath(fileName);
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit(
-            [this, generation, fileName, onReady]() mutable {
-        StackFormat::ProjectDocument document;
-        std::shared_ptr<EditorLoadedProjectData> loadedProject;
-        bool success = false;
-        try {
-            StackFormat::ProjectLoadOptions options;
-            options.includeThumbnail = false;
-            options.includeSourceImage = true;
-            options.includePipelineData = true;
-            options.includeNodeBrowserThumbnails = true;
-
-            loadedProject = std::make_shared<EditorLoadedProjectData>();
-            success = LoadProjectDocument(fileName, document, options);
-            if (success &&
-                (document.metadata.projectKind == StackFormat::kRenderProjectKind ||
-                 document.metadata.projectKind == StackFormat::kCompositeProjectKind)) {
-                success = false;
-            }
-            if (success) {
-                const bool isRawProject =
-                    document.metadata.projectKind == StackFormat::kRawProjectKind ||
-                    (document.rawWorkspaceData.is_object() &&
-                     document.rawWorkspaceData.value("schema", std::string()) ==
-                         "stack.rawWorkspace.project");
-                int width = 0;
-                int height = 0;
-                int channels = 0;
-                if (isRawProject) {
-                    loadedProject->sourcePixels.assign(4, 0);
-                    width = 1;
-                    height = 1;
-                    channels = 4;
-                } else {
-                    success = DecodeImageBytes(
-                        document.sourceImageBytes,
-                        loadedProject->sourcePixels,
-                        width,
-                        height,
-                        channels);
+        submitted = editor->ProjectTasks().Submit("Loading project",
+            [editor, owner, generation, sourceDocumentId, sourceEditRevision,
+             projectPath, onReady]() mutable {
+                Stack::Project::ProjectOpenResult opened;
+                try {
+                    opened = Stack::Project::ProjectOpenCoordinator::Load(projectPath);
+                } catch (const std::exception& exception) {
+                    opened.error = exception.what();
+                } catch (...) {
+                    opened.error = "An unknown error interrupted the project load.";
                 }
-                if (success) {
-                    loadedProject->width = width;
-                    loadedProject->height = height;
-                    loadedProject->channels = channels;
-                    loadedProject->pipelineData = document.pipelineData.is_null()
-                        ? StackFormat::json::array()
-                        : document.pipelineData;
-                    if (isRawProject && loadedProject->pipelineData.empty() &&
-                        document.rawWorkspaceData.is_object() &&
-                        document.rawWorkspaceData.contains("downstreamGraph")) {
-                        loadedProject->pipelineData =
-                            document.rawWorkspaceData["downstreamGraph"];
-                    }
-                    loadedProject->projectName = document.metadata.projectName;
-                    loadedProject->projectFileName = isRawProject
-                        ? (m_LibraryPath / fileName).lexically_normal().string()
-                        : fileName;
-                    loadedProject->projectKind = isRawProject
-                        ? StackFormat::kRawProjectKind
-                        : document.metadata.projectKind;
-                    loadedProject->rawWorkspaceData =
-                        std::move(document.rawWorkspaceData);
-                    loadedProject->projectStore = document.projectStore;
-                    loadedProject->rawProjectSnapshot = document.rawProjectSnapshot;
-                    loadedProject->nodeBrowserThumbnailEntries =
-                        std::move(document.nodeBrowserThumbnailEntries);
-                }
-            }
-        } catch (...) {
-            loadedProject.reset();
-            success = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this,
-                                             generation,
-                                             onReady = std::move(onReady),
-                                             loadedProject,
-                                             success]() mutable {
-            if (generation != m_ProjectLoadGeneration) {
-                if (onReady) onReady(false, nullptr);
-                return;
-            }
-
-            if (!success) {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                m_ProjectLoadStatusText = "Failed to load the selected project.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the selected project.", "library-load-project");
-                if (onReady) onReady(false, nullptr);
-                return;
-            }
-
-            m_ProjectLoadTaskState = Async::TaskState::Applying;
-            m_ProjectLoadStatusText = "Project data decoded.";
-
-            if (onReady) {
-                onReady(true, std::move(loadedProject));
-            }
-        });
+                editor->ProjectTasks().PostToMain(
+                    [editor, owner, generation, sourceDocumentId, sourceEditRevision,
+                     opened = std::move(opened), onReady = std::move(onReady)]() mutable {
+                        const auto operations = owner.lock();
+                        if (!operations) return;
+                        if (generation != operations->load.generation) {
+                            if (onReady) onReady(false, nullptr);
+                            return;
+                        }
+                        if (editor->GetProjectDocumentId() != sourceDocumentId ||
+                            editor->GetProjectEditRevision() != sourceEditRevision) {
+                            operations->load.Invalidate();
+                            if (onReady) onReady(false, nullptr);
+                            return;
+                        }
+                        if (!opened) {
+                            operations->load.state = Async::TaskState::Failed;
+                            operations->load.statusText = opened.error.empty()
+                                ? "Failed to load the selected project." : opened.error;
+                            editor->ShowUiNotification(UiNotificationSeverity::Error,
+                                operations->load.statusText, "project-load");
+                            if (onReady) onReady(false, nullptr);
+                            return;
+                        }
+                        operations->load.state = Async::TaskState::Applying;
+                        operations->load.statusText = "Project data decoded.";
+                        operations->load.warning = std::move(opened.warning);
+                        if (onReady) onReady(true, std::move(opened.candidate));
+                    });
             });
     } catch (...) {
         submitted = false;
     }
-    if (!submitted && generation == m_ProjectLoadGeneration) {
-        m_ProjectLoadTaskState = Async::TaskState::Failed;
-        m_ProjectLoadStatusText = "The project load could not be queued.";
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            m_ProjectLoadStatusText,
-            "library-load-project");
+    if (!submitted && generation == operations->load.generation) {
+        operations->load.state = Async::TaskState::Failed;
+        operations->load.statusText = "The project load could not be queued.";
+        editor->ShowUiNotification(UiNotificationSeverity::Error,
+            operations->load.statusText, "project-load");
         if (onReady) onReady(false, nullptr);
     }
 }
 
-void LibraryManager::SetProjectLoadApplyingStatus(const std::string& statusText) {
-    m_ProjectLoadTaskState = Async::TaskState::Applying;
-    m_ProjectLoadStatusText = statusText;
+void LibraryManager::SetProjectLoadApplyingStatus(
+    EditorModule* editor, const std::string& statusText) {
+    if (!editor) return;
+    auto& load = editor->GetProjectFileOperations()->load;
+    load.state = Async::TaskState::Applying;
+    load.statusText = statusText;
 }
 
-void LibraryManager::FinishDeferredProjectLoad(bool success, const std::string& message) {
-    if (success) {
-        m_ProjectLoadTaskState = Async::TaskState::Idle;
-        m_ProjectLoadStatusText = message.empty() ? "Project loaded into the editor." : message;
-        QueueUiNotification(UiNotificationSeverity::Success, m_ProjectLoadStatusText, "library-load-project");
-        return;
-    }
-
-    m_ProjectLoadTaskState = Async::TaskState::Failed;
-    m_ProjectLoadStatusText = message.empty() ? "Failed to apply the loaded project." : message;
-    QueueUiNotification(UiNotificationSeverity::Error, m_ProjectLoadStatusText, "library-load-project");
+void LibraryManager::FinishDeferredProjectLoad(
+    EditorModule* editor, bool success, const std::string& message) {
+    if (!editor) return;
+    auto& load = editor->GetProjectFileOperations()->load;
+    load.state = success ? Async::TaskState::Idle : Async::TaskState::Failed;
+    load.statusText = success && !load.warning.empty() ? load.warning
+        : !message.empty() ? message
+        : success ? "Project opened." : "Failed to apply the loaded project.";
+    editor->ShowUiNotification(!success ? UiNotificationSeverity::Error
+            : load.warning.empty() ? UiNotificationSeverity::Success
+            : UiNotificationSeverity::Info,
+        load.statusText, "project-load");
 }
 
 bool LibraryManager::RenameProject(const std::string& fileName, const std::string& newName) {
@@ -870,7 +776,7 @@ bool LibraryManager::RenameProject(const std::string& fileName, const std::strin
     document.metadata.projectName = trimmedName;
     document.metadata.timestamp = BuildTimestampString();
 
-    if (!StackFormat::WriteProjectFile(m_LibraryPath / fileName, document)) {
+    if (!StackFormat::WriteProjectFile(ResolveProjectPath(fileName), document)) {
         return false;
     }
 
@@ -895,26 +801,42 @@ bool LibraryManager::RenameProject(const std::string& fileName, const std::strin
 
 bool LibraryManager::DeleteProject(const std::string& fileName) {
     try {
-        const std::filesystem::path projectPath = m_LibraryPath / fileName;
+        const std::filesystem::path projectPath = ResolveProjectPath(fileName);
         if (!std::filesystem::exists(projectPath)) return false;
+
+        // Library removal is only available for a project that passes the
+        // current strict store/schema check. Obsolete folders are deliberately
+        // left on disk and are not surfaced by the rebuilt index.
+        Stack::Project::ProjectStoreOpenResult currentProject =
+            Stack::Project::OpenProjectStore(projectPath);
+        if (!currentProject) return false;
 
         StackFormat::ProjectDocument document;
         StackFormat::ProjectLoadOptions metadataOnly { true, false, false };
         const bool loadedMetadata = LoadProjectDocument(fileName, document, metadataOnly);
-        const bool removedProject = std::filesystem::remove(projectPath);
+        std::error_code removeError;
+        const bool removedProject = Stack::Project::IsDirectoryProjectBundle(projectPath)
+            ? std::filesystem::remove_all(projectPath, removeError) > 0u
+            : false;
+        if (!removedProject || removeError) return false;
         TagManager::Get().SetTags(fileName, {});
         if (!loadedMetadata || document.metadata.projectKind != StackFormat::kCompositeProjectKind) {
             const std::filesystem::path assetPath = BuildAssetPathForProjectFile(fileName);
             if (std::filesystem::exists(assetPath)) {
                 std::error_code ec;
                 std::filesystem::remove(assetPath, ec);
-                std::filesystem::remove(assetPath.string() + ".hash", ec);
-                TagManager::Get().SetTags(assetPath.filename().string(), {});
+                if (ec) {
+                    m_Notifier.Warning("The project was deleted, but its preview could not be removed.",
+                        "Preview cleanup", assetPath.string() + "\n" + ec.message());
+                } else {
+                    std::filesystem::remove(assetPath.string() + ".hash", ec);
+                    TagManager::Get().SetTags(assetPath.filename().string(), {});
+                }
             }
         }
 
         m_LastLibrarySignature = 0;
-        return removedProject;
+        return true;
     } catch (...) {
         return false;
     }
@@ -924,186 +846,86 @@ std::filesystem::path LibraryManager::BuildAssetPathForProjectFile(const std::st
     return m_AssetsPath / (std::filesystem::path(projectFileName).stem().string() + ".png");
 }
 
-void LibraryManager::RequestLoadProjectFromPath(const std::filesystem::path& absolutePath, EditorModule* editor, std::function<void(bool)> onComplete) {
-    if (absolutePath.empty() || !editor) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to load the project from disk.", "library-load-project-path");
+void LibraryManager::RequestLoadProjectFromPath(
+    const std::filesystem::path& absolutePath,
+    EditorModule* editor,
+    std::function<void(bool)> onComplete) {
+    if (!editor || absolutePath.empty()) {
         if (onComplete) onComplete(false);
         return;
     }
-
-    ++m_ProjectLoadGeneration;
-    const std::uint64_t generation = m_ProjectLoadGeneration;
-    m_ProjectLoadTaskState = Async::TaskState::Queued;
-    m_ProjectLoadStatusText = "Loading the project from path...";
-
-    bool submitted = false;
-    try {
-        submitted = Async::TaskSystem::Get().Submit(
-            [this, generation, absolutePath, editor, onComplete]() mutable {
-        StackFormat::ProjectDocument document;
-        EditorModule::LoadedProjectData loadedProject;
-
-        bool success = false;
-        try {
-            StackFormat::ProjectLoadOptions options;
-            options.includeThumbnail = false;
-            options.includeSourceImage = true;
-            options.includePipelineData = true;
-            options.includeNodeBrowserThumbnails = true;
-
-            if (std::filesystem::exists(absolutePath)) {
-                std::lock_guard<std::mutex> fileLock(m_ProjectFileIoMutex);
-                if (StackFormat::ReadProjectFile(
-                        absolutePath,
-                        document,
-                        options)) {
-                    success = true;
-                } else {
-                    success = LoadLegacyProjectDocument(
-                        absolutePath,
-                        document,
-                        options);
-                }
-            }
-
-            if (success &&
-                (document.metadata.projectKind == StackFormat::kRenderProjectKind ||
-                 document.metadata.projectKind == StackFormat::kCompositeProjectKind)) {
-                success = false;
-            }
-            if (success) {
-                const bool isRawProject =
-                    document.metadata.projectKind == StackFormat::kRawProjectKind ||
-                    (document.rawWorkspaceData.is_object() &&
-                     document.rawWorkspaceData.value("schema", std::string()) ==
-                         "stack.rawWorkspace.project");
-                int width = 0;
-                int height = 0;
-                int channels = 0;
-                if (isRawProject) {
-                    loadedProject.sourcePixels.assign(4, 0);
-                    width = 1;
-                    height = 1;
-                    channels = 4;
-                } else {
-                    success = DecodeImageBytes(
-                        document.sourceImageBytes,
-                        loadedProject.sourcePixels,
-                        width,
-                        height,
-                        channels);
-                }
-                if (success) {
-                    loadedProject.width = width;
-                    loadedProject.height = height;
-                    loadedProject.channels = channels;
-                    loadedProject.pipelineData = document.pipelineData.is_null()
-                        ? StackFormat::json::array()
-                        : document.pipelineData;
-                    if (isRawProject && loadedProject.pipelineData.empty() &&
-                        document.rawWorkspaceData.is_object() &&
-                        document.rawWorkspaceData.contains("downstreamGraph")) {
-                        loadedProject.pipelineData =
-                            document.rawWorkspaceData["downstreamGraph"];
-                    }
-                    loadedProject.projectName = document.metadata.projectName;
-                    loadedProject.projectFileName =
-                        absolutePath.lexically_normal().string();
-                    loadedProject.projectKind = isRawProject
-                        ? StackFormat::kRawProjectKind
-                        : document.metadata.projectKind;
-                    loadedProject.rawWorkspaceData =
-                        std::move(document.rawWorkspaceData);
-                    loadedProject.projectStore = document.projectStore;
-                    loadedProject.rawProjectSnapshot = document.rawProjectSnapshot;
-                    loadedProject.nodeBrowserThumbnailEntries =
-                        std::move(document.nodeBrowserThumbnailEntries);
-                }
-            }
-        } catch (...) {
-            success = false;
-        }
-
-        Async::TaskSystem::Get().PostToMain([this,
-                                             generation,
-                                             editor,
-                                             onComplete = std::move(onComplete),
-                                             loadedProject = std::move(loadedProject),
-                                             success]() mutable {
-            if (generation != m_ProjectLoadGeneration) {
-                if (onComplete) onComplete(false);
-                return;
-            }
-
-            try {
-                if (!success) {
-                    m_ProjectLoadTaskState = Async::TaskState::Failed;
-                    m_ProjectLoadStatusText =
-                        "Failed to load the project from disk.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Error,
-                        "Failed to load the project from disk.",
-                        "library-load-project-path");
+    if (editor->IsDeferredLoadedProjectApplyActive() ||
+        Async::IsBusy(editor->GetProjectLoadTaskState())) {
+        if (onComplete) onComplete(false);
+        return;
+    }
+    const std::weak_ptr<Stack::Project::FileOperationState> owner =
+        editor->GetProjectFileOperations();
+    const std::string sourceDocumentId = editor->GetProjectDocumentId();
+    const auto waitingLoadGeneration = editor->GetProjectFileOperations()->load.generation;
+    if (editor->RequestAutoBracketForeground("open this project",
+            [this, absolutePath, editor, owner, sourceDocumentId, onComplete] {
+                if (owner.expired()) return;
+                if (editor->GetProjectDocumentId() != sourceDocumentId) {
                     if (onComplete) onComplete(false);
                     return;
                 }
-
-                auto projectData = std::make_shared<EditorLoadedProjectData>(
-                    std::move(loadedProject));
-                m_ProjectLoadTaskState = Async::TaskState::Applying;
-                m_ProjectLoadStatusText = "Applying project data...";
-
-                const bool started =
-                    editor->BeginDeferredLoadedProjectApply(projectData);
-                if (started) {
-                    m_ProjectLoadTaskState = Async::TaskState::Idle;
-                    m_ProjectLoadStatusText = "Project load handed to editor.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Success,
-                        "Project load started.",
-                        "library-load-project-path");
-                } else {
-                    m_ProjectLoadTaskState = Async::TaskState::Failed;
-                    m_ProjectLoadStatusText =
-                        "Failed to apply project data.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Error,
-                        "Failed to apply project data.",
-                        "library-load-project-path");
-                }
-
-                if (onComplete) onComplete(started);
-            } catch (...) {
-                m_ProjectLoadTaskState = Async::TaskState::Failed;
-                try {
-                    m_ProjectLoadStatusText =
-                        "Failed to apply project data.";
-                    QueueUiNotification(
-                        UiNotificationSeverity::Error,
-                        m_ProjectLoadStatusText,
-                        "library-load-project-path");
-                } catch (...) {
-                    m_ProjectLoadStatusText.clear();
-                }
-                if (onComplete) {
-                    try {
-                        onComplete(false);
-                    } catch (...) {
-                    }
-                }
-            }
-        });
-            });
-    } catch (...) {
-        submitted = false;
-    }
-    if (!submitted && generation == m_ProjectLoadGeneration) {
-        m_ProjectLoadTaskState = Async::TaskState::Failed;
-        m_ProjectLoadStatusText = "The project load could not be queued.";
-        QueueUiNotification(
-            UiNotificationSeverity::Error,
-            m_ProjectLoadStatusText,
-            "library-load-project-path");
+                RequestLoadProjectFromPath(absolutePath, editor, onComplete);
+            })) return;
+    if (!editor->FinishWorkspaceInteraction()) {
         if (onComplete) onComplete(false);
+        return;
     }
+    if (editor->NeedsWorkspaceSaveBeforeTransition() || editor->IsProjectFileSaveBusy() ||
+        editor->IsRawWorkspaceProjectSaveBusy()) {
+        editor->RequestSaveWorkspaceBeforeClose(
+            [this, absolutePath, editor, owner, waitingLoadGeneration, onComplete](bool success) {
+                const auto operations = owner.lock();
+                if (!operations) return;
+                if (success && operations->load.generation == waitingLoadGeneration) {
+                    RequestLoadProjectFromPath(absolutePath, editor, onComplete);
+                } else {
+                    editor->ShowUiNotification(UiNotificationSeverity::Info,
+                        "Could not save the current project. It will stay open.", "project-load-save-failed");
+                    if (onComplete) onComplete(false);
+                }
+            });
+        return;
+    }
+    RequestLoadProjectDeferredApply(absolutePath.string(), editor,
+        [this, editor, owner, onComplete](bool loaded,
+            std::shared_ptr<Stack::Project::LoadedProjectData> project) mutable {
+            const auto operations = owner.lock();
+            if (!operations) return;
+            if (!loaded || !project) {
+                if (onComplete) onComplete(false);
+                return;
+            }
+            const auto generation = operations->load.generation;
+            const std::string loadedProjectId = project->projectId;
+            operations->load.statusText = "Applying project data...";
+            try {
+                const bool started = editor->BeginDeferredLoadedProjectApply(project,
+                    [this, editor, owner, generation, loadedProjectId, onComplete](
+                        bool applied, const std::string& status) mutable {
+                        const auto operations = owner.lock();
+                        if (!operations) return;
+                        if (generation != operations->load.generation ||
+                            (applied && !loadedProjectId.empty() &&
+                             editor->GetProjectDocumentId() != loadedProjectId)) {
+                            if (onComplete) onComplete(false);
+                            return;
+                        }
+                        FinishDeferredProjectLoad(editor, applied, status);
+                        if (onComplete) onComplete(applied);
+                    });
+                if (started) return;
+                FinishDeferredProjectLoad(editor, false, editor->GetDeferredLoadedProjectStatusText());
+            } catch (const std::exception& exception) {
+                FinishDeferredProjectLoad(editor, false, exception.what());
+            } catch (...) {
+                FinishDeferredProjectLoad(editor, false, "Failed to apply project data.");
+            }
+            if (onComplete) onComplete(false);
+        });
 }

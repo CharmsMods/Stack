@@ -17,7 +17,7 @@ std::string ScopeKindToString(ScopeKind kind) {
 
 ScopeKind ScopeKindFromString(const std::string& value) {
     if (value == "Vectorscope") return ScopeKind::Vectorscope;
-    if (value == "RGBParade" || value == "RGB Parade") return ScopeKind::RGBParade;
+    if (value == "RGBParade") return ScopeKind::RGBParade;
     return ScopeKind::Histogram;
 }
 
@@ -27,14 +27,20 @@ std::string MaskGeneratorKindToString(MaskGeneratorKind kind) {
         case MaskGeneratorKind::LinearGradient: return "LinearGradient";
         case MaskGeneratorKind::RadialGradient: return "RadialGradient";
         case MaskGeneratorKind::Noise: return "Noise";
+        case MaskGeneratorKind::Square: return "Square";
+        case MaskGeneratorKind::RawGradient: return "RawGradient";
+        case MaskGeneratorKind::PaintedArea: return "PaintedArea";
     }
     return "Solid";
 }
 
 MaskGeneratorKind MaskGeneratorKindFromString(const std::string& value) {
-    if (value == "LinearGradient" || value == "Linear Gradient") return MaskGeneratorKind::LinearGradient;
-    if (value == "RadialGradient" || value == "Radial Gradient") return MaskGeneratorKind::RadialGradient;
-    if (value == "Noise" || value == "Noise Mask") return MaskGeneratorKind::Noise;
+    if (value == "LinearGradient") return MaskGeneratorKind::LinearGradient;
+    if (value == "RadialGradient") return MaskGeneratorKind::RadialGradient;
+    if (value == "Noise") return MaskGeneratorKind::Noise;
+    if (value == "Square") return MaskGeneratorKind::Square;
+    if (value == "RawGradient") return MaskGeneratorKind::RawGradient;
+    if (value == "PaintedArea") return MaskGeneratorKind::PaintedArea;
     return MaskGeneratorKind::Solid;
 }
 
@@ -82,7 +88,7 @@ std::string ImageGeneratorKindToString(ImageGeneratorKind kind) {
 }
 
 ImageGeneratorKind ImageGeneratorKindFromString(const std::string& value) {
-    if (value == "ColorGradient" || value == "Color Gradient") return ImageGeneratorKind::ColorGradient;
+    if (value == "ColorGradient") return ImageGeneratorKind::ColorGradient;
     if (value == "Square") return ImageGeneratorKind::Square;
     if (value == "Circle") return ImageGeneratorKind::Circle;
     if (value == "Text") return ImageGeneratorKind::Text;
@@ -223,6 +229,7 @@ nlohmann::json SerializeMaskSettings(const MaskGeneratorSettings& settings) {
         { "centerX", settings.centerX },
         { "centerY", settings.centerY },
         { "radius", settings.radius },
+        { "radiusY", settings.radiusY },
         { "feather", settings.feather },
         { "invert", settings.invert }
     };
@@ -240,6 +247,7 @@ MaskGeneratorSettings DeserializeMaskSettings(const nlohmann::json& value) {
     settings.centerX = value.value("centerX", settings.centerX);
     settings.centerY = value.value("centerY", settings.centerY);
     settings.radius = value.value("radius", settings.radius);
+    settings.radiusY = value.value("radiusY", settings.radius);
     settings.feather = value.value("feather", settings.feather);
     settings.invert = value.value("invert", settings.invert);
     return settings;
@@ -263,8 +271,8 @@ MixBlendMode MixBlendModeFromString(const std::string& value) {
     if (value == "Add") return MixBlendMode::Add;
     if (value == "Multiply") return MixBlendMode::Multiply;
     if (value == "Screen") return MixBlendMode::Screen;
-    if (value == "StraightSourceOver" || value == "Source Over (Straight)") return MixBlendMode::StraightSourceOver;
-    if (value == "PremultipliedSourceOver" || value == "Source Over (Premultiplied)") return MixBlendMode::PremultipliedSourceOver;
+    if (value == "StraightSourceOver") return MixBlendMode::StraightSourceOver;
+    if (value == "PremultipliedSourceOver") return MixBlendMode::PremultipliedSourceOver;
     return MixBlendMode::Normal;
 }
 
@@ -291,11 +299,11 @@ DataMathMode DataMathModeFromString(const std::string& value) {
     if (value == "Multiply") return DataMathMode::Multiply;
     if (value == "Divide") return DataMathMode::Divide;
     if (value == "Average") return DataMathMode::Average;
-    if (value == "Min" || value == "Minimum") return DataMathMode::Min;
-    if (value == "Max" || value == "Maximum") return DataMathMode::Max;
-    if (value == "Difference" || value == "AbsDiff") return DataMathMode::Difference;
+    if (value == "Min") return DataMathMode::Min;
+    if (value == "Max") return DataMathMode::Max;
+    if (value == "Difference") return DataMathMode::Difference;
     if (value == "Remap") return DataMathMode::Remap;
-    if (value == "ImageAverage" || value == "Image Average" || value == "AverageImages" || value == "Average Images") {
+    if (value == "ImageAverage") {
         return DataMathMode::ImageAverage;
     }
     return DataMathMode::Clamp;
@@ -418,7 +426,7 @@ std::string SpectrumViewLutToString(SpectrumViewLut lut) {
 SpectrumViewLut SpectrumViewLutFromString(const std::string& value) {
     if (value == "Viridis") return SpectrumViewLut::Viridis;
     if (value == "Inferno") return SpectrumViewLut::Inferno;
-    if (value == "Grayscale" || value == "Gray" || value == "Grey") return SpectrumViewLut::Grayscale;
+    if (value == "Grayscale") return SpectrumViewLut::Grayscale;
     return SpectrumViewLut::Turbo;
 }
 
@@ -607,9 +615,9 @@ std::string FrequencyMaskShapeToString(FrequencyMaskShape shape) {
 }
 
 FrequencyMaskShape FrequencyMaskShapeFromString(const std::string& value) {
-    if (value == "HighPass" || value == "High Pass") return FrequencyMaskShape::HighPass;
-    if (value == "BandPass" || value == "Band Pass") return FrequencyMaskShape::BandPass;
-    if (value == "BandStop" || value == "Band Stop") return FrequencyMaskShape::BandStop;
+    if (value == "HighPass") return FrequencyMaskShape::HighPass;
+    if (value == "BandPass") return FrequencyMaskShape::BandPass;
+    if (value == "BandStop") return FrequencyMaskShape::BandStop;
     if (value == "Notch") return FrequencyMaskShape::Notch;
     if (value == "Gaussian") return FrequencyMaskShape::Gaussian;
     if (value == "Butterworth") return FrequencyMaskShape::Butterworth;
@@ -657,7 +665,7 @@ std::string SpectrumAnalyzerModeToString(SpectrumAnalyzerMode mode) {
 }
 
 SpectrumAnalyzerMode SpectrumAnalyzerModeFromString(const std::string& value) {
-    if (value == "DominantFrequency" || value == "Dominant Frequency") {
+    if (value == "DominantFrequency") {
         return SpectrumAnalyzerMode::DominantFrequency;
     }
     return SpectrumAnalyzerMode::RadialEnergy;
@@ -782,7 +790,7 @@ std::string ImageToMaskKindToString(ImageToMaskKind kind) {
 }
 
 ImageToMaskKind ImageToMaskKindFromString(const std::string& value) {
-    if (value == "SampledRange" || value == "Sampled Range") return ImageToMaskKind::SampledRange;
+    if (value == "SampledRange") return ImageToMaskKind::SampledRange;
     return ImageToMaskKind::Luminance;
 }
 

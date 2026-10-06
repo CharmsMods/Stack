@@ -7,7 +7,9 @@
 #include "Renderer/GLHelpers.h"
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <system_error>
@@ -18,9 +20,69 @@ namespace {
 namespace StackFormat = StackBinaryFormat;
 namespace LibraryImage = Stack::Library::ImageHelpers;
 
+Async::ActivityMetadata LibraryActivity(const Stack::Notifications::Notifier& notifier,
+    Stack::Notifications::ActivityHandle activity, std::string label, bool maintenance = false) {
+    Async::ActivityMetadata metadata;
+    metadata.ownerId = notifier.GetOwner().id;
+    metadata.ownerGeneration = notifier.GetOwner().generation;
+    metadata.operationId = activity.operationId;
+    metadata.label = std::move(label);
+    metadata.maintenance = maintenance;
+    return metadata;
+}
+
 } // namespace
 
 using namespace Stack::Library::StorageHelpers;
+
+void LibraryManager::RequestImportFolderAssets(std::filesystem::path path, bool png, bool jpg, bool bmp, bool tga) {
+    if (path.empty()) return;
+    const auto notifier = m_Notifier;
+    Stack::Notifications::NoticeSpec work;
+    work.title = "Reading import folder";
+    work.context = path.filename().u8string();
+    work.details = path.u8string();
+    work.preview = false;
+    const auto activity = notifier.BeginActivity(std::move(work));
+    const bool submitted = Async::TaskSystem::Get().Submit(LibraryActivity(notifier, activity, "Reading folder"),
+        [this, path = std::move(path), png, jpg, bmp, tga, notifier, activity] {
+            std::size_t selected = 0;
+            std::size_t queued = 0;
+            std::size_t unreadable = 0;
+            try {
+                for (const auto& entry : std::filesystem::directory_iterator(path)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string extension = entry.path().extension().u8string();
+                    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+                        return static_cast<char>(std::tolower(value));
+                    });
+                    if (!((png && extension == ".png") || (jpg && (extension == ".jpg" || extension == ".jpeg")) ||
+                        (bmp && extension == ".bmp") || (tga && extension == ".tga"))) continue;
+                    ++selected;
+                    notifier.UpdateActivity(activity, "Reading " + entry.path().filename().u8string());
+                    std::vector<unsigned char> bytes;
+                    if (!ReadFileBytes(entry.path(), bytes) || bytes.empty()) { ++unreadable; continue; }
+                    QueueLooseAssetSave(entry.path().stem().u8string(), bytes, entry.path().filename().u8string());
+                    ++queued;
+                }
+                if (unreadable) {
+                    notifier.FinishActivity(activity, queued ? Stack::Notifications::Outcome::Partial : Stack::Notifications::Outcome::Failure,
+                        "Some folder images could not be read.", std::to_string(queued) + " queued for import; " + std::to_string(unreadable) + " unreadable.");
+                } else if (!selected) {
+                    notifier.CompleteActivity(activity, "No matching images found.");
+                } else {
+                    // Each queued asset reports its actual write or decision result.
+                    notifier.CompleteActivity(activity, "Queued " + std::to_string(queued) + " images for import.", false);
+                }
+            } catch (const std::exception& error) {
+                notifier.FinishActivity(activity, queued ? Stack::Notifications::Outcome::Partial : Stack::Notifications::Outcome::Failure,
+                    "Could not finish reading the import folder.", std::to_string(queued) + " images were queued.\n" + error.what());
+            } catch (...) {
+                notifier.FailActivity(activity, "Could not read the import folder.");
+            }
+        });
+    if (!submitted) notifier.FailActivity(activity, "The folder import could not be started.");
+}
 
 void LibraryManager::PrepareConflictPreview(int index) {
     if (index < 0 || index >= (int)m_PendingConflicts.size()) return;
@@ -126,7 +188,10 @@ bool LibraryManager::ExportProject(const std::string& fileName, const std::strin
 
     try {
         const std::filesystem::path sourcePath = m_LibraryPath / fileName;
-        if (!std::filesystem::exists(sourcePath)) return false;
+        if (!std::filesystem::exists(sourcePath)) {
+            PostNotification(UiNotificationSeverity::Error, "The project to export is no longer available.", "library-export-project");
+            return false;
+        }
 
         const std::filesystem::path destination = destinationPath;
         if (destination.has_parent_path()) {
@@ -134,10 +199,10 @@ bool LibraryManager::ExportProject(const std::string& fileName, const std::strin
         }
 
         std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::overwrite_existing);
-        QueueUiNotification(UiNotificationSeverity::Success, "Project exported.", "library-export-project");
+        PostNotification(UiNotificationSeverity::Success, "Project exported.", "library-export-project");
         return true;
     } catch (...) {
-        QueueUiNotification(UiNotificationSeverity::Error, "Failed to export the project.", "library-export-project");
+        PostNotification(UiNotificationSeverity::Error, "Failed to export the project.", "library-export-project");
         return false;
     }
 }
@@ -149,10 +214,13 @@ void LibraryManager::RequestExportLibraryBundle(const std::string& destinationPa
     const std::uint64_t generation = m_ExportGeneration;
     m_ExportTaskState = Async::TaskState::Running;
     m_ExportStatusText = "Exporting the library bundle in the background...";
+    m_ExportActivity = m_Notifier.BeginActivity("Exporting library");
+    const auto activity = m_ExportActivity;
+    const auto notifier = m_Notifier;
 
-    Async::TaskSystem::Get().Submit([this, generation, destinationPath]() {
+    const bool submitted = Async::TaskSystem::Get().Submit(LibraryActivity(notifier, activity, "Exporting"),[this, generation, destinationPath, activity, notifier]() {
         const bool success = WriteLibraryBundle(destinationPath);
-        Async::TaskSystem::Get().PostToMain([this, generation, success]() {
+        Async::TaskSystem::Get().PostToMain([this, generation, success, activity, notifier]() {
             if (generation != m_ExportGeneration) {
                 return;
             }
@@ -160,17 +228,26 @@ void LibraryManager::RequestExportLibraryBundle(const std::string& destinationPa
             if (success) {
                 m_ExportTaskState = Async::TaskState::Idle;
                 m_ExportStatusText = "Library export completed.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Library export completed.", "library-export-bundle");
+                notifier.CompleteActivity(activity, "Library exported.");
             } else {
                 m_ExportTaskState = Async::TaskState::Failed;
                 m_ExportStatusText = "Failed to export the library bundle.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to export the library bundle.", "library-export-bundle");
+                notifier.FailActivity(activity, "Could not export the library.");
             }
         });
     });
+    if (!submitted) {
+        m_ExportTaskState = Async::TaskState::Failed;
+        m_ExportStatusText = "The library export could not be started.";
+        notifier.FailActivity(activity, m_ExportStatusText);
+    }
 }
 
 void LibraryManager::ClearConflicts() {
+    if (!m_PendingConflicts.empty()) {
+        m_Notifier.CancelActivity(m_ImportActivity, "Import stopped.");
+        m_ImportStatusText = "Import stopped. Already imported files remain in the Library.";
+    }
     for (auto& conflict : m_PendingConflicts) {
         if (conflict.localPreviewTex) {
             m_DeferredTextureDeletions.push_back(conflict.localPreviewTex);
@@ -183,43 +260,93 @@ void LibraryManager::ClearConflicts() {
     m_ActiveImportBundle = {};
 }
 
-void LibraryManager::ResolveConflict(int index, ConflictAction action, const std::string& newName) {
-    if (index < 0 || index >= (int)m_PendingConflicts.size()) return;
+int LibraryManager::FindConflictIndex(std::uint64_t id) const {
+    for (std::size_t i = 0; i < m_PendingConflicts.size(); ++i) {
+        if (m_PendingConflicts[i].id == id) return static_cast<int>(i);
+    }
+    return -1;
+}
 
-    auto& conflict = m_PendingConflicts[index];
+ConflictResolutionResult LibraryManager::ResolveConflict(std::uint64_t id, ConflictAction action, const std::string& newName) {
+    const int index = FindConflictIndex(id);
+    if (index < 0) return { ConflictResolutionState::Failed, "This import is no longer waiting for a decision." };
+
+    // Copy before resolving. Erasing the vector must not invalidate the action's inputs.
+    const auto conflict = m_PendingConflicts[static_cast<std::size_t>(index)];
     bool resolved = false;
 
     if (conflict.importedProjectIndex < 0 || conflict.importedProjectIndex >= (int)m_ActiveImportBundle.projects.size()) {
-        m_PendingConflicts.erase(m_PendingConflicts.begin() + index);
-        return;
+        return { ConflictResolutionState::Failed, "The imported project data is unavailable. Abort this import and try again." };
     }
 
     const auto& importedBundledProject = m_ActiveImportBundle.projects[conflict.importedProjectIndex];
+    std::string targetFileName;
 
+    try {
     if (action == ConflictAction::Ignore) {
         resolved = true;
     } else if (action == ConflictAction::Replace) {
-        const std::string fileName = EnsureProjectFileNameForKind(
-            importedBundledProject.fileName,
+        targetFileName = EnsureProjectFileNameForKind(
+            conflict.localProjectFileName,
             SanitizeFileStem(importedBundledProject.project.metadata.projectName),
             importedBundledProject.project.metadata.projectKind);
-        if (StackFormat::WriteProjectFile(m_LibraryPath / fileName, importedBundledProject.project)) {
+        if (StackFormat::WriteProjectFile(m_LibraryPath / targetFileName, importedBundledProject.project)) {
             resolved = true;
         }
     } else if (action == ConflictAction::KeepBoth) {
         std::string targetName = newName.empty() ? importedBundledProject.project.metadata.projectName + " (Imported)" : newName;
-        std::string fileName = EnsureProjectFileNameForKind(
+        const std::string baseName = EnsureProjectFileNameForKind(
             std::string(),
             SanitizeFileStem(targetName) + "_" + std::to_string(std::time(nullptr)),
             importedBundledProject.project.metadata.projectKind);
+        targetFileName = conflict.pendingCopyFileName;
+        if (targetFileName.empty()) {
+            targetFileName = baseName;
+            unsigned int suffix = 1;
+            while (std::filesystem::exists(m_LibraryPath / targetFileName)) {
+                targetFileName = baseName + "_" + std::to_string(suffix++);
+            }
+            m_PendingConflicts[static_cast<std::size_t>(index)].pendingCopyFileName = targetFileName;
+        }
 
         StackFormat::ProjectDocument doc = importedBundledProject.project;
         doc.metadata.projectName = targetName;
         doc.metadata.timestamp = BuildTimestampString();
 
-        if (StackFormat::WriteProjectFile(m_LibraryPath / fileName, doc)) {
+        if (conflict.pendingCopySaved && std::filesystem::exists(m_LibraryPath / targetFileName)) {
+            StackFormat::ProjectDocument savedCopy;
+            StackFormat::ProjectLoadOptions fullLoad {true, true, true};
+            if (!LoadProjectDocument(targetFileName, savedCopy, fullLoad) ||
+                !StackFormat::AreProjectsIdentical(savedCopy, doc)) {
+                return {ConflictResolutionState::Failed, "The imported copy changed while waiting. Abort this import and start again."};
+            }
+            resolved = true;
+        } else if (StackFormat::WriteProjectFile(m_LibraryPath / targetFileName, doc, true)) {
+            m_PendingConflicts[static_cast<std::size_t>(index)].pendingCopySaved = true;
             resolved = true;
         }
+    }
+    if (resolved && action != ConflictAction::Ignore) {
+        for (const auto& asset : m_ActiveImportBundle.assets) {
+            if (asset.projectFileName != importedBundledProject.fileName) continue;
+            const auto assetTarget = action == ConflictAction::KeepBoth
+                ? BuildAssetPathForProjectFile(targetFileName)
+                : m_AssetsPath / std::filesystem::path(EnsureAssetFileName(asset.fileName,
+                    std::filesystem::path(targetFileName).stem().string() + ".png")).filename();
+            if (!WriteFileBytes(assetTarget, asset.imageBytes)) {
+                return { ConflictResolutionState::Failed,
+                    "The project was saved, but its Library preview could not be copied. Check folder access and try again." };
+            }
+        }
+    }
+    } catch (const std::exception& error) {
+        return { ConflictResolutionState::Failed, std::string("Could not save the imported project. ") + error.what() };
+    } catch (...) {
+        return { ConflictResolutionState::Failed, "Could not save the imported project. Check the destination and try again." };
+    }
+
+    if (!resolved) {
+        return { ConflictResolutionState::Failed, "Could not save the imported project. Check that the Library folder is writable, then try again." };
     }
 
     if (resolved) {
@@ -231,21 +358,26 @@ void LibraryManager::ResolveConflict(int index, ConflictAction action, const std
             m_ImportStatusText = "Conflict resolution completed.";
             m_LastLibrarySignature = 0;
             RequestRefreshLibraryAsync();
+            m_Notifier.CompleteActivity(m_ImportActivity, "Import completed.");
         }
     }
+    return { ConflictResolutionState::Resolved, {} };
 }
 
 void LibraryManager::RequestImportLibraryBundle(const std::string& sourcePath) {
-    if (sourcePath.empty() || Async::IsBusy(m_ImportTaskState)) return;
+    if (sourcePath.empty() || Async::IsBusy(m_ImportTaskState) || HasPendingConflicts()) return;
 
     ++m_ImportGeneration;
     const std::uint64_t generation = m_ImportGeneration;
     m_ImportTaskState = Async::TaskState::Running;
     m_ImportStatusText = "Importing the library bundle in the background...";
+    m_ImportActivity = m_Notifier.BeginActivity("Importing library");
+    const auto activity = m_ImportActivity;
+    const auto notifier = m_Notifier;
 
-    Async::TaskSystem::Get().Submit([this, generation, sourcePath]() {
+    const bool submitted = Async::TaskSystem::Get().Submit(LibraryActivity(notifier, activity, "Importing"),[this, generation, sourcePath, activity, notifier]() {
         const bool success = ImportLibraryBundle(sourcePath);
-        Async::TaskSystem::Get().PostToMain([this, generation, success]() {
+        Async::TaskSystem::Get().PostToMain([this, generation, success, activity, notifier]() {
             if (generation != m_ImportGeneration) {
                 return;
             }
@@ -253,16 +385,26 @@ void LibraryManager::RequestImportLibraryBundle(const std::string& sourcePath) {
             if (success) {
                 m_ImportTaskState = Async::TaskState::Idle;
                 m_ImportStatusText = "Library import completed.";
-                QueueUiNotification(UiNotificationSeverity::Success, "Library import completed.", "library-import-bundle");
+                if (!HasPendingConflicts()) {
+                    notifier.CompleteActivity(activity, "Library imported.");
+                } else {
+                    m_ImportStatusText = "Choose how to handle the imported projects.";
+                    notifier.UpdateActivity(activity, "Waiting for your choice");
+                }
                 m_LastLibrarySignature = 0;
                 RequestRefreshLibraryAsync();
             } else {
                 m_ImportTaskState = Async::TaskState::Failed;
                 m_ImportStatusText = "Failed to import the library bundle.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to import the library bundle.", "library-import-bundle");
+                notifier.FailActivity(activity, "Could not import the library.");
             }
         });
     });
+    if (!submitted) {
+        m_ImportTaskState = Async::TaskState::Failed;
+        m_ImportStatusText = "The library import could not be started.";
+        notifier.FailActivity(activity, m_ImportStatusText);
+    }
 }
 
 bool LibraryManager::WriteLibraryBundle(const std::string& destinationPath) {
@@ -395,12 +537,16 @@ bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath) {
         }
 
         if (conflicts.empty()) {
-            FinalizeImport(bundle, {});
-            return true;
+            return FinalizeImport(bundle, {});
         } else {
+            // Import unrelated entries now; conflicted project entries wait for a decision.
+            std::vector<int> skipped;
+            for (const auto& conflict : conflicts) skipped.push_back(conflict.importedProjectIndex);
+            if (!FinalizeImport(bundle, skipped)) return false;
             Async::TaskSystem::Get().PostToMain([this, bundle = std::move(bundle), conflicts = std::move(conflicts)]() mutable {
                 ClearConflicts();
                 m_ActiveImportBundle = std::move(bundle);
+                for (auto& conflict : conflicts) conflict.id = m_NextConflictId++;
                 m_PendingConflicts = std::move(conflicts);
                 m_ImportTaskState = Async::TaskState::Idle;
                 m_ImportStatusText = "Conflicts detected. Please resolve them to complete the import.";
@@ -412,13 +558,13 @@ bool LibraryManager::ImportLibraryBundle(const std::string& sourcePath) {
     }
 }
 
-void LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices) {
-    if (!std::filesystem::exists(m_LibraryPath)) {
-        std::filesystem::create_directories(m_LibraryPath);
-    }
-    if (!std::filesystem::exists(m_AssetsPath)) {
-        std::filesystem::create_directories(m_AssetsPath);
-    }
+bool LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bundle, const std::vector<int>& skippedProjectIndices) {
+    std::error_code ec;
+    std::filesystem::create_directories(m_LibraryPath, ec);
+    if (ec) return false;
+    ec.clear();
+    std::filesystem::create_directories(m_AssetsPath, ec);
+    if (ec) return false;
 
     for (int i = 0; i < (int)bundle.projects.size(); ++i) {
         bool skip = false;
@@ -436,14 +582,19 @@ void LibraryManager::FinalizeImport(const StackFormat::LibraryBundleDocument& bu
             SanitizeFileStem(project.project.metadata.projectName),
             project.project.metadata.projectKind);
 
-        StackFormat::WriteProjectFile(m_LibraryPath / fileName, project.project);
+        if (!StackFormat::WriteProjectFile(m_LibraryPath / fileName, project.project)) return false;
     }
 
     for (const auto& asset : bundle.assets) {
+        const bool waitingForProject = std::any_of(skippedProjectIndices.begin(), skippedProjectIndices.end(),
+            [&](int index) { return index >= 0 && index < static_cast<int>(bundle.projects.size()) &&
+                bundle.projects[static_cast<std::size_t>(index)].fileName == asset.projectFileName; });
+        if (waitingForProject) continue;
         const std::string fallbackName = std::filesystem::path(asset.projectFileName.empty() ? "imported_asset" : asset.projectFileName).stem().string() + ".png";
         const std::string fileName = EnsureAssetFileName(asset.fileName, fallbackName);
-        WriteFileBytes(m_AssetsPath / fileName, asset.imageBytes);
+        if (!WriteFileBytes(m_AssetsPath / std::filesystem::path(fileName).filename(), asset.imageBytes)) return false;
     }
+    return true;
 }
 
 void LibraryManager::RequestImportAndLoad(
@@ -453,6 +604,10 @@ void LibraryManager::RequestImportAndLoad(
     std::function<void(int)> onTabSwitchRequested) {
     (void)composite;
     if (sourcePath.empty()) return;
+    if (Async::IsBusy(m_ImportTaskState) || HasPendingConflicts()) {
+        m_Notifier.Info("Finish the current import before opening another file.");
+        return;
+    }
 
     const std::filesystem::path path(sourcePath);
     if (!std::filesystem::exists(path)) return;
@@ -465,24 +620,20 @@ void LibraryManager::RequestImportAndLoad(
     if (IsSupportedProjectExtension(path)) {
         StackFormat::ProjectDocument document;
         StackFormat::ProjectLoadOptions metadataOnly { true, false, false };
-        bool success = false;
-        if (StackFormat::ReadProjectFile(path, document, metadataOnly)) {
-            success = true;
-        } else {
-            success = LoadLegacyProjectDocument(path, document, metadataOnly);
-        }
+        const bool success = StackFormat::ReadProjectFile(
+            path, document, metadataOnly);
 
         if (!success) {
             m_ImportStatusText = "Failed to read project file metadata.";
             m_ImportTaskState = Async::TaskState::Failed;
-            QueueUiNotification(UiNotificationSeverity::Error, "Failed to read project file metadata.", "library-import-project");
+            PostNotification(UiNotificationSeverity::Error, "Failed to read project file metadata.", "library-import-project");
             return;
         }
 
         if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
             m_ImportStatusText = "Legacy standalone composite projects are no longer supported.";
             m_ImportTaskState = Async::TaskState::Failed;
-            QueueUiNotification(UiNotificationSeverity::Error, "Legacy standalone composite projects are no longer supported.", "library-import-project");
+            PostNotification(UiNotificationSeverity::Error, "Legacy standalone composite projects are no longer supported.", "library-import-project");
             return;
         }
 
@@ -515,7 +666,8 @@ void LibraryManager::RequestImportAndLoad(
             }
 
             if (!StackFormat::ReadProjectFile(path, document, fullLoad)) {
-                LoadLegacyProjectDocument(path, document, fullLoad);
+                m_Notifier.Error("Could not read the project to import.");
+                return;
             }
 
             StackFormat::LibraryBundleDocument bundle;
@@ -527,7 +679,10 @@ void LibraryManager::RequestImportAndLoad(
 
             ClearConflicts();
             m_ActiveImportBundle = std::move(bundle);
+            conflict.id = m_NextConflictId++;
             m_PendingConflicts.push_back(std::move(conflict));
+            m_ImportActivity = m_Notifier.BeginActivity("Importing project");
+            m_Notifier.UpdateActivity(m_ImportActivity, "Waiting for your choice");
             m_ImportTaskState = Async::TaskState::Idle;
             return;
         }
@@ -537,7 +692,7 @@ void LibraryManager::RequestImportAndLoad(
         if (ec) {
             m_ImportStatusText = "Failed to copy project to library: " + ec.message();
             m_ImportTaskState = Async::TaskState::Failed;
-            QueueUiNotification(UiNotificationSeverity::Error, m_ImportStatusText, "library-import-project");
+            PostNotification(UiNotificationSeverity::Error, m_ImportStatusText, "library-import-project");
             return;
         }
 
@@ -547,13 +702,13 @@ void LibraryManager::RequestImportAndLoad(
         if (document.metadata.projectKind == StackFormat::kRenderProjectKind) {
             m_ImportStatusText = "Render projects are no longer supported.";
             m_ImportTaskState = Async::TaskState::Failed;
-            QueueUiNotification(UiNotificationSeverity::Error, "Render projects are no longer supported.", "library-import-project");
+            PostNotification(UiNotificationSeverity::Error, "Render projects are no longer supported.", "library-import-project");
             return;
         } else {
             if (document.metadata.projectKind == StackFormat::kCompositeProjectKind) {
                 m_ImportStatusText = "Legacy standalone composite projects are no longer supported.";
                 m_ImportTaskState = Async::TaskState::Failed;
-                QueueUiNotification(UiNotificationSeverity::Error, "Legacy standalone composite projects are no longer supported.", "library-import-project");
+                PostNotification(UiNotificationSeverity::Error, "Legacy standalone composite projects are no longer supported.", "library-import-project");
                 return;
             }
             if (onTabSwitchRequested) onTabSwitchRequested(1);
@@ -569,7 +724,7 @@ void LibraryManager::RequestImportAndLoad(
         if (ec) {
             m_ImportStatusText = "Failed to copy image to library: " + ec.message();
             m_ImportTaskState = Async::TaskState::Failed;
-            QueueUiNotification(UiNotificationSeverity::Error, m_ImportStatusText, "library-import-asset");
+            PostNotification(UiNotificationSeverity::Error, m_ImportStatusText, "library-import-asset");
             return;
         }
 
@@ -585,5 +740,5 @@ void LibraryManager::RequestImportAndLoad(
 
     m_ImportStatusText = "Unsupported file type dropped.";
     m_ImportTaskState = Async::TaskState::Failed;
-    QueueUiNotification(UiNotificationSeverity::Error, "Unsupported file type dropped.", "library-import-asset");
+    PostNotification(UiNotificationSeverity::Error, "Unsupported file type dropped.", "library-import-asset");
 }

@@ -48,6 +48,8 @@ PhysicalMemorySnapshot QueryPhysicalMemorySnapshot() {
     if (GlobalMemoryStatusEx(&status) != FALSE) {
         snapshot.totalPhysicalBytes = status.ullTotalPhys;
         snapshot.availablePhysicalBytes = status.ullAvailPhys;
+        snapshot.availableCommitBytes = status.ullAvailPageFile;
+        snapshot.commitLimitKnown = true;
         snapshot.valid = snapshot.totalPhysicalBytes > 0u &&
             snapshot.availablePhysicalBytes > 0u &&
             snapshot.availablePhysicalBytes <= snapshot.totalPhysicalBytes;
@@ -120,7 +122,14 @@ MfdProcessingMemoryBudgetDecision ResolveMfdProcessingMemoryBudget(
     decision.constrainedToSafeCeiling =
         !decision.automatic &&
         decision.budgetBytes < decision.requestedBytes;
-    if (decision.budgetBytes < kMinimumUsableBudgetBytes) {
+    if (decision.automatic && decision.budgetBytes == 0u) {
+        // Automatic mode is advisory for interactive processing. Preserve a
+        // non-zero planning value even under extreme pressure so the caller
+        // can save first and attempt staged allocations instead of refusing.
+        decision.budgetBytes = 1u;
+    }
+    if (!decision.automatic &&
+        decision.budgetBytes < kMinimumUsableBudgetBytes) {
         decision.message =
             "Less than 512 MiB is safely available for MFD after the operating reserve.";
         return decision;
@@ -129,7 +138,7 @@ MfdProcessingMemoryBudgetDecision ResolveMfdProcessingMemoryBudget(
     decision.valid = true;
     if (decision.automatic) {
         decision.message =
-            "Automatic MFD budget uses available physical memory after the protected operating reserve.";
+            "Automatic MultiFrame memory is an advisory target after the operating reserve; interactive processing may attempt more.";
     } else if (decision.constrainedToSafeCeiling) {
         decision.message =
             "The manual MFD budget was bounded by currently available physical memory and the protected operating reserve.";

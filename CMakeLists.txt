@@ -6,9 +6,21 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(STACK_LEGAL_STATUS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/legal/RELEASE_LEGAL_STATUS.json")
+file(READ "${STACK_LEGAL_STATUS_FILE}" STACK_LEGAL_STATUS_JSON)
+string(JSON STACK_EULA_VERSION GET "${STACK_LEGAL_STATUS_JSON}" documents eula version)
+string(JSON STACK_PRIVACY_VERSION GET "${STACK_LEGAL_STATUS_JSON}" documents privacy version)
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/legal/EULA.txt" STACK_EULA_SHA256)
+
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/src/App/AppVersion.h"
+    @ONLY
+)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppLegalVersion.h.in"
+    "${CMAKE_BINARY_DIR}/generated/src/App/AppLegalVersion.h"
     @ONLY
 )
 
@@ -20,10 +32,14 @@ if (WIN32)
     )
 endif()
 
-# Ensure folders for outputs are nicely mapped directly to the build folder
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
+# CMake owns a private binary tree. Only the runnable app target and its shipped
+# payload are written to STACK_DEPLOY_DIR.
+set(STACK_DEPLOY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build" CACHE PATH "Runnable Stack deployment directory")
+get_filename_component(STACK_DEPLOY_DIR "${STACK_DEPLOY_DIR}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(STACK_PRIVATE_RUNTIME_DIR "${CMAKE_BINARY_DIR}/artifacts")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${STACK_PRIVATE_RUNTIME_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${STACK_PRIVATE_RUNTIME_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${STACK_PRIVATE_RUNTIME_DIR}")
 if (MSVC)
     # Use the static MSVC runtime so the portable build does not require a separate VC++ redistributable.
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -35,6 +51,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 option(STACK_ENABLE_LIBRAW "Enable LibRaw-backed Sony ARW RAW loading" ON)
+option(STACK_ENABLE_RESTORMER_EXECUTION "Enable private Restormer package probing and model-service execution" OFF)
 if (WIN32)
     option(STACK_ENABLE_APPWINDOW_TITLEBAR "Enable Windows App SDK AppWindowTitleBar bridge" ON)
 else()
@@ -89,9 +106,9 @@ if (STACK_ENABLE_LIBRAW)
     add_library(stack_libraw SHARED ${STACK_LIBRAW_SOURCES})
     set_target_properties(stack_libraw PROPERTIES
         OUTPUT_NAME libraw
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${STACK_PRIVATE_RUNTIME_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${STACK_PRIVATE_RUNTIME_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${STACK_PRIVATE_RUNTIME_DIR}"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libraw-import"
         ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/libraw-import"
         ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/libraw-import"
@@ -131,21 +148,21 @@ target_link_libraries(imgui_core PUBLIC glfw)
 
 # Automatically bake the splash image into a header if it changes
 add_custom_target(BakeAssets
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_splash.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/assets/bake_splash.py"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Baking assets into C++..."
     VERBATIM
 )
 
 add_custom_target(BakeTabIcons
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_tab_icons.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/assets/bake_tab_icons.py"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Baking tab icons into C++..."
     VERBATIM
 )
 
 add_custom_target(BakeFonts
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_fonts.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/assets/bake_fonts.py"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Baking fonts into C++..."
     VERBATIM
@@ -153,8 +170,30 @@ add_custom_target(BakeFonts
 
 include(cmake/StackSources.cmake)
 
-add_executable(${PROJECT_NAME} ${STACK_APP_SOURCE_FILES})
+if (WIN32)
+    add_executable(${PROJECT_NAME} WIN32 ${STACK_APP_SOURCE_FILES})
+else()
+    add_executable(${PROJECT_NAME} ${STACK_APP_SOURCE_FILES})
+endif()
 add_dependencies(${PROJECT_NAME} BakeAssets BakeTabIcons BakeFonts)
+include(cmake/StackPanorama.cmake)
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${STACK_DEPLOY_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${STACK_DEPLOY_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${STACK_DEPLOY_DIR}"
+)
+
+if (MSVC)
+    # RAW graph execution combines nested graph evaluation, stage caching, and
+    # validation/readback paths. Keep modest headroom above the Windows 1 MiB
+    # default without changing runtime allocation behavior; committed stack
+    # pages are still demand-backed.
+    target_link_options(${PROJECT_NAME} PRIVATE "/STACK:2097152")
+    set(STACK_MSVC_COMPILE_JOBS 14 CACHE STRING "Maximum parallel Stack C++ compilations")
+    if (STACK_MSVC_COMPILE_JOBS GREATER 1)
+        target_compile_options(${PROJECT_NAME} PRIVATE "/MP${STACK_MSVC_COMPILE_JOBS}")
+    endif()
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_BINARY_DIR}/generated/src
@@ -165,6 +204,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     STACK_ENABLE_APPWINDOW_TITLEBAR=$<BOOL:${STACK_ENABLE_APPWINDOW_TITLEBAR}>
+    STACK_ENABLE_RESTORMER_EXECUTION=$<BOOL:${STACK_ENABLE_RESTORMER_EXECUTION}>
+    STACK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
@@ -221,7 +262,6 @@ if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
         unset(STACK_WINDOWS_APP_SDK_WINRT_INCLUDE CACHE)
         unset(STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE CACHE)
         unset(STACK_WINDOWS_APP_SDK_VERSION_INCLUDE CACHE)
-        unset(STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB CACHE)
         unset(STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL CACHE)
         find_path(STACK_WINDOWS_APP_SDK_WINRT_INCLUDE
             NAMES
@@ -242,15 +282,6 @@ if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
             PATHS ${STACK_WINDOWS_APP_SDK_INCLUDE_SEARCH_DIRS}
             NO_DEFAULT_PATH
         )
-        find_library(STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB
-            NAMES Microsoft.WindowsAppRuntime.Bootstrap
-            PATHS
-                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/native/x64"
-                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/win10-x64"
-                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/x64"
-                "${STACK_WINDOWS_APP_SDK_CANDIDATE}/lib/native"
-            NO_DEFAULT_PATH
-        )
         find_file(STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL
             NAMES Microsoft.WindowsAppRuntime.Bootstrap.dll
             PATHS
@@ -263,7 +294,6 @@ if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
         if (STACK_WINDOWS_APP_SDK_WINRT_INCLUDE AND
             STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE AND
             STACK_WINDOWS_APP_SDK_VERSION_INCLUDE AND
-            STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB AND
             STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL)
             set(STACK_HAS_WINDOWS_APP_SDK ON)
             set(STACK_WINDOWS_APP_SDK_ROOT_RESOLVED "${STACK_WINDOWS_APP_SDK_CANDIDATE}")
@@ -281,7 +311,52 @@ if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
 
     if (STACK_HAS_WINDOWS_APP_SDK)
         message(STATUS "Windows App SDK titlebar bridge enabled from: ${STACK_WINDOWS_APP_SDK_ROOT_RESOLVED}")
+        # The checked-in Microsoft.UI projection can lag the servicing revision
+        # of the Windows SDK's C++/WinRT base header. Normalize a private copy so
+        # one compilation never mixes two CPPWINRT_VERSION values.
+        if (STACK_WINDOWS_CPPWINRT_INCLUDE AND
+            EXISTS "${STACK_WINDOWS_APP_SDK_GENERATED_CPPWINRT}/winrt/Microsoft.UI.h")
+            file(READ
+                "${STACK_WINDOWS_CPPWINRT_INCLUDE}/winrt/base.h"
+                STACK_CPPWINRT_BASE_HEADER)
+            string(REGEX MATCH
+                "CPPWINRT_VERSION[ \t]+\"([^\"]+)\""
+                STACK_CPPWINRT_VERSION_MATCH
+                "${STACK_CPPWINRT_BASE_HEADER}")
+            set(STACK_CPPWINRT_SDK_VERSION "${CMAKE_MATCH_1}")
+            file(READ
+                "${STACK_WINDOWS_APP_SDK_GENERATED_CPPWINRT}/winrt/Microsoft.UI.h"
+                STACK_CPPWINRT_APP_SDK_HEADER)
+            string(REGEX MATCH
+                "C[+][+]/WinRT v([^\r\n]+)"
+                STACK_CPPWINRT_APP_SDK_VERSION_MATCH
+                "${STACK_CPPWINRT_APP_SDK_HEADER}")
+            set(STACK_CPPWINRT_APP_SDK_VERSION "${CMAKE_MATCH_1}")
+            if (STACK_CPPWINRT_SDK_VERSION AND STACK_CPPWINRT_APP_SDK_VERSION)
+                set(STACK_NORMALIZED_CPPWINRT "${CMAKE_BINARY_DIR}/generated/cppwinrt")
+                file(REMOVE_RECURSE "${STACK_NORMALIZED_CPPWINRT}/winrt")
+                file(COPY
+                    "${STACK_WINDOWS_APP_SDK_GENERATED_CPPWINRT}/winrt"
+                    DESTINATION "${STACK_NORMALIZED_CPPWINRT}")
+                file(GLOB_RECURSE STACK_NORMALIZED_CPPWINRT_HEADERS
+                    "${STACK_NORMALIZED_CPPWINRT}/winrt/*.h")
+                foreach(STACK_NORMALIZED_HEADER IN LISTS STACK_NORMALIZED_CPPWINRT_HEADERS)
+                    file(READ "${STACK_NORMALIZED_HEADER}" STACK_NORMALIZED_HEADER_CONTENT)
+                    string(REPLACE
+                        "${STACK_CPPWINRT_APP_SDK_VERSION}"
+                        "${STACK_CPPWINRT_SDK_VERSION}"
+                        STACK_NORMALIZED_HEADER_CONTENT
+                        "${STACK_NORMALIZED_HEADER_CONTENT}")
+                    file(WRITE "${STACK_NORMALIZED_HEADER}" "${STACK_NORMALIZED_HEADER_CONTENT}")
+                endforeach()
+                set(STACK_WINDOWS_APP_SDK_WINRT_INCLUDE "${STACK_NORMALIZED_CPPWINRT}")
+            endif()
+        endif()
         target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_HAS_WINDOWS_APP_SDK=1)
+        if (MSVC)
+            target_compile_definitions(${PROJECT_NAME} PRIVATE
+                _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+        endif()
         target_include_directories(${PROJECT_NAME} PRIVATE
             "${STACK_WINDOWS_APP_SDK_WINRT_INCLUDE}"
             "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_INCLUDE}"
@@ -292,13 +367,14 @@ if (WIN32 AND STACK_ENABLE_APPWINDOW_TITLEBAR)
             target_include_directories(${PROJECT_NAME} PRIVATE "${STACK_WINDOWS_CPPWINRT_INCLUDE}")
         endif()
         target_link_libraries(${PROJECT_NAME} PRIVATE
-            "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_LIB}"
             runtimeobject
         )
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${STACK_WINDOWS_APP_SDK_BOOTSTRAP_DLL}"
-                "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+                "${STACK_DEPLOY_DIR}/Stack/App/Runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll"
             VERBATIM
         )
     else()
@@ -314,6 +390,62 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     imgui_core
 )
 
+if (WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE shell32)
+endif()
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+        "${STACK_DEPLOY_DIR}/Stack/App/Runtime/libraw.dll"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Resources"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Tools"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal"
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/EULA.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/EULA.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/PRIVACY.md"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/PRIVACY.md"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/INFO_BEFORE_INSTALL.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/INFO_BEFORE_INSTALL.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/THIRD_PARTY_NOTICES.md"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/LICENSE"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${imgui_SOURCE_DIR}/LICENSE.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/DearImGui-MIT.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${glfw_SOURCE_DIR}/LICENSE.md"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/GLFW-zlib-libpng.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/NlohmannJSON-MIT.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/NlohmannJSON-MIT.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/stb-MIT-or-Public-Domain.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/stb-MIT-or-Public-Domain.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-Apache-2.0.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-COPYRIGHT.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-zlib.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-SoftFloat-FDLIBM.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/legal/third_party/OpenCV-FLANN-BSD.txt"
+        "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty"
+    VERBATIM
+)
+
 if (STACK_ENABLE_LIBRAW)
     target_compile_definitions(${PROJECT_NAME} PRIVATE STACK_ENABLE_LIBRAW=1)
     target_link_libraries(${PROJECT_NAME} PRIVATE stack_libraw)
@@ -322,43 +454,49 @@ if (STACK_ENABLE_LIBRAW)
         target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
     endif()
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/THIRD_PARTY_NOTICES.md"
-        COMMAND ${CMAKE_COMMAND} -E remove_directory
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses"
         COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses"
+            "${STACK_DEPLOY_DIR}/Stack/App/Runtime"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${imgui_SOURCE_DIR}/LICENSE.txt"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/DearImGui-MIT.txt"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${glfw_SOURCE_DIR}/LICENSE.md"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/GLFW-zlib-libpng.txt"
+            "$<TARGET_FILE:stack_libraw>"
+            "${STACK_DEPLOY_DIR}/Stack/App/Runtime/libraw.dll"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${libraw_SOURCE_DIR}/LICENSE.LGPL"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-LGPL-2.1.txt"
+            "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibRaw-LGPL-2.1.txt"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${libraw_SOURCE_DIR}/COPYRIGHT"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/licenses/LibRaw-COPYRIGHT.txt"
+            "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/LibRaw-COPYRIGHT.txt"
+        VERBATIM
+    )
+endif()
+
+if (STACK_HAS_WINDOWS_APP_SDK AND
+    EXISTS "${STACK_WINDOWS_APP_SDK_ROOT_RESOLVED}/license.txt")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${STACK_WINDOWS_APP_SDK_ROOT_RESOLVED}/license.txt"
+            "${STACK_DEPLOY_DIR}/Stack/App/Legal/ThirdParty/Microsoft-WindowsAppSDK-License.txt"
+        VERBATIM
+    )
+endif()
+
+if (NOT STACK_HAS_WINDOWS_APP_SDK)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            "${STACK_DEPLOY_DIR}/Stack/App/Runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll"
         VERBATIM
     )
 endif()
 
 # Link OpenGL based on platform
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 dwmapi shell32 ole32 shlwapi winhttp bcrypt)
+    target_link_libraries(${PROJECT_NAME} PRIVATE opengl32 comdlg32 comctl32 dwmapi shell32 ole32 shlwapi winhttp bcrypt)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE "-framework OpenGL")
 elseif (UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL)
 endif()
 
-if (WIN32)
-    option(STACK_BUILD_MODEL_SERVICE "Build the optional external Windows ML model service" ON)
-else()
-    option(STACK_BUILD_MODEL_SERVICE "Build the optional external Windows ML model service" OFF)
-endif()
+option(STACK_BUILD_MODEL_SERVICE "Build the optional external Windows ML model service" OFF)
 
 if (WIN32 AND STACK_BUILD_MODEL_SERVICE)
     set(STACK_WINDOWS_ML_CANDIDATE_ROOTS)
@@ -440,7 +578,8 @@ if (WIN32 AND STACK_BUILD_MODEL_SERVICE)
     endif()
 endif()
 
-if (WIN32)
+option(STACK_BUILD_AUXILIARY_TOOLS "Build obsolete/private auxiliary Stack tools" OFF)
+if (WIN32 AND STACK_BUILD_AUXILIARY_TOOLS)
     set(STACK_BUILDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_workspace/stack_builder")
     if (EXISTS "${STACK_BUILDER_DIR}/CMakeLists.txt")
         add_subdirectory("${STACK_BUILDER_DIR}" "${CMAKE_BINARY_DIR}/stack_builder")
@@ -448,6 +587,96 @@ if (WIN32)
 endif()
 
 include(CTest)
+if(BUILD_TESTING)
+    include(cmake/StackGpuUploadTests.cmake)
+    include(cmake/StackZoneAreaTests.cmake)
+    include(cmake/StackGraphControlTests.cmake)
+    include(cmake/StackColorOrientationTests.cmake)
+    include(cmake/StackCreamPaletteTests.cmake)
+endif()
+
+if (BUILD_TESTING)
+    include(cmake/StackWorkspaceSwitcherTests.cmake)
+    add_executable(StackRawGallerySimilarityTests
+        tools/tests/raw_gallery_similarity_tests.cpp
+        src/Raw/RawGalleryFilmstripOrganization.cpp
+        src/Raw/RawGallerySimilarity.cpp)
+    target_include_directories(StackRawGallerySimilarityTests PRIVATE src)
+    add_test(NAME StackRaw.GallerySimilarity COMMAND StackRawGallerySimilarityTests)
+    set_tests_properties(StackRaw.GallerySimilarity PROPERTIES
+        LABELS "raw;gallery;similarity;cpu")
+
+    add_executable(StackStartupRevealTests
+        tools/tests/startup_reveal_tests.cpp
+        src/App/StartupReveal.cpp)
+    target_include_directories(StackStartupRevealTests PRIVATE src)
+    target_link_libraries(StackStartupRevealTests PRIVATE imgui_core)
+    add_test(NAME StackApp.StartupReveal COMMAND StackStartupRevealTests)
+    set_tests_properties(StackApp.StartupReveal PROPERTIES LABELS "app;startup;cpu")
+
+    add_test(NAME StackRaw.GradingScopes
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-raw-grading-scopes)
+    set_tests_properties(StackRaw.GradingScopes PROPERTIES LABELS "raw;scopes;gpu")
+    add_executable(StackUiActivityTests tools/tests/ui_activity_tests.cpp
+        src/Async/TaskSystem.cpp
+        src/Notifications/NotificationStore.cpp src/Notifications/Notifier.cpp
+        src/Notifications/NotificationIndicator.cpp src/Notifications/NotificationPresentation.cpp
+        src/Notifications/AnimatedIndicatorLabel.cpp src/ThirdParty/imstb_truetype_impl.cpp)
+    target_include_directories(StackUiActivityTests PRIVATE src)
+    target_link_libraries(StackUiActivityTests PRIVATE imgui_core)
+    add_test(NAME StackUi.Activity COMMAND StackUiActivityTests)
+    set_tests_properties(StackUi.Activity PROPERTIES LABELS "ui;notifications;async;cpu" TIMEOUT 30)
+
+    add_executable(StackAsyncReliabilityTests
+        tools/tests/async_reliability_tests.cpp
+        src/Async/TaskSystem.cpp)
+    target_include_directories(StackAsyncReliabilityTests PRIVATE src)
+    add_test(NAME StackAsync.Reliability COMMAND StackAsyncReliabilityTests)
+    set_tests_properties(StackAsync.Reliability PROPERTIES
+        LABELS "async;reliability;cpu" TIMEOUT 30)
+
+    if (WIN32)
+        add_executable(StackComApartmentTests tools/tests/com_apartment_tests.cpp)
+        target_include_directories(StackComApartmentTests PRIVATE src)
+        target_link_libraries(StackComApartmentTests PRIVATE ole32)
+        add_test(NAME StackPlatform.ComApartment COMMAND StackComApartmentTests)
+        set_tests_properties(StackPlatform.ComApartment PROPERTIES
+            LABELS "platform;dialogs;cpu" TIMEOUT 30)
+    endif()
+endif()
+
+if (BUILD_TESTING)
+    add_executable(StackAppPathsTests
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/app_paths_tests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/App/AppPaths.cpp"
+    )
+    target_include_directories(StackAppPathsTests PRIVATE src src/ThirdParty)
+    if (WIN32)
+        target_link_libraries(StackAppPathsTests PRIVATE shell32 ole32)
+    endif()
+    add_test(NAME StackApp.RuntimePaths COMMAND StackAppPathsTests)
+    set_tests_properties(StackApp.RuntimePaths PROPERTIES LABELS "app;paths;migration;cpu")
+
+    add_executable(StackUpdateReliabilityTests
+        tools/tests/update_reliability_tests.cpp src/App/UpdateDownloadStorage.cpp)
+    target_include_directories(StackUpdateReliabilityTests PRIVATE src)
+    add_test(NAME StackApp.UpdateReliability COMMAND StackUpdateReliabilityTests)
+    set_tests_properties(StackApp.UpdateReliability PROPERTIES LABELS "app;updates;cpu")
+
+    add_executable(StackSavePathConfirmationTests tools/tests/save_path_confirmation_tests.cpp)
+    target_include_directories(StackSavePathConfirmationTests PRIVATE src)
+    add_test(NAME StackPlatform.SavePathConfirmation COMMAND StackSavePathConfirmationTests)
+    set_tests_properties(StackPlatform.SavePathConfirmation PROPERTIES
+        LABELS "platform;dialogs;cpu")
+
+    add_test(
+        NAME StackApp.AppearanceSettings
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-appearance-settings
+    )
+    set_tests_properties(StackApp.AppearanceSettings PROPERTIES
+        LABELS "app;appearance;settings;migration;cpu"
+    )
+endif()
 
 if (BUILD_TESTING)
     add_test(
@@ -545,6 +774,77 @@ if (BUILD_TESTING)
     set_tests_properties(StackRaw.MfdEndToEnd PROPERTIES
         LABELS "raw;mfd;processor;registration;fusion;atomicity;memory;cpu"
     )
+
+    add_test(NAME StackRaw.HdrContracts
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-hdr-contracts)
+    set_tests_properties(StackRaw.HdrContracts PROPERTIES
+        LABELS "raw;hdr;contract;overrange;cache;cpu")
+
+    add_test(NAME StackRaw.HdrCalibration
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-hdr-calibration)
+    set_tests_properties(StackRaw.HdrCalibration PROPERTIES
+        LABELS "raw;hdr;calibration;mixed-iso;noise;cpu")
+
+    add_test(NAME StackRaw.HdrTranslation
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-hdr-translation)
+    set_tests_properties(StackRaw.HdrTranslation PROPERTIES
+        LABELS "raw;hdr;registration;fusion;cfa;cpu")
+
+    add_test(NAME StackRaw.HdrProjectFoundation
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-hdr-project-foundation)
+    set_tests_properties(StackRaw.HdrProjectFoundation PROPERTIES
+        LABELS "raw;hdr;project;migration;compatibility;cpu")
+
+    add_test(NAME StackRaw.HdrEndToEnd
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-hdr-end-to-end)
+    set_tests_properties(StackRaw.HdrEndToEnd PROPERTIES
+        LABELS "raw;hdr;processor;all-cfa;determinism;cpu")
+
+    add_test(NAME StackRaw.ManualHdrFusion
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-manual-hdr-fusion)
+    set_tests_properties(StackRaw.ManualHdrFusion PROPERTIES
+        LABELS "raw;hdr;manual;curves;masks;cache;graph;cpu")
+
+    add_test(NAME StackRaw.HdrGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-hdr-gpu)
+    set_tests_properties(StackRaw.HdrGpu PROPERTIES
+        LABELS "raw;hdr;processor;all-cfa;parity;fallback;cancellation;gpu")
+
+    add_test(NAME StackRaw.SharedBurstGpu
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-shared-burst-gpu)
+    set_tests_properties(StackRaw.SharedBurstGpu PROPERTIES
+        LABELS "raw;mfd;shared-burst;processor;parity;fallback;cancellation;gpu")
+
+    add_test(NAME StackRaw.SuperResolution
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-super-resolution
+            "${CMAKE_CURRENT_BINARY_DIR}/validation/super-resolution")
+    set_tests_properties(StackRaw.SuperResolution PROPERTIES
+        LABELS "raw;bracketing;super-resolution;parity;fallback;gpu")
+
+    add_test(NAME StackRaw.MultiFrameContracts
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-multiframe-contracts)
+    set_tests_properties(StackRaw.MultiFrameContracts PROPERTIES
+        LABELS "raw;multiframe;contract;adapter;evidence;cfa;cpu")
+
+    add_test(NAME StackRaw.MultiFramePhase0
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-multiframe-phase0)
+    set_tests_properties(StackRaw.MultiFramePhase0 PROPERTIES
+        LABELS "raw;multiframe;phase0;fixture;demosaic;artifact;cpu")
+
+    add_test(NAME StackRaw.MultiFrameEstimator
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-multiframe-estimator)
+    set_tests_properties(StackRaw.MultiFrameEstimator PROPERTIES
+        LABELS "raw;multiframe;estimator;gaussian;accumulator;clipping;cpu")
+
+    add_test(NAME StackRaw.MultiFramePreparedTiles
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-multiframe-prepared-tiles)
+    set_tests_properties(StackRaw.MultiFramePreparedTiles PROPERTIES
+        LABELS "raw;multiframe;estimator;tile;mosaic;hdr;denoise;clipping;cpu")
+
+    add_test(NAME StackRaw.SharedBurstV1
+        COMMAND $<TARGET_FILE:${PROJECT_NAME}> --validate-shared-burst-v1)
+    set_tests_properties(StackRaw.SharedBurstV1 PROPERTIES
+        LABELS "raw;multiframe;burst;denoise;huber;uncertainty;cfa;cpu")
 endif()
 
 if (BUILD_TESTING AND TARGET StackModelServiceProtocolTests)
@@ -683,12 +983,21 @@ if (STACK_BUILD_GRAPH_TESTS)
             target_link_libraries(StackGraphBehaviorTests PRIVATE delayimp)
         endif()
     endif()
+    if (WIN32)
+        target_link_libraries(StackGraphBehaviorTests PRIVATE shell32 ole32)
+    endif()
 
     add_executable(StackRawEvidenceTests ${STACK_RAW_EVIDENCE_TEST_SOURCE_FILES})
     target_include_directories(StackRawEvidenceTests PRIVATE
         src
         src/ThirdParty
     )
+
+    add_executable(StackDngMetadataTests
+        tools/tests/dng_metadata_tests.cpp
+        src/Raw/DngMetadataSupplement.cpp
+        src/Raw/Internal/DngTiffReader.cpp)
+    target_include_directories(StackDngMetadataTests PRIVATE src)
 
     add_executable(StackRenderedFeatureTests ${STACK_RENDERED_FEATURE_TEST_SOURCE_FILES})
     target_include_directories(StackRenderedFeatureTests PRIVATE
@@ -730,6 +1039,9 @@ if (STACK_BUILD_GRAPH_TESTS)
             COMMAND StackRawEvidenceTests)
         set_tests_properties(StackRaw.Evidence PROPERTIES
             LABELS "raw;analysis;cpu")
+
+        add_test(NAME StackRaw.DngMetadata COMMAND StackDngMetadataTests)
+        set_tests_properties(StackRaw.DngMetadata PROPERTIES LABELS "raw;metadata;cpu")
 
         add_test(NAME StackRaw.RenderedFeatures
             COMMAND StackRenderedFeatureTests)

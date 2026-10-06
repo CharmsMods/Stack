@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
 #include <algorithm>
@@ -175,6 +176,11 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                 case NodeKind::ChannelSplit:
                     plan.valid = requireInput(kImageInputSocketId);
                     break;
+                case NodeKind::RawOperation:
+                    if (key.socketId == "measurementImageOut" && findInput(key.nodeId, "referenceIn"))
+                        plan.valid = requireInput("referenceIn");
+                    else plan.valid = requireInput(kImageInputSocketId);
+                    break;
                 case NodeKind::Compound: {
                     std::vector<std::string> dependencies;
                     std::string dependencyError;
@@ -263,6 +269,13 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
                     // result is adopted, graph snapshot construction supplies
                     // its developed RAW source.
                     plan.valid = node->multiFrameDenoise.resultState == "ready";
+                    plan.source = plan.valid;
+                    break;
+                case NodeKind::MultiFrameHdr:
+                    // Like MFD, the managed RAW inputs describe provenance;
+                    // the adopted virtual Bayer mosaic is the executable
+                    // source once processing has published it.
+                    plan.valid = node->multiFrameHdr.resultState == "ready";
                     plan.source = plan.valid;
                     break;
                 case NodeKind::RawProjectSourceSet:
@@ -398,14 +411,23 @@ const std::vector<CompletedChainInfo>& Graph::GetCompletedChains() const {
             // and dependency validation. Otherwise an unresolved mask or
             // dynamic scalar branch can disappear from the render snapshot
             // and silently turn a conditional edit into a global one.
-            const bool adoptedMfdSource =
-                node->kind == NodeKind::MultiFrameDenoise && plan.source;
-            if (plan.valid && !adoptedMfdSource) {
+            const bool adoptedMultiFrameSource =
+                (node->kind == NodeKind::MultiFrameDenoise ||
+                 node->kind == NodeKind::MultiFrameHdr) && plan.source;
+            if (plan.valid && !adoptedMultiFrameSource) {
                 const auto authoredInputs =
                     renderInputsByNode.find(key.nodeId);
                 if (authoredInputs != renderInputsByNode.end()) {
                     for (const Link* input :
                          authoredInputs->second) {
+                        if (!EditorNodeGraphDefinitions::OutputDependsOnInput(*this, *node, key.socketId, input->toSocketId)) continue;
+                        const bool coverage = (input->toSocketId == kMaskInputSocketId &&
+                            (node->kind == NodeKind::RawOperation || node->kind == NodeKind::Layer || node->kind == NodeKind::Lut || node->kind == NodeKind::RawDevelop)) ||
+                            (node->kind == NodeKind::Mix && input->toSocketId == kMixFactorSocketId) ||
+                            (node->kind == NodeKind::RawOperation && (input->toSocketId.rfind("area:", 0) == 0 || input->toSocketId.rfind("gradient:", 0) == 0));
+                        // Attached unfinished coverage is empty. Its branch remains
+                        // authored and participates in document cycle analysis.
+                        if (coverage) continue;
                         if (std::find(
                                 plan.dependencies.begin(),
                                 plan.dependencies.end(),

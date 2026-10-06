@@ -236,7 +236,7 @@ void EditorModule::RenderDetachedPreviewWindow() {
     if (!windowVisible || !ownsDedicatedViewport || platformWindow == nullptr) {
         ++m_DetachedPreviewPlatformWaitFrames;
         if (m_DetachedPreviewPlatformWaitFrames > kDetachedPreviewOpenGraceFrames) {
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Error,
                 "Canvas pop-out could not open a detached window.",
                 "editor-detached-preview");

@@ -87,6 +87,7 @@ int Graph::ResolveReferenceSourceNodeId(
                 addInput(kRawInputSocketId);
                 break;
             case NodeKind::Layer:
+            case NodeKind::RawOperation:
             case NodeKind::TechnicalImage:
             case NodeKind::Reformat:
             case NodeKind::RawDetailFusion:

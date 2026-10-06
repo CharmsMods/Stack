@@ -4,114 +4,23 @@
 #include <cmath>
 #include <algorithm>
 
-EditorScopes::EditorScopes() {
-    m_HistR.assign(256, 0.0f);
-    m_HistG.assign(256, 0.0f);
-    m_HistB.assign(256, 0.0f);
-    m_HistL.assign(256, 0.0f);
-}
+EditorScopes::EditorScopes() = default;
 
 EditorScopes::~EditorScopes() {}
 
 void EditorScopes::Initialize() {}
 
-void EditorScopes::AnalyzePixels(const std::vector<unsigned char>& pixels, int w, int h) {
-    std::fill(m_HistR.begin(), m_HistR.end(), 0.0f);
-    std::fill(m_HistG.begin(), m_HistG.end(), 0.0f);
-    std::fill(m_HistB.begin(), m_HistB.end(), 0.0f);
-    std::fill(m_HistL.begin(), m_HistL.end(), 0.0f);
-    m_VectorPoints.clear();
-    m_ParadeData.clear();
-    if (pixels.empty() || w <= 0 || h <= 0) {
-        return;
-    }
-    
-    // Parade Setup (1 bin per pixel column if small enough)
-    m_ParadeData.assign(w, ParadeColumn{0});
-
-    float maxHist = 0;
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = (y * w + x) * 4;
-            uint8_t r = pixels[idx];
-            uint8_t g = pixels[idx + 1];
-            uint8_t b = pixels[idx + 2];
-            
-            // 1. Histogram
-            m_HistR[r]++;
-            m_HistG[g]++;
-            m_HistB[b]++;
-            float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            m_HistL[(int)lum]++;
-
-            // 2. Vectorscope (YUV Chroma)
-            // Simplified conversion for plotting
-            float rf = r / 255.0f;
-            float gf = g / 255.0f;
-            float bf = b / 255.0f;
-            float u = -0.14713f * rf - 0.28886f * gf + 0.43692f * bf;
-            float v =  0.61501f * rf - 0.51499f * gf - 0.10001f * bf;
-            
-            // Sample only some points for performance if buffer is large
-            if ((x + y) % 2 == 0) {
-                m_VectorPoints.push_back({u, v});
-            }
-
-            // 3. RGB Parade
-            m_ParadeData[x].r[r]++;
-            m_ParadeData[x].g[g]++;
-            m_ParadeData[x].b[b]++;
-        }
-    }
-
-    // Normalize Histograms
-    for (int i = 0; i < 256; i++) {
-        maxHist = std::max({maxHist, m_HistR[i], m_HistG[i], m_HistB[i], m_HistL[i]});
-    }
-    if (maxHist > 0) {
-        for (int i = 0; i < 256; i++) {
-            m_HistR[i] /= maxHist;
-            m_HistG[i] /= maxHist;
-            m_HistB[i] /= maxHist;
-            m_HistL[i] /= maxHist;
-        }
-    }
-}
-
 void EditorScopes::RenderScopeNode(EditorModule* editor, EditorNodeGraph::ScopeKind scopeKind, int sourceNodeId) {
-    if (sourceNodeId > 0) {
-        const std::uint64_t scopeRevision = editor ? editor->GetScopeNodeRevision(sourceNodeId) : 0;
-        if (scopeRevision != m_LastScopeRevision || sourceNodeId != m_LastScopeNodeId) {
-            m_LastScopeRevision = scopeRevision;
-            m_LastScopeNodeId = sourceNodeId;
-            m_LastWidth = 0;
-            m_LastHeight = 0;
-            int w = 0;
-            int h = 0;
-            std::vector<unsigned char> pixels = editor->GetScopePixelsForNode(sourceNodeId, w, h);
-            AnalyzePixels(pixels, w, h);
-            m_LastWidth = w;
-            m_LastHeight = h;
-        }
-    }
-
+    m_Data.reset();
     if (sourceNodeId <= 0) {
-        m_LastScopeRevision = 0;
-        m_LastScopeNodeId = -1;
-        m_LastWidth = 0;
-        m_LastHeight = 0;
-        AnalyzePixels({}, 0, 0);
         ImGui::TextDisabled("Connect an image or mask output.");
         return;
     }
-
-    if (m_LastWidth <= 0 || m_LastHeight <= 0) {
-        int w = 0;
-        int h = 0;
-        std::vector<unsigned char> pixels = editor->GetScopePixelsForNode(sourceNodeId, w, h);
-        AnalyzePixels(pixels, w, h);
-        m_LastWidth = w;
-        m_LastHeight = h;
+    const auto* cached = editor ? editor->GetCachedPreviewPixelsForNode(sourceNodeId) : nullptr;
+    if (cached) m_Data = cached->scopeData;
+    if (!m_Data) {
+        ImGui::TextDisabled("Rendering scope...");
+        return;
     }
 
     switch (scopeKind) {
@@ -132,19 +41,19 @@ void EditorScopes::DrawHistogram() {
     float height = ImGui::GetContentRegionAvail().y - 20;
 
     ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(1, 0.3f, 0.3f, 0.8f));
-    ImGui::PlotLines("##Red", m_HistR.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
+    ImGui::PlotLines("##Red", m_Data->HistR.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
     ImGui::PopStyleColor();
     
     ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.3f, 1, 0.3f, 0.8f));
-    ImGui::PlotLines("##Green", m_HistG.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
+    ImGui::PlotLines("##Green", m_Data->HistG.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
     ImGui::PopStyleColor();
     
     ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.3f, 0.3f, 1, 0.8f));
-    ImGui::PlotLines("##Blue", m_HistB.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
+    ImGui::PlotLines("##Blue", m_Data->HistB.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
     ImGui::PopStyleColor();
 
     ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(1, 1, 1, 0.8f));
-    ImGui::PlotLines("##Lum", m_HistL.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
+    ImGui::PlotLines("##Lum", m_Data->HistL.data(), 256, 0, nullptr, 0, 1.0f, ImVec2(width, height / 4));
     ImGui::PopStyleColor();
 }
 
@@ -161,7 +70,7 @@ void EditorScopes::DrawVectorscope() {
     draw->AddLine(ImVec2(center.x, center.y - side/2), ImVec2(center.x, center.y + side/2), IM_COL32(50, 50, 50, 255));
 
     // Plot points
-    for (auto& p : m_VectorPoints) {
+    for (auto& p : m_Data->VectorPoints) {
         // Map U, V (-0.5 to 0.5 approx) to pixels
         float px = center.x + p.u * (side * 0.8f);
         float py = center.y - p.v * (side * 0.8f);
@@ -176,16 +85,16 @@ void EditorScopes::DrawRGBParade() {
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    if (m_ParadeData.empty()) return;
+    if (m_Data->ParadeData.empty()) return;
 
-    float colWidth = canvas_size.x / m_ParadeData.size();
+    float colWidth = canvas_size.x / m_Data->ParadeData.size();
     float rowHeight = canvas_size.y / 256.0f;
 
-    for (size_t x = 0; x < m_ParadeData.size(); x++) {
+    for (size_t x = 0; x < m_Data->ParadeData.size(); x++) {
         for (int i = 0; i < 256; i++) {
-            float r = m_ParadeData[x].r[i];
-            float g = m_ParadeData[x].g[i];
-            float b = m_ParadeData[x].b[i];
+            float r = m_Data->ParadeData[x].r[i];
+            float g = m_Data->ParadeData[x].g[i];
+            float b = m_Data->ParadeData[x].b[i];
 
             if (r > 0) draw->AddRectFilled(ImVec2(pos.x + x * colWidth, pos.y + (255-i) * rowHeight), 
                                         ImVec2(pos.x + (x+1) * colWidth, pos.y + (255-i+1) * rowHeight), 

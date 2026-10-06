@@ -21,7 +21,10 @@ struct Summary {
 };
 
 bool HasPixels(const Raw::RawImageData& rawData);
-bool BuildPreviewRawData(const Raw::RawImageData& source, int previewMaxDimension, Raw::RawImageData& preview);
+bool BuildPreviewRawData(
+    const Raw::RawImageData& source,
+    int previewMaxDimension,
+    Raw::RawImageData& preview);
 std::string BuildCacheKey(
     const std::string& sourceCacheKey,
     const Raw::RawImageData& rawData,

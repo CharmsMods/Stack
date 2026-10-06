@@ -498,8 +498,7 @@ WhiteBalanceRecommendation BuildWhiteBalanceRecommendation(
     WhiteBalanceRecommendation recommendation;
     recommendation.cameraWhiteBalanceAvailable = analysis.metadata.hasCameraWhiteBalance;
     recommendation.manualWhiteBalanceProtected =
-        recipe.whiteBalance.mode == Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers ||
-        recipe.whiteBalance.mode == Stack::RawRecipe::WhiteBalanceMode::SampledGrayPoint;
+        recipe.whiteBalance.mode == Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers;
 
     if (recommendation.cameraWhiteBalanceAvailable) {
         recommendation.valid = true;
@@ -674,13 +673,6 @@ void ApplyWhiteBalanceRecommendationToRecipe(
         recommendation.gainsG,
         recommendation.gainsB
     };
-    recipe.whiteBalance.hasTemperatureKelvin = false;
-    recipe.whiteBalance.temperatureKelvin = 0.0f;
-    recipe.whiteBalance.hasTint = false;
-    recipe.whiteBalance.tint = 0.0f;
-    recipe.whiteBalance.hasSamplePoint = false;
-    recipe.whiteBalance.sampleX = 0.5f;
-    recipe.whiteBalance.sampleY = 0.5f;
 }
 
 void ApplyHighlightProtectionToRecipe(

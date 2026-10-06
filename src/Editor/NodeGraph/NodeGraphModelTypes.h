@@ -1,6 +1,8 @@
 #pragma once
 
-#include "Editor/LayerRegistry.h"
+#include "Graph/LayerIdentity.h"
+#include "Graph/OutputDependencies.h"
+#include "Raw/RawGraphOperation.h"
 #include "Editor/NodeGraph/NodeGraphPayloads.h"
 
 #include <string>
@@ -11,7 +13,12 @@ namespace EditorNodeGraph {
 struct Node {
     int id = 0;
     std::string instanceUuid;
+    Stack::GraphModel::NodeRole role = Stack::GraphModel::NodeRole::Ordinary;
+    Stack::GraphModel::Endpoint reference;
+    Stack::NodeMath::LogicalValueType referenceType = Stack::NodeMath::LogicalValueType::Invalid;
     NodeKind kind = NodeKind::Layer;
+    Stack::RawRecipe::GraphOperation rawOperation;
+    nlohmann::json rawCoverage = nlohmann::json::object();
     int layerIndex = -1;
     LayerType layerType = LayerType::Brightness;
     std::string typeId;
@@ -73,6 +80,7 @@ struct Node {
     MfsrPayload mfsr;
     RawProjectFramePayload rawProjectFrame;
     MultiFrameDenoisePayload multiFrameDenoise;
+    MultiFrameHdrPayload multiFrameHdr;
     RawProjectSourceSetPayload rawProjectSourceSet;
     LutPayload lut;
     CustomMaskPayload customMask;

@@ -16,15 +16,8 @@ bool AlmostEqual(float a, float b) {
     return std::fabs(a - b) <= kFloatEpsilon;
 }
 
-bool IsDefaultPreviewOutput(const Stack::RawRecipe::RawPreviewOutputRecipe& previewOutput) {
-    return previewOutput.previewIntent == "developed-preview" &&
-        previewOutput.internalViewTransform == "scene-linear-to-display" &&
-        previewOutput.outputColorSpace == "sRGB";
-}
-
 bool IsDefaultStageOrder(const Stack::RawRecipe::RawDevelopmentRecipe& recipe) {
-    return recipe.stageOrder.empty() ||
-        recipe.stageOrder == Stack::RawRecipe::DefaultStageOrder();
+    return recipe.stageOrder == Stack::RawRecipe::DefaultStageOrder();
 }
 
 bool IsSupportedRotation(int degrees) {
@@ -36,7 +29,6 @@ bool RawDecodeSettingsUseOnlyManagedFields(
     const Raw::RawDevelopSettings& settings,
     std::string* outReason) {
     const Raw::RawDevelopSettings defaults;
-    const bool truthful = settings.processingVersion == Raw::RawProcessingVersion::TruthfulV1;
     auto fail = [&](const std::string& reason) {
         if (outReason) {
             *outReason = reason;
@@ -71,9 +63,9 @@ bool RawDecodeSettingsUseOnlyManagedFields(
     if (settings.rotateToFitFrame != defaults.rotateToFitFrame) {
         return fail("RAW Decode rotate-to-fit is outside the managed RAW recipe mapping.");
     }
-    const float expectedFalseColor = truthful ? 0.0f : defaults.falseColorSuppression;
-    const float expectedDefringe = truthful ? 0.0f : defaults.defringeStrength;
-    const float expectedHighlightCleanup = truthful ? 0.0f : defaults.highlightEdgeCleanup;
+    constexpr float expectedFalseColor = 0.0f;
+    constexpr float expectedDefringe = 0.0f;
+    constexpr float expectedHighlightCleanup = 0.0f;
     if (!AlmostEqual(settings.falseColorSuppression, expectedFalseColor) ||
         !AlmostEqual(settings.defringeStrength, expectedDefringe) ||
         !AlmostEqual(settings.highlightEdgeCleanup, expectedHighlightCleanup) ||
@@ -219,7 +211,8 @@ Stack::RawRecipe::RawDevelopmentRecipe RecipeFromDecodeSettings(
     const Stack::RawRecipe::RawDevelopmentRecipe& baseRecipe,
     const Raw::RawDevelopSettings& settings) {
     Stack::RawRecipe::RawDevelopmentRecipe recipe = baseRecipe;
-    recipe.technical.processingVersion = settings.processingVersion;
+    recipe.technical.processingVersion =
+        Raw::RawProcessingVersion::TruthfulV2;
     recipe.technical.demosaicMethod = settings.demosaicMethod;
     recipe.technical.workingSpace = settings.workingSpace;
     recipe.technical.applyBaselineExposure = settings.applyBaselineExposure;
@@ -230,25 +223,16 @@ Stack::RawRecipe::RawDevelopmentRecipe RecipeFromDecodeSettings(
     recipe.cropRotation.flipHorizontally = settings.flipHorizontally;
     recipe.cropRotation.flipVertically = settings.flipVertically;
 
-    recipe.whiteBalance.hasTemperatureKelvin = false;
-    recipe.whiteBalance.temperatureKelvin = 0.0f;
-    recipe.whiteBalance.hasTint = false;
-    recipe.whiteBalance.tint = 0.0f;
-    recipe.whiteBalance.hasSamplePoint = false;
-    recipe.whiteBalance.sampleX = 0.5f;
-    recipe.whiteBalance.sampleY = 0.5f;
     recipe.whiteBalance.hasMultipliers = false;
     recipe.whiteBalance.multipliers = { 1.0f, 1.0f, 1.0f };
 
     switch (settings.whiteBalanceMode) {
-        case Raw::WhiteBalanceMode::Auto:
-            recipe.whiteBalance.mode = Stack::RawRecipe::WhiteBalanceMode::Auto;
-            break;
         case Raw::WhiteBalanceMode::Manual:
             recipe.whiteBalance.mode = Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers;
             recipe.whiteBalance.hasMultipliers = true;
             recipe.whiteBalance.multipliers = settings.manualWhiteBalance;
             break;
+        case Raw::WhiteBalanceMode::Auto:
         case Raw::WhiteBalanceMode::AsShot:
         case Raw::WhiteBalanceMode::Neutral:
         default:
@@ -256,16 +240,7 @@ Stack::RawRecipe::RawDevelopmentRecipe RecipeFromDecodeSettings(
             break;
     }
 
-    recipe.toneCurve.mode = Stack::RawRecipe::ToneCurveMode::Default;
-    recipe.toneCurve.points = {
-        Stack::RawRecipe::RawToneCurvePoint{ 0.0f, 0.0f },
-        Stack::RawRecipe::RawToneCurvePoint{ 1.0f, 1.0f }
-    };
-    recipe.localExposure = Stack::RawRecipe::RawLocalExposureRecipe {};
     recipe.stageOrder = Stack::RawRecipe::DefaultStageOrder();
-    recipe.previewOutput.previewIntent = "developed-preview";
-    recipe.previewOutput.internalViewTransform = "scene-linear-to-display";
-    recipe.previewOutput.outputColorSpace = "sRGB";
     return recipe;
 }
 
@@ -284,25 +259,25 @@ bool IsRecipeRepresentableAsManagedGraph(
     if (!IsDefaultStageOrder(recipe)) {
         return fail("This recipe uses a custom RAW stage order that cannot be represented by the managed graph contract yet.");
     }
-    if (recipe.whiteBalance.hasTemperatureKelvin || recipe.whiteBalance.hasTint) {
-        return fail("Temperature/tint white balance values cannot round-trip through the managed RAW Decode node yet.");
-    }
-    if (recipe.whiteBalance.hasSamplePoint ||
-        recipe.whiteBalance.mode == Stack::RawRecipe::WhiteBalanceMode::SampledGrayPoint) {
-        return fail("Sampled gray-point white balance cannot round-trip through the managed graph contract yet.");
-    }
     if ((recipe.whiteBalance.mode == Stack::RawRecipe::WhiteBalanceMode::CustomMultipliers) &&
         !recipe.whiteBalance.hasMultipliers) {
         return fail("Custom white balance needs RGB multipliers before it can be decomposed.");
     }
-    if (Stack::RawRecipe::IsLocalExposureEnabled(recipe)) {
-        return fail("Local exposure cannot round-trip through the managed graph contract yet.");
-    }
-    if (Stack::RawRecipe::IsLocalRangeEnabled(recipe)) {
+    if (Stack::RawRecipe::IsLocalRangeEnabled(recipe) ||
+        !recipe.evGradients.empty()) {
         return fail("Local range cannot round-trip through the managed graph contract yet.");
     }
-    if (recipe.rgbDenoise.enabled) {
+    if (!recipe.toneGradients.empty()) {
+        return fail("Local Tone Curve masks cannot round-trip through the managed graph contract yet.");
+    }
+    if (Stack::RawRecipe::IsRgbDenoiseActive(recipe.rgbDenoise)) {
         return fail("Post-demosaic RGB denoise cannot round-trip through the managed graph contract yet.");
+    }
+    if (Stack::RawRecipe::IsDetailContrastActive(recipe.detailContrast)) {
+        return fail("Detail Contrast requires the recipe-backed RAW processor.");
+    }
+    if (Stack::RawRecipe::IsColorCalibrationActive(recipe.colorCalibration)) {
+        return fail("Color Calibration cannot round-trip through the managed graph contract yet.");
     }
     if (recipe.cropRotation.cropEnabled) {
         return fail("Crop edits cannot be represented by the managed graph contract yet.");
@@ -310,10 +285,6 @@ bool IsRecipeRepresentableAsManagedGraph(
     if (!IsSupportedRotation(recipe.cropRotation.rotationDegrees)) {
         return fail("RAW rotation must be 0, 90, 180, or 270 degrees to decompose safely.");
     }
-    if (!IsDefaultPreviewOutput(recipe.previewOutput)) {
-        return fail("Preview/output settings cannot round-trip through the managed View Transform node yet.");
-    }
-
     if (outReason) {
         outReason->clear();
     }
@@ -376,7 +347,7 @@ nlohmann::json SerializeManagedRawSection(const ManagedRawSection& section) {
         { "stageSlots", {
             { "lockedFoundation", nlohmann::json::array({ "raw-source", "raw-decode" }) },
             { "tone", "tone-curve" },
-            { "previewOutput", "view-transform" }
+            { "view", "view-transform" }
         } },
         { "sectionOutput", {
             { "nodeId", section.viewTransformNodeId },
@@ -413,8 +384,6 @@ ManagedRawSection DeserializeManagedRawSection(const nlohmann::json& value) {
         if (sourceRawRef.contains("fingerprint") && sourceRawRef["fingerprint"].is_string()) {
             section.sourceFingerprint = sourceRawRef["fingerprint"].get<std::string>();
         }
-    } else {
-        section.sourceRelativePathKey = value.value("sourceRelativePathKey", section.sourceRelativePathKey);
     }
     section.groupId = value.value("groupId", section.groupId);
 
@@ -424,11 +393,6 @@ ManagedRawSection DeserializeManagedRawSection(const nlohmann::json& value) {
         section.rawDecodeNodeId = managedNodeIds.value("rawDecode", section.rawDecodeNodeId);
         section.toneCurveNodeId = managedNodeIds.value("toneCurve", section.toneCurveNodeId);
         section.viewTransformNodeId = managedNodeIds.value("viewTransform", section.viewTransformNodeId);
-    } else {
-        section.rawSourceNodeId = value.value("rawSourceNodeId", section.rawSourceNodeId);
-        section.rawDecodeNodeId = value.value("rawDecodeNodeId", section.rawDecodeNodeId);
-        section.toneCurveNodeId = value.value("toneCurveNodeId", section.toneCurveNodeId);
-        section.viewTransformNodeId = value.value("viewTransformNodeId", section.viewTransformNodeId);
     }
 
     section.orderedNodeIds = JsonIntVector(value.value("orderedNodeIds", nlohmann::json::array()));

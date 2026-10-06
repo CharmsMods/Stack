@@ -25,6 +25,11 @@ struct ImagePayload {
     std::string label;
     std::string sourcePath;
     std::vector<unsigned char> pngBytes;
+    // Immutable project-store identity for the current PNG payload. When
+    // present, ordinary saves can reuse the managed asset without re-encoding
+    // or hashing the full image. Pixel-changing edits clear these fields.
+    std::string managedAssetId;
+    std::string projectAssetPath;
     std::vector<unsigned char> pixels;
     // Runtime-only bounded preview used by the graph UI. Full pixels remain the
     // render source and are the only pixels written to project storage.
@@ -151,7 +156,9 @@ inline constexpr const char* kRawProjectSourceSetUnavailableStatus =
     "Result unavailable: processing is not implemented yet.";
 
 inline constexpr const char* kMfdAwaitingProcessingStatus =
-    "Process the burst to create the MFD result.";
+    "Process with Shared Burst V1 to create the Burst result.";
+inline constexpr const char* kHdrAwaitingProcessingStatus =
+    "Process the bracket to create the HDR result.";
 
 struct RawProjectFramePayload {
     std::string sourceSetId;
@@ -183,6 +190,17 @@ struct MultiFrameDenoisePayload {
     bool quarantined = false;
 };
 
+struct MultiFrameHdrPayload {
+    std::string sourceSetId;
+    std::vector<MfdFrameBinding> frameBindings;
+    std::string radiometricAnchorFrameId;
+    std::string presentationStatus = kHdrAwaitingProcessingStatus;
+    std::string resultState = "unavailable";
+    bool internalViewTransformEnabled = true;
+    bool managed = true;
+    bool quarantined = false;
+};
+
 struct RawProjectSourceSetPayload {
     std::string sourceSetId;
     std::string presentationStatus = kRawProjectSourceSetUnavailableStatus;
@@ -198,6 +216,7 @@ struct MaskGeneratorSettings {
     float centerX = 0.5f;
     float centerY = 0.5f;
     float radius = 0.45f;
+    float radiusY = 0.45f;
     float feather = 0.2f;
     bool invert = false;
 };

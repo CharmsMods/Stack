@@ -280,7 +280,9 @@ nlohmann::json SerializeValueDescriptor(const ValueDescriptor& descriptor) {
             { "fullWindow", EncodeRect(value.fullWindow) },
             { "dataWindow", EncodeRect(value.dataWindow) },
             { "rasterOrigin", EnumToken(value.rasterOrigin, kRasterOrigins) },
-            { "pixelAspect", value.pixelAspect }
+            { "pixelAspect", value.pixelAspect },
+            { "nativeWidth", value.nativeWidth }, { "nativeHeight", value.nativeHeight },
+            { "sourceTransform", value.sourceTransform }
         };
     });
     result["sampling"] = EncodeField(descriptor.sampling, [](const SamplingDescriptor& value) {
@@ -463,6 +465,8 @@ DescriptorParseResult ParseValueDescriptor(const nlohmann::json& value) {
             !ParseEnumToken(item["kind"], kSpatialKinds, output.kind)) return false;
         try {
             output.pixelAspect = item.at("pixelAspect").get<double>();
+            output.nativeWidth = item.value("nativeWidth", 0); output.nativeHeight = item.value("nativeHeight", 0);
+            output.sourceTransform = item.value("sourceTransform", output.sourceTransform);
         } catch (...) { return false; }
         if (item.contains("rasterOrigin") &&
             !ParseEnumToken(item["rasterOrigin"], kRasterOrigins, output.rasterOrigin)) {

@@ -23,6 +23,7 @@ in vec2 vUV;
 out vec4 FragColor;
 
 uniform sampler2D uInputTex;
+uniform ivec2 uOutputSize;
 uniform float uStrength;
 uniform vec3 uShadows;
 uniform vec3 uMidtones;
@@ -33,7 +34,8 @@ float getLuma(vec3 rgb) {
 }
 
 void main() {
-    vec4 color = texture(uInputTex, vUV);
+    vec4 color = all(equal(textureSize(uInputTex, 0), uOutputSize))
+        ? texelFetch(uInputTex, ivec2(gl_FragCoord.xy), 0) : texture(uInputTex, vUV);
     vec3 rgb = color.rgb;
     float luma = getLuma(rgb);
 
@@ -74,6 +76,7 @@ void ColorGradeLayer::Execute(unsigned int inputTexture, int width, int height, 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glUniform1i(glGetUniformLocation(m_ShaderProgram, "uInputTex"), 0);
+    glUniform2i(glGetUniformLocation(m_ShaderProgram, "uOutputSize"), width, height);
 
     glUniform1f(glGetUniformLocation(m_ShaderProgram, "uStrength"), m_Strength / 100.0f);
     glUniform3f(glGetUniformLocation(m_ShaderProgram, "uShadows"), m_Shadows[0], m_Shadows[1], m_Shadows[2]);

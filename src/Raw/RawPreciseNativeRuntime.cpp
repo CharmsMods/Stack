@@ -1,6 +1,6 @@
 #include "Raw/RawPreciseNativeRuntime.h"
 
-#include "App/Validation/PreciseCandidateValidationRuntime.h"
+#include "Renderer/RawCandidateEvaluation.h"
 #include "Raw/LibRawDecoder.h"
 #include "Raw/RawTechnicalEvidence.h"
 #include "Raw/RenderedFeatureEvidence.h"
@@ -14,8 +14,8 @@
 namespace Stack::PreciseIntegration {
 namespace {
 
-using Validation::PreciseCandidateRuntime::RenderedEvaluation;
-using Validation::PreciseCandidateRuntime::WarmStartResult;
+using Renderer::RawCandidateEvaluation::RenderedEvaluation;
+using Renderer::RawCandidateEvaluation::WarmStartResult;
 
 RawOptimizer::SearchBudget SelectedBudget() {
     RawOptimizer::SearchBudget budget;
@@ -87,7 +87,7 @@ struct EvaluationSession {
             "Evaluating candidates " + std::to_string(proxyRenderCount) + " / 48...",
             std::min(48, proxyRenderCount));
         RenderedEvaluation rendered =
-            Validation::PreciseCandidateRuntime::RenderAndEvaluate(
+            Renderer::RawCandidateEvaluation::RenderAndEvaluate(
                 proxyPipeline,
                 graph,
                 proposal,
@@ -101,7 +101,7 @@ struct EvaluationSession {
                 *solverBaseRecipe,
                 "Phase 06 native precise proxy candidate; isolated, no apply.");
         const bool complete =
-            Validation::PreciseCandidateRuntime::HasRequiredStages(rendered);
+            Renderer::RawCandidateEvaluation::HasRequiredStages(rendered);
         if (warmImages.empty() && complete) warmImages = rendered.images;
         return std::move(rendered.evaluation);
     }
@@ -110,7 +110,7 @@ struct EvaluationSession {
         const PreciseRaw::CandidateProposal& proposal) {
         Report(*callbacks, "Verifying full resolution...", 49);
         RenderedEvaluation rendered =
-            Validation::PreciseCandidateRuntime::RenderAndEvaluate(
+            Renderer::RawCandidateEvaluation::RenderAndEvaluate(
                 fullPipeline,
                 graph,
                 proposal,
@@ -124,7 +124,7 @@ struct EvaluationSession {
                 *solverBaseRecipe,
                 "Phase 06 independent full-resolution verification; isolated, no apply.");
         fullReadbackComplete =
-            Validation::PreciseCandidateRuntime::HasRequiredStages(rendered);
+            Renderer::RawCandidateEvaluation::HasRequiredStages(rendered);
         return std::move(rendered.evaluation);
     }
 };
@@ -188,7 +188,7 @@ NativeSolveResult RunNativePreciseSolve(
 
     Report(callbacks, "Measuring scene and building warm start...", 1);
     const WarmStartResult warm =
-        Validation::PreciseCandidateRuntime::BuildPass94WarmStart(
+        Renderer::RawCandidateEvaluation::BuildWarmStart(
             request.inputRecipe,
             metadata,
             sourceIdentity.sha256,
@@ -237,7 +237,7 @@ NativeSolveResult RunNativePreciseSolve(
     dryRequest.stagePolicies = PreciseDryRun::DefaultStagePolicies();
 
     EvaluationSession session;
-    session.graph = Validation::PreciseCandidateRuntime::BuildGraph(solverBaseRecipe);
+    session.graph = Renderer::RawCandidateEvaluation::BuildGraph(solverBaseRecipe);
     session.parameterSpace = &parameterSpace;
     session.rawEvidence = &rawEvidence;
     session.metadata = &metadata;

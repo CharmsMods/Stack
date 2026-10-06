@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+#ifndef GL_STREAM_READ
+#define GL_STREAM_READ 0x88E1
+#endif
+
 namespace {
 
 using ScopedFramebufferState =
@@ -304,6 +308,170 @@ std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH)
         true);
 }
 
+std::vector<unsigned char> RenderPipeline::GetOutputPixelsTiledPbo(
+    int& outW,
+    int& outH,
+    int rowsPerTile) {
+    outW = 0;
+    outH = 0;
+    if (m_OutputTexture == 0 || m_Width <= 0 || m_Height <= 0 ||
+        !RecordConsumerBoundary(
+            Stack::NodeMath::SpecializedStageKind::ExportReadback)) {
+        return {};
+    }
+
+    std::size_t outputByteCount = 0;
+    if (!Stack::PixelBuffer::TryComputePixelByteCount(
+            m_Width, m_Height, 4, outputByteCount)) {
+        return {};
+    }
+    std::vector<unsigned char> pixels;
+    try {
+        pixels.resize(outputByteCount);
+    } catch (const std::bad_alloc&) {
+        return {};
+    } catch (const std::length_error&) {
+        return {};
+    }
+
+    struct ReadbackSlot {
+        unsigned int pbo = 0;
+        GLsync fence = nullptr;
+        int sourceY = 0;
+        int rowCount = 0;
+        bool occupied = false;
+    };
+    std::array<ReadbackSlot, 3> slots;
+    const ScopedFramebufferState savedFramebufferState(true);
+    const ScopedPixelPackState savedPackState;
+    const unsigned int framebuffer = GLHelpers::CreateFBO(m_OutputTexture);
+    bool ready = framebuffer != 0;
+    rowsPerTile = std::clamp(rowsPerTile, 1, m_Height);
+    const std::size_t rowBytes =
+        static_cast<std::size_t>(m_Width) * 4u;
+    std::vector<unsigned char> tileBytes;
+    try {
+        tileBytes.resize(rowBytes * static_cast<std::size_t>(rowsPerTile));
+    } catch (const std::bad_alloc&) {
+        ready = false;
+    } catch (const std::length_error&) {
+        ready = false;
+    }
+
+    if (ready) {
+        for (ReadbackSlot& slot : slots) {
+            glGenBuffers(1, &slot.pbo);
+            ready = ready && slot.pbo != 0;
+        }
+    }
+
+    savedPackState.ConfigureTightCpuReadback();
+    if (ready) {
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+    }
+
+    auto collectSlot = [&](ReadbackSlot& slot) {
+        if (!slot.occupied) {
+            return true;
+        }
+        GLenum waitResult = GL_TIMEOUT_EXPIRED;
+        while (waitResult == GL_TIMEOUT_EXPIRED) {
+            waitResult = glClientWaitSync(
+                slot.fence,
+                GL_SYNC_FLUSH_COMMANDS_BIT,
+                1000000000ull);
+        }
+        bool collected = waitResult == GL_ALREADY_SIGNALED ||
+            waitResult == GL_CONDITION_SATISFIED;
+        const std::size_t tileByteCount =
+            rowBytes * static_cast<std::size_t>(slot.rowCount);
+        if (collected) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.pbo);
+            while (glGetError() != GL_NO_ERROR) {}
+            glGetBufferSubData(
+                GL_PIXEL_PACK_BUFFER,
+                0,
+                static_cast<GLsizeiptr>(tileByteCount),
+                tileBytes.data());
+            collected = glGetError() == GL_NO_ERROR;
+        }
+        if (collected) {
+            for (int localRow = 0; localRow < slot.rowCount; ++localRow) {
+                const int destinationRow =
+                    m_Height - 1 - (slot.sourceY + localRow);
+                std::copy_n(
+                    tileBytes.data() +
+                        static_cast<std::size_t>(localRow) * rowBytes,
+                    rowBytes,
+                    pixels.data() +
+                        static_cast<std::size_t>(destinationRow) * rowBytes);
+            }
+        }
+        glDeleteSync(slot.fence);
+        slot.fence = nullptr;
+        slot.occupied = false;
+        return collected;
+    };
+
+    int tileIndex = 0;
+    for (int sourceY = 0; ready && sourceY < m_Height;
+         sourceY += rowsPerTile, ++tileIndex) {
+        ReadbackSlot& slot = slots[static_cast<std::size_t>(
+            tileIndex % static_cast<int>(slots.size()))];
+        ready = collectSlot(slot);
+        if (!ready) break;
+        slot.sourceY = sourceY;
+        slot.rowCount = std::min(rowsPerTile, m_Height - sourceY);
+        const std::size_t tileByteCount =
+            rowBytes * static_cast<std::size_t>(slot.rowCount);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.pbo);
+        while (glGetError() != GL_NO_ERROR) {}
+        glBufferData(
+            GL_PIXEL_PACK_BUFFER,
+            static_cast<GLsizeiptr>(tileByteCount),
+            nullptr,
+            GL_STREAM_READ);
+        glReadPixels(
+            0,
+            sourceY,
+            m_Width,
+            slot.rowCount,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            nullptr);
+        ready = glGetError() == GL_NO_ERROR;
+        if (ready) {
+            slot.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            ready = slot.fence != nullptr;
+            slot.occupied = ready;
+            if (ready) glFlush();
+        }
+    }
+    for (ReadbackSlot& slot : slots) {
+        if (ready) {
+            ready = collectSlot(slot);
+        }
+        if (slot.fence != nullptr) {
+            glDeleteSync(slot.fence);
+            slot.fence = nullptr;
+        }
+        if (slot.pbo != 0) {
+            glDeleteBuffers(1, &slot.pbo);
+            slot.pbo = 0;
+        }
+    }
+    savedPackState.Restore();
+    savedFramebufferState.Restore(true);
+    if (framebuffer != 0) glDeleteFramebuffers(1, &framebuffer);
+    if (!ready) {
+        return {};
+    }
+    outW = m_Width;
+    outH = m_Height;
+    return pixels;
+}
+
 std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH, int maxDimension) {
     if (maxDimension <= 0 || maxDimension >= std::max(m_Width, m_Height)) {
         return GetOutputPixels(outW, outH);
@@ -324,6 +492,23 @@ std::vector<unsigned char> RenderPipeline::GetOutputPixels(int& outW, int& outH,
         "GetOutputPixels(maxDimension)");
 }
 
+std::vector<unsigned char> RenderPipeline::GetExternalTexturePixels(
+    unsigned int texture,
+    int width,
+    int height,
+    int& outW,
+    int& outH,
+    int maxDimension) {
+    return ReadTexturePixelsRgba8(
+        texture,
+        width,
+        height,
+        outW,
+        outH,
+        maxDimension,
+        "GetExternalTexturePixels");
+}
+
 std::vector<unsigned char> RenderPipeline::GetRawDevelopmentLocalRangeOverlayPixels(int& outW, int& outH) {
     return ReadTexturePixelsRgba8(
         m_RawDevelopmentLocalRangeOverlayTexture,
@@ -339,6 +524,7 @@ bool RenderPipeline::CaptureRawDevelopmentLocalRangeTargetSample(
     unsigned int texture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
     Raw::RawWorkingSpace workingSpace,
+    Raw::RawProcessingVersion processingVersion,
     std::size_t inputStageFingerprint) {
     m_RawDevelopmentLocalRangeTargetSampleValid = false;
     if (!m_RawDevelopmentLocalRangeTargetSampleRequested ||
@@ -423,13 +609,19 @@ bool RenderPipeline::CaptureRawDevelopmentLocalRangeTargetSample(
         if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) {
             continue;
         }
-        const float luma = std::max(0.0f, 0.2126f * r + 0.7152f * g + 0.0722f * b);
+        const bool rec2020 =
+            workingSpace == Raw::RawWorkingSpace::LinearRec2020D65;
+        const float luma = std::max(
+            0.0f,
+            (rec2020 ? 0.2627f : 0.2126f) * r +
+                (rec2020 ? 0.6780f : 0.7152f) * g +
+                (rec2020 ? 0.0593f : 0.0722f) * b);
         if (std::isfinite(luma)) {
             samples.push_back({
                 luma,
-                std::max(0.0f, r),
-                std::max(0.0f, g),
-                std::max(0.0f, b)
+                r,
+                g,
+                b
             });
         }
     }
@@ -482,6 +674,7 @@ bool RenderPipeline::CaptureRawDevelopmentLocalRangeTargetSample(
             texture,
             sanitized,
             workingSpace,
+            processingVersion,
             inputStageFingerprint);
     if (selectionBitsTexture != 0 &&
         m_RawDevelopmentLocalRangeSelectionBitsTextureWidth > 0 &&
@@ -943,7 +1136,8 @@ void RenderPipeline::CaptureRawDevelopmentGraphScopeReadback(
     m_RawDevelopmentGraphScopeReadback = std::move(readback);
 }
 
-RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int width, int height, const char* context) {
+RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int width, int height, const char* context,
+    bool linearRec2020) {
     RenderTextureStats stats;
     if (texture == 0 || width <= 0 || height <= 0) {
         return stats;
@@ -987,6 +1181,7 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     int displayLowEdgePixels = 0;
     int validPixels = 0;
     for (std::size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        if (!(pixels[i + 3] > 0.0f)) continue;
         float r = pixels[i + 0];
         float g = pixels[i + 1];
         float b = pixels[i + 2];
@@ -996,7 +1191,9 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
 
         const float minChannel = std::min({ r, g, b });
         const float maxChannel = std::max({ r, g, b });
-        const float luma = std::max(0.0f, 0.2126f * r + 0.7152f * g + 0.0722f * b);
+        const float luma = std::max(0.0f, linearRec2020
+            ? 0.2627002f * r + 0.6779981f * g + 0.0593017f * b
+            : 0.2126f * r + 0.7152f * g + 0.0722f * b);
         stats.minRgb = std::min(stats.minRgb, minChannel);
         stats.maxRgb = std::max(stats.maxRgb, maxChannel);
         stats.minLuma = std::min(stats.minLuma, luma);
@@ -1045,7 +1242,7 @@ RenderTextureStats RenderPipeline::ReadTextureStats(unsigned int texture, int wi
     stats.dynamicRangeEv =
         std::log2(std::max(1.0e-8f, stats.p99Luma)) -
         std::log2(std::max(1.0e-8f, stats.p01Luma));
-    stats.validPixelPercent = 100.0f;
+    stats.validPixelPercent = 100.0f * validPixels / std::max<std::size_t>(1, pixels.size() / 4);
     stats.hdrPixelPercent = 100.0f * static_cast<float>(hdrPixels) / static_cast<float>(validPixels);
     stats.displayClipPercent = 100.0f * static_cast<float>(displayEdgePixels) / static_cast<float>(validPixels);
     stats.displayClipHighPercent =
@@ -1114,7 +1311,7 @@ Stack::RawAutoBase::LocalSuggestionAnalysisImage RenderPipeline::ReadLocalSugges
             pixel.r = rgba[src + 0];
             pixel.g = rgba[src + 1];
             pixel.b = rgba[src + 2];
-            pixel.valid =
+            pixel.valid = rgba[src + 3] > 0.0f &&
                 std::isfinite(pixel.r) &&
                 std::isfinite(pixel.g) &&
                 std::isfinite(pixel.b);

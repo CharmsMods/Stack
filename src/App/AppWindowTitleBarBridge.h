@@ -30,9 +30,13 @@ void UpdateTheme(
     GLFWwindow* window,
     const ImVec4& foreground,
     const ImVec4& hoverBackground,
-    const ImVec4& pressedBackground);
+    const ImVec4& pressedBackground,
+    float captionButtonOpacity = 1.0f);
 void SyncPassthroughRegions(GLFWwindow* window, const std::vector<ImRect>& screenRects);
 void ClearPassthroughRegions();
+// Override caption/system-menu hits inside declared client regions. Caption
+// buttons and resize edges retain their native behavior.
+bool IsCaptionPassthroughPoint(int screenX, int screenY);
 const Metrics& GetMetrics();
 bool IsActive();
 

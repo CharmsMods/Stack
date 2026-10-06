@@ -1,6 +1,8 @@
 #include "TimelineAnimation.h"
 
 #include "Editor/Layers/LayerBase.h"
+#include "Editor/LayerRegistry.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -312,7 +314,8 @@ void WriteLayerJsonScalar(nlohmann::json& layerJson, const LayerParameterSpec& s
 } // namespace
 
 bool SameTarget(const AnimatableParameterTarget& a, const AnimatableParameterTarget& b) {
-    return a.nodeId == b.nodeId && a.parameterId == b.parameterId;
+    return a.graphId == b.graphId && a.parameterId == b.parameterId &&
+        ((!a.nodeUuid.empty() || !b.nodeUuid.empty()) ? a.nodeUuid == b.nodeUuid : a.nodeId == b.nodeId);
 }
 
 bool IsValidTarget(const AnimatableParameterTarget& target) {
@@ -320,16 +323,31 @@ bool IsValidTarget(const AnimatableParameterTarget& target) {
 }
 
 std::string BuildTargetKey(const AnimatableParameterTarget& target) {
-    return std::to_string(target.nodeId) + ":" + target.parameterId;
+    return target.graphId + ":" + (target.nodeUuid.empty() ? std::to_string(target.nodeId) : target.nodeUuid) + ":" + target.parameterId;
 }
 
 std::vector<AnimatableParameterDefinition> CollectAnimatableParametersForNode(
     const EditorNodeGraph::Node& node,
-    const LayerBase* layer) {
+    const LayerBase* layer, const std::string& graphId) {
     std::vector<AnimatableParameterDefinition> parameters;
-    if (node.kind != EditorNodeGraph::NodeKind::Layer) {
+    if (node.kind == EditorNodeGraph::NodeKind::RawOperation) {
+        if (const auto* registered = EditorNodeGraphDefinitions::FindLiveNodeDefinition(node))
+            for (const auto& parameter : registered->parameters) {
+                if (parameter.animation == EditorNodeGraphDefinitions::LiveAnimationPolicy::NotAnimatable || !parameter.hasNumericDomain) continue;
+                AnimatableParameterDefinition definition;
+                definition.target = {node.id, parameter.id, graphId, node.instanceUuid};
+                definition.nodeLabel = node.title; definition.parameterLabel = parameter.label;
+                definition.storageKey = parameter.storageKey;
+                definition.defaultValue = parameter.defaultValue.get<float>();
+                definition.minValue = float(parameter.minimum); definition.maxValue = float(parameter.maximum);
+                const nlohmann::json::json_pointer path(parameter.storageKey);
+                definition.hasCurrentValue = node.rawOperation.parameters.contains(path);
+                definition.currentValue = definition.hasCurrentValue ? node.rawOperation.parameters.at(path).get<float>() : definition.defaultValue;
+                parameters.push_back(std::move(definition));
+            }
         return parameters;
     }
+    if (node.kind != EditorNodeGraph::NodeKind::Layer) return parameters;
 
     const std::string nodeLabel = ResolveNodeLabel(node);
     for (const LayerParameterSpec& spec : kLayerParameters) {
@@ -339,6 +357,8 @@ std::vector<AnimatableParameterDefinition> CollectAnimatableParametersForNode(
 
         AnimatableParameterDefinition definition;
         definition.target.nodeId = node.id;
+        definition.target.graphId = graphId;
+        definition.target.nodeUuid = node.instanceUuid;
         definition.target.parameterId = spec.parameterId;
         definition.nodeLabel = nodeLabel;
         definition.parameterLabel = spec.label;
@@ -373,9 +393,13 @@ bool TryReadAnimatableParameterValue(
     const LayerBase* layer,
     const std::string& parameterId,
     float& outValue) {
-    if (node.kind != EditorNodeGraph::NodeKind::Layer) {
+    if (node.kind == EditorNodeGraph::NodeKind::RawOperation) {
+        for (const auto& definition : CollectAnimatableParametersForNode(node)) {
+            if (definition.target.parameterId == parameterId) { outValue = definition.currentValue; return true; }
+        }
         return false;
     }
+    if (node.kind != EditorNodeGraph::NodeKind::Layer) return false;
 
     const LayerParameterSpec* spec = FindLayerParameterSpec(node.layerType, parameterId);
     if (!spec) {
@@ -596,14 +620,15 @@ bool ApplyFrameEvaluationContextToLayerJson(
     const FrameEvaluationContext& context,
     int nodeId,
     LayerType layerType,
-    nlohmann::json& layerJson) {
+    nlohmann::json& layerJson, const std::string& graphId, const std::string& nodeUuid) {
     if (context.empty() || nodeId <= 0 || !layerJson.is_object()) {
         return false;
     }
 
     bool changed = false;
     for (const FrameParameterValue& value : context.values) {
-        if (value.target.nodeId != nodeId) {
+        if (value.target.graphId != graphId || (!value.target.nodeUuid.empty()
+            ? value.target.nodeUuid != nodeUuid : value.target.nodeId != nodeId)) {
             continue;
         }
 

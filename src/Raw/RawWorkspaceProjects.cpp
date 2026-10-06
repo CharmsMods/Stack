@@ -1,12 +1,19 @@
+#include "Raw/RawGraphOperation.h"
+#include "Raw/RawRecipeCompatibility.h"
 #include "Raw/RawWorkspace.h"
+#include "Raw/RawWorkspaceManagedGraph.h"
 #include "Raw/RawTechnicalEvidence.h"
+#include "Raw/MultiFrameDenoise/SharedBurst.h"
+#include "Persistence/ProjectIndex.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <system_error>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,7 +46,7 @@ std::int64_t ProjectFileTimeTicks(const std::filesystem::path& path) {
 }
 
 std::string GenericPathKey(const std::filesystem::path& path) {
-    return path.generic_string();
+    return path.generic_u8string();
 }
 
 std::string LowerGenericPathKey(const std::filesystem::path& path) {
@@ -112,39 +119,6 @@ std::string SafeProjectStem(const SourceRecord& source) {
     return stem.empty() ? std::string("raw_project") : stem;
 }
 
-std::vector<unsigned char> ReadBinaryFile(const std::filesystem::path& path, std::string* outError) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in.is_open()) {
-        if (outError) {
-            *outError = "Failed to open " + path.string() + " for reading.";
-        }
-        return {};
-    }
-    std::vector<unsigned char> bytes;
-    bytes.assign(
-        std::istreambuf_iterator<char>(in),
-        std::istreambuf_iterator<char>());
-    if (!in.good() && !in.eof()) {
-        if (outError) {
-            *outError = "Failed to read " + path.string() + ".";
-        }
-        bytes.clear();
-    }
-    return bytes;
-}
-
-bool ReadProjectDocumentForDiscovery(
-    const std::filesystem::path& path,
-    StackBinaryFormat::ProjectDocument& outDocument) {
-    StackBinaryFormat::ProjectLoadOptions options;
-    options.includeThumbnail = false;
-    options.includeSourceImage = false;
-    options.includePipelineData = false;
-    options.includeNodeBrowserThumbnails = false;
-    options.includeRawWorkspaceData = true;
-    return StackBinaryFormat::ReadProjectFile(path, outDocument, options);
-}
-
 ProjectStatus StatusForProjectInfo(const ProjectInfo& info) {
     if (info.embeddedRaw) {
         return ProjectStatus::Embedded;
@@ -152,12 +126,66 @@ ProjectStatus StatusForProjectInfo(const ProjectInfo& info) {
     return ProjectStatus::Existing;
 }
 
-nlohmann::json BuildEmbeddedRawPlaceholder() {
-    return {
-        { "present", false },
-        { "fileName", nullptr },
-        { "bytes", nullptr }
-    };
+ProjectInfo ProjectInfoFromIndex(
+    const Stack::Project::ProjectRecord& record) {
+    ProjectInfo info;
+    info.mode = RawProjectModeFromString(record.rawWorkspaceMode);
+    info.sourceRelativePathKey = record.rawSourceRelativePathKey;
+    info.sourceFingerprint = record.rawSourceFingerprint;
+    info.sourceFileSizeBytes = record.rawSourceFileSizeBytes;
+    info.sourceModifiedTimeTicks = record.rawSourceModifiedTimeTicks;
+    info.linkedRaw = record.rawSourceLinked;
+    info.embeddedRaw = record.rawSourceEmbedded;
+    if (info.embeddedRaw) info.linkedRaw = false;
+    info.readOnlyReason = record.rawWorkspaceReadOnlyReason;
+    if (info.mode == RawProjectMode::Unknown) {
+        info.status = ProjectStatus::Invalid;
+        info.errorMessage = "Project has a missing or unsupported RAW Workspace mode.";
+    } else {
+        info.status = StatusForProjectInfo(info);
+    }
+    return info;
+}
+
+std::filesystem::path WriteProjectCoverCache(
+    const ManagedLayout& layout,
+    const std::string& projectId,
+    const std::vector<unsigned char>& bytes) {
+    if (projectId.empty() || bytes.empty()) return {};
+
+    std::string safeId = projectId;
+    for (char& character : safeId) {
+        const unsigned char value = static_cast<unsigned char>(character);
+        if (!(std::isalnum(value) || character == '-' || character == '_')) {
+            character = '_';
+        }
+    }
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char value : bytes) {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    }
+    std::ostringstream fileName;
+    fileName << safeId << '-' << std::hex << hash << ".png";
+
+    std::error_code error;
+    const std::filesystem::path directory =
+        layout.projectCoversDirectory;
+    std::filesystem::create_directories(directory, error);
+    if (error) return {};
+    const std::filesystem::path path = directory / fileName.str();
+    error.clear();
+    if (std::filesystem::exists(path, error) && !error &&
+        std::filesystem::file_size(path, error) == bytes.size() && !error) {
+        return path;
+    }
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return {};
+    output.write(
+        reinterpret_cast<const char*>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size()));
+    return output.good() ? path : std::filesystem::path();
 }
 
 void AttachProjectToSource(
@@ -179,15 +207,28 @@ void AttachProjectToSource(
     source.project = std::move(info);
 }
 
+std::vector<Stack::Project::ProjectRecord> ScanWorkspaceProjects(const ManagedLayout& layout) {
+    auto roots = Stack::Project::ProjectIndex::DefaultRoots();
+    roots.insert(roots.begin(), {layout.workspaceRoot, layout.projectsDirectory});
+    auto records = Stack::Project::ProjectIndex::Get().Rebuild(roots, true);
+    const auto inside = [](const auto& path, const auto& root) {
+        if (root.empty()) return false;
+        auto prefix = LowerGenericPathKey(NormalizePath(root));
+        if (prefix.back() != '/') prefix += '/';
+        return LowerGenericPathKey(NormalizePath(path)).rfind(prefix, 0) == 0;
+    };
+    records.erase(std::remove_if(records.begin(), records.end(), [&](const auto& record) {
+        return !inside(record.absolutePath, layout.workspaceRoot) &&
+            !inside(record.absolutePath, layout.projectsDirectory);
+    }), records.end());
+    return records;
+}
 } // namespace
 
 std::filesystem::path BuildProjectRelativePathForSource(const SourceRecord& source) {
-    std::filesystem::path relative;
-    if (!source.parentFolderKey.empty()) {
-        relative = std::filesystem::path(source.parentFolderKey);
-    }
-    relative /= SafeProjectStem(source) + ".stack";
-    return relative.lexically_normal();
+    // Working projects are folders in Stack's configured Projects directory;
+    // the viewed source hierarchy is provenance, not storage architecture.
+    return std::filesystem::path(SafeProjectStem(source)).lexically_normal();
 }
 
 ProjectInfo BuildExpectedProjectInfo(const ManagedLayout& layout, const SourceRecord& source) {
@@ -195,7 +236,7 @@ ProjectInfo BuildExpectedProjectInfo(const ManagedLayout& layout, const SourceRe
     info.relativePath = BuildProjectRelativePathForSource(source);
     info.absolutePath = NormalizePath(layout.projectsDirectory / info.relativePath);
     info.status = ProjectStatus::NoProject;
-    info.mode = RawProjectMode::RecipeBacked;
+    info.mode = RawProjectMode::UnifiedLayers;
     info.sourceRelativePathKey = source.relativePathKey;
     info.sourceFingerprint = source.fingerprint;
     info.sourceFileSizeBytes = source.fileSizeBytes;
@@ -207,15 +248,13 @@ ProjectInfo BuildExpectedProjectInfo(const ManagedLayout& layout, const SourceRe
 
 nlohmann::json BuildRawSourceRefJson(const SourceRecord& source, bool linkedRaw) {
     return {
-        { "sourcePath", source.absolutePath.string() },
-        { "workspaceRelativePath", source.relativePathKey },
+        { "sourcePath", source.absolutePath.u8string() },
         { "relativePathKey", source.relativePathKey },
         { "fingerprint", source.fingerprint.empty() ? nlohmann::json() : nlohmann::json(source.fingerprint) },
         { "fileSizeBytes", source.fileSizeBytes },
         { "modifiedTimeTicks", source.modifiedTimeTicks },
         { "displayName", source.fileName },
-        { "linked", linkedRaw },
-        { "embedded", !linkedRaw }
+        { "linked", linkedRaw }
     };
 }
 
@@ -227,15 +266,14 @@ nlohmann::json BuildRawProjectData(
     bool linkedRaw) {
     nlohmann::json value = nlohmann::json::object();
     value["schema"] = "stack.rawWorkspace.project";
-    value["rawWorkspaceSchemaVersion"] = 2;
+    value["schemaVersion"] =
+        Stack::Project::kRawWorkspaceProjectSchemaVersion;
+    value["rawProjectModel"] =
+        Stack::Project::kRawProjectModelSourceSets;
     value["rawWorkspaceMode"] = RawProjectModeToString(mode);
     value["rawSourceRef"] = BuildRawSourceRefJson(source, linkedRaw);
-    value["rawRecipe"] = Stack::RawRecipe::SerializeRecipe(recipe);
+    value["rawRecipe"] = Stack::RawRecipe::SerializeWorkspaceSourceRecipe(recipe);
     (void)downstreamGraph;
-    value["managedRawSection"] = nullptr;
-    value["customRawSection"] = nullptr;
-    value["readOnlyReason"] = nullptr;
-    value["embeddedRaw"] = BuildEmbeddedRawPlaceholder();
     return value;
 }
 
@@ -248,26 +286,26 @@ bool ApplyRawWorkspaceDataToProjectDocument(
     bool linkedRaw) {
     document.metadata.projectKind = StackBinaryFormat::kRawProjectKind;
     document.pipelineData = downstreamGraph;
-    nlohmann::json value = document.rawWorkspaceData.is_object()
+    const nlohmann::json existing = document.rawWorkspaceData.is_object()
         ? document.rawWorkspaceData
         : nlohmann::json::object();
-    value["schema"] = "stack.rawWorkspace.project";
-    value["rawWorkspaceSchemaVersion"] = 2;
-    value["rawWorkspaceMode"] = RawProjectModeToString(mode);
-    value["rawSourceRef"] = BuildRawSourceRefJson(source, linkedRaw);
-    value["rawRecipe"] = Stack::RawRecipe::SerializeRecipe(recipe);
-    value.erase("downstreamGraph");
-    if (!value.contains("managedRawSection")) {
-        value["managedRawSection"] = nullptr;
-    }
-    if (!value.contains("customRawSection")) {
-        value["customRawSection"] = nullptr;
-    }
-    if (!value.contains("readOnlyReason")) {
-        value["readOnlyReason"] = nullptr;
-    }
-    if (linkedRaw || !value.contains("embeddedRaw")) {
-        value["embeddedRaw"] = BuildEmbeddedRawPlaceholder();
+    nlohmann::json value = BuildRawProjectData(
+        source, recipe, downstreamGraph, mode, linkedRaw);
+    static constexpr const char* kCurrentPreservedFields[] = {
+        "projectId",
+        "activeSourceSetId",
+        "activeFrameId",
+        "managedAssetId",
+        "originalSourcePath",
+        "originalFileFingerprint",
+        "repairRequired",
+        "repairedCopy"
+    };
+    for (const char* field : kCurrentPreservedFields) {
+        const auto stored = existing.find(field);
+        if (stored != existing.end()) {
+            value[field] = *stored;
+        }
     }
     document.rawWorkspaceData = std::move(value);
     return document.rawWorkspaceData.is_object();
@@ -282,6 +320,17 @@ bool ReadProjectInfoFromDocument(
     if (!raw.is_object()) {
         outInfo.status = ProjectStatus::Invalid;
         outInfo.errorMessage = "Project does not contain RAW Workspace metadata.";
+        return false;
+    }
+    if (raw.value("schema", std::string()) !=
+            "stack.rawWorkspace.project" ||
+        raw.value("schemaVersion", 0) !=
+            Stack::Project::kRawWorkspaceProjectSchemaVersion ||
+        raw.value("rawProjectModel", std::string()) !=
+            Stack::Project::kRawProjectModelSourceSets) {
+        outInfo.status = ProjectStatus::Invalid;
+        outInfo.errorMessage =
+            "Project does not use the current RAW Workspace schema.";
         return false;
     }
 
@@ -304,23 +353,27 @@ bool ReadProjectInfoFromDocument(
     const nlohmann::json sourceRef = raw.value("rawSourceRef", nlohmann::json::object());
     if (sourceRef.is_object()) {
         outInfo.sourceRelativePathKey = sourceRef.value(
-            "relativePathKey",
-            sourceRef.value("workspaceRelativePath", std::string()));
+            "relativePathKey", std::string());
         outInfo.sourceFingerprint = JsonStringOrDefault(sourceRef, "fingerprint");
         outInfo.sourceFileSizeBytes = JsonUintMaxOrDefault(sourceRef, "fileSizeBytes");
         outInfo.sourceModifiedTimeTicks = JsonInt64OrDefault(sourceRef, "modifiedTimeTicks");
         outInfo.linkedRaw = sourceRef.value("linked", true);
-        outInfo.embeddedRaw = sourceRef.value("embedded", false);
     }
-
-    const nlohmann::json embeddedRaw = raw.value("embeddedRaw", nlohmann::json::object());
-    if (embeddedRaw.is_object() && embeddedRaw.value("present", false)) {
-        outInfo.embeddedRaw = true;
-        outInfo.linkedRaw = false;
-    }
+    outInfo.embeddedRaw = raw.contains("managedAssetId") &&
+        raw["managedAssetId"].is_string() &&
+        !raw["managedAssetId"].get<std::string>().empty();
+    if (outInfo.embeddedRaw) outInfo.linkedRaw = false;
 
     if (outRecipe != nullptr) {
-        *outRecipe = Stack::RawRecipe::DeserializeRecipe(raw.value("rawRecipe", nlohmann::json::object()));
+        const nlohmann::json recipe = raw.value(
+            "rawRecipe", nlohmann::json::object());
+        if (!Stack::RawRecipe::IsCanonicalWorkspaceSourceRecipeDocument(recipe)) {
+            outInfo.status = ProjectStatus::Invalid;
+            outInfo.errorMessage =
+                "Project does not use the current RAW recipe schema.";
+            return false;
+        }
+        *outRecipe = Stack::RawRecipe::DeserializeRecipe(recipe);
     }
 
     if (outInfo.status != ProjectStatus::Invalid) {
@@ -333,9 +386,8 @@ bool DiscoverProjects(
     const ManagedLayout& layout,
     std::vector<SourceRecord>& sources,
     CancellationPredicate shouldCancel) {
-    std::unordered_map<std::string, std::size_t> expectedPathToSource;
-    std::unordered_map<std::string, std::size_t> relativeKeyToSource;
     std::unordered_map<std::string, std::size_t> fingerprintToSource;
+    std::unordered_map<std::string, std::size_t> absolutePathToSource;
 
     for (std::size_t index = 0; index < sources.size(); ++index) {
         if (shouldCancel && shouldCancel()) {
@@ -343,84 +395,71 @@ bool DiscoverProjects(
         }
         SourceRecord& source = sources[index];
         source.project = BuildExpectedProjectInfo(layout, source);
-        expectedPathToSource[LowerGenericPathKey(source.project.relativePath)] = index;
-        relativeKeyToSource[ToLowerAscii(source.relativePathKey)] = index;
         if (!source.fingerprint.empty()) {
             fingerprintToSource[source.fingerprint] = index;
         }
+        absolutePathToSource[LowerGenericPathKey(
+            NormalizePath(source.absolutePath))] = index;
     }
 
-    std::error_code ec;
-    if (!std::filesystem::exists(layout.projectsDirectory, ec) || ec) {
-        return true;
-    }
-
-    std::filesystem::recursive_directory_iterator it(layout.projectsDirectory, ec);
-    const std::filesystem::recursive_directory_iterator end;
-    for (; it != end; it.increment(ec)) {
+    // The shared ProjectIndex is rebuilt for the rest of the application as
+    // well, but a RAW Workspace owns its project population. Do not use the
+    // global snapshot here. Include projects directly in the browsed folder
+    // as well as its managed Projects folder, so external Save As copies are
+    // discoverable only after the user browses their location.
+    const auto indexedProjects = ScanWorkspaceProjects(layout);
+    for (const Stack::Project::ProjectRecord& record : indexedProjects) {
         if (shouldCancel && shouldCancel()) {
             return false;
         }
-        if (ec) {
-            ec.clear();
+        if (record.needsAttention ||
+            record.projectKind != StackBinaryFormat::kRawProjectKind) {
             continue;
         }
-        if (!it->is_regular_file(ec) || ec) {
-            ec.clear();
-            continue;
-        }
-        const std::filesystem::path absolutePath = NormalizePath(it->path());
-        if (ToLowerAscii(absolutePath.extension().string()) != ".stack") {
-            continue;
-        }
+        const std::filesystem::path absolutePath =
+            NormalizePath(record.absolutePath);
 
-        std::filesystem::path relativePath = std::filesystem::relative(absolutePath, layout.projectsDirectory, ec);
-        if (ec) {
-            ec.clear();
+        std::error_code relativeError;
+        std::filesystem::path relativePath = std::filesystem::relative(
+            absolutePath,
+            layout.projectsDirectory,
+            relativeError);
+        if (relativeError) {
             relativePath = absolutePath.filename();
         }
         relativePath = relativePath.lexically_normal();
 
-        StackBinaryFormat::ProjectDocument document;
-        ProjectInfo info;
-        const bool loaded = ReadProjectDocumentForDiscovery(absolutePath, document) &&
-            ReadProjectInfoFromDocument(document, info, nullptr);
+        if (!record.hasRawWorkspaceData) {
+            continue;
+        }
+        ProjectInfo info = ProjectInfoFromIndex(record);
 
-        const std::string expectedKey = LowerGenericPathKey(relativePath);
-        auto expectedIt = expectedPathToSource.find(expectedKey);
-        if (expectedIt != expectedPathToSource.end()) {
-            if (loaded) {
-                AttachProjectToSource(
-                    sources[expectedIt->second],
-                    std::move(info),
-                    absolutePath,
-                    relativePath,
-                    "expected-project-path");
-            } else {
-                ProjectInfo invalid = BuildExpectedProjectInfo(layout, sources[expectedIt->second]);
-                invalid.absolutePath = absolutePath;
-                invalid.relativePath = relativePath;
-                invalid.status = ProjectStatus::Invalid;
-                invalid.errorMessage = "Project file could not be read as a RAW Workspace project.";
-                sources[expectedIt->second].project = std::move(invalid);
+        auto exactSource = absolutePathToSource.end();
+        for (const Stack::Project::IndexedProjectSource& indexedSource :
+             record.sources) {
+            if (!indexedSource.workspaceRelativePath.empty()) {
+                exactSource = absolutePathToSource.find(LowerGenericPathKey(
+                    NormalizePath(layout.workspaceRoot / indexedSource.workspaceRelativePath)));
+                if (exactSource != absolutePathToSource.end() &&
+                    sources[exactSource->second].fingerprint == indexedSource.contentSha256) break;
+                exactSource = absolutePathToSource.end();
             }
-            continue;
+            if (!indexedSource.originalPath.empty()) {
+                exactSource = absolutePathToSource.find(
+                    LowerGenericPathKey(NormalizePath(
+                        indexedSource.originalPath)));
+                if (exactSource != absolutePathToSource.end() &&
+                    sources[exactSource->second].fingerprint == indexedSource.contentSha256) break;
+                exactSource = absolutePathToSource.end();
+            }
         }
-
-        if (!loaded) {
-            continue;
-        }
-
-        auto sourceIt = info.sourceRelativePathKey.empty()
-            ? relativeKeyToSource.end()
-            : relativeKeyToSource.find(ToLowerAscii(info.sourceRelativePathKey));
-        if (sourceIt != relativeKeyToSource.end()) {
+        if (exactSource != absolutePathToSource.end()) {
             AttachProjectToSource(
-                sources[sourceIt->second],
+                sources[exactSource->second],
                 std::move(info),
                 absolutePath,
                 relativePath,
-                "stored-source-reference");
+                "original-source-path");
             continue;
         }
 
@@ -455,45 +494,62 @@ bool DiscoverSourceSetProjects(
         byteLengthToSources[static_cast<std::uint64_t>(source.fileSizeBytes)].push_back(index);
     }
 
-    std::error_code iteratorError;
-    if (!std::filesystem::exists(layout.projectsDirectory, iteratorError) || iteratorError) {
-        return true;
-    }
+    // The shared ProjectIndex also contains ordinary Library projects. RAW
+    // Workspace cards include the browsed folder and its managed Projects
+    // folder, including multiple independent projects for one source.
+    const auto indexedProjects = ScanWorkspaceProjects(layout);
 
-    const auto inspectProject = [&](const std::filesystem::path& candidate) {
-        Stack::Project::ProjectStoreOpenResult opened =
-            Stack::Project::OpenProjectStore(candidate);
-        if (!opened) {
-            SourceSetProjectCatalogEntry invalid;
-            invalid.absolutePath = NormalizePath(candidate);
-            invalid.relativePath = candidate.filename();
-            invalid.status = ProjectStatus::Invalid;
-            invalid.errorMessage = opened.message;
-            projects.push_back(std::move(invalid));
-            return;
-        }
+    const auto inspectProject = [&](const Stack::Project::ProjectRecord& indexed) {
+        const std::filesystem::path candidate = indexed.absolutePath;
+        // Projects is scoped by storage location, not by which editing tools
+        // the document uses. Graph-only and portable projects belong here too.
 
         SourceSetProjectCatalogEntry entry;
-        entry.projectId = opened.snapshot.projectId;
-        entry.projectName = opened.snapshot.projectName;
+        entry.projectId = indexed.projectId;
+        entry.projectName = indexed.displayName;
         entry.absolutePath = NormalizePath(candidate);
         std::error_code relativeError;
         entry.relativePath = std::filesystem::relative(
             entry.absolutePath, layout.projectsDirectory, relativeError);
         if (relativeError) entry.relativePath = candidate.filename();
-        entry.storageKind = opened.store->StorageKind();
-        entry.status = opened.store->IsReadOnlyRecovery()
+        entry.storageKind = indexed.storageKind;
+        entry.status = indexed.readOnlyRecovery
             ? ProjectStatus::Conflict
             : ProjectStatus::Existing;
-        entry.readOnlyRecovery = opened.store->IsReadOnlyRecovery();
-        entry.sourceSetCount = static_cast<std::uint64_t>(opened.snapshot.sourceSets.size());
+        entry.readOnlyRecovery = indexed.readOnlyRecovery;
+        entry.conflict = indexed.readOnlyRecovery;
+        entry.dirty = indexed.editRevision != indexed.storageRevision;
+        entry.errorMessage = indexed.errorMessage;
+        entry.multiFrameProject = indexed.multiFrameProject;
+        entry.bracketingProject = std::any_of(indexed.sourceSets.begin(),indexed.sourceSets.end(),[](const auto& set){return set.settings.contains("bracketing");});
+        entry.sourceSetCount = static_cast<std::uint64_t>(indexed.sourceSets.size());
+        const bool invalidBurst = std::any_of(
+            indexed.sourceSets.begin(),
+            indexed.sourceSets.end(),
+            [](const Stack::Project::MultiFrameSourceSet& sourceSet) {
+                return sourceSet.operationIntent ==
+                        Stack::Project::MultiFrameOperationIntent::RawBurstDenoise &&
+                    (sourceSet.operationSchemaVersion !=
+                         Stack::Project::kMfdOperationSchemaVersion ||
+                     sourceSet.settings.value("algorithmId", std::string()) !=
+                         Raw::Mfd::kSharedBurstAlgorithmId);
+            });
+        if (!invalidBurst) {
+            entry.coverThumbnailBytes = indexed.coverThumbnailBytes;
+        }
+        entry.coverThumbnailCachePath = WriteProjectCoverCache(
+            layout, entry.projectId, entry.coverThumbnailBytes);
 
         std::unordered_map<std::string, std::vector<std::size_t>> assetSources;
-        for (const Stack::Project::EmbeddedAssetRecord& asset : opened.snapshot.embeddedAssets) {
-            if (!asset.informationalOriginPath.empty()) {
+        for (const Stack::Project::IndexedProjectSource& asset : indexed.sources) {
+            if (asset.assetId.empty()) continue;
+            const std::filesystem::path originPath = asset.workspaceRelativePath.empty()
+                ? asset.originalPath : layout.workspaceRoot / asset.workspaceRelativePath;
+            if (!originPath.empty()) {
                 const auto source = originPathToSource.find(
-                    LowerGenericPathKey(NormalizePath(asset.informationalOriginPath)));
-                if (source != originPathToSource.end()) {
+                    LowerGenericPathKey(NormalizePath(originPath)));
+                if (source != originPathToSource.end() &&
+                    sources[source->second].fingerprint == asset.contentSha256) {
                     assetSources[asset.assetId].push_back(source->second);
                 }
             }
@@ -509,13 +565,14 @@ bool DiscoverSourceSetProjects(
                         Stack::RawEvidence::ComputeSourceIdentity(
                             sources[sourceIndex].absolutePath)).first;
                 }
-                if (identity->second.valid && identity->second.sha256 == asset.sha256) {
+                if (identity->second.valid &&
+                    identity->second.sha256 == asset.contentSha256) {
                     assetSources[asset.assetId].push_back(sourceIndex);
                 }
             }
         }
 
-        for (const Stack::Project::MultiFrameSourceSet& sourceSet : opened.snapshot.sourceSets) {
+        for (const Stack::Project::MultiFrameSourceSet& sourceSet : indexed.sourceSets) {
             entry.totalFrameCount += static_cast<std::uint64_t>(sourceSet.frames.size());
             if (sourceSet.inputFamily == Stack::Project::MultiFrameInputFamily::Raw) {
                 ++entry.rawSetCount;
@@ -524,9 +581,17 @@ bool DiscoverSourceSetProjects(
             }
             std::unordered_set<std::size_t> attachedSources;
             for (const Stack::Project::SourceSetFrame& frame : sourceSet.frames) {
+                if(sourceSet.settings.contains("bracketingSelection")) {
+                    const auto& selected=sourceSet.settings["bracketingSelection"];
+                    if(std::find(selected.begin(),selected.end(),frame.frameId)==selected.end())continue;
+                }
                 const auto matches = assetSources.find(frame.assetId);
                 if (matches == assetSources.end()) continue;
                 for (std::size_t sourceIndex : matches->second) {
+                    if (entry.referenceSourceKey.empty() &&
+                        frame.frameId == sourceSet.referenceFrameId) {
+                        entry.referenceSourceKey = sources[sourceIndex].relativePathKey;
+                    }
                     if (!attachedSources.insert(sourceIndex).second) continue;
                     SourceSetProjectMembership membership;
                     membership.projectId = entry.projectId;
@@ -534,99 +599,96 @@ bool DiscoverSourceSetProjects(
                     membership.projectPath = entry.absolutePath;
                     membership.sourceSetId = sourceSet.sourceSetId;
                     membership.sourceSetName = sourceSet.name;
+                    membership.projectIsMultiFrame =
+                        entry.multiFrameProject;
+                    membership.projectCoverThumbnailCachePath =
+                        entry.coverThumbnailCachePath;
                     sources[sourceIndex].sourceSetProjectMemberships.push_back(
                         std::move(membership));
                 }
             }
         }
+        // Single-RAW projects have managed source identity but no source-set
+        // node. Attach them through the same shared index relationship so the
+        // Gallery presents the project card and suppresses the unedited card.
+        std::unordered_set<std::size_t> directlyAttached;
+        for (const Stack::Project::IndexedProjectSource& indexedSource :
+             indexed.sources) {
+            std::vector<std::size_t> matches;
+            const auto origin = indexedSource.workspaceRelativePath.empty()
+                ? indexedSource.originalPath : layout.workspaceRoot / indexedSource.workspaceRelativePath;
+            if (!origin.empty()) {
+                const auto match = originPathToSource.find(
+                    LowerGenericPathKey(NormalizePath(
+                        origin)));
+                if (match != originPathToSource.end() &&
+                    sources[match->second].fingerprint == indexedSource.contentSha256) {
+                    matches.push_back(match->second);
+                }
+            }
+            if (matches.empty() && !indexedSource.fingerprint.empty()) {
+                for (std::size_t sourceIndex = 0;
+                     sourceIndex < sources.size();
+                     ++sourceIndex) {
+                    if (sources[sourceIndex].fingerprint ==
+                        indexedSource.fingerprint) {
+                        matches.push_back(sourceIndex);
+                    }
+                }
+            }
+            for (std::size_t sourceIndex : matches) {
+                if (!directlyAttached.insert(sourceIndex).second) continue;
+                const bool alreadyAttached = std::any_of(
+                    sources[sourceIndex].sourceSetProjectMemberships.begin(),
+                    sources[sourceIndex].sourceSetProjectMemberships.end(),
+                    [&](const SourceSetProjectMembership& membership) {
+                        return membership.projectId == entry.projectId;
+                    });
+                if (!alreadyAttached) {
+                    SourceSetProjectMembership membership;
+                    membership.projectId = entry.projectId;
+                    membership.projectName = entry.projectName;
+                    membership.projectPath = entry.absolutePath;
+                    membership.sourceSetName = "RAW source";
+                    membership.projectIsMultiFrame =
+                        entry.multiFrameProject;
+                    membership.projectCoverThumbnailCachePath =
+                        entry.coverThumbnailCachePath;
+                    sources[sourceIndex].sourceSetProjectMemberships.push_back(
+                        std::move(membership));
+                }
+                if (entry.referenceSourceKey.empty()) {
+                    entry.referenceSourceKey =
+                        sources[sourceIndex].relativePathKey;
+                }
+            }
+        }
+        if (entry.totalFrameCount == 0 && !directlyAttached.empty()) {
+            entry.totalFrameCount =
+                static_cast<std::uint64_t>(directlyAttached.size());
+            entry.rawSetCount = 1;
+        }
         projects.push_back(std::move(entry));
     };
 
-    std::filesystem::recursive_directory_iterator iterator(
-        layout.projectsDirectory,
-        std::filesystem::directory_options::skip_permission_denied,
-        iteratorError);
-    const std::filesystem::recursive_directory_iterator end;
-    for (; iterator != end; iterator.increment(iteratorError)) {
+    for (const Stack::Project::ProjectRecord& record : indexedProjects) {
         if (shouldCancel && shouldCancel()) return false;
-        if (iteratorError) {
-            iteratorError.clear();
+        if (record.needsAttention) {
+            SourceSetProjectCatalogEntry invalid;
+            invalid.projectId = record.projectId;
+            invalid.projectName = record.displayName;
+            invalid.absolutePath = record.absolutePath;
+            invalid.relativePath = record.absolutePath.lexically_relative(layout.projectsDirectory);
+            invalid.status = ProjectStatus::Invalid;
+            invalid.errorMessage = record.errorMessage;
+            projects.push_back(std::move(invalid));
             continue;
         }
-        const std::filesystem::path candidate = iterator->path();
-        std::error_code kindError;
-        if (iterator->is_directory(kindError) && !kindError &&
-            ToLowerAscii(candidate.extension().string()) == ".stackbundle") {
-            iterator.disable_recursion_pending();
-            inspectProject(candidate);
-            continue;
-        }
-        kindError.clear();
-        if (iterator->is_regular_file(kindError) && !kindError &&
-            ToLowerAscii(candidate.extension().string()) == ".stack" &&
-            Stack::Project::IsPortableV3Project(candidate)) {
-            inspectProject(candidate);
-        }
+        inspectProject(record);
     }
     std::sort(projects.begin(), projects.end(), [](const auto& lhs, const auto& rhs) {
         return ToLowerAscii(lhs.projectName) < ToLowerAscii(rhs.projectName);
     });
-    return true;
-}
-
-bool RelinkProjectDocumentToSource(
-    const SourceRecord& source,
-    StackBinaryFormat::ProjectDocument& document,
-    std::string* outError) {
-    if (!document.rawWorkspaceData.is_object()) {
-        if (outError) {
-            *outError = "Project does not contain RAW Workspace metadata.";
-        }
-        return false;
-    }
-
-    document.rawWorkspaceData["rawSourceRef"] = BuildRawSourceRefJson(source, true);
-    document.rawWorkspaceData["readOnlyReason"] = nullptr;
-
-    nlohmann::json recipeJson = document.rawWorkspaceData.value("rawRecipe", nlohmann::json::object());
-    Stack::RawRecipe::RawDevelopmentRecipe recipe = Stack::RawRecipe::DeserializeRecipe(recipeJson);
-    recipe.source.sourcePath = source.absolutePath.string();
-    recipe.source.relativePathKey = source.relativePathKey;
-    recipe.source.fingerprint = source.fingerprint;
-    recipe.source.fileSizeBytes = static_cast<std::uint64_t>(source.fileSizeBytes);
-    recipe.source.modifiedTimeTicks = source.modifiedTimeTicks;
-    recipe.source.displayName = source.fileName;
-    document.rawWorkspaceData["rawRecipe"] = Stack::RawRecipe::SerializeRecipe(recipe);
-    return true;
-}
-
-bool EmbedRawSourceInProjectDocument(
-    const SourceRecord& source,
-    StackBinaryFormat::ProjectDocument& document,
-    std::string* outError) {
-    if (!document.rawWorkspaceData.is_object()) {
-        if (outError) {
-            *outError = "Project does not contain RAW Workspace metadata.";
-        }
-        return false;
-    }
-
-    std::vector<unsigned char> bytes = ReadBinaryFile(source.absolutePath, outError);
-    if (bytes.empty()) {
-        if (outError && outError->empty()) {
-            *outError = "RAW source is empty or could not be read.";
-        }
-        return false;
-    }
-
-    nlohmann::json::binary_t::container_type binary(bytes.begin(), bytes.end());
-    document.rawWorkspaceData["rawSourceRef"] = BuildRawSourceRefJson(source, false);
-    document.rawWorkspaceData["embeddedRaw"] = {
-        { "present", true },
-        { "fileName", source.fileName },
-        { "sourceRelativePath", source.relativePathKey },
-        { "bytes", nlohmann::json::binary(std::move(binary)) }
-    };
     return true;
 }
 

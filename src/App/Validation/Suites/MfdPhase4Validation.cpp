@@ -224,6 +224,38 @@ std::vector<Raw::Mfd::ExposureSample> MakeExposureSamples(
     return samples;
 }
 
+std::vector<Raw::Mfd::ExposureSample> MakeNoisyDarkExposureSamples() {
+    constexpr std::size_t count = 12000u;
+    std::vector<Raw::Mfd::ExposureSample> samples;
+    samples.reserve(count);
+    for (std::size_t index = 0u; index < count; ++index) {
+        const Raw::Mfd::CfaSite site =
+            static_cast<Raw::Mfd::CfaSite>(index % 4u);
+        const double unit = static_cast<double>((index * 7919u) % 10007u) /
+            10007.0;
+        const double scene = 0.025 + 0.20 * unit;
+        // Independent deterministic noise on both axes reproduces the
+        // errors-in-variables attenuation that made the former joint
+        // per-site slope/intercept diagnostic reject real dark phone bursts.
+        const double alternate = scene + 0.018 * std::sin(
+            0.61 * static_cast<double>(index) +
+            0.23 * static_cast<double>(index % 4u));
+        const double reference = scene + 0.018 * std::cos(
+            0.47 * static_cast<double>(index) +
+            0.31 * static_cast<double>(index % 4u));
+        Raw::Mfd::ExposureSample sample;
+        sample.referenceValue = reference;
+        sample.alternateValue = alternate;
+        sample.referenceVariance = 0.000324;
+        sample.alternateVariance = 0.000324;
+        sample.usableCodeSpanDn = 4095.0;
+        sample.offsetVariance = 0.000004;
+        sample.site = site;
+        samples.push_back(sample);
+    }
+    return samples;
+}
+
 bool ValidateExposureFitting() {
     bool ok = true;
     Raw::Mfd::RawRadiometricParameters parameters;
@@ -277,6 +309,29 @@ bool ValidateExposureFitting() {
                 std::abs(site.scale / fit.scale - 1.0) <= 0.02 &&
                 std::abs(site.intercept) <= site.interceptLimit,
             "accepted exposure fit lacks consistent per-CFA diagnostics");
+    }
+
+    Raw::Mfd::ExposureFitResult noisyDarkFit;
+    metadata.scale = 1.0;
+    error.clear();
+    const bool noisyDarkAccepted = Raw::Mfd::FitGlobalExposureScale(
+        MakeNoisyDarkExposureSamples(),
+        12000u,
+        metadata,
+        parameters,
+        noisyDarkFit,
+        &error);
+    ok &= Check(noisyDarkAccepted && noisyDarkFit.accepted &&
+            NearlyEqual(noisyDarkFit.scale, 1.0, 0.03),
+        "noise-aware per-CFA exposure diagnostics rejected a valid dark burst: " +
+            error);
+    for (const Raw::Mfd::ExposureSiteDiagnostics& site :
+         noisyDarkFit.sites) {
+        ok &= Check(site.valid &&
+                std::abs(site.scale / noisyDarkFit.scale - 1.0) <=
+                    parameters.cfaScaleDisagreementFraction &&
+                std::abs(site.intercept) <= site.interceptLimit,
+            "valid dark-burst fit lacks stable per-CFA diagnostics");
     }
 
     Raw::Mfd::ExposureFitResult blackOffset;

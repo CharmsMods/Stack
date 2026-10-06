@@ -130,7 +130,7 @@ void EditorModule::RenderRawSourceControls(EditorNodeGraph::Node& node, float co
             const EditorNodeGraph::Vec2 position{ node.position.x + 250.0f, node.position.y };
             const int sourceNodeId = node.id;
             AddRawDevelopNodeAt(position);
-            const int developNodeId = m_NodeGraph.GetSelectedNodeId();
+            const int developNodeId = m_Project->graph.GetSelectedNodeId();
             std::string errorMessage;
             ConnectGraphSockets(
                 sourceNodeId,
@@ -170,7 +170,7 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
         node.title = "RAW Decode";
     }
 
-    const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSource(m_NodeGraph, node);
+    const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSource(m_Project->graph, node);
     const Raw::RawMetadata emptyMetadata;
     const Raw::RawMetadata& metadata =
         (rawSourceNode && rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource)
@@ -288,7 +288,7 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGuiExtras::RichSectionLabel("RAW DEMOSAIC", 4.0f);
     if (demosaicEnabled) {
-        const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5" };
+        const char* demosaicLabels[] = { "Fast / Bilinear", "Malvar-He-Cutler 5x5", "Nearest Neighbor", "Hamilton-Adams" };
         int demosaicMethod = static_cast<int>(settings.demosaicMethod);
         ImGui::SetNextItemWidth(controlWidth);
         if (ImGui::Combo("Method", &demosaicMethod, demosaicLabels, IM_ARRAYSIZE(demosaicLabels))) {
@@ -296,7 +296,7 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
                 std::clamp(demosaicMethod, 0, IM_ARRAYSIZE(demosaicLabels) - 1));
         }
         ImGui::TextDisabled("Method: %s", Raw::DemosaicMethodName(settings.demosaicMethod));
-        ImGui::TextDisabled("MHC is the high-quality 5x5 path; Bilinear is the fast draft path.");
+        ImGui::TextDisabled("MHC, Nearest Neighbor, and Hamilton-Adams run in Stack's RAW pipeline.");
     } else {
         ImGui::TextDisabled("Method: skipped");
         ImGui::TextDisabled("Status: source is already linear RGB, so demosaic is not used.");
@@ -369,7 +369,5 @@ void EditorModule::RenderRawDecodeControls(EditorNodeGraph::Node& node, float co
 
     if (!SameRawDevelopSettings(settingsBefore, settings)) {
         MarkRenderDirty(node.id);
-        MarkDirty();
-        ValidateActiveRawWorkspaceManagedGraph(true);
     }
 }

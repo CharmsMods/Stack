@@ -1,4 +1,10 @@
 #pragma once
+#include "Renderer/Internal/RawZoneAreaRenderer.h"
+
+#include "Raw/RawGradingScope.h"
+#include "Renderer/Internal/RawGradingScopeGpu.h"
+#include "Renderer/Internal/RawViewportGpuTiming.h"
+#include "Raw/RawViewportRegion.h"
 
 #include "Renderer/GLHelpers.h"
 #include "NodeMath/PointwiseIR.h"
@@ -9,13 +15,17 @@
 #include "Renderer/MaskRenderTypes.h"
 #include "Raw/RawAutoBase.h"
 #include "Raw/RawAutoStartPoint.h"
+#include "Raw/Denoise/RawRgbNoiseModel.h"
 #include "Raw/RawDevelopmentRecipe.h"
 #include "Raw/RawGpuPipeline.h"
+#include "Renderer/RawDevelopmentStageCachePolicy.h"
+#include "Renderer/RawRgbDenoiseState.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <type_traits>
@@ -28,6 +38,7 @@
 
 namespace Stack::Renderer::GraphExecution {
 struct GraphExecutionContext;
+class GraphExecutionRuntime;
 struct GraphTopologyIndex;
 } // namespace Stack::Renderer::GraphExecution
 
@@ -74,25 +85,6 @@ struct RawLocalRangeTargetPreviewCpuResult {
     std::vector<std::uint32_t> selectedBits;
 };
 
-struct RawRgbDenoiseAsyncResult {
-    bool ok = false;
-    bool cancelled = false;
-    std::string error;
-    std::string provider;
-    double inferenceMilliseconds = 0.0;
-    int completedTiles = 0;
-    int totalTiles = 0;
-    std::size_t modelFingerprint = 0;
-    std::size_t applicationFingerprint = 0;
-    int width = 0;
-    int height = 0;
-    float inputExposureGain = 1.0f;
-    double meanAbsoluteModelDelta = 0.0;
-    double meanAbsoluteSceneDelta = 0.0;
-    std::shared_ptr<const std::vector<float>> modelOutputSrgbProxy;
-    std::shared_ptr<const std::vector<float>> outputRgba;
-};
-
 struct RawDevelopmentStageStatsReadback {
     bool valid = false;
     Stack::RawAutoStartPoint::RawAutoStartPointStage stage =
@@ -116,11 +108,16 @@ using RawDevelopmentStageImageReadback =
 enum class RawDevelopmentGraphScopeStage {
     None = 0,
     LocalRangeInput = 1,
-    FinishToneInput = 2
+    FinishToneInput = 2,
+    ColorWarpInput = 3
 };
 
 struct RawDevelopmentGraphScopeReadback {
     bool valid = false;
+    // Actual upstream content for a graph operation, independent of the old
+    // recipe-stage positions. Zero denotes a standalone recipe readback.
+    std::size_t graphInputFingerprint = 0;
+    float inputExposureEv = 0.0f;
     RawDevelopmentGraphScopeStage stage = RawDevelopmentGraphScopeStage::None;
     std::string measurementDomain;
     std::string controlSignalDomain;
@@ -131,6 +128,9 @@ struct RawDevelopmentGraphScopeReadback {
     int sourceHeight = 0;
     std::vector<float> pixels;
     std::vector<float> controlSignal;
+    std::vector<Stack::RawRecipe::RawZoneAreaStatistics> zoneAreas;
+    float zoneReferenceExposureEv = 0.0f;
+    std::shared_ptr<const Stack::RawRecipe::ImageGuide> zoneGuide;
 };
 
 struct PointwiseExecutionGroupStats {
@@ -173,6 +173,32 @@ struct GraphExecutionStats {
     int frequencyCacheMisses = 0;
     int rawStageCacheHits = 0;
     int rawStageCacheMisses = 0;
+    int rawRgbDenoisePasses = 0;
+    int rawNativeDenoiseReuses = 0;
+    int rawGpuPreprocessDispatches = 0;
+    int rawPreprocessCacheHits = 0;
+    int rawCpuPreprocessFallbacks = 0;
+    double rawSensorUploadMs = 0.0;
+    double rawMetadataBuildMs = 0.0;
+    double rawMetadataUploadMs = 0.0;
+    double rawGpuPreprocessSubmitMs = 0.0;
+    double rawCpuNormalizationMs = 0.0;
+    double rawCpuVarianceMs = 0.0;
+    double rawCorrectedUploadMs = 0.0;
+    double rawVarianceUploadMs = 0.0;
+    std::uint64_t rawSensorUploadBytes = 0;
+    std::uint64_t rawMetadataUploadBytes = 0;
+    std::uint64_t rawCorrectedUploadBytes = 0;
+    std::uint64_t rawVarianceUploadBytes = 0;
+    std::string lastRawPreprocessFallback;
+    int colorWarpMaskCacheHits = 0;
+    int colorWarpMaskCacheMisses = 0;
+    int colorWarpMaskCancellations = 0;
+    double colorWarpMaskBuildMs = 0.0;
+    double colorWarpDiagnosticBuildMs = 0.0;
+    int colorWarpMaskQualityLongEdge = 0;
+    std::uint64_t colorWarpMaskBytesRetained = 0;
+    std::uint64_t colorWarpMaskBudgetBytes = 160ull * 1024ull * 1024ull;
     int fusedPointwiseGroups = 0;
     int fusedPointwiseNodes = 0;
     int avoidedPointwisePasses = 0;
@@ -186,6 +212,8 @@ struct GraphExecutionStats {
     int transientTargetReuses = 0;
     int transientTargetEvictions = 0;
     int persistentCacheEvictions = 0;
+    std::uint64_t rawStageCacheBytes = 0;
+    std::uint64_t rawStageCacheBudgetBytes = 0;
     std::uint64_t transientPoolBytes = 0;
     std::uint64_t transientPoolBudgetBytes = 0;
     std::uint64_t persistentCacheBytes = 0;
@@ -222,7 +250,7 @@ public:
     void LoadSourceFromSharedPixels(const SharedPixelBuffer& data, int w, int h, int ch);
     void Clear();
     void ClearOutput();
-    unsigned int TakeExternalOutputTexture(int& outW, int& outH);
+    unsigned int TakeExternalOutputTexture(int& outW, int& outH, bool preserveCompareSource = false);
     bool UploadOutputFromPixels(
         const unsigned char* data,
         int w,
@@ -232,7 +260,8 @@ public:
     unsigned int PublishSharedOutputTexture(
         int& outW,
         int& outH,
-        bool forceOpaqueSampling = false);
+        bool forceOpaqueSampling = false,
+        std::string* error = nullptr);
     void SetPreviewMaxDimension(int maxDimension) { m_PreviewMaxDimension = std::max(0, maxDimension); }
     void SetRenderCancellationContext(
         std::uint64_t generation,
@@ -249,6 +278,50 @@ public:
     bool IsRawDevelopmentAnalysisEnabled() const {
         return m_RawDevelopmentAnalysisEnabled;
     }
+    // Detailed stage-by-stage damage probes require synchronous GPU readback.
+    // Keep them off the pointer-drag hot path; interactive renders retain the
+    // final-output guard and settled renders perform the complete audit.
+    void SetRawDevelopmentInteractivePreview(bool active) {
+        m_RawDevelopmentInteractivePreview = active;
+    }
+    void SetRawDevelopmentColorWarpMaskPolicy(
+        int qualityLongEdge,
+        bool requireSpatialResult) {
+        m_RawDevelopmentColorWarpMaskQualityLongEdge =
+            std::clamp(qualityLongEdge, 384, 2048);
+        m_RawDevelopmentColorWarpRequireSpatialResult = requireSpatialResult;
+    }
+    void SetRawDevelopmentViewportValidationEnabled(bool enabled) {
+        m_RawDevelopmentViewportValidationEnabled = enabled;
+    }
+    void SetRawDevelopmentPreferredCacheInputStage(
+        std::optional<Stack::Renderer::RawDevelopmentCache::Stage> stage) {
+        m_RawDevelopmentPreferredCacheInputStage = stage;
+    }
+    void SetRawDevelopmentGlobalExposureInteraction(bool active) {
+        m_RawDevelopmentGlobalExposureInteraction = active;
+    }
+    void SetRawDevelopmentCachePrewarmRequest(
+        bool enabled,
+        Stack::Renderer::RawDevelopmentCache::Stage stage,
+        std::size_t fingerprint,
+        std::uint64_t byteBudget) {
+        m_RawDevelopmentCachePrewarmActive =
+            enabled && fingerprint != 0 && byteBudget != 0;
+        m_RawDevelopmentCachePrewarmStage = stage;
+        m_RawDevelopmentCachePrewarmFingerprint =
+            m_RawDevelopmentCachePrewarmActive ? fingerprint : 0;
+        m_RawDevelopmentCachePrewarmByteBudget =
+            m_RawDevelopmentCachePrewarmActive ? byteBudget : 0;
+        m_RawDevelopmentCachePrewarmStoredBytes = 0;
+        m_RawDevelopmentCachePrewarmCompleted = false;
+    }
+    bool IsRawDevelopmentCachePrewarmActive() const {
+        return m_RawDevelopmentCachePrewarmActive;
+    }
+    bool WasRawDevelopmentCachePrewarmCompleted() const {
+        return m_RawDevelopmentCachePrewarmCompleted;
+    }
     // Live RAW editing owns the OpenGL context on the UI thread, but the
     // external Restormer inference and CPU adapter must not block that thread.
     // Export/validation pipelines leave this disabled and retain synchronous,
@@ -256,13 +329,15 @@ public:
     void SetRawRgbDenoiseAsyncEnabled(bool enabled) {
         m_RawRgbDenoiseAsyncEnabled = enabled;
     }
+    void SetRawRgbDenoiseState(
+        std::shared_ptr<RawRgbDenoiseState> state, bool allowAsyncStart);
     bool ConsumeRawRgbDenoiseAsyncCompletion();
     bool IsRawRgbDenoiseAsyncPending() const {
-        return m_RestormerAsyncPending;
+        return m_RawRgbDenoiseState->pending || m_RawRgbDenoiseState->deferred;
     }
     bool IsRawRgbDenoiseAsyncCompletionReady() const;
     const std::string& GetRawRgbDenoiseStatus() const {
-        return m_LastRawRgbDenoiseStatus;
+        return m_RawRgbDenoiseState->status;
     }
 
     // Execute the full layer stack sequentially (ping-pong rendering)
@@ -272,8 +347,34 @@ public:
     void ExecuteGraph(
         const RenderGraphSnapshot& graph,
         const Stack::Renderer::GraphExecution::GraphTopologyIndex& topology);
+    // All graph-owned caches share one caller-provided allowance. Active RAW
+    // working surfaces and the accepted presentation are budgeted first.
+    void SetGraphCacheBudget(
+        std::uint64_t totalCacheBudgetBytes,
+        std::uint64_t minimumRawStageCacheBytes = 0,
+        bool reserveRawStages = true);
+    std::uint64_t GetGraphResidentCacheBytes() const;
 
     // Returns the final output texture ID for display in the ImGui viewport
+    Raw::ViewportGpuTiming m_RawViewportGpuTiming;
+    void PrepareRawCalibrationPass(std::optional<Raw::ViewportStage> changingStage = std::nullopt);
+    bool SeedViewportDependency(const RenderPipeline& source, const Stack::RawRecipe::RawDevelopmentRecipe& recipe, int edge, int inputEdge = -1);
+    std::array<std::size_t, Raw::kViewportStageCount> RawViewportCachedStages(
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe, int edge) const;
+    int GetRawViewportCacheEdge() const { return m_PreviewMaxDimension; }
+    void SetRawViewportRequest(const Raw::ViewportRequest& request) {
+        if (request.generation != m_RawViewportRequest.generation || request.visible != m_RawViewportRequest.visible)
+            m_RawViewportAppliedRegion = {};
+        m_RawViewportRequest = request;
+    }
+    const Raw::ViewportRegion& GetRawViewportRegion() const { return m_RawViewportAppliedRegion; }
+    Raw::ViewportRequest m_RawViewportRequest;
+    Raw::ViewportRegion m_RawViewportAppliedRegion;
+
+    void BeginRawViewportTiming(bool enabled) { m_RawViewportGpuTiming.Reset(enabled); }
+    Raw::ViewportStageCosts CollectRawViewportTiming(const std::function<bool()>& canceled) {
+        return m_RawViewportGpuTiming.Collect(canceled);
+    }
     unsigned int GetOutputTexture() const { return m_OutputTexture; }
     unsigned int GetSourceTexture() const { return m_SourceTexture; }
     unsigned int GetCompareSourceTexture() const { return m_GraphSourceTexture != 0 ? m_GraphSourceTexture : m_SourceTexture; }
@@ -283,7 +384,22 @@ public:
 
     // Read final output pixels (usually for thumbnails)
     std::vector<unsigned char> GetOutputPixels(int& outW, int& outH);
+    // Authoritative export readback. This is intended for the persistent RAW
+    // worker: row bands are pipelined through a three-slot PBO ring so the UI
+    // never owns a full-frame glReadPixels stall or a full-raster GPU staging
+    // allocation.
+    std::vector<unsigned char> GetOutputPixelsTiledPbo(
+        int& outW,
+        int& outH,
+        int rowsPerTile = 256);
     std::vector<unsigned char> GetOutputPixels(int& outW, int& outH, int maxDimension);
+    std::vector<unsigned char> GetExternalTexturePixels(
+        unsigned int texture,
+        int width,
+        int height,
+        int& outW,
+        int& outH,
+        int maxDimension);
     std::vector<unsigned char> GetCachedGraphImagePixels(int nodeId, const std::string& socketId, int& outW, int& outH) const;
     std::vector<unsigned char> GetCachedGraphImagePixels(int nodeId, const std::string& socketId, int& outW, int& outH, int maxDimension) const;
     bool WasGraphImageCacheHit(int nodeId, const std::string& socketId) const;
@@ -317,6 +433,17 @@ public:
     const RawDevelopmentGraphScopeReadback& GetRawDevelopmentGraphScopeReadback() const {
         return m_RawDevelopmentGraphScopeReadback;
     }
+    void SetRawDevelopmentGradingScopeReadbackRequest(
+        RawDevelopmentGradingScopeSource source,
+        int maxDimension,
+        std::uint64_t generation,
+        std::string sourceKey,
+        bool includePixels = false);
+    bool PollRawDevelopmentGradingScopeReadback();
+    const RawDevelopmentGradingScopeReadback& GetRawDevelopmentGradingScopeReadback() const {
+        return m_RawDevelopmentGradingScopeReadback;
+    }
+    void ClearRawDevelopmentGradingScopeReadback();
     Stack::RawAutoStartPoint::RawAutoStartPointDiagnostics BuildRawDevelopmentStartPointDiagnostics(
         const std::string& sourceKey) const;
     const Stack::RawAutoBase::LocalSuggestionAnalysisImage& GetRawDevelopmentLocalSuggestionImage() const {
@@ -390,18 +517,26 @@ public:
         return true;
     }
     const std::string& GetLastRawRgbDenoiseError() const {
-        return m_LastRawRgbDenoiseError;
+        return m_RawRgbDenoiseState->error;
     }
+    bool ValidateRawRgbDenoiseProgramsForTesting();
+    bool ValidateRawNativeDenoiseHandoffForTesting();
 
     FullscreenQuad& GetQuad() { return m_Quad; }
 
 private:
+    friend class Stack::Renderer::GraphExecution::GraphExecutionRuntime;
+
     struct CachedGraphTexture {
+        // Coverage belongs to the cached pixels, not the last configured job.
+        Raw::ViewportRegion viewportRegion;
         unsigned int texture = 0;
         std::size_t fingerprint = 0;
         int width = 0;
         int height = 0;
         bool owned = false;
+        bool viewportNativeDependency = false;
+        bool viewportNativeDerived = false;
         std::uint64_t bytes = 0;
         std::uint64_t lastUseSerial = 0;
     };
@@ -430,6 +565,7 @@ private:
     struct CachedRawDevelopmentRecipeLayer {
         std::shared_ptr<LayerBase> layer;
         nlohmann::json defaultPayload = nlohmann::json::object();
+        nlohmann::json appliedPayload;
         std::string type;
     };
 
@@ -516,6 +652,21 @@ private:
     int m_SourceChannels;
     int m_PreviewMaxDimension = 0;
     bool m_RawDevelopmentAnalysisEnabled = true;
+    bool m_RawDevelopmentInteractivePreview = false;
+    int m_RawDevelopmentColorWarpMaskQualityLongEdge = 1024;
+    bool m_RawDevelopmentColorWarpRequireSpatialResult = false;
+    bool m_RawDevelopmentViewportValidationEnabled = true;
+    std::optional<Stack::Renderer::RawDevelopmentCache::Stage>
+        m_RawDevelopmentPreferredCacheInputStage;
+    bool m_RawDevelopmentGlobalExposureInteraction = false;
+    bool m_RawDevelopmentCachePrewarmActive = false;
+    Stack::Renderer::RawDevelopmentCache::Stage
+        m_RawDevelopmentCachePrewarmStage =
+            Stack::Renderer::RawDevelopmentCache::Stage::NeutralPlacement;
+    std::size_t m_RawDevelopmentCachePrewarmFingerprint = 0;
+    std::uint64_t m_RawDevelopmentCachePrewarmByteBudget = 0;
+    std::uint64_t m_RawDevelopmentCachePrewarmStoredBytes = 0;
+    bool m_RawDevelopmentCachePrewarmCompleted = false;
 
     unsigned int m_SourceTexture;   // The original loaded image
     unsigned int m_PingTexture;     // Ping FBO color attachment
@@ -530,6 +681,7 @@ private:
     unsigned int m_MaskProgram;
     unsigned int m_MaskCombineProgram;
     unsigned int m_MaskBlendProgram;
+    unsigned int m_RawGradientBlendProgram = 0;
     unsigned int m_MixProgram;
     unsigned int m_MaskUtilityProgram;
     unsigned int m_ImageToMaskProgram;
@@ -553,6 +705,9 @@ private:
     unsigned int m_AutoGainStatsProgram;
     unsigned int m_RawDevelopmentToneCurveProgram;
     unsigned int m_RawDevelopmentLocalRangeProgram;
+    unsigned int m_RawSpatialInitProgram = 0;
+    unsigned int m_RawSpatialFilterProgram = 0;
+    unsigned int m_RawSpatialApplyProgram = 0;
     unsigned int m_RawDevelopmentLocalRangeOverlayProgram;
     unsigned int m_RawDevelopmentLocalRangeQualifierProgram;
     unsigned int m_RawDevelopmentRgbDenoiseConvertProgram;
@@ -560,6 +715,22 @@ private:
     unsigned int m_RawDevelopmentRgbDenoiseBandProgram;
     unsigned int m_RawDevelopmentRgbDenoiseReconstructProgram;
     unsigned int m_RawDevelopmentExposureProgram;
+    unsigned int m_RawDevelopmentColorWarpProgram;
+    unsigned int m_RawDevelopmentColorWarpProxyProgram;
+    unsigned int m_RawDevelopmentCropProgram;
+    struct RawDevelopmentColorWarpMaskCacheEntry {
+        std::size_t key = 0;
+        int width = 0;
+        int height = 0;
+        int layers = 0;
+        unsigned int gateTexture = 0;
+        unsigned int supportTexture = 0;
+        unsigned int boundaryTexture = 0;
+        unsigned int guideTexture = 0;
+        std::vector<std::string> pinIds;
+        std::uint64_t retainedBytes = 0;
+    };
+    RawDevelopmentColorWarpMaskCacheEntry m_RawDevelopmentColorWarpMaskCache;
     unsigned int m_RawDevelopmentLocalRangeSelectionBitsTexture = 0;
     unsigned int m_RawDevelopmentLocalRangeSelectionBitsInputTexture = 0;
     int m_RawDevelopmentLocalRangeSelectionBitsWidth = 0;
@@ -583,6 +754,43 @@ private:
         RawDevelopmentGraphScopeStage::None;
     int m_RawDevelopmentGraphScopeReadbackMaxDimension = 0;
     RawDevelopmentGraphScopeReadback m_RawDevelopmentGraphScopeReadback;
+    Stack::Renderer::RawZoneAreaRenderer m_RawZoneAreaRenderer;
+    bool m_RawZoneAreasFloatOutput = false;
+    RawDevelopmentGradingScopeSource m_RawDevelopmentGradingScopeSource =
+        RawDevelopmentGradingScopeSource::None;
+    int m_RawDevelopmentGradingScopeReadbackMaxDimension = 0;
+    std::uint64_t m_RawDevelopmentGradingScopeRequestGeneration = 0;
+    std::string m_RawDevelopmentGradingScopeRequestSourceKey;
+    RawDevelopmentGradingScopeReadback m_RawDevelopmentGradingScopeReadback;
+    RawGradingScopeGpu m_RawDevelopmentGradingScopeGpu;
+    bool m_RawDevelopmentGradingScopeIncludePixels = false;
+    std::uint64_t m_RawDevelopmentGradingScopeRequestRevision = 0;
+    struct RawDevelopmentGradingScopeReadbackSlot {
+        unsigned int pbo = 0;
+        unsigned int plotBuffer = 0;
+        bool gpuReduced = false;
+        bool includesPixels = false;
+        std::uint64_t requestRevision = 0;
+        GLsync fence = nullptr;
+        RawDevelopmentGradingScopeSource source =
+            RawDevelopmentGradingScopeSource::None;
+        std::string sourceKey;
+        std::string measurementDomain;
+        Raw::RawWorkingSpace workingSpace = Raw::RawWorkingSpace::LinearSrgbD65;
+        bool sceneLinear = false;
+        bool encodedSrgb = false;
+        std::uint64_t generation = 0;
+        int width = 0;
+        int height = 0;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        bool occupied = false;
+    };
+    std::array<RawDevelopmentGradingScopeReadbackSlot, 3>
+        m_RawDevelopmentGradingScopeReadbackSlots;
+    int m_RawDevelopmentGradingScopeNextReadbackSlot = 0;
+    std::chrono::steady_clock::time_point
+        m_RawDevelopmentGradingScopeLastIssueTime {};
     Stack::RawAutoBase::LocalSuggestionAnalysisImage m_RawDevelopmentLocalSuggestionImage;
     bool m_RawDevelopmentLocalRangeTargetSampleRequested = false;
     float m_RawDevelopmentLocalRangeTargetSampleRequestU = 0.0f;
@@ -628,9 +836,13 @@ private:
     GraphExecutionStats m_LastGraphExecutionStats;
     std::uint64_t m_RenderGeneration = 0;
     std::function<bool()> m_ShouldCancelRender;
-    std::string m_LastRawRgbDenoiseError;
-    std::string m_LastRawRgbDenoiseStatus;
     bool m_RawRgbDenoiseAsyncEnabled = false;
+    bool m_RawRgbDenoiseAsyncStartAllowed = true;
+    bool m_HasProvisionalRawRgbDenoiseOutput = false;
+    std::shared_ptr<RawRgbDenoiseState> m_DefaultRawRgbDenoiseState =
+        std::make_shared<RawRgbDenoiseState>();
+    std::shared_ptr<RawRgbDenoiseState> m_RawRgbDenoiseState =
+        m_DefaultRawRgbDenoiseState;
     std::size_t m_RestormerNeutralCacheFingerprint = 0;
     int m_RestormerNeutralCacheWidth = 0;
     int m_RestormerNeutralCacheHeight = 0;
@@ -640,13 +852,6 @@ private:
     int m_RestormerAppliedCacheWidth = 0;
     int m_RestormerAppliedCacheHeight = 0;
     std::shared_ptr<const std::vector<float>> m_RestormerAppliedCacheRgba;
-    std::future<RawRgbDenoiseAsyncResult> m_RestormerAsyncFuture;
-    bool m_RestormerAsyncPending = false;
-    std::size_t m_RestormerAsyncModelFingerprint = 0;
-    std::size_t m_RestormerAsyncApplicationFingerprint = 0;
-    std::shared_ptr<std::atomic<bool>> m_RestormerAsyncCancel;
-    std::size_t m_RestormerLastCompletedModelFingerprint = 0;
-    std::string m_RestormerLastCompletedError;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphImageCache;
     std::unordered_map<std::string, CachedGraphTexture> m_GraphMaskCache;
     std::unordered_map<std::string, CachedGraphScalar> m_GraphScalarCache;
@@ -660,10 +865,20 @@ private:
     std::unordered_map<std::string, CachedPointwiseProgram> m_PointwiseProgramCache;
     std::vector<GraphTransientTarget> m_GraphTransientTargets;
     std::uint64_t m_GraphResourceUseSerial = 0;
+    std::uint64_t m_RawDevelopStageCacheBudgetBytes =
+        512ull * 1024ull * 1024ull;
+    std::uint64_t m_GraphPersistentCacheBudgetBytes =
+        512ull * 1024ull * 1024ull;
+    std::uint64_t m_GraphTransientTargetBudgetBytes =
+        256ull * 1024ull * 1024ull;
     std::unordered_map<std::size_t, AutoGainSceneStats> m_AutoGainSceneStatsCache;
     std::unordered_map<int, PreLocalExposureSummary> m_PreLocalExposureSummaries;
     std::vector<ToneCurveAutoRewriteFeedback> m_ToneCurveAutoRewriteFeedback;
     std::unordered_map<int, Raw::RawGpuPipeline> m_RawPipelines;
+    std::unordered_map<std::string, std::shared_ptr<const Raw::RawImageData>> m_RawSharedSourceData;
+    std::pair<int, int> ResolveGraphNativeExtent(
+        const Stack::Renderer::GraphExecution::GraphExecutionContext& context,
+        int nodeId, const std::string& socketId) const;
     std::unordered_map<int, Raw::RawImageData> m_RawDataCache;
     std::unordered_map<int, std::string> m_RawDataCachePaths;
     std::unordered_map<int, Raw::RawImageData> m_RawPreviewDataCache;
@@ -699,6 +914,11 @@ private:
     unsigned int GetOrCreateLut3DTexture(const std::string& key, const ColorLut::Lut3DStage& stage, std::size_t fingerprint);
     void PruneInactiveLutTextureCache(const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext);
     CachedGraphTexture FindRawDevelopStageCacheEntry(const std::string& key, std::size_t fingerprint);
+    CachedGraphTexture FindRawViewportDenoiseInput(const std::string& key,
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe, bool& temporary);
+    void InvalidateRawDevelopStageCacheEntry(
+        const std::string& key,
+        std::size_t fingerprint);
     unsigned int CloneTextureForRawDevelopStageCache(unsigned int sourceTexture);
     void DeleteRawDevelopStageCacheEntry(CachedGraphTexture& entry);
     std::uint64_t RawDevelopStageCacheEntryBytes(const CachedGraphTexture& entry) const;
@@ -708,8 +928,12 @@ private:
         std::uint64_t currentTotalBytes,
         std::uint64_t maximumBytes,
         unsigned int protectedTexture = 0);
-    void StoreRawDevelopStageCacheEntry(const std::string& key, unsigned int texture, std::size_t fingerprint);
-    void InvalidateGraphCaches();
+    bool StoreRawDevelopStageCacheEntry(
+        const std::string& key,
+        unsigned int texture,
+        std::size_t fingerprint,
+        bool takeTextureOwnership = false);
+    void InvalidateGraphCaches(bool preserveRawDevelopStages = false);
     unsigned int AcquireGraphTransientTarget();
     void ReleaseGraphTransientTarget(unsigned int texture);
     bool PromoteGraphTransientTarget(unsigned int texture);
@@ -727,6 +951,11 @@ private:
         bool executionInspectionEnabled);
     void DestroyPointwiseProgramCache();
     unsigned int CreateGraphRenderTargetTexture() const;
+    std::uint64_t EstimateGraphTargetBytes(int width, int height) const;
+    void EnsureGraphFloat32Targets();
+    // Once a pipeline executes a layered RAW document, retain full float
+    // targets for its lifetime, including previews and cached copies.
+    bool m_GraphFloat32Targets = false;
     bool RenderIntoGraphTargetTextureImpl(
         unsigned int texture,
         const void* renderContext,
@@ -746,6 +975,11 @@ private:
         int cacheNodeId,
         const Raw::RawImageData& rawData,
         const std::string& sourceCacheKey);
+    unsigned int RenderRawPipelineWithTelemetry(
+        int pipelineId,
+        const Raw::RawImageData& raw,
+        const Raw::RawDevelopSettings& settings,
+        int previewMaxDimension);
     static int FindReferenceSourceNode(const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext, int nodeId);
     static HdrMergeInputContext ResolveHdrMergeInputContext(const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext, int sourceNodeId);
     static HdrMergeResolvedSettings ResolveHdrMergeSettings(
@@ -786,12 +1020,33 @@ private:
     GraphNodeRenderResult RenderRawDevelopmentGraphNode(
         const RenderGraphNode& node,
         std::size_t fingerprint);
+    bool RenderRawDevelopmentColorWarpStage(
+        GraphNodeRenderResult& result,
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe);
+    void ApplyRawViewportRegion(GraphNodeRenderResult& result,
+        const Stack::RawRecipe::RawDevelopmentRecipe& recipe, Raw::ViewportStage stage,
+        std::size_t upstreamFingerprint, int nodeId);
+    void RenderRawDevelopmentOutputCropStage(
+        GraphNodeRenderResult& result,
+        const Stack::RawRecipe::RawCropRotationRecipe& crop,
+        const std::string& cacheKey,
+        std::size_t fingerprint);
     GraphNodeRenderResult RenderRawDetailGraphNode(
         const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext,
         const RenderGraphNode& node,
         const std::string& socketId,
         const std::function<unsigned int(int, const std::string&)>& evalImage,
         const std::function<unsigned int(int, const std::string&)>& evalMask);
+    void CaptureRawLayerLocalScope(const Stack::Renderer::GraphExecution::GraphExecutionContext& context,
+        int operationId, unsigned int texture,
+        const std::function<unsigned int(int, const std::string&)>& evalMask);
+    GraphNodeRenderResult RenderRawOperation(
+        const Stack::Renderer::GraphExecution::GraphExecutionContext& context,
+        const RenderGraphNode& node,
+        const std::function<unsigned int(int, const std::string&)>& evalImage,
+        const std::function<unsigned int(int, const std::string&)>& evalMask);
+    GraphNodeRenderResult RenderRawSpatialLayer(const Stack::Renderer::GraphExecution::GraphExecutionContext& context,
+        const RenderGraphNode& node, unsigned int input);
     GraphNodeRenderResult RenderLayerGraphNode(
         const Stack::Renderer::GraphExecution::GraphExecutionContext& executionContext,
         const RenderGraphNode& node,
@@ -874,12 +1129,14 @@ private:
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         Raw::RawWorkingSpace workingSpace,
+        Raw::RawProcessingVersion processingVersion,
         std::size_t inputStageFingerprint,
         int maxSelectionDimension = 1536);
     unsigned int BuildRawDevelopmentLocalRangeTargetPreviewSelectionBits(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         Raw::RawWorkingSpace workingSpace,
+        Raw::RawProcessingVersion processingVersion,
         const RawLocalRangeTargetPreviewRequest& request);
     void ClearRawDevelopmentLocalRangeSelectionBits();
     void ClearRawDevelopmentLocalRangeTargetPreviewSelection();
@@ -901,14 +1158,27 @@ private:
         const std::string& measurementDomain,
         bool sceneLinearBeforeViewTransform,
         const std::string& controlSignalDomain = {});
+    bool IsRawDevelopmentGradingScopeRequested(
+        RawDevelopmentGradingScopeSource source) const;
+    void CaptureRawDevelopmentGradingScopeReadback(
+        RawDevelopmentGradingScopeSource source,
+        unsigned int texture,
+        int width,
+        int height,
+        const std::string& measurementDomain,
+        Raw::RawWorkingSpace workingSpace,
+        bool sceneLinear,
+        bool encodedSrgb);
+    void ReleaseRawDevelopmentGradingScopeReadbackResources();
     void CaptureRawDevelopmentLocalRangeGraphScopeReadback(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         int sourceWidth,
-        int sourceHeight);
+        int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight);
     void ClearRawDevelopmentLocalRangeOverlay();
     void ClearRawDevelopmentLocalRangeTargetSample();
-    RenderTextureStats ReadTextureStats(unsigned int texture, int width, int height, const char* context);
+    RenderTextureStats ReadTextureStats(unsigned int texture, int width, int height, const char* context,
+        bool linearRec2020 = false);
     Stack::RawAutoBase::LocalSuggestionAnalysisImage ReadLocalSuggestionAnalysisImage(
         unsigned int texture,
         int width,
@@ -919,6 +1189,7 @@ private:
         unsigned int texture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         Raw::RawWorkingSpace workingSpace,
+        Raw::RawProcessingVersion processingVersion,
         std::size_t inputStageFingerprint);
     AutoGainSceneStats ComputeAutoGainSceneStats(unsigned int inputTexture);
     Raw::RawDetailFusionSettings ResolveAutoGainEffectiveSettings(unsigned int inputTexture, const Raw::RawDetailFusionSettings& settings);
@@ -934,6 +1205,9 @@ private:
     bool RenderMaskUtility(unsigned int inputMask, const RenderGraphNode& node, unsigned int targetFBO);
     bool RenderImageToMask(unsigned int inputImage, const RenderGraphNode& node, unsigned int targetFBO);
     bool RenderMaskBlend(unsigned int originalTexture, unsigned int processedTexture, unsigned int maskTexture, unsigned int targetFBO);
+    unsigned int RenderRawGradientBlend(unsigned int originalTexture,
+        unsigned int processedTexture, const Stack::RawRecipe::RawGradientMask& mask,
+        unsigned int evReferenceTexture = 0, int evMode = 0, unsigned int coverageTexture = 0);
     bool RenderMixBlend(unsigned int textureA, unsigned int textureB, unsigned int factorTexture, float factor, RenderMixBlendMode mode, unsigned int targetFBO);
     bool RenderChannelSplit(unsigned int inputTexture, int channel, unsigned int targetFBO);
     bool RenderDataMath(unsigned int textureA, unsigned int textureB, bool hasA, bool hasB, bool scalarA, bool scalarB,
@@ -961,19 +1235,33 @@ private:
         unsigned int inputTexture,
         const Stack::RawRecipe::RawRgbDenoiseRecipe& settings,
         Raw::RawWorkingSpace workingSpace,
-        std::size_t neutralInputFingerprint);
+        std::size_t neutralInputFingerprint,
+        const Raw::Denoise::RawRgbNoiseModel& noiseModel,
+        const std::string& decompositionCacheKey,
+        int sourceWidth,
+        int sourceHeight,
+        const Stack::RawRecipe::RawDevelopmentRecipe* viewportRecipe = nullptr);
     unsigned int RenderRawDevelopmentExposure(
         unsigned int inputTexture,
-        float exposureEv);
+        float exposureEv,
+        const Stack::RawRecipe::RawColorCalibrationTransform* calibration = nullptr);
     unsigned int RenderRawDevelopmentLocalRange(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         Raw::RawWorkingSpace workingSpace,
-        std::size_t inputStageFingerprint);
+        Raw::RawProcessingVersion processingVersion,
+        std::size_t inputStageFingerprint, int sourceWidth = 0, int sourceHeight = 0);
+    void EnsureRawSpatialPrograms();
+    unsigned int RenderRawSpatialField(unsigned int input, float maximumScale, float edge,
+        Raw::RawWorkingSpace space, int sourceWidth, int sourceHeight,
+        const Stack::RawRecipe::DetailContrast* detail = nullptr);
+    unsigned int RenderRawSceneDetail(unsigned int input, const Stack::RawRecipe::DetailContrast& settings,
+        Raw::RawWorkingSpace space, int sourceWidth, int sourceHeight);
     unsigned int RenderRawDevelopmentLocalRangeOverlay(
         unsigned int inputTexture,
         const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
         Raw::RawWorkingSpace workingSpace,
+        Raw::RawProcessingVersion processingVersion,
         const std::string& overlayMode,
-        std::size_t inputStageFingerprint);
+        std::size_t inputStageFingerprint, int sourceWidth = 0, int sourceHeight = 0);
 };

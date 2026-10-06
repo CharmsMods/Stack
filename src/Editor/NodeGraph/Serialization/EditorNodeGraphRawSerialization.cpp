@@ -36,12 +36,16 @@ Raw::WhiteBalanceMode WhiteBalanceModeFromString(const std::string& value) {
 }
 
 std::string DemosaicMethodToString(Raw::DemosaicMethod method) {
+    if (method == Raw::DemosaicMethod::NearestNeighbor) return "NearestNeighbor";
+    if (method == Raw::DemosaicMethod::HamiltonAdams) return "HamiltonAdams";
     if (method == Raw::DemosaicMethod::MalvarHeCutler) return "MalvarHeCutler";
     return "Bilinear";
 }
 
 Raw::DemosaicMethod DemosaicMethodFromString(const std::string& value) {
-    if (value == "MalvarHeCutler" || value == "MHC") return Raw::DemosaicMethod::MalvarHeCutler;
+    if (value == "MalvarHeCutler") return Raw::DemosaicMethod::MalvarHeCutler;
+    if (value == "NearestNeighbor") return Raw::DemosaicMethod::NearestNeighbor;
+    if (value == "HamiltonAdams") return Raw::DemosaicMethod::HamiltonAdams;
     return Raw::DemosaicMethod::Bilinear;
 }
 
@@ -93,9 +97,9 @@ Raw::RawDebugView RawDebugViewFromString(const std::string& value) {
     if (value == "PostDenoiseMosaic") return Raw::RawDebugView::PostDenoiseMosaic;
     if (value == "HotPixelMask") return Raw::RawDebugView::HotPixelMask;
     if (value == "DenoiseDifference") return Raw::RawDebugView::DenoiseDifference;
-    if (value == "FalseColorMask" || value == "False Color Mask") return Raw::RawDebugView::FalseColorMask;
-    if (value == "DefringeMask" || value == "Defringe Mask") return Raw::RawDebugView::DefringeMask;
-    if (value == "HighlightEdgeMask" || value == "Highlight Edge Mask") return Raw::RawDebugView::HighlightEdgeMask;
+    if (value == "FalseColorMask") return Raw::RawDebugView::FalseColorMask;
+    if (value == "DefringeMask") return Raw::RawDebugView::DefringeMask;
+    if (value == "HighlightEdgeMask") return Raw::RawDebugView::HighlightEdgeMask;
     return Raw::RawDebugView::FinalOutput;
 }
 
@@ -109,7 +113,7 @@ std::string RawDetailFusionModeToString(Raw::RawDetailFusionMode mode) {
 }
 
 Raw::RawDetailFusionMode RawDetailFusionModeFromString(const std::string& value) {
-    if (value == "ManualMask" || value == "Manual Mask") return Raw::RawDetailFusionMode::ManualMask;
+    if (value == "ManualMask") return Raw::RawDetailFusionMode::ManualMask;
     if (value == "Hybrid") return Raw::RawDetailFusionMode::Hybrid;
     return Raw::RawDetailFusionMode::AutoAnalyze;
 }
@@ -136,20 +140,20 @@ std::string RawDetailFusionDebugViewToString(Raw::RawDetailFusionDebugView view)
 }
 
 Raw::RawDetailFusionDebugView RawDetailFusionDebugViewFromString(const std::string& value) {
-    if (value == "ExposureMap" || value == "Effective EV Map") return Raw::RawDetailFusionDebugView::ExposureMap;
-    if (value == "Confidence" || value == "Confidence Map") return Raw::RawDetailFusionDebugView::Confidence;
-    if (value == "HighlightSafety" || value == "Highlight Safety") return Raw::RawDetailFusionDebugView::HighlightSafety;
-    if (value == "ShadowProtection" || value == "Shadow / Noise Protection") return Raw::RawDetailFusionDebugView::ShadowProtection;
-    if (value == "SampleSelection" || value == "Sample Selection") return Raw::RawDetailFusionDebugView::SampleSelection;
-    if (value == "SmoothGradient" || value == "Smooth Gradient Protection") return Raw::RawDetailFusionDebugView::SmoothGradient;
-    if (value == "TrueEdge" || value == "True Edge Map") return Raw::RawDetailFusionDebugView::TrueEdge;
-    if (value == "TextureDetail" || value == "Texture Detail Map") return Raw::RawDetailFusionDebugView::TextureDetail;
-    if (value == "DebandRisk" || value == "Deband Risk") return Raw::RawDetailFusionDebugView::DebandRisk;
-    if (value == "AutoRange" || value == "Auto Range Map") return Raw::RawDetailFusionDebugView::AutoRange;
-    if (value == "NoiseFloorSnr" || value == "Noise Floor / SNR") return Raw::RawDetailFusionDebugView::NoiseFloorSnr;
-    if (value == "HighlightHeadroom" || value == "Highlight Headroom") return Raw::RawDetailFusionDebugView::HighlightHeadroom;
-    if (value == "ChannelSaturation" || value == "Channel Saturation") return Raw::RawDetailFusionDebugView::ChannelSaturation;
-    if (value == "RejectedDetail" || value == "Rejected Detail") return Raw::RawDetailFusionDebugView::RejectedDetail;
+    if (value == "ExposureMap") return Raw::RawDetailFusionDebugView::ExposureMap;
+    if (value == "Confidence") return Raw::RawDetailFusionDebugView::Confidence;
+    if (value == "HighlightSafety") return Raw::RawDetailFusionDebugView::HighlightSafety;
+    if (value == "ShadowProtection") return Raw::RawDetailFusionDebugView::ShadowProtection;
+    if (value == "SampleSelection") return Raw::RawDetailFusionDebugView::SampleSelection;
+    if (value == "SmoothGradient") return Raw::RawDetailFusionDebugView::SmoothGradient;
+    if (value == "TrueEdge") return Raw::RawDetailFusionDebugView::TrueEdge;
+    if (value == "TextureDetail") return Raw::RawDetailFusionDebugView::TextureDetail;
+    if (value == "DebandRisk") return Raw::RawDetailFusionDebugView::DebandRisk;
+    if (value == "AutoRange") return Raw::RawDetailFusionDebugView::AutoRange;
+    if (value == "NoiseFloorSnr") return Raw::RawDetailFusionDebugView::NoiseFloorSnr;
+    if (value == "HighlightHeadroom") return Raw::RawDetailFusionDebugView::HighlightHeadroom;
+    if (value == "ChannelSaturation") return Raw::RawDetailFusionDebugView::ChannelSaturation;
+    if (value == "RejectedDetail") return Raw::RawDetailFusionDebugView::RejectedDetail;
     return Raw::RawDetailFusionDebugView::FinalImage;
 }
 
@@ -169,10 +173,10 @@ std::string HdrMergeDebugViewToString(Raw::HdrMergeDebugView view) {
 Raw::HdrMergeDebugView HdrMergeDebugViewFromString(const std::string& value) {
     if (value == "Contribution") return Raw::HdrMergeDebugView::Contribution;
     if (value == "Clipping") return Raw::HdrMergeDebugView::Clipping;
-    if (value == "NoiseLimited" || value == "Noise / Black Limited") return Raw::HdrMergeDebugView::NoiseLimited;
-    if (value == "AlignmentConfidence" || value == "Alignment Confidence") return Raw::HdrMergeDebugView::AlignmentConfidence;
-    if (value == "MotionMask" || value == "Motion Mask") return Raw::HdrMergeDebugView::MotionMask;
-    if (value == "RejectedSamples" || value == "Rejected Samples") return Raw::HdrMergeDebugView::RejectedSamples;
+    if (value == "NoiseLimited") return Raw::HdrMergeDebugView::NoiseLimited;
+    if (value == "AlignmentConfidence") return Raw::HdrMergeDebugView::AlignmentConfidence;
+    if (value == "MotionMask") return Raw::HdrMergeDebugView::MotionMask;
+    if (value == "RejectedSamples") return Raw::HdrMergeDebugView::RejectedSamples;
     return Raw::HdrMergeDebugView::FinalImage;
 }
 
@@ -187,7 +191,7 @@ std::string HdrMergeAlignmentModeToString(Raw::HdrMergeAlignmentMode mode) {
 
 Raw::HdrMergeAlignmentMode HdrMergeAlignmentModeFromString(const std::string& value) {
     if (value == "Translation") return Raw::HdrMergeAlignmentMode::Translation;
-    if (value == "WideTranslation" || value == "Wide Translation" || value == "Handheld") {
+    if (value == "WideTranslation") {
         return Raw::HdrMergeAlignmentMode::WideTranslation;
     }
     return Raw::HdrMergeAlignmentMode::Off;
@@ -218,9 +222,9 @@ std::string HdrMergeReferenceModeToString(Raw::HdrMergeReferenceMode mode) {
 }
 
 Raw::HdrMergeReferenceMode HdrMergeReferenceModeFromString(const std::string& value) {
-    if (value == "Frame1" || value == "Frame 1") return Raw::HdrMergeReferenceMode::Frame1;
-    if (value == "Frame2" || value == "Frame 2") return Raw::HdrMergeReferenceMode::Frame2;
-    if (value == "Frame3" || value == "Frame 3") return Raw::HdrMergeReferenceMode::Frame3;
+    if (value == "Frame1") return Raw::HdrMergeReferenceMode::Frame1;
+    if (value == "Frame2") return Raw::HdrMergeReferenceMode::Frame2;
+    if (value == "Frame3") return Raw::HdrMergeReferenceMode::Frame3;
     return Raw::HdrMergeReferenceMode::Auto;
 }
 
@@ -251,7 +255,7 @@ std::string HdrMergeMotionPriorityToString(Raw::HdrMergeMotionPriority mode) {
 }
 
 Raw::HdrMergeMotionPriority HdrMergeMotionPriorityFromString(const std::string& value) {
-    if (value == "AverageCleanAreas" || value == "Average Clean Areas") {
+    if (value == "AverageCleanAreas") {
         return Raw::HdrMergeMotionPriority::AverageCleanAreas;
     }
     return Raw::HdrMergeMotionPriority::PreserveReference;
@@ -268,8 +272,8 @@ std::string RawPixelLayoutToString(Raw::RawPixelLayout layout) {
 }
 
 Raw::RawPixelLayout RawPixelLayoutFromString(const std::string& value) {
-    if (value == "MosaicBayer" || value == "Mosaic RAW") return Raw::RawPixelLayout::MosaicBayer;
-    if (value == "LinearRgb" || value == "Linear RGB") return Raw::RawPixelLayout::LinearRgb;
+    if (value == "MosaicBayer") return Raw::RawPixelLayout::MosaicBayer;
+    if (value == "LinearRgb") return Raw::RawPixelLayout::LinearRgb;
     return Raw::RawPixelLayout::Unknown;
 }
 
@@ -301,15 +305,32 @@ std::string RawCameraTransformSourceToString(Raw::RawCameraTransformSource sourc
 }
 
 Raw::RawCameraTransformSource RawCameraTransformSourceFromString(const std::string& value) {
-    if (value == "LibRawRgbCam" || value == "LibRaw rgb_cam") return Raw::RawCameraTransformSource::LibRawRgbCam;
-    if (value == "DngAuto" || value == "DNG Auto") return Raw::RawCameraTransformSource::DngAuto;
-    if (value == "DngForwardMatrix1" || value == "DNG ForwardMatrix 1") return Raw::RawCameraTransformSource::DngForwardMatrix1;
-    if (value == "DngForwardMatrix2" || value == "DNG ForwardMatrix 2") return Raw::RawCameraTransformSource::DngForwardMatrix2;
-    if (value == "DngColorMatrixInverse" || value == "DNG ColorMatrix inverse") return Raw::RawCameraTransformSource::DngColorMatrixInverse;
+    if (value == "LibRawRgbCam") return Raw::RawCameraTransformSource::LibRawRgbCam;
+    if (value == "DngAuto") return Raw::RawCameraTransformSource::DngAuto;
+    if (value == "DngForwardMatrix1") return Raw::RawCameraTransformSource::DngForwardMatrix1;
+    if (value == "DngForwardMatrix2") return Raw::RawCameraTransformSource::DngForwardMatrix2;
+    if (value == "DngColorMatrixInverse") return Raw::RawCameraTransformSource::DngColorMatrixInverse;
     return Raw::RawCameraTransformSource::DngAuto;
 }
 
 nlohmann::json SerializeRawMetadata(const Raw::RawMetadata& metadata) {
+    nlohmann::json gainMaps = nlohmann::json::array();
+    for (const Raw::DngGainMapOpcode& map : metadata.dngGainMaps) {
+        gainMaps.push_back({
+            { "top", map.top }, { "left", map.left },
+            { "bottom", map.bottom }, { "right", map.right },
+            { "plane", map.plane }, { "planes", map.planes },
+            { "rowPitch", map.rowPitch }, { "colPitch", map.colPitch },
+            { "mapPointsV", map.mapPointsV },
+            { "mapPointsH", map.mapPointsH },
+            { "mapPlanes", map.mapPlanes },
+            { "mapSpacingV", map.mapSpacingV },
+            { "mapSpacingH", map.mapSpacingH },
+            { "mapOriginV", map.mapOriginV },
+            { "mapOriginH", map.mapOriginH },
+            { "gains", map.gains }
+        });
+    }
     return {
         { "sourcePath", metadata.sourcePath },
         { "cameraMake", metadata.cameraMake },
@@ -381,6 +402,7 @@ nlohmann::json SerializeRawMetadata(const Raw::RawMetadata& metadata) {
         { "dngBaselineExposure", metadata.dngBaselineExposure },
         { "hasDngBaselineExposure", metadata.hasDngBaselineExposure },
         { "dngGainMapCount", metadata.dngGainMapCount },
+        { "dngGainMaps", std::move(gainMaps) },
         { "dngUnsupportedOpcodeCount", metadata.dngUnsupportedOpcodeCount },
         { "uploadFormat", metadata.uploadFormat },
         { "warnings", metadata.warnings },
@@ -485,15 +507,42 @@ Raw::RawMetadata DeserializeRawMetadata(const nlohmann::json& value) {
             if (warning.is_string()) metadata.warnings.push_back(warning.get<std::string>());
         }
     }
+    const nlohmann::json gainMaps = value.value("dngGainMaps", nlohmann::json::array());
+    if (gainMaps.is_array()) {
+        for (const nlohmann::json& item : gainMaps) {
+            if (!item.is_object()) continue;
+            Raw::DngGainMapOpcode map;
+            map.top = item.value("top", 0);
+            map.left = item.value("left", 0);
+            map.bottom = item.value("bottom", 0);
+            map.right = item.value("right", 0);
+            map.plane = item.value("plane", 0);
+            map.planes = item.value("planes", 1);
+            map.rowPitch = item.value("rowPitch", 1);
+            map.colPitch = item.value("colPitch", 1);
+            map.mapPointsV = item.value("mapPointsV", 0);
+            map.mapPointsH = item.value("mapPointsH", 0);
+            map.mapPlanes = item.value("mapPlanes", 1);
+            map.mapSpacingV = item.value("mapSpacingV", 0.0);
+            map.mapSpacingH = item.value("mapSpacingH", 0.0);
+            map.mapOriginV = item.value("mapOriginV", 0.0);
+            map.mapOriginH = item.value("mapOriginH", 0.0);
+            const nlohmann::json gains = item.value("gains", nlohmann::json::array());
+            if (gains.is_array()) {
+                for (const nlohmann::json& gain : gains) {
+                    if (gain.is_number()) map.gains.push_back(gain.get<float>());
+                }
+            }
+            metadata.dngGainMaps.push_back(std::move(map));
+        }
+        metadata.dngGainMapCount = static_cast<int>(metadata.dngGainMaps.size());
+    }
     return metadata;
 }
 
 nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
     return {
-        { "processingVersion",
-            settings.processingVersion == Raw::RawProcessingVersion::TruthfulV1
-                ? "TruthfulV1"
-                : "LegacyV1" },
+        { "processingVersion", "TruthfulV2" },
         { "workingSpace",
             settings.workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
                 ? "LinearRec2020D65"
@@ -532,7 +581,7 @@ nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
             settings.mosaicDenoise.mode ==
                     Raw::RawMosaicDenoiseMode::DngNoiseProfile
                 ? "DngNoiseProfileV1"
-                : "LegacyFixedThreshold" },
+                : "FixedThreshold" },
         { "mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression },
         { "mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold },
         { "mosaicDenoiseLumaStrength", settings.mosaicDenoise.lumaStrength },
@@ -546,10 +595,7 @@ nlohmann::json SerializeRawSettings(const Raw::RawDevelopSettings& settings) {
 Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     Raw::RawDevelopSettings settings;
     if (!value.is_object()) return settings;
-    settings.processingVersion =
-        value.value("processingVersion", std::string("LegacyV1")) == "TruthfulV1"
-        ? Raw::RawProcessingVersion::TruthfulV1
-        : Raw::RawProcessingVersion::LegacyV1;
+    settings.processingVersion = Raw::RawProcessingVersion::TruthfulV2;
     settings.workingSpace =
         value.value("workingSpace", std::string("LinearSrgbD65")) == "LinearRec2020D65"
         ? Raw::RawWorkingSpace::LinearRec2020D65
@@ -571,9 +617,6 @@ Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     settings.cameraTransformEnabled = value.value("cameraTransformEnabled", settings.cameraTransformEnabled);
     settings.cameraTransformSource = RawCameraTransformSourceFromString(value.value("cameraTransformSource", std::string("DngAuto")));
     settings.debugView = RawDebugViewFromString(value.value("debugView", std::string("FinalOutput")));
-    if (value.value("debugShowNormalizedMosaic", false)) {
-        settings.debugView = Raw::RawDebugView::NormalizedMosaic;
-    }
     settings.debugBypassCameraTransform = value.value("debugBypassCameraTransform", settings.debugBypassCameraTransform);
     settings.debugTransposeCameraMatrix = value.value("debugTransposeCameraMatrix", settings.debugTransposeCameraMatrix);
     settings.rotationDegrees = value.value("rotationDegrees", settings.rotationDegrees);
@@ -588,14 +631,12 @@ Raw::RawDevelopSettings DeserializeRawSettings(const nlohmann::json& value) {
     settings.lateralRedCyan = value.value("lateralRedCyan", settings.lateralRedCyan);
     settings.lateralBlueYellow = value.value("lateralBlueYellow", settings.lateralBlueYellow);
     settings.mosaicDenoise.enabled = value.value("mosaicDenoiseEnabled", settings.mosaicDenoise.enabled);
-    // An absent mode identifies a graph authored before the noise-profile
-    // implementation and must retain its original fixed-threshold pixels.
     settings.mosaicDenoise.mode =
         value.value(
             "mosaicDenoiseMode",
-            std::string("LegacyFixedThreshold")) == "DngNoiseProfileV1"
+            std::string("DngNoiseProfileV1")) == "DngNoiseProfileV1"
         ? Raw::RawMosaicDenoiseMode::DngNoiseProfile
-        : Raw::RawMosaicDenoiseMode::LegacyFixedThreshold;
+        : Raw::RawMosaicDenoiseMode::FixedThreshold;
     settings.mosaicDenoise.hotPixelSuppression = value.value("mosaicDenoiseHotPixelSuppression", settings.mosaicDenoise.hotPixelSuppression);
     settings.mosaicDenoise.hotPixelThreshold = value.value("mosaicDenoiseHotPixelThreshold", settings.mosaicDenoise.hotPixelThreshold);
     settings.mosaicDenoise.lumaStrength = value.value("mosaicDenoiseLumaStrength", settings.mosaicDenoise.lumaStrength);

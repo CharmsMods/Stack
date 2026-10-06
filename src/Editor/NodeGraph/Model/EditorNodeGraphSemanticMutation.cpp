@@ -1,3 +1,4 @@
+#include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"

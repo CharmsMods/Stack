@@ -125,116 +125,54 @@ GraphEvaluationSchedule BuildGraphEvaluationSchedule(
         return schedule;
     }
 
-    std::vector<ScheduledGraphOutput> pending;
-    pending.reserve(graph.nodes.size());
-    pending.push_back(root);
-    pending.insert(
-        pending.end(),
-        extraRoots.begin(),
-        extraRoots.end());
-
-    std::unordered_set<NodeSocketKey, NodeSocketKeyHash> requiredOutputKeys;
-    requiredOutputKeys.reserve(graph.links.size() + pending.size());
-    std::unordered_set<int> expandedNodes;
-    expandedNodes.reserve(graph.nodes.size());
-    std::unordered_map<int, std::vector<std::string>> outputsByNode;
-    outputsByNode.reserve(graph.nodes.size());
-
-    for (std::size_t index = 0; index < pending.size(); ++index) {
-        ScheduledGraphOutput request = std::move(pending[index]);
-        if (topology.nodes.count(request.nodeId) == 0) {
-            schedule.error =
-                "The requested render output does not exist in the graph.";
+    // Schedule output sockets, not whole nodes. An earlier output can feed
+    // a mask for a later output of the same operation without feedback.
+    std::vector<ScheduledGraphOutput> pending{root};
+    pending.insert(pending.end(), extraRoots.begin(), extraRoots.end());
+    std::unordered_map<NodeSocketKey, std::size_t, NodeSocketKeyHash> indices;
+    std::vector<ScheduledGraphOutput> outputs;
+    std::vector<std::vector<std::size_t>> dependencies;
+    const auto add = [&](const ScheduledGraphOutput& output) {
+        const NodeSocketKey key{output.nodeId, output.socketId};
+        const auto inserted = indices.emplace(key, outputs.size());
+        if (inserted.second) { outputs.push_back(output); dependencies.emplace_back(); }
+        return inserted.first->second;
+    };
+    for (const auto& output : pending) add(output);
+    for (std::size_t i = 0; i < outputs.size(); ++i) {
+        const auto request = outputs[i];
+        const auto node = topology.nodes.find(request.nodeId);
+        if (node == topology.nodes.end()) {
+            schedule.error = "The requested render output does not exist in the graph.";
             return schedule;
         }
-
-        NodeSocketKey key{ request.nodeId, request.socketId };
-        if (requiredOutputKeys.insert(key).second) {
-            outputsByNode[request.nodeId].push_back(
-                std::move(request.socketId));
-        }
-        if (!expandedNodes.insert(request.nodeId).second) {
-            continue;
-        }
-
-        const auto inputIt = topology.inputsByNode.find(request.nodeId);
-        if (inputIt == topology.inputsByNode.end()) {
-            continue;
-        }
-        for (const RenderGraphLink* input : inputIt->second) {
-            pending.push_back(
-                ScheduledGraphOutput{
-                    input->fromNodeId,
-                    input->fromSocketId
-                });
+        const auto inputs = topology.inputsByNode.find(request.nodeId);
+        if (inputs == topology.inputsByNode.end()) continue;
+        for (const auto* input : inputs->second) {
+            if (!Stack::GraphModel::OutputDependsOnInput(node->second->outputDependencies,
+                    request.socketId, input->toSocketId)) continue;
+            const auto upstream = add({input->fromNodeId, input->fromSocketId});
+            dependencies[i].push_back(upstream);
         }
     }
-
-    std::unordered_map<int, std::size_t> indegree;
-    std::unordered_map<int, std::vector<int>> outgoing;
-    indegree.reserve(expandedNodes.size());
-    outgoing.reserve(expandedNodes.size());
-    for (int requiredNodeId : expandedNodes) {
-        indegree.emplace(requiredNodeId, 0u);
-        outgoing.emplace(requiredNodeId, std::vector<int>{});
+    std::vector<std::size_t> indegree(outputs.size(), 0);
+    std::vector<std::vector<std::size_t>> outgoing(outputs.size());
+    std::vector<std::size_t> ready;
+    for (std::size_t i = 0; i < outputs.size(); ++i) {
+        indegree[i] = dependencies[i].size();
+        for (auto upstream : dependencies[i]) outgoing[upstream].push_back(i);
+        if (indegree[i] == 0) ready.push_back(i);
     }
-    for (int requiredNodeId : expandedNodes) {
-        const auto inputIt = topology.inputsByNode.find(requiredNodeId);
-        if (inputIt == topology.inputsByNode.end()) {
-            continue;
-        }
-        for (const RenderGraphLink* input : inputIt->second) {
-            if (expandedNodes.count(input->fromNodeId) == 0) {
-                continue;
-            }
-            outgoing[input->fromNodeId].push_back(requiredNodeId);
-            ++indegree[requiredNodeId];
-        }
+    for (std::size_t i = 0; i < ready.size(); ++i) {
+        const auto current = ready[i];
+        schedule.outputs.push_back(outputs[current]);
+        for (auto downstream : outgoing[current])
+            if (--indegree[downstream] == 0) ready.push_back(downstream);
     }
-
-    std::vector<int> ready;
-    ready.reserve(expandedNodes.size());
-    for (const RenderGraphNode& node : graph.nodes) {
-        const auto degreeIt = indegree.find(node.nodeId);
-        if (degreeIt != indegree.end() && degreeIt->second == 0u) {
-            ready.push_back(node.nodeId);
-        }
-    }
-
-    std::vector<int> orderedNodes;
-    orderedNodes.reserve(expandedNodes.size());
-    for (std::size_t index = 0; index < ready.size(); ++index) {
-        const int currentNodeId = ready[index];
-        orderedNodes.push_back(currentNodeId);
-        for (int downstreamNodeId : outgoing[currentNodeId]) {
-            auto downstreamDegree = indegree.find(downstreamNodeId);
-            if (downstreamDegree != indegree.end() &&
-                downstreamDegree->second > 0u &&
-                --downstreamDegree->second == 0u) {
-                ready.push_back(downstreamNodeId);
-            }
-        }
-    }
-
-    if (orderedNodes.size() != expandedNodes.size()) {
-        schedule.error =
-            "The render graph contains a cycle in the requested output path.";
+    if (schedule.outputs.size() != outputs.size()) {
+        schedule.outputs.clear();
+        schedule.error = "The render graph contains a cycle in the requested output path.";
         return schedule;
-    }
-
-    schedule.outputs.reserve(requiredOutputKeys.size());
-    for (int orderedNodeId : orderedNodes) {
-        const auto outputIt = outputsByNode.find(orderedNodeId);
-        if (outputIt == outputsByNode.end()) {
-            continue;
-        }
-        for (const std::string& outputSocketId : outputIt->second) {
-            schedule.outputs.push_back(
-                ScheduledGraphOutput{
-                    orderedNodeId,
-                    outputSocketId
-                });
-        }
     }
     schedule.valid = true;
     return schedule;

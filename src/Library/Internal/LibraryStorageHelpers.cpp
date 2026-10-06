@@ -85,14 +85,7 @@ bool IsSupportedAssetExtension(const std::filesystem::path& path) {
 }
 
 bool IsSupportedProjectExtension(const std::filesystem::path& path) {
-    std::string extension = path.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
-        return static_cast<char>(std::tolower(value));
-    });
-    if (extension == ".stack") return true;
-    if (extension != ".stackbundle") return false;
-    std::error_code error;
-    return std::filesystem::is_directory(path, error);
+    return Stack::Project::IsDirectoryProjectBundle(path);
 }
 
 bool IsSupportedAssetMetadataExtension(const std::filesystem::path& path) {
@@ -102,7 +95,7 @@ bool IsSupportedAssetMetadataExtension(const std::filesystem::path& path) {
 
 std::string DefaultProjectExtensionForKind(const std::string& projectKind) {
     (void)projectKind;
-    return ".stack";
+    return {};
 }
 
 std::string EnsureProjectFileNameForKind(
@@ -110,12 +103,13 @@ std::string EnsureProjectFileNameForKind(
     const std::string& fallbackStem,
     const std::string& projectKind) {
 
-    std::filesystem::path resolved = fileName.empty() ? std::filesystem::path(fallbackStem) : std::filesystem::path(fileName);
-    if (!IsSupportedProjectExtension(resolved)) {
-        resolved = resolved.stem().string() + DefaultProjectExtensionForKind(projectKind);
-    }
-
-    return resolved.filename().string();
+    (void)projectKind;
+    const std::filesystem::path requested = fileName.empty()
+        ? std::filesystem::path(fallbackStem)
+        : std::filesystem::path(fileName);
+    return SanitizeFileStem(requested.stem().string().empty()
+        ? requested.filename().string()
+        : requested.stem().string());
 }
 
 std::string EnsureProjectFileName(const std::string& fileName, const std::string& fallbackName) {
@@ -286,54 +280,6 @@ bool WriteFileBytes(const std::filesystem::path& path, const std::vector<unsigne
     }
 
     return file.good();
-}
-
-bool LoadLegacyProjectDocument(
-    const std::filesystem::path& path,
-    StackFormat::ProjectDocument& outDocument,
-    const StackFormat::ProjectLoadOptions& options) {
-
-    try {
-        std::ifstream file(path, std::ios::binary);
-        if (!file.is_open()) return false;
-
-        StackFormat::json root = StackFormat::json::parse(file);
-        outDocument.metadata.projectKind = StackFormat::kEditorProjectKind;
-        outDocument.metadata.projectName = root.value("name", "Untitled Project");
-        outDocument.metadata.timestamp = root.value("timestamp", "Unknown");
-        outDocument.metadata.sourceWidth = root.value("width", 0);
-        outDocument.metadata.sourceHeight = root.value("height", 0);
-
-        if (options.includeThumbnail) {
-            const std::string thumbnailB64 = root.value("thumbnail", "");
-            if (!thumbnailB64.empty()) {
-                outDocument.thumbnailBytes = Utils::Base64Decode(thumbnailB64);
-            } else {
-                outDocument.thumbnailBytes.clear();
-            }
-        } else {
-            outDocument.thumbnailBytes.clear();
-        }
-
-        if (options.includeSourceImage) {
-            const std::string sourceB64 = root.value("source", "");
-            if (!sourceB64.empty()) {
-                outDocument.sourceImageBytes = Utils::Base64Decode(sourceB64);
-            } else {
-                outDocument.sourceImageBytes.clear();
-            }
-        } else {
-            outDocument.sourceImageBytes.clear();
-        }
-
-        outDocument.pipelineData = options.includePipelineData
-            ? root.value("pipeline", StackFormat::json::array())
-            : StackFormat::json();
-
-        return true;
-    } catch (...) {
-        return false;
-    }
 }
 
 std::vector<unsigned char> DecodeDataUrl(const std::string& dataUrl) {

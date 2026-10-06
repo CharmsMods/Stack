@@ -34,6 +34,7 @@ void(APIENTRY* glUniformMatrix4fv_)(GLint, GLsizei, GLboolean, const GLfloat*) =
 void(APIENTRY* glGenVertexArrays_)(GLsizei, GLuint*) = nullptr;
 void(APIENTRY* glDeleteVertexArrays_)(GLsizei, const GLuint*) = nullptr;
 void(APIENTRY* glBindVertexArray_)(GLuint) = nullptr;
+void(APIENTRY* glBindSampler_)(GLuint, GLuint) = nullptr;
 
 void(APIENTRY* glGenBuffers_)(GLsizei, GLuint*) = nullptr;
 void(APIENTRY* glDeleteBuffers_)(GLsizei, const GLuint*) = nullptr;
@@ -57,12 +58,18 @@ void(APIENTRY* glActiveTexture_)(GLenum) = nullptr;
 void(APIENTRY* glTexStorage2D_)(GLenum, GLsizei, GLenum, GLsizei, GLsizei) = nullptr;
 void(APIENTRY* glTexStorage3D_)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLsizei) = nullptr;
 void(APIENTRY* glTexSubImage3D_)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void*) = nullptr;
+void(APIENTRY* glGenerateMipmap_)(GLenum) = nullptr;
 void(APIENTRY* glBindImageTexture_)(GLuint, GLuint, GLint, GLboolean, GLint, GLenum, GLenum) = nullptr;
 void(APIENTRY* glGetIntegeri_v_)(GLenum, GLuint, GLint*) = nullptr;
 void(APIENTRY* glDrawBuffers_)(GLsizei, const GLenum*) = nullptr;
 
 void(APIENTRY* glDispatchCompute_)(GLuint, GLuint, GLuint) = nullptr;
 void(APIENTRY* glMemoryBarrier_)(GLbitfield) = nullptr;
+void(APIENTRY* glGenQueries_)(GLsizei, GLuint*) = nullptr;
+void(APIENTRY* glDeleteQueries_)(GLsizei, const GLuint*) = nullptr;
+void(APIENTRY* glQueryCounter_)(GLuint, GLenum) = nullptr;
+void(APIENTRY* glGetQueryObjectiv_)(GLuint, GLenum, GLint*) = nullptr;
+void(APIENTRY* glGetQueryObjectui64v_)(GLuint, GLenum, GLuint64*) = nullptr;
 GLsync(APIENTRY* glFenceSync_)(GLenum, GLbitfield) = nullptr;
 GLenum(APIENTRY* glClientWaitSync_)(GLsync, GLbitfield, GLuint64) = nullptr;
 void(APIENTRY* glDeleteSync_)(GLsync) = nullptr;
@@ -110,6 +117,7 @@ bool LoadGLFunctions() {
     LOAD(glGenVertexArrays_, "glGenVertexArrays");
     LOAD(glDeleteVertexArrays_, "glDeleteVertexArrays");
     LOAD(glBindVertexArray_, "glBindVertexArray");
+    LOAD(glBindSampler_, "glBindSampler");
 
     LOAD(glGenBuffers_, "glGenBuffers");
     LOAD(glDeleteBuffers_, "glDeleteBuffers");
@@ -133,12 +141,18 @@ bool LoadGLFunctions() {
     LOAD(glTexStorage2D_, "glTexStorage2D");
     LOAD(glTexStorage3D_, "glTexStorage3D");
     LOAD(glTexSubImage3D_, "glTexSubImage3D");
+    LOAD(glGenerateMipmap_, "glGenerateMipmap");
     LOAD(glBindImageTexture_, "glBindImageTexture");
     LOAD(glGetIntegeri_v_, "glGetIntegeri_v");
     LOAD(glDrawBuffers_, "glDrawBuffers");
 
     LOAD(glDispatchCompute_, "glDispatchCompute");
     LOAD(glMemoryBarrier_, "glMemoryBarrier");
+    LOAD(glGenQueries_, "glGenQueries");
+    LOAD(glDeleteQueries_, "glDeleteQueries");
+    LOAD(glQueryCounter_, "glQueryCounter");
+    LOAD(glGetQueryObjectiv_, "glGetQueryObjectiv");
+    LOAD(glGetQueryObjectui64v_, "glGetQueryObjectui64v");
     LOAD(glFenceSync_, "glFenceSync");
     LOAD(glClientWaitSync_, "glClientWaitSync");
     LOAD(glDeleteSync_, "glDeleteSync");

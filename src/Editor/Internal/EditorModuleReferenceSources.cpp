@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Project/GraphImagePayload.h"
 
 #include "Raw/RawImageData.h"
 #include "Utils/HashUtils.h"
@@ -74,58 +75,12 @@ int ResolveRawDevelopOrientation(const Raw::RawMetadata& metadata, const Raw::Ra
 } // namespace
 
 SharedPixelBuffer EditorModule::EnsureSharedImagePixels(const EditorNodeGraph::ImagePayload& payload) const {
-    const auto payloadIsComplete = [&](std::size_t availableBytes) {
-        return Stack::PixelBuffer::HasCompletePixelBuffer(
-            availableBytes,
-            payload.width,
-            payload.height,
-            payload.channels);
-    };
-    if (payload.width <= 0 || payload.height <= 0 ||
-        !Stack::PixelBuffer::IsSupportedInterleavedChannelCount(payload.channels)) {
-        payload.sharedPixels.reset();
-        payload.pixelsFingerprint = 0;
-        return {};
-    }
-
-    if (payload.pixels.empty()) {
-        if (!payload.sharedPixels || payload.sharedPixels->empty() ||
-            !payloadIsComplete(payload.sharedPixels->size())) {
-            payload.sharedPixels.reset();
-            payload.pixelsFingerprint = 0;
-            return {};
-        }
-        if (payload.pixelsFingerprint == 0) {
-            payload.pixelsFingerprint = StackHash::HashBytes(*payload.sharedPixels);
-        }
-        return MakeSharedPixelBufferAlias(payload.sharedPixels, payload.pixelsFingerprint);
-    }
-
-    if (!payloadIsComplete(payload.pixels.size())) {
-        payload.sharedPixels.reset();
-        payload.pixelsFingerprint = 0;
-        return {};
-    }
-    if (!payload.sharedPixels || payload.sharedPixels->size() != payload.pixels.size()) {
-        payload.pixelsFingerprint = StackHash::HashBytes(payload.pixels);
-        payload.sharedPixels = std::make_shared<std::vector<unsigned char>>(payload.pixels);
-    } else if (payload.pixelsFingerprint == 0) {
-        payload.pixelsFingerprint = StackHash::HashBytes(*payload.sharedPixels);
-    }
-
-    return MakeSharedPixelBufferAlias(payload.sharedPixels, payload.pixelsFingerprint);
+    return Stack::Project::EnsureSharedImagePixels(payload);
 }
 
 RenderGraphImagePayload EditorModule::BuildRenderImagePayload(const EditorNodeGraph::ImagePayload& payload) const {
-    RenderGraphImagePayload renderImage;
-    renderImage.pixels = EnsureSharedImagePixels(payload);
-    renderImage.width = payload.width;
-    renderImage.height = payload.height;
-    renderImage.channels = payload.channels;
-    renderImage.sourceDescriptor = payload.sourceColorMetadata.descriptor;
-    return renderImage;
+    return Stack::Project::BuildRenderImagePayload(payload);
 }
-
 SharedPixelBuffer EditorModule::MakeSharedSourcePixelBufferCopy(const std::vector<unsigned char>& pixels) const {
     return MakeSharedPixelBufferCopy(pixels);
 }
@@ -136,7 +91,7 @@ bool EditorModule::TryCopyImageNodeSharedPixels(
     int& outW,
     int& outH,
     int& outChannels) const {
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
+    const EditorNodeGraph::Node* sourceNode = m_Project->graph.FindNode(sourceNodeId);
     if (!sourceNode) {
         return false;
     }
@@ -145,7 +100,7 @@ bool EditorModule::TryCopyImageNodeSharedPixels(
 
     if (sourceNode->kind == EditorNodeGraph::NodeKind::RawDecode ||
         sourceNode->kind == EditorNodeGraph::NodeKind::RawDevelop) {
-        const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_NodeGraph, *sourceNode);
+        const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_Project->graph, *sourceNode);
         const Raw::RawMetadata emptyMetadata;
         const Raw::RawMetadata& metadata = rawSourceNode ? rawSourceNode->rawSource.metadata : emptyMetadata;
 
@@ -198,7 +153,7 @@ bool EditorModule::TryResolveReferenceSourceBuffer(
     int& outW,
     int& outH,
     int& outChannels) const {
-    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeId(nodeId, socketId);
+    const int referenceSourceNodeId = m_Project->graph.ResolveReferenceSourceNodeId(nodeId, socketId);
     return TryCopyImageNodeSharedPixels(referenceSourceNodeId, outPixels, outW, outH, outChannels);
 }
 
@@ -208,19 +163,19 @@ bool EditorModule::TryResolveReferenceSourceBufferForOutput(
     int& outW,
     int& outH,
     int& outChannels) const {
-    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
+    const int referenceSourceNodeId = m_Project->graph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
     return TryCopyImageNodeSharedPixels(referenceSourceNodeId, outPixels, outW, outH, outChannels);
 }
 
 bool EditorModule::TryCopyImageNodePixels(int sourceNodeId, std::vector<unsigned char>& outPixels, int& outW, int& outH, int& outChannels) const {
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(sourceNodeId);
+    const EditorNodeGraph::Node* sourceNode = m_Project->graph.FindNode(sourceNodeId);
     if (!sourceNode) {
         return false;
     }
 
     if (sourceNode->kind == EditorNodeGraph::NodeKind::RawDecode ||
         sourceNode->kind == EditorNodeGraph::NodeKind::RawDevelop) {
-        const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_NodeGraph, *sourceNode);
+        const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_Project->graph, *sourceNode);
         const Raw::RawMetadata emptyMetadata;
         const Raw::RawMetadata& metadata = rawSourceNode ? rawSourceNode->rawSource.metadata : emptyMetadata;
 
@@ -278,7 +233,7 @@ bool EditorModule::TryResolveReferenceSourcePixels(
     int& outW,
     int& outH,
     int& outChannels) const {
-    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeId(nodeId, socketId);
+    const int referenceSourceNodeId = m_Project->graph.ResolveReferenceSourceNodeId(nodeId, socketId);
     return TryCopyImageNodePixels(referenceSourceNodeId, outPixels, outW, outH, outChannels);
 }
 
@@ -288,7 +243,7 @@ bool EditorModule::TryResolveReferenceSourcePixelsForOutput(
     int& outW,
     int& outH,
     int& outChannels) const {
-    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
+    const int referenceSourceNodeId = m_Project->graph.ResolveReferenceSourceNodeIdForOutput(outputNodeId);
     return TryCopyImageNodePixels(referenceSourceNodeId, outPixels, outW, outH, outChannels);
 }
 
@@ -300,8 +255,8 @@ bool EditorModule::TryResolveReferenceSourceDimensions(
     outW = 0;
     outH = 0;
 
-    const int referenceSourceNodeId = m_NodeGraph.ResolveReferenceSourceNodeId(nodeId, socketId);
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(referenceSourceNodeId);
+    const int referenceSourceNodeId = m_Project->graph.ResolveReferenceSourceNodeId(nodeId, socketId);
+    const EditorNodeGraph::Node* sourceNode = m_Project->graph.FindNode(referenceSourceNodeId);
     if (!sourceNode) {
         return false;
     }
@@ -317,7 +272,7 @@ bool EditorModule::TryResolveReferenceSourceDimensions(
             return outW > 0 && outH > 0;
         case EditorNodeGraph::NodeKind::RawDecode:
         case EditorNodeGraph::NodeKind::RawDevelop: {
-            const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_NodeGraph, *sourceNode);
+            const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_Project->graph, *sourceNode);
             const Raw::RawMetadata emptyMetadata;
             const Raw::RawMetadata& metadata = rawSourceNode ? rawSourceNode->rawSource.metadata : emptyMetadata;
             const int visibleWidth = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;

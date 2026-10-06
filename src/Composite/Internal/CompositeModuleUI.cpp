@@ -873,7 +873,4 @@ void CompositeModule::RenderUI() {
     RenderSavePopup();
     RenderRenamePopup();
 
-    if (Async::IsBusy(LibraryManager::Get().GetSaveTaskState())) {
-        ImGuiExtras::RenderBusyOverlay(LibraryManager::Get().GetSaveStatusText().c_str());
-    }
 }

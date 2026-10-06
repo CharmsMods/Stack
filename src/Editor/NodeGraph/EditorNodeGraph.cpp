@@ -1,3 +1,4 @@
+#include "Editor/LayerRegistry.h"
 #include "EditorNodeGraph.h"
 #include "EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphLookupCache.h"
@@ -144,19 +145,10 @@ void Graph::SyncLayerNodes(int layerCount) {
     m_Links.erase(
         std::remove_if(m_Links.begin(), m_Links.end(), [this](const Link& link) {
             const Node* toNode = FindNode(link.toNodeId);
-            const bool preservesLegacyOutputComponent =
-                toNode &&
-                toNode->kind == NodeKind::Output &&
-                !toNode->definitionResolved &&
-                (link.toSocketId == "r" ||
-                 link.toSocketId == "g" ||
-                 link.toSocketId == "b" ||
-                 link.toSocketId == "a");
             return !FindNode(link.fromNodeId) ||
                 !toNode ||
                 !FindSocket(link.fromNodeId, link.fromSocketId) ||
-                (!preservesLegacyOutputComponent &&
-                 !FindSocket(link.toNodeId, link.toSocketId));
+                !FindSocket(link.toNodeId, link.toSocketId);
         }),
         m_Links.end());
     structureChanged = structureChanged || oldLinkCount != m_Links.size();
@@ -326,6 +318,20 @@ Node* Graph::AddMultiFrameDenoiseNode(
     return &m_Nodes.back();
 }
 
+Node* Graph::AddMultiFrameHdrNode(
+    MultiFrameHdrPayload payload,
+    Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::MultiFrameHdr;
+    node.position = position;
+    node.multiFrameHdr = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
 Node* Graph::AddRawProjectSourceSetNode(
     RawProjectSourceSetPayload payload,
     Vec2 position) {
@@ -346,6 +352,18 @@ Node* Graph::AddLutNode(LutPayload payload, Vec2 position) {
     node.kind = NodeKind::Lut;
     node.position = position;
     node.lut = std::move(payload);
+    EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+    m_Nodes.push_back(std::move(node));
+    TouchStructure();
+    return &m_Nodes.back();
+}
+
+Node* Graph::AddRawOperationNode(Stack::RawRecipe::GraphOperationKind kind, Vec2 position) {
+    Node node;
+    node.id = AllocateNodeId();
+    node.kind = NodeKind::RawOperation;
+    node.rawOperation = Stack::RawRecipe::MakeGraphOperation(kind);
+    node.position = position;
     EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
     m_Nodes.push_back(std::move(node));
     TouchStructure();
@@ -978,6 +996,22 @@ std::vector<SocketDefinition> Graph::GetSockets(const Node& node, bool visibleOn
         }
         return sockets;
     };
+    if (node.role == Stack::GraphModel::NodeRole::Reference && node.referenceType != Stack::NodeMath::LogicalValueType::Invalid) {
+        SocketDefinition socket{node.kind == NodeKind::MaskGenerator ? "maskOut" : "imageOut",node.id,SocketDirection::Output,
+            SocketPresentation::SocketTypeForLogicalType(node.referenceType),"Result",false,true};
+        socket.logicalType=node.referenceType;
+        return finalize({socket});
+    }
+    if (node.kind == NodeKind::Output && node.outputSettings.publishedType != Stack::NodeMath::LogicalValueType::Invalid) {
+        SocketDefinition socket{"imageIn",node.id,SocketDirection::Input,
+            SocketPresentation::SocketTypeForLogicalType(node.outputSettings.publishedType),"Result",false,true};
+        socket.logicalType=node.outputSettings.publishedType;
+        return finalize({socket});
+    }
+    if (node.kind == NodeKind::Output && node.outputSettings.maskOutput) {
+        return finalize({{kImageInputSocketId, node.id, SocketDirection::Input,
+            SocketType::Mask, "Coverage", false, true}});
+    }
     if (node.kind == NodeKind::Compound) {
         std::vector<SocketDefinition> sockets;
         auto socketType = [](Stack::NodeMath::LogicalValueType type) {

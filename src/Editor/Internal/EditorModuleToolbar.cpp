@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "App/Resources/EmbeddedRawSidebarIcons.h"
 
 #include "App/settings/AppearanceTheme.h"
 #include "App/Resources/EmbeddedTabIcons.h"
@@ -66,14 +67,7 @@ unsigned int LoadEditorResourceTexture(const unsigned char* data, unsigned int s
 }
 
 ImU32 ResolveFloatingToolbarIconTint(const StackAppearance::AppearanceManager* appearance, bool emphasized, bool hovered) {
-    if (StackAppearance::UseDarkIconsForCurrentTheme(appearance)) {
-        return emphasized
-            ? IM_COL32(16, 20, 24, 255)
-            : (hovered ? IM_COL32(42, 48, 56, 246) : IM_COL32(82, 88, 96, 226));
-    }
-    return emphasized
-        ? IM_COL32(255, 255, 255, 255)
-        : (hovered ? IM_COL32(238, 240, 244, 246) : IM_COL32(204, 208, 214, 218));
+    return StackAppearance::ResolveThemedMonochromeIconTint(appearance, emphasized, hovered);
 }
 
 } // namespace
@@ -187,6 +181,34 @@ void EditorModule::LoadResourceTextures() {
         EmbeddedTabIcons::RawGallery_png_size,
         "RawGallery"
     );
+    m_RawGalleryOptionsIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawGalleryOptions_png_data,
+        EmbeddedTabIcons::RawGalleryOptions_png_size,
+        "RawGalleryOptions"
+    );
+    m_RawSidebarIconTextures[0] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar0_png_data, EmbeddedTabIcons::RawSidebar0_png_size, "RawSidebar0");
+    m_RawSidebarIconTextures[1] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar1_png_data, EmbeddedTabIcons::RawSidebar1_png_size, "RawSidebar1");
+    m_RawSidebarIconTextures[2] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar2_png_data, EmbeddedTabIcons::RawSidebar2_png_size, "RawSidebar2");
+    m_RawSidebarIconTextures[3] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar3_png_data, EmbeddedTabIcons::RawSidebar3_png_size, "RawSidebar3");
+    m_RawSidebarIconTextures[4] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar4_png_data, EmbeddedTabIcons::RawSidebar4_png_size, "RawSidebar4");
+    m_RawSidebarIconTextures[5] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar5_png_data, EmbeddedTabIcons::RawSidebar5_png_size, "RawSidebar5");
+    m_RawSidebarIconTextures[6] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar6_png_data, EmbeddedTabIcons::RawSidebar6_png_size, "RawSidebar6");
+    m_RawSidebarIconTextures[7] = LoadEditorResourceTexture(EmbeddedTabIcons::RawSidebar7_png_data, EmbeddedTabIcons::RawSidebar7_png_size, "RawSidebar7");
+    m_RawLabGalleryEyeClosedIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawLabGalleryEyeClosed_png_data,
+        EmbeddedTabIcons::RawLabGalleryEyeClosed_png_size,
+        "RawLabGalleryEyeClosed"
+    );
+    m_RawLabGalleryEyeOpenIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::RawLabGalleryEyeOpen_png_data,
+        EmbeddedTabIcons::RawLabGalleryEyeOpen_png_size,
+        "RawLabGalleryEyeOpen"
+    );
+    m_ChevronIconTexture = LoadEditorResourceTexture(
+        EmbeddedTabIcons::Chevron_png_data,
+        EmbeddedTabIcons::Chevron_png_size,
+        "Chevron"
+    );
     g_ToneCurveIconTexture = LoadEditorResourceTexture(
         EmbeddedTabIcons::ToneCurve_png_data,
         EmbeddedTabIcons::ToneCurve_png_size,
@@ -240,6 +262,11 @@ void EditorModule::UnloadResourceTextures() {
     deleteTexture(m_RawGridIconTexture);
     deleteTexture(m_RawListIconTexture);
     deleteTexture(m_RawGalleryIconTexture);
+    deleteTexture(m_RawGalleryOptionsIconTexture);
+    for (auto& texture : m_RawSidebarIconTextures) deleteTexture(texture);
+    deleteTexture(m_RawLabGalleryEyeClosedIconTexture);
+    deleteTexture(m_RawLabGalleryEyeOpenIconTexture);
+    deleteTexture(m_ChevronIconTexture);
     deleteTexture(g_ToneCurveIconTexture);
     deleteTexture(g_ViewTransformIconTexture);
     deleteTexture(g_HdrMergeIconTexture);
@@ -284,7 +311,7 @@ void EditorModule::RenderFloatingToolbar() {
     buttons.push_back({ true, EditorSubWindow::Presets, -1, EditorNodeGraph::NodeKind::Image, "", "Presets [Ctrl+Tab]" });
 
     // Append dynamic complex node buttons
-    for (const auto& node : m_NodeGraph.GetNodes()) {
+    for (const auto& node : GetNodeGraph().GetNodes()) {
         if (!NodeHasDedicatedComplexEditor(node.id)) {
             continue;
         }

@@ -40,6 +40,8 @@ struct Snapshot {
     bool downloadReady = false;
     bool verificationAvailable = false;
     bool verificationPassed = false;
+    bool automaticStartupCheckEnabled = true;
+    bool isLocalTestBuild = false;
 };
 
 class UpdateManager {
@@ -55,6 +57,8 @@ public:
     bool CanCheckForUpdates() const;
     bool CanDownloadUpdate() const;
     bool CanInstallUpdate() const;
+    bool IsAutomaticStartupCheckEnabled() const;
+    void SetAutomaticStartupCheckEnabled(bool enabled);
 
     void StartBackgroundCheck();
     void StartManualCheck();

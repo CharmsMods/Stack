@@ -362,7 +362,8 @@ bool operator==(const SpatialDescriptor& left, const SpatialDescriptor& right) {
     return left.kind == right.kind && left.fullWindow == right.fullWindow &&
         left.dataWindow == right.dataWindow &&
         left.rasterOrigin == right.rasterOrigin &&
-        left.pixelAspect == right.pixelAspect;
+        left.pixelAspect == right.pixelAspect && left.nativeWidth == right.nativeWidth &&
+        left.nativeHeight == right.nativeHeight && left.sourceTransform == right.sourceTransform;
 }
 
 bool operator==(const SamplingDescriptor& left, const SamplingDescriptor& right) {
@@ -704,6 +705,9 @@ std::vector<ContractIssue> ValidateDescriptor(const ValueDescriptor& descriptor)
         if (!std::isfinite(spatial.pixelAspect) || spatial.pixelAspect <= 0.0) {
             issues.push_back({ "spatial", "pixel aspect must be finite and positive" });
         }
+        if (spatial.nativeWidth < 0 || spatial.nativeHeight < 0 ||
+            !std::all_of(spatial.sourceTransform.begin(), spatial.sourceTransform.end(), [](double x) { return std::isfinite(x); }))
+            issues.push_back({"spatial", "native extent and source coordinates must be valid"});
         if (spatial.kind == SpatialExtentKind::Finite) {
             if (spatial.fullWindow.width <= 0 || spatial.fullWindow.height <= 0 ||
                 spatial.dataWindow.width < 0 || spatial.dataWindow.height < 0) {
@@ -825,6 +829,14 @@ bool IsValidCanonicalUuid(const std::string& uuid) {
 std::string Sha256ContentIdentity(const std::string& content) {
     Sha256 hash;
     hash.Update(content.data(), content.size());
+    return "sha256:" + hash.Finish();
+}
+
+std::string Sha256ContentIdentity(
+    const std::vector<std::string_view>& contentChunks) {
+    Sha256 hash;
+    for (const std::string_view chunk : contentChunks)
+        hash.Update(chunk.data(), chunk.size());
     return "sha256:" + hash.Finish();
 }
 

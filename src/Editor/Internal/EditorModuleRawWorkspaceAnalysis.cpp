@@ -658,7 +658,7 @@ void EditorModule::RenderRawWorkspaceAnalysisPanel(float controlWidth) {
         ImGui::TextDisabled("Render a RAW preview to populate technical diagnostics.");
     } else {
         ImGui::TextDisabled("Source: %s", analysis.sourceKey.c_str());
-        if (analysis.sourceKey != m_ActiveRawWorkspaceSourceKey) {
+        if (analysis.sourceKey != m_Project->rawSourceKey) {
             ImGui::TextDisabled("Source mismatch");
         } else if (m_RenderPending) {
             ImGui::TextDisabled("Analyzing");

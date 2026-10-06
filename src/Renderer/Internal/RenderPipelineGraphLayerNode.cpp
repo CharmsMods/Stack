@@ -17,16 +17,29 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
     const std::function<unsigned int(int, const std::string&)>& evalImage,
     const std::function<unsigned int(int, const std::string&)>& evalMask) {
     GraphNodeRenderResult result;
+    const auto fail = [&](const char* message, bool allocationFailed = false) {
+        m_LastGraphExecutionStats.allocationFailed |= allocationFailed;
+        m_LastGraphExecutionStats.lastSpecializedFailureNodeId = node.nodeId;
+        m_LastGraphExecutionStats.lastSpecializedFailure = message;
+        return GraphNodeRenderResult{};
+    };
 
     const RenderGraphLink* input = executionContext.FindInputLink(node.nodeId, "imageIn");
     const unsigned int inputTexture = input ? evalImage(input->fromNodeId, input->fromSocketId) : 0;
     if (inputTexture == 0 || !node.layerJson.is_object()) {
         return result;
     }
+    if (!node.layerJson.value("enabled", true)) {
+        result.texture = inputTexture;
+        result.owned = false;
+        return result;
+    }
     const int inputWidth = m_Width;
     const int inputHeight = m_Height;
 
     const std::string type = node.layerJson.value("type", std::string());
+    if (type == "RawOutputCrop")
+        return RenderRawSpatialLayer(executionContext, node, inputTexture);
     std::shared_ptr<LayerBase> layer = LayerRegistry::CreateLayerFromTypeId(type);
     if (!layer) {
         return result;
@@ -45,11 +58,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         layer->ExecuteWithSource(inputTexture, sourceTexture, m_Width, m_Height, m_Quad);
     });
     if (!renderedLayer || !processed) {
-        result.texture = inputTexture;
-        result.owned = false;
-        std::cerr << "[RenderPipeline] Layer target allocation failed for graph node "
-                  << node.nodeId << "; passing input texture through.\n";
-        return result;
+        return fail("Layer rendering failed; previous presentation retained.", !processed);
     }
 
     if (ToneCurveLayer* toneCurve = dynamic_cast<ToneCurveLayer*>(layer.get());
@@ -57,22 +66,12 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
         m_ToneCurveAutoRewriteFeedback.push_back(toneCurve->TakePendingAutoRewriteFeedback());
     }
 
-    if (type == "ToneCurve" && IsDefaultToneCurvePayload(node.layerJson)) {
+    if (type == "ToneCurve" || type == "ViewTransform") {
         const QuickTextureStats inputStats = ProbeTextureStats(inputTexture, m_Width, m_Height);
         const QuickTextureStats outputStats = ProbeTextureStats(processed.Get(), m_Width, m_Height);
-        const bool inputHasSignal = inputStats.valid && inputStats.p99Luma > 0.00001f;
-        const bool outputIsBlank =
-            outputStats.valid &&
-            outputStats.p99Luma <= 0.000001f &&
-            outputStats.maxRgb <= 0.00001f;
-        if (inputHasSignal && outputIsBlank) {
-            result.texture = inputTexture;
-            result.owned = false;
-            std::cerr << "[RenderPipeline] Default Tone Curve produced a blank output for graph node "
-                      << node.nodeId << " (input p99 luma " << inputStats.p99Luma
-                      << ", output p99 luma " << outputStats.p99Luma
-                      << "); passing input texture through.\n";
-            return result;
+        if (!LayerPayloadExplicitlyRequestsCollapsedOutput(node.layerJson) &&
+            IsImplausiblyDamagedTextureOutput(inputStats, outputStats)) {
+            return fail("Layer produced invalid output; previous presentation retained.");
         }
     }
 
@@ -101,10 +100,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderLayerGraphNode(
             result.texture = blended.Release();
             result.owned = true;
         } else {
-            result.texture = inputTexture;
-            result.owned = false;
-            std::cerr << "[RenderPipeline] Mask blend target allocation failed for graph node "
-                      << node.nodeId << "; passing input texture through.\n";
+            return fail("Layer mask blending failed; previous presentation retained.", !blended);
         }
     } else {
         result.texture = processed.Release();

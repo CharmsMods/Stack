@@ -248,7 +248,7 @@ void PresetManager::RequestBackgroundGraphPayloadPreload(const std::shared_ptr<P
 
     const std::filesystem::path path = m_PresetsPath / entry->fileName;
     const std::weak_ptr<PresetEntry> weakEntry = entry;
-    Async::TaskSystem::Get().Submit([path, weakEntry]() {
+    Async::TaskSystem::Get().Submit("Loading presets", [path, weakEntry]() {
         StackBinaryFormat::json graphPayload = StackBinaryFormat::json::object();
         std::string error;
         bool success = false;

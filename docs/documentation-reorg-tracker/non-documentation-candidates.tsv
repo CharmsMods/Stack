@@ -1,4 +1,0 @@
-status	folder_group	current_path	notes
-excluded	website	website/index.html	reviewed_on=2026-07-02; reason=live product website page asset; keep in place and exclude from documentation consolidation
-excluded	website	website/beta main version/index2.html	reviewed_on=2026-07-02; reason=website variant page asset; keep in place and exclude from documentation consolidation
-excluded	website	website/other versions/index3.html	reviewed_on=2026-07-02; reason=older website variant page asset; keep in place and exclude from documentation consolidation

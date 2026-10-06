@@ -82,7 +82,7 @@ void PreserveLutViewSettings(const ColorLut::LutPayload& source, ColorLut::LutPa
 } // namespace
 
 bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool notifyOnFailure) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut) {
         return false;
     }
@@ -104,7 +104,7 @@ bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool
         node->lut = std::move(import.payload);
         MarkRenderDirty(nodeId);
         if (notifyOnFailure) {
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Error,
                 "LUT import failed: " + node->lut.importError,
                 "lut-import-failed");
@@ -114,15 +114,19 @@ bool EditorModule::LoadLutNodeFromFile(int nodeId, const std::string& path, bool
 
     node->lut = std::move(import.payload);
     MarkRenderDirty(nodeId);
+    if (notifyOnFailure) {
+        PostNotification(UiNotificationSeverity::Success,
+            "Imported " + node->lut.label + ".", "lut-import-complete");
+    }
     return true;
 }
 
 bool EditorModule::ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure) {
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut || node->lut.sourcePath.empty()) {
         if (notifyOnFailure) {
-            QueueUiNotification(
-                UiNotificationSeverity::Info,
+            PostNotification(
+                UiNotificationSeverity::Warning,
                 "This LUT node does not have a source path to reload.",
                 "lut-reload-missing-path");
         }
@@ -132,7 +136,7 @@ bool EditorModule::ReloadLutNodeFromSourcePath(int nodeId, bool notifyOnFailure)
 }
 
 bool EditorModule::ClearLutNodeData(int nodeId) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Lut) {
         return false;
     }
@@ -213,7 +217,10 @@ void EditorModule::RenderLutControls(EditorNodeGraph::Node& node, float controlW
 
     if (!node.lut.importError.empty()) {
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.42f, 1.0f), "Import Error");
+        const ImVec4 errorColor=m_Appearance
+            ? m_Appearance->ResolveSemanticUiColor(StackAppearance::SemanticUiColor::Error,ImVec4(0.95f,0.55f,0.42f,1.0f))
+            : ImVec4(0.95f,0.55f,0.42f,1.0f);
+        ImGui::TextColored(errorColor, "Import Error");
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + controlWidth);
         ImGui::TextUnformatted(node.lut.importError.c_str());
         ImGui::PopTextWrapPos();

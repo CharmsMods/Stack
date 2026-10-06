@@ -1,4 +1,5 @@
 #include "Renderer/Internal/RenderPipelineGraphExecutionHelpers.h"
+#include "Raw/Tone/SceneTone.h"
 #include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
@@ -89,7 +90,7 @@ QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height)
         return stats;
     }
 
-    constexpr int kProbeMaxEdge = 128;
+    constexpr int kProbeMaxEdge = 32;
     const float scale = std::min(
         1.0f,
         static_cast<float>(kProbeMaxEdge) / static_cast<float>(std::max(width, height)));
@@ -155,7 +156,12 @@ QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height)
         const bool readbackOk = glGetError() == GL_NO_ERROR;
         savedPackState.Restore();
         if (readbackOk) {
+            stats.allFinite = true;
             for (std::size_t i = 0; i + 2 < pixels.size(); i += 4u) {
+                stats.allFinite = stats.allFinite &&
+                    std::isfinite(pixels[i + 0]) &&
+                    std::isfinite(pixels[i + 1]) &&
+                    std::isfinite(pixels[i + 2]);
                 const float r = std::isfinite(pixels[i + 0]) ? std::max(0.0f, pixels[i + 0]) : 0.0f;
                 const float g = std::isfinite(pixels[i + 1]) ? std::max(0.0f, pixels[i + 1]) : 0.0f;
                 const float b = std::isfinite(pixels[i + 2]) ? std::max(0.0f, pixels[i + 2]) : 0.0f;
@@ -178,7 +184,53 @@ QuickTextureStats ProbeTextureStats(unsigned int texture, int width, int height)
     return stats;
 }
 
+bool IsImplausiblyDamagedTextureOutput(
+    const QuickTextureStats& input,
+    const QuickTextureStats& output) {
+    if (output.valid && !output.allFinite) {
+        return true;
+    }
+    if (!input.valid || !output.valid || !input.allFinite ||
+        input.p99Luma <= 0.00001f) {
+        return false;
+    }
+    const float minimumP99 = std::max(
+        0.0000001f,
+        input.p99Luma * 0.00001f);
+    const float minimumPeak = std::max(
+        0.000001f,
+        input.maxRgb * 0.00001f);
+    return output.p99Luma <= minimumP99 &&
+        output.maxRgb <= minimumPeak;
+}
+
+bool LayerPayloadExplicitlyRequestsCollapsedOutput(
+    const nlohmann::json& layerJson) {
+    if (!layerJson.is_object() ||
+        layerJson.value("type", std::string()) != "ToneCurve") {
+        return false;
+    }
+    const auto pointsCollapse = [](const nlohmann::json& points) {
+        if (!points.is_array() || points.size() < 2) {
+            return false;
+        }
+        return std::all_of(
+            points.begin(),
+            points.end(),
+            [](const nlohmann::json& point) {
+                return point.is_object() &&
+                    std::abs(point.value("y", 1.0f)) <= 0.00001f;
+            });
+    };
+    return (layerJson.contains("points") &&
+            pointsCollapse(layerJson["points"])) ||
+        (layerJson.contains("preparedPoints") &&
+         pointsCollapse(layerJson["preparedPoints"]));
+}
+
 bool IsDefaultToneCurvePayload(const nlohmann::json& layerJson) {
+    if (layerJson.contains("luminanceTone") && Stack::RawRecipe::IsSceneToneActive(
+            Stack::RawRecipe::ReadSceneTone(layerJson.at("luminanceTone")))) return false;
     if (!layerJson.is_object() || layerJson.value("type", std::string()) != "ToneCurve") {
         return false;
     }
@@ -209,6 +261,14 @@ bool IsDefaultToneCurvePayload(const nlohmann::json& layerJson) {
         return false;
     }
 
+    const Stack::RawRecipe::RawPointCurveSet pointCurves =
+        Stack::RawRecipe::PointCurveSetFromFinishToneJson(layerJson);
+    for (const Stack::RawRecipe::RawPointCurveComponent& curve :
+         pointCurves.curves) {
+        if (!Stack::RawRecipe::IsIdentityRawPointCurveComponent(curve)) {
+            return false;
+        }
+    }
     const float localStrength = std::abs(layerJson.value("localBaselineStrength", 0.0f));
     const float shadowOpening = std::abs(layerJson.value("localShadowOpening", 0.0f));
     const float highlightCompression = std::abs(layerJson.value("localHighlightCompression", 0.0f));
@@ -324,6 +384,13 @@ GraphExecutionContext::GraphExecutionContext(
     imageFingerprintCache.reserve(executionEntryCapacity);
     maskFingerprintCache.reserve(executionEntryCapacity);
     scalarSocketCache.reserve(executionEntryCapacity);
+    for (const auto& link : graph.links) {
+        using Stack::NodeMath::LogicalValueType;
+        const auto type = link.semanticDescriptor.logicalType;
+        if (!link.semanticDescriptorIdentity.empty() && type != LogicalValueType::Invalid && type != LogicalValueType::Failure)
+            scalarSocketCache[MakeNodeSocketKey(link.fromNodeId, link.fromSocketId)] =
+                type == LogicalValueType::Channel || type == LogicalValueType::Mask || type == LogicalValueType::ScalarField;
+    }
     visitingImages.reserve(executionEntryCapacity);
     visitingMasks.reserve(executionEntryCapacity);
     fingerprintingImages.reserve(executionEntryCapacity);

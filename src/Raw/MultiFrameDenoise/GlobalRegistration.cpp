@@ -1159,41 +1159,68 @@ bool FitGlobalExposureScale(
                 "MFD global exposure lacks per-CFA diagnostic support.",
                 error);
         }
-        double sumWeight = 0.0;
-        double sumX = 0.0;
-        double sumY = 0.0;
-        double sumXX = 0.0;
-        double sumXY = 0.0;
+        // Fit the per-site scale through the physical zero point.  The old
+        // simultaneous slope/intercept OLS diagnostic treated the noisy
+        // alternate sample as an exact independent variable.  In dark phone
+        // bursts that produces classic errors-in-variables attenuation and
+        // can make every otherwise-valid same-exposure frame look like a CFA
+        // gain mismatch.  Reusing the same variance-aware IRLS form as the
+        // common fit keeps this diagnostic stable without weakening the
+        // shared-scale requirement.
+        double siteScale = scale;
+        double siteDenominator = 0.0;
+        for (std::uint32_t iteration = 0u;
+             iteration < parameters.exposureIrlsIterations;
+             ++iteration) {
+            double siteNumerator = 0.0;
+            siteDenominator = 0.0;
+            for (const ExposureSample* sample : siteSamples) {
+                const double variance = sample->referenceVariance +
+                    siteScale * siteScale * sample->alternateVariance +
+                    1.0e-12;
+                if (!Finite(variance) || variance <= 0.0) continue;
+                const double residual = (sample->referenceValue -
+                    siteScale * sample->alternateValue) /
+                    std::sqrt(variance);
+                const double weight = HuberWeight(
+                    residual, parameters.exposureHuberDelta) / variance;
+                siteNumerator += weight * sample->alternateValue *
+                    sample->referenceValue;
+                siteDenominator += weight * sample->alternateValue *
+                    sample->alternateValue;
+            }
+            if (!Finite(siteNumerator) || !Finite(siteDenominator) ||
+                siteDenominator <= 1.0e-18) {
+                return FailExposure(
+                    result,
+                    ExposureFitFailure::SingularFit,
+                    "MFD per-CFA exposure diagnostic is singular.",
+                    error);
+            }
+            const double updated = siteNumerator / siteDenominator;
+            if (!Finite(updated) || updated < parameters.fittedScaleMin ||
+                updated > parameters.fittedScaleMax) {
+                return FailExposure(
+                    result,
+                    ExposureFitFailure::CfaScaleDisagreement,
+                    "MFD per-CFA exposure diagnostic scale is invalid.",
+                    error);
+            }
+            siteScale = updated;
+        }
+
         double spanSum = 0.0;
         double offsetSum = 0.0;
+        std::vector<double> commonScaleOffsets;
+        commonScaleOffsets.reserve(siteSamples.size());
         for (const ExposureSample* sample : siteSamples) {
-            const double variance = sample->referenceVariance +
-                scale * scale * sample->alternateVariance + 1.0e-12;
-            const double residual = (sample->referenceValue -
-                scale * sample->alternateValue) / std::sqrt(variance);
-            const double weight = HuberWeight(
-                residual,
-                parameters.exposureHuberDelta) / variance;
-            sumWeight += weight;
-            sumX += weight * sample->alternateValue;
-            sumY += weight * sample->referenceValue;
-            sumXX += weight * sample->alternateValue * sample->alternateValue;
-            sumXY += weight * sample->alternateValue * sample->referenceValue;
+            commonScaleOffsets.push_back(
+                sample->referenceValue - scale * sample->alternateValue);
             spanSum += sample->usableCodeSpanDn;
             offsetSum += sample->offsetVariance;
         }
-        const double fitDenominator = sumWeight * sumXX - sumX * sumX;
-        if (!Finite(fitDenominator) || fitDenominator <= 1.0e-18) {
-            return FailExposure(
-                result,
-                ExposureFitFailure::SingularFit,
-                "MFD per-CFA exposure diagnostic is singular.",
-                error);
-        }
-        diagnostics.scale =
-            (sumWeight * sumXY - sumX * sumY) / fitDenominator;
-        diagnostics.intercept =
-            (sumY - diagnostics.scale * sumX) / sumWeight;
+        diagnostics.scale = siteScale;
+        diagnostics.intercept = Median(std::move(commonScaleOffsets));
         const double meanSpan = spanSum / static_cast<double>(siteSamples.size());
         const double meanOffset = offsetSum / static_cast<double>(siteSamples.size());
         diagnostics.interceptLimit = std::max(
@@ -1205,10 +1232,24 @@ bool FitGlobalExposureScale(
         if (!diagnostics.valid ||
             std::abs(diagnostics.scale / scale - 1.0) >
                 parameters.cfaScaleDisagreementFraction) {
+            std::string details =
+                "MFD per-CFA diagnostic scales disagree with the common exposure scale (common=" +
+                std::to_string(scale) + ", sites=";
+            for (std::size_t detailIndex = 0u;
+                 detailIndex < result.sites.size();
+                 ++detailIndex) {
+                if (detailIndex > 0u) details += ",";
+                const ExposureSiteDiagnostics& detail =
+                    result.sites[detailIndex];
+                details += detail.valid
+                    ? std::to_string(detail.scale)
+                    : std::string("unavailable");
+            }
+            details += ").";
             return FailExposure(
                 result,
                 ExposureFitFailure::CfaScaleDisagreement,
-                "MFD per-CFA diagnostic scales disagree with the common exposure scale.",
+                details,
                 error);
         }
         if (std::abs(diagnostics.intercept) > diagnostics.interceptLimit) {

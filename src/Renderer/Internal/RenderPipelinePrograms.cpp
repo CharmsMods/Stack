@@ -1,5 +1,6 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLHelpers.h"
+#include "Renderer/ScopedGLObjects.h"
 #include "Renderer/GLStateGuards.h"
 #include "Renderer/RawDevelopmentStageCachePolicy.h"
 #include "Utils/PixelBufferUtils.h"
@@ -417,6 +418,7 @@ void RenderPipeline::EnsureMaskPrograms() {
         uniform float uScale;
         uniform vec2 uCenter;
         uniform float uRadius;
+        uniform float uRadiusY;
         uniform float uFeather;
         uniform int uInvert;
         float hash(vec2 p) {
@@ -437,10 +439,15 @@ void RenderPipeline::EnsureMaskPrograms() {
                 vec2 dir = vec2(cos(radiansAngle), sin(radiansAngle));
                 maskValue = dot(uv - vec2(0.5), dir) * max(uScale, 0.001) + 0.5 + uOffset;
                 maskValue = clamp(maskValue, 0.0, 1.0);
-            } else if (uKind == 2) {
-                float d = distance(uv, uCenter);
-                float feather = max(uFeather, 0.0001);
-                maskValue = 1.0 - smoothstep(max(0.0, uRadius - feather), uRadius + feather, d);
+            } else if (uKind == 2 || uKind == 4) {
+                vec2 delta = uv - uCenter;
+                float angle = radians(uAngle);
+                vec2 local = vec2(cos(angle) * delta.x + sin(angle) * delta.y,
+                                 -sin(angle) * delta.x + cos(angle) * delta.y);
+                local /= max(vec2(uRadius, uRadiusY), vec2(0.0001));
+                float d = uKind == 4 ? max(abs(local.x), abs(local.y)) : length(local);
+                float feather = max(uFeather / max(uRadius, 0.0001), 0.0001);
+                maskValue = 1.0 - smoothstep(max(0.0, 1.0 - feather), 1.0 + feather, d);
                 maskValue = clamp(maskValue, 0.0, 1.0);
             } else if (uKind == 3) {
                 float n = noise(uv * max(uScale * 96.0, 1.0) + vec2(uOffset * 37.0, uAngle * 0.071));
@@ -657,12 +664,13 @@ void RenderPipeline::EnsureReformatProgram() {
             return clamp(value, ivec2(0), uInputSize - ivec2(1));
         }
         vec4 fetchClamp(ivec2 value) {
-            return texelFetch(uImage, clampCoord(value), 0);
+            vec4 sampleValue = texelFetch(uImage, clampCoord(value), 0);
+            return vec4(sampleValue.rgb * sampleValue.a, sampleValue.a);
         }
         void main() {
             vec2 source = vTexCoord * vec2(uInputSize) - vec2(0.5);
             if (uFilter == 0) {
-                FragColor = fetchClamp(ivec2(floor(source + vec2(0.5))));
+                FragColor = texelFetch(uImage, clampCoord(ivec2(floor(source + vec2(0.5)))), 0);
                 return;
             }
             ivec2 base = ivec2(floor(source));
@@ -670,6 +678,7 @@ void RenderPipeline::EnsureReformatProgram() {
             vec4 lower = mix(fetchClamp(base), fetchClamp(base + ivec2(1, 0)), fraction.x);
             vec4 upper = mix(fetchClamp(base + ivec2(0, 1)), fetchClamp(base + ivec2(1, 1)), fraction.x);
             FragColor = mix(lower, upper, fraction.y);
+            FragColor.rgb = FragColor.a > 0.0 ? FragColor.rgb / FragColor.a : vec3(0.0);
         }
     )";
     if (!m_ReformatProgram) {
@@ -1121,7 +1130,9 @@ void RenderPipeline::EnsureUtilityPrograms() {
         uniform int uEnabled;
         uniform int uInvert;
         void main() {
-            float v = clamp(texture(uInputMask, vTexCoord).r, 0.0, 1.0);
+            // Channel data may be HDR or signed. Levels and Threshold define
+            // their own output range; merely reading a Channel must not clip it.
+            float v = texture(uInputMask, vTexCoord).r;
             if (uKind == 0) {
                 if (uEnabled != 0) v = 1.0 - v;
             } else if (uKind == 1) {
@@ -1367,10 +1378,13 @@ void RenderPipeline::EnsureAutoGainStatsProgram() {
         }
 
         float logLuma(vec2 uv) {
-            return log2(max(luma(texture(uInputImage, uv).rgb), 0.00003));
+            vec4 value = texture(uInputImage, uv);
+            if (value.a <= 0.0) value = texture(uInputImage, vTexCoord);
+            return log2(max(luma(value.rgb), 0.00003));
         }
 
         void main() {
+            if (texture(uInputImage, vTexCoord).a <= 0.0) { FragColor = vec4(0.0); return; }
             vec3 rgb = max(texture(uInputImage, vTexCoord).rgb, vec3(0.0));
             float lum = luma(rgb);
             float maxChannel = max(max(rgb.r, rgb.g), rgb.b);
@@ -1411,13 +1425,16 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
         uniform float uAutoHighlightProtection;
         uniform float uChannelSaturationRisk;
         uniform vec2 uTexelSize;
+        uniform vec3 uLumaWeights;
 
         vec3 rgbAt(vec2 uv) {
-            return max(texture(uInputImage, uv).rgb, vec3(0.0));
+            vec4 value = texture(uInputImage, uv);
+            if (value.a <= 0.0) value = texture(uInputImage, vTexCoord);
+            return max(value.rgb, vec3(0.0));
         }
 
         float luma(vec3 rgb) {
-            return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+            return dot(rgb, uLumaWeights);
         }
 
         float lumaAt(vec2 uv) {
@@ -1547,14 +1564,17 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
         uniform float uMaskGamma;
         uniform float uManualBlend;
         uniform vec2 uTexelSize;
+        uniform vec3 uLumaWeights;
 
         float lumaAt(vec2 uv) {
             vec3 rgb = max(texture(uInputImage, uv).rgb, vec3(0.0));
-            return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+            return dot(rgb, uLumaWeights);
         }
 
         vec3 rgbAt(vec2 uv) {
-            return max(texture(uInputImage, uv).rgb, vec3(0.0));
+            vec4 value = texture(uInputImage, uv);
+            if (value.a <= 0.0) value = texture(uInputImage, vTexCoord);
+            return max(value.rgb, vec3(0.0));
         }
 
         float shapedMask() {
@@ -1587,8 +1607,10 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
                     float dist2 = dot(offsetPx, offsetPx);
                     if (dist2 > radius2) continue;
                     vec2 uv = vTexCoord + offsetPx * uTexelSize;
+                    if (texture(uInputImage, uv).a <= 0.0) continue;
                     float sampleLog = logLumaAt(uv);
                     float sampleLum = lumaAt(uv);
+                    if (texture(uInputImage, uv).a <= 0.0) continue;
                     vec4 sampleMetrics = texture(uMetrics, uv);
                     float sampleEdge = clamp(sampleMetrics.r, 0.0, 1.0);
                     float sampleSmooth = clamp(sampleMetrics.b, 0.0, 1.0);
@@ -1610,7 +1632,7 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
 
         void main() {
             vec3 centerRgb = rgbAt(vTexCoord);
-            float lum = dot(centerRgb, vec3(0.2126, 0.7152, 0.0722));
+            float lum = dot(centerRgb, uLumaWeights);
             float maxChannel = max(max(centerRgb.r, centerRgb.g), centerRgb.b);
             float minChannel = min(min(centerRgb.r, centerRgb.g), centerRgb.b);
             float channelDominance = maxChannel > 0.00003 ? (maxChannel - minChannel) / maxChannel : 0.0;
@@ -1695,10 +1717,11 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
         uniform float uSmoothGradientProtection;
         uniform float uMaskDebandDither;
         uniform vec2 uTexelSize;
+        uniform vec3 uLumaWeights;
 
         float lumaAt(vec2 uv) {
             vec3 rgb = max(texture(uInputImage, uv).rgb, vec3(0.0));
-            return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+            return dot(rgb, uLumaWeights);
         }
 
         float logLumaAt(vec2 uv) {
@@ -1734,6 +1757,7 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
                 for (int x = -32; x <= 32; ++x) {
                     if (abs(x) > effectiveRadius || abs(y) > effectiveRadius) continue;
                     vec2 uv = vTexCoord + vec2(x, y) * uTexelSize;
+                    if (texture(uInputImage, uv).a <= 0.0) continue;
                     vec4 sampleMetrics = texture(uMetrics, uv);
                     float distance2 = float(x * x + y * y);
                     float spatial = exp(-distance2 / max(1.0, float(effectiveRadius * effectiveRadius) * smoothRadiusScale) * haloScale);
@@ -1779,6 +1803,8 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
         uniform float uChannelSaturationRisk;
         uniform int uDebugView;
         uniform int uMaskOutput;
+        uniform int uPreserveSigned;
+        uniform vec3 uLumaWeights;
 
         void main() {
             vec4 inputColor = texture(uInputImage, vTexCoord);
@@ -1786,7 +1812,9 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
             vec4 metrics = texture(uMetrics, vTexCoord);
             float ev = uHasMask != 0 ? mix(uMinEv + uBaseEv, uMaxEv + uBaseEv, clamp(map.r, 0.0, 1.0)) : 0.0;
             float gain = exp2(ev * clamp(uStrength, 0.0, 1.0));
-            vec3 fused = max(inputColor.rgb, vec3(0.0)) * gain;
+            vec3 fused = (uPreserveSigned != 0
+                ? inputColor.rgb
+                : max(inputColor.rgb, vec3(0.0))) * gain;
             if (uMaskOutput != 0 || uDebugView == 1) {
                 FragColor = vec4(vec3(map.r), 1.0);
             } else if (uDebugView == 2) {
@@ -1810,7 +1838,7 @@ void RenderPipeline::EnsureRawDetailFusionPrograms() {
                 float rangePreview = clamp((uMaxEv - uMinEv) / 12.0, 0.0, 1.0);
                 FragColor = vec4(map.r, rangePreview, clamp((uBaseEv + 4.0) / 8.0, 0.0, 1.0), 1.0);
             } else if (uDebugView == 11) {
-                float lum = dot(max(inputColor.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+                float lum = dot(max(inputColor.rgb, vec3(0.0)), uLumaWeights);
                 float snr = smoothstep(uEstimatedNoiseFloor * 2.0, uEstimatedNoiseFloor * 18.0, lum);
                 FragColor = vec4(vec3(snr * (1.0 - metrics.a * 0.45)), 1.0);
             } else if (uDebugView == 12) {
@@ -1964,6 +1992,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         uniform sampler2D uInputImage;
         uniform int uLocalRangePointCount;
         uniform vec2 uLocalRangePoints[12];
+        uniform vec4 uLocalRangeHandles[11];
         uniform float uStrength;
         uniform float uMiddleGrey;
         uniform float uSmoothness;
@@ -1996,6 +2025,14 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         uniform int uHasTargetZoneSelectionBits;
         uniform int uScopeOutput;
 
+        float cubicBezier(float p0, float p1, float p2, float p3, float t) {
+            float inverse = 1.0 - t;
+            return inverse * inverse * inverse * p0 +
+                3.0 * inverse * inverse * t * p1 +
+                3.0 * inverse * t * t * p2 +
+                t * t * t * p3;
+        }
+
         float evaluateLocalRangeDelta(float sceneEv) {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
                 return 0.0;
@@ -2012,9 +2049,19 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
                 }
                 vec2 current = uLocalRangePoints[i];
                 if (sceneEv <= current.x) {
-                    float span = max(current.x - previous.x, 0.0001);
-                    float t = clamp((sceneEv - previous.x) / span, 0.0, 1.0);
-                    return mix(previous.y, current.y, t);
+                    vec4 handles = uLocalRangeHandles[i - 1];
+                    float low = 0.0;
+                    float high = 1.0;
+    for (int iteration = 0; iteration < 18; ++iteration) {
+                        float middle = (low + high) * 0.5;
+                        float curveX = cubicBezier(
+                            previous.x, handles.x, handles.z, current.x, middle);
+                        if (curveX < sceneEv) low = middle;
+                        else high = middle;
+                    }
+                    float t = (low + high) * 0.5;
+                    return cubicBezier(
+                        previous.y, handles.y, handles.w, current.y, t);
                 }
                 previous = current;
             }
@@ -2022,7 +2069,10 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
         }
 
         float lumaOf(vec3 rgb) {
-            return max(dot(max(rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.000001);
+            vec3 weights = uTargetZoneWorkingSpace == 1
+                ? vec3(0.2627002, 0.6779981, 0.0593017)
+                : vec3(0.2126729, 0.7151522, 0.0721750);
+            return max(dot(rgb, weights), 1e-12);
         }
 
         float colorChroma(vec3 rgb) {
@@ -2069,32 +2119,11 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
             weightSum += weight;
         }
 
+        uniform sampler2D uSceneGuide;
         float edgeAwareSceneEv(float centerSceneEv) {
-            float smoothness = clamp(uSmoothness, 0.0, 1.0);
-            if (smoothness <= 0.0001) {
-                return centerSceneEv;
-            }
-
-            vec2 nearRadius = uTexelSize * mix(2.0, 18.0, smoothness);
-            vec2 farRadius = uTexelSize * mix(5.0, 44.0, smoothness);
-            float weightedEv = centerSceneEv;
-            float weightSum = 1.0;
-
-            accumulateSceneEv(vec2( nearRadius.x, 0.0), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-nearRadius.x, 0.0), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0,  nearRadius.y), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0, -nearRadius.y), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2( nearRadius.x,  nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-nearRadius.x,  nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2( nearRadius.x, -nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-nearRadius.x, -nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2( farRadius.x, 0.0), 0.45, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-farRadius.x, 0.0), 0.45, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0,  farRadius.y), 0.45, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0, -farRadius.y), 0.45, centerSceneEv, weightedEv, weightSum);
-
-            float smoothedSceneEv = weightedEv / max(weightSum, 0.0001);
-            return mix(centerSceneEv, smoothedSceneEv, smoothness);
+            if (uSmoothness <= 0.0001) return centerSceneEv;
+            float guidedEv = texture(uSceneGuide, vTexCoord).r + log2(0.18 / max(uMiddleGrey, 0.000001));
+            return mix(centerSceneEv, guidedEv, clamp(uSmoothness, 0.0, 1.0));
         }
 
         float protectedLocalDeltaEv(float mapSceneEv) {
@@ -2262,7 +2291,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeProgram() {
 
         void main() {
             vec4 color = texture(uInputImage, vTexCoord);
-            vec3 rgb = max(color.rgb, vec3(0.0));
+            vec3 rgb = color.rgb;
             float luma = lumaOf(rgb);
             float sceneEv = log2(luma / max(uMiddleGrey, 0.000001));
             float mapSceneEv = edgeAwareSceneEv(sceneEv);
@@ -2310,6 +2339,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         uniform sampler2D uInputImage;
         uniform int uLocalRangePointCount;
         uniform vec2 uLocalRangePoints[12];
+        uniform vec4 uLocalRangeHandles[11];
         uniform float uStrength;
         uniform float uMiddleGrey;
         uniform int uOverlayMode;
@@ -2344,6 +2374,14 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         uniform vec2 uTargetZoneSelectionTexelSize;
         uniform int uTargetOutlineProvisional;
 
+        float cubicBezier(float p0, float p1, float p2, float p3, float t) {
+            float inverse = 1.0 - t;
+            return inverse * inverse * inverse * p0 +
+                3.0 * inverse * inverse * t * p1 +
+                3.0 * inverse * t * t * p2 +
+                t * t * t * p3;
+        }
+
         float evaluateLocalRangeDelta(float sceneEv) {
             if (uLocalRangePointCount < 2 || uStrength <= 0.0001) {
                 return 0.0;
@@ -2360,9 +2398,19 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
                 }
                 vec2 current = uLocalRangePoints[i];
                 if (sceneEv <= current.x) {
-                    float span = max(current.x - previous.x, 0.0001);
-                    float t = clamp((sceneEv - previous.x) / span, 0.0, 1.0);
-                    return mix(previous.y, current.y, t);
+                    vec4 handles = uLocalRangeHandles[i - 1];
+                    float low = 0.0;
+                    float high = 1.0;
+    for (int iteration = 0; iteration < 18; ++iteration) {
+                        float middle = (low + high) * 0.5;
+                        float curveX = cubicBezier(
+                            previous.x, handles.x, handles.z, current.x, middle);
+                        if (curveX < sceneEv) low = middle;
+                        else high = middle;
+                    }
+                    float t = (low + high) * 0.5;
+                    return cubicBezier(
+                        previous.y, handles.y, handles.w, current.y, t);
                 }
                 previous = current;
             }
@@ -2370,7 +2418,10 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
         }
 
         float lumaOf(vec3 rgb) {
-            return max(dot(max(rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.000001);
+            vec3 weights = uTargetZoneWorkingSpace == 1
+                ? vec3(0.2627002, 0.6779981, 0.0593017)
+                : vec3(0.2126729, 0.7151522, 0.0721750);
+            return max(dot(rgb, weights), 1e-12);
         }
 
         float colorChroma(vec3 rgb) {
@@ -2417,32 +2468,11 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
             weightSum += weight;
         }
 
+        uniform sampler2D uSceneGuide;
         float edgeAwareSceneEv(float centerSceneEv) {
-            float smoothness = clamp(uSmoothness, 0.0, 1.0);
-            if (smoothness <= 0.0001) {
-                return centerSceneEv;
-            }
-
-            vec2 nearRadius = uTexelSize * mix(2.0, 18.0, smoothness);
-            vec2 farRadius = uTexelSize * mix(5.0, 44.0, smoothness);
-            float weightedEv = centerSceneEv;
-            float weightSum = 1.0;
-
-            accumulateSceneEv(vec2( nearRadius.x, 0.0), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-nearRadius.x, 0.0), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0,  nearRadius.y), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0, -nearRadius.y), 1.00, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2( nearRadius.x,  nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-nearRadius.x,  nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2( nearRadius.x, -nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-nearRadius.x, -nearRadius.y), 0.70, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2( farRadius.x, 0.0), 0.45, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(-farRadius.x, 0.0), 0.45, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0,  farRadius.y), 0.45, centerSceneEv, weightedEv, weightSum);
-            accumulateSceneEv(vec2(0.0, -farRadius.y), 0.45, centerSceneEv, weightedEv, weightSum);
-
-            float smoothedSceneEv = weightedEv / max(weightSum, 0.0001);
-            return mix(centerSceneEv, smoothedSceneEv, smoothness);
+            if (uSmoothness <= 0.0001) return centerSceneEv;
+            float guidedEv = texture(uSceneGuide, vTexCoord).r + log2(0.18 / max(uMiddleGrey, 0.000001));
+            return mix(centerSceneEv, guidedEv, clamp(uSmoothness, 0.0, 1.0));
         }
 
         float protectedLocalDeltaEv(float mapSceneEv) {
@@ -2664,7 +2694,7 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeOverlayProgram() {
 
         void main() {
             vec4 color = texture(uInputImage, vTexCoord);
-            vec3 rgb = max(color.rgb, vec3(0.0));
+            vec3 rgb = color.rgb;
             float luma = lumaOf(rgb);
             float sceneEv = log2(luma / max(uMiddleGrey, 0.000001));
             float mapSceneEv = edgeAwareSceneEv(sceneEv);
@@ -2775,7 +2805,10 @@ void RenderPipeline::EnsureRawDevelopmentLocalRangeQualifierProgram() {
         uniform vec2 uMeta;
 
         float lumaOf(vec3 rgb) {
-            return max(dot(max(rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.000001);
+            vec3 weights = uWorkingSpace == 1
+                ? vec3(0.2627, 0.6780, 0.0593)
+                : vec3(0.2126, 0.7152, 0.0722);
+            return max(dot(max(rgb, vec3(0.0)), weights), 0.000001);
         }
 
         vec3 sceneRgbToUvChroma(vec3 rgb) {
@@ -2833,6 +2866,7 @@ unsigned int RenderPipeline::BuildRawDevelopmentLocalRangeSelectionBits(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRangeInput,
     Raw::RawWorkingSpace workingSpace,
+    Raw::RawProcessingVersion processingVersion,
     std::size_t inputStageFingerprint,
     int maxSelectionDimension) {
     const Stack::RawRecipe::RawLocalRangeRecipe localRange =
@@ -2858,7 +2892,9 @@ unsigned int RenderPipeline::BuildRawDevelopmentLocalRangeSelectionBits(
                 localRange,
                 workingSpace,
                 inputStageFingerprint,
-                boundedMaximumDimension);
+                boundedMaximumDimension) ^
+        (static_cast<std::size_t>(processingVersion) *
+            0x9e3779b97f4a7c15ull);
     const bool inputMatches = inputStageFingerprint != 0
         ? m_RawDevelopmentLocalRangeSelectionBitsInputFingerprint ==
             inputStageFingerprint
@@ -3125,6 +3161,7 @@ unsigned int RenderPipeline::BuildRawDevelopmentLocalRangeTargetPreviewSelection
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRangeInput,
     Raw::RawWorkingSpace workingSpace,
+    Raw::RawProcessingVersion processingVersion,
     const RawLocalRangeTargetPreviewRequest& request) {
     const Stack::RawRecipe::RawLocalRangeRecipe localRange =
         Stack::RawRecipe::SanitizeLocalRangeRecipe(localRangeInput);
@@ -3497,7 +3534,7 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
     int sourceWidth,
-    int sourceHeight) {
+    int sourceHeight, Raw::RawWorkingSpace workingSpace, int nativeWidth, int nativeHeight) {
     if (m_RawDevelopmentGraphScopeStage !=
             RawDevelopmentGraphScopeStage::LocalRangeInput ||
         m_RawDevelopmentGraphScopeReadbackMaxDimension <= 0 ||
@@ -3512,6 +3549,12 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
 
     const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
         Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
+    Stack::Renderer::ScopedGLTexture guide;
+    if (sanitized.smoothness > 0.0001f) {
+        guide.Reset(RenderRawSpatialField(inputTexture, 16.f + 240.f * sanitized.smoothness,
+            sanitized.edgeProtection, workingSpace, nativeWidth, nativeHeight));
+        if (!guide) return;
+    }
     const float scale = std::min(
         1.0f,
         static_cast<float>(m_RawDevelopmentGraphScopeReadbackMaxDimension) /
@@ -3540,6 +3583,10 @@ void RenderPipeline::CaptureRawDevelopmentLocalRangeGraphScopeReadback(
         scopeTexture,
         [&](unsigned int) {
             glUseProgram(m_RawDevelopmentLocalRangeProgram);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, guide.Get());
+            glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uSceneGuide"), 2);
+            UploadRawLocalRangeTargetZoneUniforms(m_RawDevelopmentLocalRangeProgram, sanitized, workingSpace);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, inputTexture);
             glUniform1i(
@@ -3604,7 +3651,8 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
     Raw::RawWorkingSpace workingSpace,
-    std::size_t inputStageFingerprint) {
+    Raw::RawProcessingVersion processingVersion,
+    std::size_t inputStageFingerprint, int sourceWidth, int sourceHeight) {
     const Stack::RawRecipe::RawLocalRangeRecipe sanitized =
         Stack::RawRecipe::SanitizeLocalRangeRecipe(localRange);
     if (!inputTexture || !Stack::RawRecipe::IsLocalRangeEnabled(sanitized) || sanitized.points.size() < 2) {
@@ -3620,15 +3668,27 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             inputTexture,
             sanitized,
             workingSpace,
+            processingVersion,
             inputStageFingerprint);
 
-    unsigned int outputTexture = CreateGraphRenderTargetTexture();
+    unsigned int outputTexture = m_RawZoneAreasFloatOutput
+        ? GLHelpers::CreateStorageTexture(m_Width, m_Height, GL_RGBA32F)
+        : CreateGraphRenderTargetTexture();
     if (!outputTexture) {
         return 0;
     }
 
+    Stack::Renderer::ScopedGLTexture guide;
+    if (sanitized.smoothness > 0.0001f) {
+        guide.Reset(RenderRawSpatialField(inputTexture, 16.f + 240.f * sanitized.smoothness,
+            sanitized.edgeProtection, workingSpace, sourceWidth, sourceHeight));
+        if (!guide) { glDeleteTextures(1, &outputTexture); return 0; }
+    }
     const bool rendered = RenderIntoGraphTargetTexture(outputTexture, [&](unsigned int) {
         glUseProgram(m_RawDevelopmentLocalRangeProgram);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, guide.Get());
+        glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uSceneGuide"), 2);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uInputImage"), 0);
@@ -3662,7 +3722,6 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
             m_RawDevelopmentLocalRangeProgram,
             sanitized,
             workingSpace);
-
         const int count = std::min<int>(static_cast<int>(sanitized.points.size()), 12);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, "uLocalRangePointCount"), count);
         for (int i = 0; i < count; ++i) {
@@ -3673,6 +3732,23 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRange(
                 glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, uniformName),
                 point.ev,
                 point.deltaEv);
+        }
+        const std::vector<Stack::RawRecipe::RawBezierCurvePoint> bezierPoints =
+            Stack::RawRecipe::RawLocalRangeBezierPoints(sanitized);
+        const float evSpan = std::max(0.1f, sanitized.maxEv - sanitized.minEv);
+        for (int i = 0; i + 1 < count; ++i) {
+            const Stack::RawRecipe::RawBezierSegment segment =
+                Stack::RawRecipe::BuildRawBezierSegment(
+                    bezierPoints,
+                    static_cast<std::size_t>(i));
+            char uniformName[64];
+            std::snprintf(uniformName, sizeof(uniformName), "uLocalRangeHandles[%d]", i);
+            glUniform4f(
+                glGetUniformLocation(m_RawDevelopmentLocalRangeProgram, uniformName),
+                sanitized.minEv + segment.leftHandleX * evSpan,
+                -4.0f + segment.leftHandleY * 8.0f,
+                sanitized.minEv + segment.rightHandleX * evSpan,
+                -4.0f + segment.rightHandleY * 8.0f);
         }
 
         m_Quad.Draw();
@@ -3695,8 +3771,9 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
     unsigned int inputTexture,
     const Stack::RawRecipe::RawLocalRangeRecipe& localRange,
     Raw::RawWorkingSpace workingSpace,
+    Raw::RawProcessingVersion processingVersion,
     const std::string& overlayMode,
-    std::size_t inputStageFingerprint) {
+    std::size_t inputStageFingerprint, int sourceWidth, int sourceHeight) {
     const int mode = overlayMode == "affected-tones"
         ? 1
         : (overlayMode == "delta-map"
@@ -3800,11 +3877,13 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
               inputTexture,
               overlayRange,
               workingSpace,
+              processingVersion,
               m_RawDevelopmentLocalRangeTargetPreviewRequest)
         : BuildRawDevelopmentLocalRangeSelectionBits(
               inputTexture,
               overlayRange,
               workingSpace,
+              processingVersion,
               inputStageFingerprint,
               targetOutlineActive ? 768 : 1536);
     const bool awaitingTargetRefinement =
@@ -3847,8 +3926,17 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
         return 0;
     }
 
+    Stack::Renderer::ScopedGLTexture guide;
+    if (overlayRange.smoothness > 0.0001f) {
+        guide.Reset(RenderRawSpatialField(inputTexture, 16.f + 240.f * overlayRange.smoothness,
+            overlayRange.edgeProtection, workingSpace, sourceWidth, sourceHeight));
+        if (!guide) { glDeleteTextures(1, &outputTexture); return 0; }
+    }
     const bool rendered = RenderIntoGraphTargetTexture(outputTexture, [&](unsigned int) {
         glUseProgram(m_RawDevelopmentLocalRangeOverlayProgram);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, guide.Get());
+        glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uSceneGuide"), 2);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputTexture);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uInputImage"), 0);
@@ -3902,7 +3990,6 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
             m_RawDevelopmentLocalRangeOverlayProgram,
             overlayRange,
             workingSpace);
-
         const int count = std::min<int>(static_cast<int>(overlayRange.points.size()), 12);
         glUniform1i(glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, "uLocalRangePointCount"), count);
         for (int i = 0; i < count; ++i) {
@@ -3913,6 +4000,25 @@ unsigned int RenderPipeline::RenderRawDevelopmentLocalRangeOverlay(
                 glGetUniformLocation(m_RawDevelopmentLocalRangeOverlayProgram, uniformName),
                 point.ev,
                 point.deltaEv);
+        }
+        const std::vector<Stack::RawRecipe::RawBezierCurvePoint> bezierPoints =
+            Stack::RawRecipe::RawLocalRangeBezierPoints(overlayRange);
+        const float evSpan = std::max(0.1f, overlayRange.maxEv - overlayRange.minEv);
+        for (int i = 0; i + 1 < count; ++i) {
+            const Stack::RawRecipe::RawBezierSegment segment =
+                Stack::RawRecipe::BuildRawBezierSegment(
+                    bezierPoints,
+                    static_cast<std::size_t>(i));
+            char uniformName[64];
+            std::snprintf(uniformName, sizeof(uniformName), "uLocalRangeHandles[%d]", i);
+            glUniform4f(
+                glGetUniformLocation(
+                    m_RawDevelopmentLocalRangeOverlayProgram,
+                    uniformName),
+                overlayRange.minEv + segment.leftHandleX * evSpan,
+                -4.0f + segment.leftHandleY * 8.0f,
+                overlayRange.minEv + segment.rightHandleX * evSpan,
+                -4.0f + segment.rightHandleY * 8.0f);
         }
 
         m_Quad.Draw();

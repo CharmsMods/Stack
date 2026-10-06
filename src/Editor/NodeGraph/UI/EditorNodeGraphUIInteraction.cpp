@@ -54,7 +54,7 @@ bool IsPointInRect(
 } // namespace
 
 bool EditorNodeGraphUI::IsGraphCanvasHovered() const {
-    if (m_RenderPreviewOnly) {
+    if (m_RenderPreviewOnly || (m_ActiveEditor != nullptr && m_ActiveEditor->IsLibraryWindowHovered())) {
         return false;
     }
     return ImGui::IsMouseHoveringRect(ToImVec2(m_CanvasMin), ToImVec2(m_CanvasMax), false);
@@ -553,6 +553,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     group->size.y += delta.y / m_Zoom;
                     group->size.x = std::max(100.0f, group->size.x);
                     group->size.y = std::max(80.0f, group->size.y);
+                    editor->MarkGraphEdited(-1, false);
                 }
             }
         }
@@ -590,6 +591,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     // Shift group position
                     group->position.x += dx;
                     group->position.y += dy;
+                    editor->MarkGraphEdited(-1, false);
                 }
             }
         }
@@ -702,6 +704,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                         node->position.x += delta.x / m_Zoom;
                         node->position.y += delta.y / m_Zoom;
                         node->position = ClampGraphPosition(node->position);
+                        editor->MarkGraphEdited(-1, false);
                     }
                 }
             }
@@ -888,6 +891,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
         if (m_HoveredGroupId > 0) {
             if (editor->GetNodeGraph().RemoveGroup(m_HoveredGroupId)) {
+                editor->MarkGraphEdited(-1, false);
                 PostNodeGraphNotification(editor, UiNotificationSeverity::Success, "Group deleted.", "editor-node-graph-delete");
             }
             if (m_EditingGroupId == m_HoveredGroupId) m_EditingGroupId = -1;
@@ -906,6 +910,10 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
         !anyPopupOpen &&
         !HasDrawerOpen() &&
         !graphHotkeysBlockedByNodeControls) {
+        if (editor->IsEditingRawLayerMaskGraph() && ImGui::GetIO().KeyCtrl) {
+            if (!ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z,false)) { editor->UndoRawLayerEdit(); return; }
+            if ((ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z,false)) || ImGui::IsKeyPressed(ImGuiKey_Y,false)) { editor->RedoRawLayerEdit(); return; }
+        }
         if (ImGui::GetIO().KeyCtrl &&
             !ImGui::GetIO().KeyShift &&
             ImGui::IsKeyPressed(ImGuiKey_Z, false) &&
@@ -967,6 +975,7 @@ void EditorNodeGraphUI::RenderInteraction(EditorModule* editor, const EditorNode
                     float h = (maxY - minY) + padding * 2.0f;
 
                     editor->GetNodeGraph().AddGroup("New Group", { x, y }, { w, h });
+                    editor->MarkGraphEdited(-1, false);
                 }
             }
         }

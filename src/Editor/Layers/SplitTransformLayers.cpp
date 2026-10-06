@@ -1,3 +1,5 @@
+#include "Renderer/CoverageSampling.h"
+#include <string>
 #include "SplitTransformLayers.h"
 
 #include "Renderer/FullscreenQuad.h"
@@ -54,7 +56,7 @@ void main() {
     if (uv.x < left || uv.x > right || uv.y < top || uv.y > bottom) {
         FragColor = vec4(0.0, 0.0, 0.0, 0.0);
     } else {
-        FragColor = texture(uInputTex, uv);
+        FragColor = sampleCovered(uInputTex, uv);
     }
 }
 )";
@@ -68,7 +70,9 @@ SplitTransformLayerBase::~SplitTransformLayerBase() {
 }
 
 void SplitTransformLayerBase::InitializeGL() {
-    m_ShaderProgram = GLHelpers::CreateShaderProgram(kTransformVert, kTransformFrag);
+    std::string fragment = kTransformFrag;
+    fragment.insert(fragment.find("void main()"), Stack::Renderer::CoverageSamplingGlsl);
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(kTransformVert, fragment.c_str());
 }
 
 void SplitTransformLayerBase::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {

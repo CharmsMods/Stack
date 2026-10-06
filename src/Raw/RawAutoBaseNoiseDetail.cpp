@@ -59,20 +59,6 @@ float EstimateLocalRangeShadowLiftEv(const Stack::RawRecipe::RawLocalRangeRecipe
     return std::clamp(maxLiftEv, 0.0f, 4.0f);
 }
 
-float EstimateLocalExposureShadowLiftEv(const Stack::RawRecipe::RawLocalExposureRecipe& localExposure) {
-    if (!localExposure.enabled) {
-        return 0.0f;
-    }
-    const float amount = std::clamp(
-        std::isfinite(localExposure.amount) ? localExposure.amount : 1.0f,
-        0.0f,
-        4.0f);
-    const float lift = std::isfinite(localExposure.shadowLiftEv)
-        ? localExposure.shadowLiftEv
-        : 0.0f;
-    return std::clamp(std::max(0.0f, lift) * amount, 0.0f, 4.0f);
-}
-
 std::string FormatNoiseSummary(const NoiseDetailRecommendation& recommendation) {
     std::ostringstream out;
     out << "ISO " << std::fixed << std::setprecision(0) << recommendation.iso
@@ -92,7 +78,6 @@ float EstimateShadowLiftEvForNoiseDetail(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     const std::vector<SuggestedLocalAdjustment>* localSuggestions) {
     float shadowLiftEv = 0.0f;
-    shadowLiftEv = std::max(shadowLiftEv, EstimateLocalExposureShadowLiftEv(recipe.localExposure));
     shadowLiftEv = std::max(shadowLiftEv, EstimateLocalRangeShadowLiftEv(recipe.localRange));
 
     if (localSuggestions != nullptr) {

@@ -1,0 +1,174 @@
+STACK END USER LICENSE AGREEMENT
+Version 1.0-draft
+Effective Date: August 6, 2026
+
+DRAFT - ATTORNEY REVIEW REQUIRED - NOT APPROVED FOR PUBLIC RELEASE
+
+This End User License Agreement ("Agreement") is between Darynn Ho
+("Licensor") and the person or organization that installs or uses an official
+compiled release of Stack ("you"). Stack, Charm, and CharmsMods are product or
+publishing brands used by the Licensor.
+
+Please read this Agreement before installing or using Stack. By selecting the
+accept option, installing Stack, or using an official portable release after
+accepting this Agreement, you agree to these terms. If you do not agree, do not
+install or use Stack.
+
+1. What this Agreement covers
+
+This Agreement covers only official compiled Stack installers, executables,
+portable archives, and the files included with them (the "Application"). It
+does not license the Stack source code or repository materials. Those materials
+are governed by the separate Stack Source-Available Proprietary License.
+
+Third-party components included with the Application remain governed by their
+own licenses and notices. If this Agreement conflicts with a third-party license
+for that component, the third-party license controls for that component.
+
+2. Permission to use Stack
+
+Subject to this Agreement, the Licensor grants you a personal, worldwide,
+non-exclusive, revocable, non-transferable license to install and use the
+Application for any lawful personal, educational, nonprofit, or commercial
+image-editing work.
+
+You do not need an account, activation, subscription, payment, separate
+permission, or prior contact with the Licensor to use Stack as allowed here.
+
+3. Your work and output
+
+The Licensor does not claim ownership of images, projects, exports, presets, or
+other original material that you create using Stack. You keep whatever rights
+you otherwise have in that work. You are responsible for ensuring that your
+inputs and outputs comply with applicable law and do not violate another
+person's rights.
+
+4. Sharing the official installer
+
+You may give another person an exact, unmodified copy of an official Stack
+installer or portable archive, free of charge, if:
+
+- the copy came from an official Stack or CharmsMods release;
+- every application file, legal notice, license, signature, and checksum remains
+  intact and unmodified;
+- you do not charge a fee, sell access, include it in a paid bundle, collect
+  compensation for the copy, or use the distribution primarily for advertising;
+- you do not imply that you created, own, sponsor, or officially publish Stack;
+  and
+- the recipient is shown and must accept the then-current Agreement before use.
+
+This permission does not allow distribution of Stack source code, modified
+binaries, repackaged installers, unofficial builds, or only part of the package.
+
+5. Restrictions
+
+Except where this Agreement, a third-party license, or applicable law expressly
+allows it, you may not:
+
+- sell, rent, lease, sublicense, monetize, commercially distribute, or include
+  the Application in a paid product, service, device, bundle, or subscription;
+- modify, patch, translate, adapt, repackage, rebuild, or create a derivative
+  version of the Application;
+- remove, hide, alter, or bypass a copyright, signature, license, attribution,
+  update-integrity check, security control, or proprietary notice;
+- rebrand Stack, claim authorship or ownership, or represent Stack as your own
+  product or as endorsed by the Licensor;
+- use Stack names, logos, or branding except for truthful references that do not
+  imply ownership, endorsement, sponsorship, or affiliation;
+- reverse engineer, decompile, disassemble, or attempt to derive the proprietary
+  Stack source code; or
+- use the Application in violation of law or another person's rights.
+
+The reverse-engineering restriction does not apply where applicable law does
+not permit that restriction. It also does not limit rights granted by a
+third-party license. In particular, it does not prohibit reverse engineering
+that the GNU Lesser General Public License version 2.1 permits for debugging a
+user modification to LibRaw, or replacing the included `libraw.dll` with an
+interface-compatible modified version as allowed by that license.
+
+6. Updates and network access
+
+By default, Stack makes an HTTPS request to the official GitHub releases API
+when it starts, no more often than the interval implemented by the Application,
+to learn whether an update is available. You can disable automatic startup
+checks in Stack Settings and can still check manually. GitHub may receive
+ordinary network information such as your IP address, request time, and user
+agent under GitHub's own terms and privacy policy.
+
+An update may include new or changed terms. Stack will ask you to accept a new
+EULA version before installation or use when acceptance is required. You may
+decline and continue using an older version if it remains technically usable,
+but the Licensor is not required to maintain or support an older version.
+
+7. Third-party software
+
+The Application includes or may interact with separately licensed third-party
+software. The installed legal directory contains notices and available license
+texts. Third-party licensors retain their own copyrights and disclaimers.
+
+LibRaw is dynamically linked under the GNU Lesser General Public License
+version 2.1 option. The corresponding LibRaw source for a distributed version
+is provided with the applicable Stack release. Other third-party components are
+identified in `THIRD_PARTY_NOTICES.md`.
+
+8. Support and changes
+
+Stack is provided without a promise of support, maintenance, continued
+availability, compatibility, or future features. The Licensor may change,
+suspend, or discontinue Stack. Ordinary bug reports may be submitted through
+the official Stack GitHub Issues page, but no contact is required to use Stack.
+
+9. Termination
+
+This Agreement remains effective until terminated. Your license ends
+automatically if you materially violate it. On termination, you must stop using
+and remove the Application, except for archival copies that applicable law
+requires you to retain. Sections about ownership, restrictions, third-party
+rights, warranty, liability, and general legal terms survive termination.
+
+10. Disclaimer of warranties
+
+STACK IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OF ANY KIND.
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR DISCLAIMS ALL EXPRESS,
+IMPLIED, AND STATUTORY WARRANTIES, INCLUDING MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY,
+AVAILABILITY, AND ERROR-FREE OPERATION. THE LICENSOR DOES NOT WARRANT THAT STACK
+WILL MEET YOUR REQUIREMENTS, PRESERVE DATA, OR WORK WITH A PARTICULAR SYSTEM,
+FILE, WORKFLOW, OR THIRD-PARTY PRODUCT.
+
+11. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR WILL NOT BE LIABLE FOR ANY
+INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES,
+OR FOR LOSS OF PROFITS, REVENUE, DATA, GOODWILL, BUSINESS OPPORTUNITY, OR SYSTEM
+FUNCTIONALITY, ARISING FROM STACK OR THIS AGREEMENT, EVEN IF ADVISED THAT SUCH
+DAMAGE IS POSSIBLE.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR'S TOTAL LIABILITY ARISING
+FROM STACK OR THIS AGREEMENT WILL NOT EXCEED THE AMOUNT YOU PAID DIRECTLY TO THE
+LICENSOR FOR THE APPLICATION DURING THE TWELVE MONTHS BEFORE THE EVENT GIVING
+RISE TO THE CLAIM. IF YOU PAID NOTHING, THE MAXIMUM WILL BE ZERO, EXCEPT WHERE
+APPLICABLE LAW REQUIRES A DIFFERENT REMEDY.
+
+12. Governing law and non-excludable rights
+
+This Agreement is governed by the laws of the State of Washington, United
+States, without regard to conflict-of-law rules, unless applicable law requires
+otherwise. Nothing here excludes, limits, or waives a consumer right, statutory
+warranty, remedy, reverse-engineering right, or other protection that applicable
+law does not permit the parties to exclude, limit, or waive.
+
+13. General terms
+
+If a provision is unenforceable, it will be adjusted only as much as necessary
+and the remainder will continue in effect. Failure to enforce a provision is not
+a waiver. You may not transfer this Agreement except as applicable law permits.
+The Licensor may transfer it in connection with a transfer of Stack ownership.
+This Agreement, the Privacy Notice, and applicable third-party licenses are the
+entire agreement governing the Application unless the Licensor signs a separate
+written agreement that expressly applies.
+
+Official project page: https://github.com/CharmsMods/Stack
+Ordinary support and permission requests: use the official repository's Issues
+page or repository-owner contact methods. No contact is required for a use
+already allowed by this Agreement.

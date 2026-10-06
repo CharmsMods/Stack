@@ -1361,7 +1361,7 @@ void CompositeModule::RenderStage() {
 
     ImGui::SetCursorScreenPos(canvasPos);
     ImGui::InvisibleButton("composite_stage_interact", canvasSize);
-    const bool hovered = ImGui::IsItemHovered();
+    const bool hovered = !m_LibraryWindowHovered && ImGui::IsItemHovered();
     const bool active = ImGui::IsItemActive();
     const ImVec2 mousePos = ImGui::GetMousePos();
     const ImVec2 mouseWorld = ScreenToWorld(canvasCenter, m_ViewZoom, m_ViewPanX, m_ViewPanY, mousePos);

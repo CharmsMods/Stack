@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -22,6 +23,7 @@
 #undef APIENTRY
 #endif
 #include <windows.h>
+#include <commctrl.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
@@ -66,8 +68,20 @@ bool g_TraceLoggedThemeUpdate = false;
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
 winrt::Microsoft::UI::Windowing::AppWindow g_AppWindow { nullptr };
 winrt::Microsoft::UI::Input::InputNonClientPointerSource g_NonClientSource { nullptr };
+HWND g_PassthroughWindow = nullptr;
+std::vector<RECT> g_PassthroughClientRects;
+std::vector<HWND> g_PassthroughChildren;
 bool g_BootstrapInitialized = false;
 bool g_WinrtInitialized = false;
+HMODULE g_BootstrapModule = nullptr;
+using BootstrapInitialize2Fn = HRESULT (WINAPI*)(
+    UINT32,
+    PCWSTR,
+    PACKAGE_VERSION,
+    MddBootstrapInitializeOptions);
+using BootstrapShutdownFn = void (WINAPI*)();
+BootstrapInitialize2Fn g_BootstrapInitialize2 = nullptr;
+BootstrapShutdownFn g_BootstrapShutdown = nullptr;
 #endif
 
 bool EnvFlagEnabled(const char* name) {
@@ -140,6 +154,45 @@ void SetFallback(const std::string& reason, GLFWwindow* window = nullptr) {
 }
 
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
+void UnloadBootstrapModule() {
+    g_BootstrapInitialize2 = nullptr;
+    g_BootstrapShutdown = nullptr;
+    if (g_BootstrapModule != nullptr) {
+        FreeLibrary(g_BootstrapModule);
+        g_BootstrapModule = nullptr;
+    }
+}
+
+bool LoadBootstrapModule(std::string& error) {
+    if (g_BootstrapModule != nullptr &&
+        g_BootstrapInitialize2 != nullptr &&
+        g_BootstrapShutdown != nullptr) {
+        return true;
+    }
+    const std::filesystem::path path =
+        AppPaths::GetRuntimeDirectory() / "Microsoft.WindowsAppRuntime.Bootstrap.dll";
+    g_BootstrapModule = LoadLibraryExW(
+        path.c_str(),
+        nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (g_BootstrapModule == nullptr) {
+        std::ostringstream detail;
+        detail << "managed bootstrap DLL unavailable (error " << GetLastError() << ")";
+        error = detail.str();
+        return false;
+    }
+    g_BootstrapInitialize2 = reinterpret_cast<BootstrapInitialize2Fn>(
+        GetProcAddress(g_BootstrapModule, "MddBootstrapInitialize2"));
+    g_BootstrapShutdown = reinterpret_cast<BootstrapShutdownFn>(
+        GetProcAddress(g_BootstrapModule, "MddBootstrapShutdown"));
+    if (g_BootstrapInitialize2 == nullptr || g_BootstrapShutdown == nullptr) {
+        error = "managed bootstrap DLL is missing required exports";
+        UnloadBootstrapModule();
+        return false;
+    }
+    return true;
+}
+
 winrt::Windows::UI::Color ToWindowsColor(const ImVec4& color) {
     auto toByte = [](float value) {
         return static_cast<std::uint8_t>(std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
@@ -237,7 +290,55 @@ void RefreshMetrics() {
     g_Metrics.rightInsetPx = titleBar.RightInset();
 }
 
+constexpr UINT_PTR kCaptionPassthroughSubclass = 1;
+
+LRESULT CALLBACK CaptionPassthroughChildProc(
+    HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR subclassId, DWORD_PTR) {
+    if (message == WM_NCHITTEST) {
+        const LRESULT nativeHit = DefSubclassProc(hwnd, message, wParam, lParam);
+        if ((nativeHit == HTCLIENT || nativeHit == HTCAPTION || nativeHit == HTSYSMENU) &&
+            IsCaptionPassthroughPoint(
+                static_cast<SHORT>(LOWORD(lParam)), static_cast<SHORT>(HIWORD(lParam)))) {
+            // The SDK's input sink is a separate HWND above the GLFW client.
+            // HTCLIENT on the parent cannot bypass it. Let Windows deliver the
+            // whole gesture to the underlying same-thread client instead.
+            return HTTRANSPARENT;
+        }
+        return nativeHit;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, CaptionPassthroughChildProc, subclassId);
+        g_PassthroughChildren.erase(
+            std::remove(g_PassthroughChildren.begin(), g_PassthroughChildren.end(), hwnd),
+            g_PassthroughChildren.end());
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+BOOL CALLBACK AttachCaptionPassthroughChild(HWND child, LPARAM parentValue) {
+    const HWND parent = reinterpret_cast<HWND>(parentValue);
+    // Do not depend on SDK-private class names or subclass another thread.
+    // Only declared caption client regions change hit testing; native caption
+    // buttons, drag areas and resize edges keep their original results.
+    if (GetParent(child) != parent ||
+        GetWindowThreadProcessId(child, nullptr) != GetCurrentThreadId() ||
+        std::find(g_PassthroughChildren.begin(), g_PassthroughChildren.end(), child) !=
+            g_PassthroughChildren.end()) return TRUE;
+    if (SetWindowSubclass(child, CaptionPassthroughChildProc, kCaptionPassthroughSubclass, 0))
+        g_PassthroughChildren.push_back(child);
+    return TRUE;
+}
+
+void ClearCaptionPassthroughChildren() {
+    for (HWND child : g_PassthroughChildren)
+        RemoveWindowSubclass(child, CaptionPassthroughChildProc, kCaptionPassthroughSubclass);
+    g_PassthroughChildren.clear();
+}
+
 void ClearPassthroughRegionsReal() {
+    ClearCaptionPassthroughChildren();
+    g_PassthroughWindow = nullptr;
+    g_PassthroughClientRects.clear();
     if (!g_NonClientSource) {
         return;
     }
@@ -304,8 +405,13 @@ void Initialize(GLFWwindow* window) {
         }
 
         if (!g_BootstrapInitialized) {
+            std::string bootstrapError;
+            if (!LoadBootstrapModule(bootstrapError)) {
+                SetFallback(bootstrapError, window);
+                return;
+            }
             PACKAGE_VERSION minVersion {};
-            const HRESULT bootstrapHr = MddBootstrapInitialize2(
+            const HRESULT bootstrapHr = g_BootstrapInitialize2(
                 WINDOWSAPPSDK_RELEASE_MAJORMINOR,
                 WINDOWSAPPSDK_RELEASE_VERSION_TAG_W,
                 minVersion,
@@ -315,6 +421,7 @@ void Initialize(GLFWwindow* window) {
                 detail << "MddBootstrapInitialize2 hr=0x"
                        << std::hex << static_cast<unsigned long>(bootstrapHr) << std::dec;
                 SetFallback(detail.str(), window);
+                UnloadBootstrapModule();
                 return;
             }
             g_BootstrapInitialized = true;
@@ -337,6 +444,9 @@ void Initialize(GLFWwindow* window) {
 
         auto titleBar = g_AppWindow.TitleBar();
         titleBar.ExtendsContentIntoTitleBar(true);
+        // The rail owns the top-left corner. A hidden native icon can still
+        // reserve this hit region unless its system-menu area is removed too.
+        titleBar.IconShowOptions(winrt::Microsoft::UI::Windowing::IconShowOptions::HideIconAndSystemMenu);
         titleBar.PreferredHeightOption(winrt::Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
         g_Metrics.initialized = true;
         g_Metrics.active = true;
@@ -395,9 +505,12 @@ void Shutdown() {
     g_NonClientSource = nullptr;
     g_AppWindow = nullptr;
     if (g_BootstrapInitialized) {
-        MddBootstrapShutdown();
+        if (g_BootstrapShutdown != nullptr) {
+            g_BootstrapShutdown();
+        }
         g_BootstrapInitialized = false;
     }
+    UnloadBootstrapModule();
 #endif
     g_Metrics = Metrics{};
     g_TraceLoggedThemeUpdate = false;
@@ -407,18 +520,28 @@ void UpdateTheme(
     GLFWwindow* window,
     const ImVec4& foreground,
     const ImVec4& hoverBackground,
-    const ImVec4& pressedBackground) {
+    const ImVec4& pressedBackground,
+    float captionButtonOpacity) {
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
     if (!g_Metrics.active || !g_AppWindow) {
         return;
     }
 
     try {
+        const float opacity = std::clamp(captionButtonOpacity, 0.0f, 1.0f);
+        ImVec4 activeForeground = foreground;
+        ImVec4 inactiveForeground = foreground;
+        ImVec4 hover = hoverBackground;
+        ImVec4 pressed = pressedBackground;
+        activeForeground.w *= opacity;
+        inactiveForeground.w *= 0.72f * opacity;
+        hover.w *= opacity;
+        pressed.w *= opacity;
         auto titleBar = g_AppWindow.TitleBar();
-        titleBar.ButtonForegroundColor(BoxColor(ToWindowsColor(foreground)));
-        titleBar.ButtonInactiveForegroundColor(BoxColor(ToWindowsColor(ImVec4(foreground.x, foreground.y, foreground.z, 0.72f))));
-        titleBar.ButtonHoverBackgroundColor(BoxColor(ToWindowsColor(hoverBackground)));
-        titleBar.ButtonPressedBackgroundColor(BoxColor(ToWindowsColor(pressedBackground)));
+        titleBar.ButtonForegroundColor(BoxColor(ToWindowsColor(activeForeground)));
+        titleBar.ButtonInactiveForegroundColor(BoxColor(ToWindowsColor(inactiveForeground)));
+        titleBar.ButtonHoverBackgroundColor(BoxColor(ToWindowsColor(hover)));
+        titleBar.ButtonPressedBackgroundColor(BoxColor(ToWindowsColor(pressed)));
         RefreshMetrics();
         if (!g_TraceLoggedThemeUpdate) {
             g_TraceLoggedThemeUpdate = true;
@@ -434,17 +557,20 @@ void UpdateTheme(
     (void)foreground;
     (void)hoverBackground;
     (void)pressedBackground;
+    (void)captionButtonOpacity;
 #endif
 }
 
 void SyncPassthroughRegions(GLFWwindow* window, const std::vector<ImRect>& screenRects) {
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
-    if (!g_Metrics.active || !g_NonClientSource || !window) {
+    if (!g_Metrics.active || !window) {
+        ClearPassthroughRegionsReal();
         return;
     }
 
     HWND hwnd = glfwGetWin32Window(window);
     if (!hwnd) {
+        ClearPassthroughRegionsReal();
         return;
     }
 
@@ -468,13 +594,18 @@ void SyncPassthroughRegions(GLFWwindow* window, const std::vector<ImRect>& scree
 
     const int clientWidth = framebufferWidth > 0 ? framebufferWidth : (clientRect.right - clientRect.left);
     const int titlebarHeight = std::max(0, g_Metrics.heightPx);
-    const int leftLimit = std::max(0, g_Metrics.leftInsetPx);
+    // HideIconAndSystemMenu gives this corner to the rail. Some runtime
+    // versions retain a nonzero LeftInset metric after hiding the icon.
+    // Clipping to that metric removes the panel toggle from passthrough.
+    const int leftLimit = 0;
     const int rightLimit = std::max(leftLimit, clientWidth - std::max(0, g_Metrics.rightInsetPx));
     const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
     const ImVec2 viewportPos = mainViewport ? mainViewport->Pos : ImVec2(0.0f, 0.0f);
 
     std::vector<winrt::Windows::Graphics::RectInt32> passthroughRects;
     passthroughRects.reserve(screenRects.size());
+    std::vector<RECT> clientRects;
+    clientRects.reserve(screenRects.size());
 
     for (const ImRect& rect : screenRects) {
         const float minX = (rect.Min.x - viewportPos.x) * scaleX;
@@ -496,11 +627,27 @@ void SyncPassthroughRegions(GLFWwindow* window, const std::vector<ImRect>& scree
             right - left,
             bottom - top
         });
+        clientRects.push_back(RECT{left, top, right, bottom});
     }
 
-    g_NonClientSource.SetRegionRects(
-        winrt::Microsoft::UI::Input::NonClientRegionKind::Passthrough,
-        winrt::array_view<const winrt::Windows::Graphics::RectInt32>(passthroughRects));
+    // Keep hit regions stable through a press/release. Reconfigure the native
+    // title bar only when layout, DPI or popup coverage actually changes.
+    if (g_PassthroughWindow && g_PassthroughWindow != hwnd)
+        ClearCaptionPassthroughChildren();
+    // The SDK may recreate its input children without changing these rectangles.
+    EnumChildWindows(hwnd, AttachCaptionPassthroughChild, reinterpret_cast<LPARAM>(hwnd));
+    if (g_PassthroughWindow == hwnd && clientRects.size() == g_PassthroughClientRects.size() &&
+        std::equal(clientRects.begin(), clientRects.end(), g_PassthroughClientRects.begin(),
+            [](const RECT& left, const RECT& right) { return EqualRect(&left, &right) != FALSE; }))
+        return;
+    g_PassthroughWindow = hwnd;
+    g_PassthroughClientRects = std::move(clientRects);
+
+    if (g_NonClientSource) {
+        g_NonClientSource.SetRegionRects(
+            winrt::Microsoft::UI::Input::NonClientRegionKind::Passthrough,
+            winrt::array_view<const winrt::Windows::Graphics::RectInt32>(passthroughRects));
+    }
 
     if (TraceEnabled()) {
         std::ostringstream detail;
@@ -524,6 +671,23 @@ void SyncPassthroughRegions(GLFWwindow* window, const std::vector<ImRect>& scree
 void ClearPassthroughRegions() {
 #if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
     ClearPassthroughRegionsReal();
+#endif
+}
+
+bool IsCaptionPassthroughPoint(int screenX, int screenY) {
+#if defined(_WIN32) && STACK_ENABLE_APPWINDOW_TITLEBAR && STACK_HAS_WINDOWS_APP_SDK
+    // Apply the same declared client regions even when the SDK advertises
+    // passthrough support but returns a native caption hit for this point.
+    if (!g_Metrics.active || !g_PassthroughWindow)
+        return false;
+    POINT point{screenX, screenY};
+    if (!ScreenToClient(g_PassthroughWindow, &point)) return false;
+    return std::any_of(g_PassthroughClientRects.begin(), g_PassthroughClientRects.end(),
+        [&](const RECT& rect) { return PtInRect(&rect, point) != FALSE; });
+#else
+    (void)screenX;
+    (void)screenY;
+    return false;
 #endif
 }
 

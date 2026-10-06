@@ -48,6 +48,11 @@ public:
         bool readOnlyRecovery = false);
     void FailReplacement(const ProjectReplacementToken& token);
     void Clear();
+    bool AdoptSavedBaseline(
+        std::string projectId,
+        std::uint64_t persistedDirtyRevision,
+        std::uint64_t currentDirtyRevision,
+        std::uint64_t storageRevision);
 
     std::uint64_t NoteEdit();
     bool BeginImport();
@@ -60,6 +65,7 @@ public:
         std::uint64_t committedStorageRevision,
         bool conflict = false);
     void CancelSave(const ProjectSaveToken& token);
+    bool RecoverOrphanedSave();
     void MarkConflict();
     void MarkReadOnlyRecovery();
 

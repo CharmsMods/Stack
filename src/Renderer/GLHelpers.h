@@ -21,7 +21,19 @@ namespace GLHelpers {
     unsigned int CreateComputeProgram(const char* computeSrc);
 
     // Create a simple RGBA texture from CPU pixel data
-    unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int height, int channels);
+    unsigned int CreateTextureFromPixels(
+        const unsigned char* data,
+        int width,
+        int height,
+        int channels,
+        bool generateMipmaps = false);
+
+    // Upload tightly packed CPU data. The caller validates the buffer length.
+    // Returns zero on unsupported dimensions or any upload/allocation error.
+    unsigned int CreateTextureFromData(
+        const void* data, int width, int height,
+        unsigned int internalFormat, unsigned int format, unsigned int type,
+        unsigned int filter = GL_NEAREST);
 
     // Create an empty RGBA16F scene-linear texture for FBO attachment
     unsigned int CreateEmptyTexture(int width, int height);

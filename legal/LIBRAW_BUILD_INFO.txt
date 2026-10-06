@@ -1,0 +1,15 @@
+Stack LibRaw corresponding-source record
+
+Upstream: https://github.com/LibRaw/LibRaw
+Version: 0.22.1
+Commit: b860248a89d9082b8e0a1e202e516f46af9adb29
+Selected license: GNU Lesser General Public License version 2.1
+
+Stack builds `libraw.dll` as a dynamic library from the upstream `src/*.cpp`
+files at the commit above. Files ending in `_ph.cpp` are excluded from the
+source list. The build defines `LIBRAW_BUILDLIB`; Microsoft compiler builds
+suppress warnings 4244, 4267, and 4996. Stack applies no source patch to LibRaw.
+
+The archive generated for a release contains the exact upstream tree at the
+recorded commit plus this record. Users may replace the distributed DLL with an
+interface-compatible modified version as permitted by LGPL 2.1.

@@ -1,10 +1,14 @@
 #include "RawGpuPipeline.h"
 
+#include "RawGpuPreprocessor.h"
 #include "RawProcessingMath.h"
+#include "RawOrientation.h"
 #include "Renderer/GLHelpers.h"
+#include "Utils/PixelBufferUtils.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -15,11 +19,91 @@
 #ifndef GL_R32F
 #define GL_R32F 0x822E
 #endif
+#ifndef GL_RGB32F
+#define GL_RGB32F 0x8815
+#endif
 
 namespace Raw {
+void RawGpuPipeline::InvalidateProcessingOutputs() {
+    if (m_Preprocessor) m_Preprocessor->InvalidateOutputs();
+    m_CorrectedRawFingerprint = 0;
+    m_RawNoiseVarianceFingerprint = 0;
+}
+
 namespace {
 
 constexpr int kMaxRawGpuToneCurvePoints = 12;
+constexpr std::uint64_t kCooperativeCfaRasterPixelThreshold =
+    4ull * 1024ull * 1024ull;
+constexpr int kCooperativeCfaRasterTileWidth = 512;
+constexpr int kCooperativeCfaRasterTileHeight = 128;
+
+bool DrawRawFullscreenPass(
+    int width,
+    int height,
+    bool cooperativeGpuScheduling,
+    const std::function<bool()>& shouldCancel) {
+    if (!cooperativeGpuScheduling || width <= 0 || height <= 0) {
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        return true;
+    }
+
+    const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
+    GLint previousScissor[4] = { 0, 0, 0, 0 };
+    glGetIntegerv(GL_SCISSOR_BOX, previousScissor);
+    glEnable(GL_SCISSOR_TEST);
+    bool completed = true;
+    for (int y = 0;
+         y < height && completed;
+         y += kCooperativeCfaRasterTileHeight) {
+        const int tileHeight = std::min(
+            kCooperativeCfaRasterTileHeight,
+            height - y);
+        for (int x = 0; x < width; x += kCooperativeCfaRasterTileWidth) {
+            if (shouldCancel && shouldCancel()) {
+                completed = false;
+                break;
+            }
+            const int tileWidth = std::min(
+                kCooperativeCfaRasterTileWidth,
+                width - x);
+            glScissor(x, y, tileWidth, tileHeight);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Bound each native CFA command so the GPU scheduler can service
+            // the UI/compositor between tiles. Waiting happens only on the
+            // RAW worker and also creates a cancellation boundary before the
+            // next tile is submitted.
+            GLsync tileFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if (tileFence != nullptr) {
+                glFlush();
+                GLenum waitResult = GL_TIMEOUT_EXPIRED;
+                while (waitResult == GL_TIMEOUT_EXPIRED) {
+                    waitResult = glClientWaitSync(
+                        tileFence,
+                        GL_SYNC_FLUSH_COMMANDS_BIT,
+                        1000000u);
+                }
+                glDeleteSync(tileFence);
+                if (waitResult == GL_WAIT_FAILED) {
+                    completed = false;
+                    break;
+                }
+            } else {
+                glFlush();
+            }
+        }
+    }
+    glScissor(
+        previousScissor[0],
+        previousScissor[1],
+        previousScissor[2],
+        previousScissor[3]);
+    if (scissorWasEnabled == GL_FALSE) {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    return completed;
+}
 
 constexpr const char* kRawVertexShader = R"GLSL(
 #version 330 core
@@ -42,6 +126,7 @@ uniform sampler2D uCorrectedRaw;
 uniform int uUseCorrectedRaw;
 uniform sampler2D uRawNoiseVariance;
 uniform int uUseRawNoiseVariance;
+uniform int uHdrVirtualAnchor;
 uniform ivec2 uRawSize;
 uniform ivec2 uVisibleSize;
 uniform ivec2 uCropOrigin;
@@ -141,16 +226,28 @@ float blackForColor(int color) {
     return channelBlack;
 }
 
-float rawNormalizedAt(ivec2 rawP, ivec2 visibleP) {
+ivec2 mirrorCfaSamplePoint(ivec2 rawP) {
     ivec2 minimumP = uClampToActiveArea != 0 ? uCropOrigin : ivec2(0);
     ivec2 maximumP = uClampToActiveArea != 0
         ? min(uRawSize - ivec2(1), uCropOrigin + uVisibleSize - ivec2(1))
         : uRawSize - ivec2(1);
-    ivec2 q = clamp(rawP, minimumP, maximumP);
+    if (all(greaterThanEqual(rawP, minimumP)) && all(lessThanEqual(rawP, maximumP))) return rawP;
+    // Reflect about the boundary sample, without repeating it. A reflection
+    // changes each coordinate by an even number, preserving its Bayer phase.
+    // Clamping instead substitutes the edge's CFA color into another channel's
+    // reconstruction kernel and produces a colored one/two-pixel border.
+    ivec2 span = max(maximumP - minimumP, ivec2(1));
+    ivec2 period = 2 * span;
+    ivec2 phase = ((rawP - minimumP) % period + period) % period;
+    return min(minimumP + span - abs(phase - span), maximumP);
+}
+
+float rawNormalizedAt(ivec2 rawP, ivec2 visibleP) {
+    ivec2 q = mirrorCfaSamplePoint(rawP);
     if (uUseCorrectedRaw != 0) {
         return texelFetch(uCorrectedRaw, q, 0).r;
     }
-    ivec2 visibleQ = clamp(visibleP, ivec2(0), uVisibleSize - ivec2(1));
+    ivec2 visibleQ = visibleP + q - rawP;
     int color = cfaAt(visibleQ);
     float black = blackForColor(color);
     float white = max(black + 1.0, uWhiteLevel);
@@ -162,13 +259,9 @@ float noiseVarianceAt(ivec2 rawP) {
     if (uUseRawNoiseVariance == 0) {
         return 0.0;
     }
-    ivec2 minimumP = uClampToActiveArea != 0 ? uCropOrigin : ivec2(0);
-    ivec2 maximumP = uClampToActiveArea != 0
-        ? min(uRawSize - ivec2(1), uCropOrigin + uVisibleSize - ivec2(1))
-        : uRawSize - ivec2(1);
     return max(0.0, texelFetch(
         uRawNoiseVariance,
-        clamp(rawP, minimumP, maximumP),
+        mirrorCfaSamplePoint(rawP),
         0).r);
 }
 
@@ -250,7 +343,7 @@ float denoisedRawAt(ivec2 rawP, ivec2 visibleP) {
     if (uMosaicDenoiseEnabled == 0) {
         return center;
     }
-    int color = cfaAt(clamp(visibleP, ivec2(0), uVisibleSize - ivec2(1)));
+    int color = cfaAt(visibleP + mirrorCfaSamplePoint(rawP) - rawP);
     float strength = color == 1 ? uMosaicLumaStrength : uMosaicChromaStrength;
     strength = clamp(strength, 0.0, 1.0);
     float value = center;
@@ -285,7 +378,7 @@ float demosaicSampleAt(ivec2 rawP, ivec2 visibleP) {
     if (uWhiteBalanceBeforeDemosaic == 0) {
         return value;
     }
-    ivec2 visibleQ = clamp(visibleP, ivec2(0), uVisibleSize - ivec2(1));
+    ivec2 visibleQ = visibleP + mirrorCfaSamplePoint(rawP) - rawP;
     int color = cfaAt(visibleQ);
     if (color == 0) return value * uWhiteBalance.r;
     if (color == 2) return value * uWhiteBalance.b;
@@ -293,12 +386,13 @@ float demosaicSampleAt(ivec2 rawP, ivec2 visibleP) {
 }
 
 vec3 clippedMaskAt(ivec2 rawP, ivec2 visibleP) {
-    ivec2 minimumP = uClampToActiveArea != 0 ? uCropOrigin : ivec2(0);
-    ivec2 maximumP = uClampToActiveArea != 0
-        ? min(uRawSize - ivec2(1), uCropOrigin + uVisibleSize - ivec2(1))
-        : uRawSize - ivec2(1);
-    ivec2 q = clamp(rawP, minimumP, maximumP);
-    ivec2 visibleQ = clamp(visibleP, ivec2(0), uVisibleSize - ivec2(1));
+    if (uHdrVirtualAnchor != 0) {
+        // HDR clipping ownership is carried by the fusion sidecars. Values
+        // above one are valid scene signal, not single-frame sensor clipping.
+        return vec3(0.0);
+    }
+    ivec2 q = mirrorCfaSamplePoint(rawP);
+    ivec2 visibleQ = visibleP + q - rawP;
     int color = cfaAt(visibleQ);
     float black = blackForColor(color);
     float white = max(black + 1.0, uWhiteLevel);
@@ -430,8 +524,58 @@ vec3 qualityDemosaic(ivec2 rawP, ivec2 visibleP) {
         mhcAtGreen(rawP, visibleP, !horizontalRed));
 }
 
+vec3 nearestNeighborDemosaic(ivec2 rawP, ivec2 visibleP) {
+    vec3 result = vec3(0.0);
+    for (int wanted = 0; wanted < 3; ++wanted) {
+        int bestDistance = 1000000;
+        for (int radius = 0; radius <= 2; ++radius) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (abs(dx) != radius && abs(dy) != radius) continue;
+                    ivec2 p = visibleP + ivec2(dx, dy);
+                    if (cfaAt(p) != wanted) continue;
+                    int distance = abs(dx) + abs(dy);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        result[wanted] = demosaicSampleAt(rawP + ivec2(dx, dy), p);
+                    }
+                }
+            }
+            if (bestDistance < 1000000) break;
+        }
+    }
+    return result;
+}
+
+vec3 hamiltonAdamsDemosaic(ivec2 rawP, ivec2 visibleP) {
+    int color = cfaAt(visibleP);
+    float c = demosaicSampleAt(rawP, visibleP);
+    float l = demosaicSampleAt(rawP + ivec2(-1, 0), visibleP + ivec2(-1, 0));
+    float r = demosaicSampleAt(rawP + ivec2(1, 0), visibleP + ivec2(1, 0));
+    float u = demosaicSampleAt(rawP + ivec2(0, -1), visibleP + ivec2(0, -1));
+    float d = demosaicSampleAt(rawP + ivec2(0, 1), visibleP + ivec2(0, 1));
+    if (color == 0 || color == 2) {
+        float h = 0.5 * (l + r);
+        float v = 0.5 * (u + d);
+        float gh = abs(l - r);
+        float gv = abs(u - d);
+        float g = gh <= gv ? h : v;
+        float opposite = 0.25 * (
+            demosaicSampleAt(rawP + ivec2(-1, -1), visibleP + ivec2(-1, -1)) +
+            demosaicSampleAt(rawP + ivec2(1, -1), visibleP + ivec2(1, -1)) +
+            demosaicSampleAt(rawP + ivec2(-1, 1), visibleP + ivec2(-1, 1)) +
+            demosaicSampleAt(rawP + ivec2(1, 1), visibleP + ivec2(1, 1)));
+        return color == 0 ? vec3(c, g, opposite) : vec3(opposite, g, c);
+    }
+    bool horizontalRed = cfaAt(visibleP + ivec2(-1, 0)) == 0 || cfaAt(visibleP + ivec2(1, 0)) == 0;
+    return horizontalRed ? vec3(0.5 * (l + r), c, 0.5 * (u + d)) : vec3(0.5 * (u + d), c, 0.5 * (l + r));
+}
+
 vec3 rawDemosaicAt(ivec2 rawP, ivec2 visibleP) {
-    return uDemosaicMethod == 1 ? qualityDemosaic(rawP, visibleP) : bilinearDemosaic(rawP, visibleP);
+    if (uDemosaicMethod == 1) return qualityDemosaic(rawP, visibleP);
+    if (uDemosaicMethod == 2) return nearestNeighborDemosaic(rawP, visibleP);
+    if (uDemosaicMethod == 3) return hamiltonAdamsDemosaic(rawP, visibleP);
+    return bilinearDemosaic(rawP, visibleP);
 }
 
 vec3 clippedMaskAtUv(vec2 uv) {
@@ -528,7 +672,7 @@ vec3 cleanupColorEdges(vec2 visibleUv, vec3 rgb, vec3 clipMask, out float falseC
     vec3 targetChroma = mix(meanChroma, vec3(0.0), highlightEdgeMask * 0.65);
     float cleanup = max(max(falseColorMask * uFalseColorSuppression, defringeMask * uDefringeStrength), highlightEdgeMask * uHighlightEdgeCleanup);
     vec3 cleaned = vec3(centerLum) + mix(centerChroma, targetChroma, clamp(cleanup, 0.0, 1.0));
-    return max(cleaned, vec3(0.0));
+    return uHdrVirtualAnchor != 0 ? cleaned : max(cleaned, vec3(0.0));
 }
 
 vec3 clippedDemosaicMask(ivec2 rawP, ivec2 visibleP) {
@@ -624,7 +768,10 @@ vec2 orientVisibleUv(vec2 uv) {
 }
 
 void main() {
-    vec2 visibleUv = orientVisibleUv(vUv);
+    // All sensor buffers store row zero at the top. Convert the framebuffer's
+    // bottom-up UV before applying EXIF, including ordinary decoded camera RAW.
+    vec2 displayUv = vec2(vUv.x, 1.0 - vUv.y);
+    vec2 visibleUv = orientVisibleUv(displayUv);
     ivec2 visibleP = ivec2(clamp(visibleUv * vec2(uVisibleSize), vec2(0.0), vec2(uVisibleSize) - vec2(1.0)));
     ivec2 rawP = uCropOrigin + visibleP;
     if (uDebugView == 1) {
@@ -665,8 +812,15 @@ void main() {
 
     vec3 rgb = rawDemosaicAt(rawP, visibleP);
     rgb = applyLateralCa(visibleUv, rgb);
-    vec3 clipMask = clippedDemosaicMask(rawP, visibleP);
-    rgb = reconstructHighlights(rgb, clipMask);
+    vec3 clipMask = vec3(0.0);
+    if (uHighlightMode != 0 ||
+        uHighlightEdgeCleanup > 0.0001 ||
+        uDebugView == 13) {
+        clipMask = clippedDemosaicMask(rawP, visibleP);
+    }
+    if (uHighlightMode != 0) {
+        rgb = reconstructHighlights(rgb, clipMask);
+    }
     if (uDebugView == 3) {
         FragColor = vec4(rgb, 1.0);
         return;
@@ -719,6 +873,7 @@ in vec2 vUv;
 out vec4 FragColor;
 
 uniform sampler2D uLinearRgb;
+uniform int uTopDownInput;
 uniform ivec2 uVisibleSize;
 uniform int uOrientation;
 uniform int uRotateToFitFrame;
@@ -728,6 +883,8 @@ uniform mat3 uCameraToWorking;
 uniform int uUseCameraTransform;
 uniform int uDebugView;
 uniform float uExposure;
+uniform vec3 uWhiteBalance;
+uniform int uApplyWhiteBalance;
 uniform int uToneCurvePointCount;
 uniform vec2 uToneCurvePoints[12];
 
@@ -781,8 +938,28 @@ vec2 orientVisibleUv(vec2 uv) {
 }
 
 void main() {
-    vec2 uv = orientVisibleUv(vUv);
-    vec3 rgb = texture(uLinearRgb, uv).rgb;
+    vec2 displayUv = uTopDownInput != 0 ? vec2(vUv.x, 1.0 - vUv.y) : vUv;
+    vec2 uv = orientVisibleUv(displayUv);
+    ivec2 size = textureSize(uLinearRgb, 0);
+    vec2 position = uv * vec2(size) - 0.5;
+    // A native-size covered reconstruction has an exact pixel mapping. Avoid
+    // small rasterized-UV errors bleeding coverage across its outline.
+    if (uTopDownInput == 2) position = floor(position + 0.5);
+    ivec2 base = ivec2(floor(position));
+    vec2 fraction = fract(position);
+    vec3 sum = vec3(0.0);
+    float coverage = 0.0;
+    for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x) {
+        float weight = (x == 0 ? 1.0 - fraction.x : fraction.x) *
+                       (y == 0 ? 1.0 - fraction.y : fraction.y);
+        vec4 value = texelFetch(uLinearRgb, clamp(base + ivec2(x,y), ivec2(0), size - 1), 0);
+        coverage += weight * value.a;
+        sum += weight * value.a * value.rgb;
+    }
+    vec3 rgb = coverage > 0.0 ? sum / coverage : vec3(0.0);
+    if (uApplyWhiteBalance != 0) {
+        rgb *= uWhiteBalance;
+    }
     if (uUseCameraTransform != 0) {
         rgb = uCameraToWorking * rgb;
     }
@@ -791,20 +968,9 @@ void main() {
         applyToneCurveChannel(rgb.r),
         applyToneCurveChannel(rgb.g),
         applyToneCurveChannel(rgb.b));
-    FragColor = vec4(rgb, 1.0);
+    FragColor = vec4(rgb, coverage);
 }
 )GLSL";
-
-std::size_t HashRawBuffer(const std::vector<std::uint16_t>& data) {
-    std::size_t hash = 1469598103934665603ull;
-    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data.data());
-    const std::size_t byteCount = data.size() * sizeof(std::uint16_t);
-    for (std::size_t i = 0; i < byteCount; ++i) {
-        hash ^= static_cast<std::size_t>(bytes[i]);
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
 
 template <typename T>
 std::size_t HashBuffer(const std::vector<T>& data) {
@@ -816,6 +982,19 @@ std::size_t HashBuffer(const std::vector<T>& data) {
         hash *= 1099511628211ull;
     }
     return hash;
+}
+
+template <typename T>
+std::size_t ImmutableContentFingerprint(
+    const RawImageData& raw,
+    const std::vector<T>& fallbackPixels) {
+    if (raw.contentIdentityHash != 0u) {
+        return static_cast<std::size_t>(raw.contentIdentityHash);
+    }
+    if (!raw.contentIdentity.empty()) {
+        return std::hash<std::string>{}(raw.contentIdentity);
+    }
+    return HashBuffer(fallbackPixels);
 }
 
 void MixHash(std::size_t& hash, std::size_t value) {
@@ -830,7 +1009,28 @@ void MixDoubleHash(std::size_t& hash, double value) {
     MixHash(hash, std::hash<double>{}(value));
 }
 
-void UploadToneCurveUniforms(unsigned int program, const RawDevelopSettings& settings) {
+template <std::size_t N>
+void CacheToneCurveUniformLocations(
+    unsigned int program,
+    int& pointCountLocation,
+    std::array<int, N>& pointLocations) {
+    pointCountLocation = glGetUniformLocation(program, "uToneCurvePointCount");
+    for (std::size_t i = 0; i < pointLocations.size(); ++i) {
+        char uniformName[48] = {};
+        snprintf(
+            uniformName,
+            sizeof(uniformName),
+            "uToneCurvePoints[%zu]",
+            i);
+        pointLocations[i] = glGetUniformLocation(program, uniformName);
+    }
+}
+
+template <std::size_t N>
+void UploadToneCurveUniforms(
+    int pointCountLocation,
+    const std::array<int, N>& pointLocations,
+    const RawDevelopSettings& settings) {
     int count = 0;
     std::array<float, kMaxRawGpuToneCurvePoints * 2> packed {};
     for (const RawToneCurvePoint& point : settings.toneCurvePoints) {
@@ -847,12 +1047,10 @@ void UploadToneCurveUniforms(unsigned int program, const RawDevelopSettings& set
         ++count;
     }
 
-    glUniform1i(glGetUniformLocation(program, "uToneCurvePointCount"), count);
+    glUniform1i(pointCountLocation, count);
     for (int i = 0; i < count; ++i) {
-        char uniformName[48] = {};
-        snprintf(uniformName, sizeof(uniformName), "uToneCurvePoints[%d]", i);
         glUniform2f(
-            glGetUniformLocation(program, uniformName),
+            pointLocations[static_cast<std::size_t>(i)],
             packed[static_cast<std::size_t>(i) * 2],
             packed[static_cast<std::size_t>(i) * 2 + 1]);
     }
@@ -1286,11 +1484,30 @@ bool OrientationSwapsDimensions(int orientation) {
 
 } // namespace
 
+std::array<float, 3> ResolveRawWhiteBalance(
+    const RawMetadata& metadata,
+    const RawDevelopSettings& settings) {
+    return ResolveWhiteBalance(metadata, settings);
+}
+
+std::array<float, 9> BuildRawCameraToWorkingTransform(
+    const RawMetadata& metadata,
+    const RawDevelopSettings& settings,
+    bool inputAlreadyWhiteBalanced) {
+    return BuildCameraToWorking(
+        metadata,
+        settings,
+        inputAlreadyWhiteBalanced);
+}
+
+RawGpuPipeline::RawGpuPipeline() = default;
+
 RawGpuPipeline::~RawGpuPipeline() {
     Clear();
 }
 
 void RawGpuPipeline::Clear() {
+    if (m_Preprocessor) m_Preprocessor->Clear();
     if (m_Program) glDeleteProgram(m_Program);
     if (m_LinearProgram) glDeleteProgram(m_LinearProgram);
     if (m_RawTexture) glDeleteTextures(1, &m_RawTexture);
@@ -1303,6 +1520,8 @@ void RawGpuPipeline::Clear() {
     if (m_QuadVao) glDeleteVertexArrays(1, &m_QuadVao);
     m_Program = 0;
     m_LinearProgram = 0;
+    m_RawUniforms = {};
+    m_LinearUniforms = {};
     m_RawTexture = 0;
     m_CorrectedRawTexture = 0;
     m_RawNoiseVarianceTexture = 0;
@@ -1319,6 +1538,7 @@ void RawGpuPipeline::Clear() {
     m_CorrectedRawFingerprint = 0;
     m_RawNoiseVarianceFingerprint = 0;
     m_LinearFingerprint = 0;
+    m_LastPreprocessTelemetry = {};
 }
 
 bool RawGpuPipeline::EnsureProgram() {
@@ -1328,8 +1548,56 @@ bool RawGpuPipeline::EnsureProgram() {
     m_Program = GLHelpers::CreateShaderProgram(kRawVertexShader, kRawDevelopShader);
     if (m_Program == 0) {
         m_LastError = "RAW GPU shader compile/link failed.";
+        return false;
     }
-    return m_Program != 0;
+    m_RawUniforms.raw = glGetUniformLocation(m_Program, "uRaw");
+    m_RawUniforms.correctedRaw = glGetUniformLocation(m_Program, "uCorrectedRaw");
+    m_RawUniforms.useCorrectedRaw = glGetUniformLocation(m_Program, "uUseCorrectedRaw");
+    m_RawUniforms.rawNoiseVariance = glGetUniformLocation(m_Program, "uRawNoiseVariance");
+    m_RawUniforms.useRawNoiseVariance = glGetUniformLocation(m_Program, "uUseRawNoiseVariance");
+    m_RawUniforms.hdrVirtualAnchor = glGetUniformLocation(m_Program, "uHdrVirtualAnchor");
+    m_RawUniforms.rawSize = glGetUniformLocation(m_Program, "uRawSize");
+    m_RawUniforms.visibleSize = glGetUniformLocation(m_Program, "uVisibleSize");
+    m_RawUniforms.cropOrigin = glGetUniformLocation(m_Program, "uCropOrigin");
+    m_RawUniforms.clampToActiveArea = glGetUniformLocation(m_Program, "uClampToActiveArea");
+    m_RawUniforms.orientation = glGetUniformLocation(m_Program, "uOrientation");
+    m_RawUniforms.rotateToFitFrame = glGetUniformLocation(m_Program, "uRotateToFitFrame");
+    m_RawUniforms.flipHorizontally = glGetUniformLocation(m_Program, "uFlipHorizontally");
+    m_RawUniforms.flipVertically = glGetUniformLocation(m_Program, "uFlipVertically");
+    m_RawUniforms.cfaPattern = glGetUniformLocation(m_Program, "uCfaPattern");
+    m_RawUniforms.blackLevel = glGetUniformLocation(m_Program, "uBlackLevel");
+    m_RawUniforms.channelBlack = glGetUniformLocation(m_Program, "uChannelBlack");
+    m_RawUniforms.whiteLevel = glGetUniformLocation(m_Program, "uWhiteLevel");
+    m_RawUniforms.whiteBalance = glGetUniformLocation(m_Program, "uWhiteBalance");
+    m_RawUniforms.whiteBalanceBeforeDemosaic = glGetUniformLocation(m_Program, "uWhiteBalanceBeforeDemosaic");
+    m_RawUniforms.cameraToWorking = glGetUniformLocation(m_Program, "uCameraToWorking");
+    m_RawUniforms.useCameraTransform = glGetUniformLocation(m_Program, "uUseCameraTransform");
+    m_RawUniforms.debugView = glGetUniformLocation(m_Program, "uDebugView");
+    m_RawUniforms.exposure = glGetUniformLocation(m_Program, "uExposure");
+    CacheToneCurveUniformLocations(
+        m_Program,
+        m_RawUniforms.toneCurve.pointCount,
+        m_RawUniforms.toneCurve.points);
+    m_RawUniforms.highlightMode = glGetUniformLocation(m_Program, "uHighlightMode");
+    m_RawUniforms.highlightStrength = glGetUniformLocation(m_Program, "uHighlightStrength");
+    m_RawUniforms.highlightThreshold = glGetUniformLocation(m_Program, "uHighlightThreshold");
+    m_RawUniforms.demosaicMethod = glGetUniformLocation(m_Program, "uDemosaicMethod");
+    m_RawUniforms.falseColorSuppression = glGetUniformLocation(m_Program, "uFalseColorSuppression");
+    m_RawUniforms.defringeStrength = glGetUniformLocation(m_Program, "uDefringeStrength");
+    m_RawUniforms.highlightEdgeCleanup = glGetUniformLocation(m_Program, "uHighlightEdgeCleanup");
+    m_RawUniforms.chromaRadius = glGetUniformLocation(m_Program, "uChromaRadius");
+    m_RawUniforms.preserveRealColor = glGetUniformLocation(m_Program, "uPreserveRealColor");
+    m_RawUniforms.lateralRedCyan = glGetUniformLocation(m_Program, "uLateralRedCyan");
+    m_RawUniforms.lateralBlueYellow = glGetUniformLocation(m_Program, "uLateralBlueYellow");
+    m_RawUniforms.mosaicDenoiseEnabled = glGetUniformLocation(m_Program, "uMosaicDenoiseEnabled");
+    m_RawUniforms.mosaicHotPixelSuppression = glGetUniformLocation(m_Program, "uMosaicHotPixelSuppression");
+    m_RawUniforms.mosaicHotPixelThreshold = glGetUniformLocation(m_Program, "uMosaicHotPixelThreshold");
+    m_RawUniforms.mosaicLumaStrength = glGetUniformLocation(m_Program, "uMosaicLumaStrength");
+    m_RawUniforms.mosaicChromaStrength = glGetUniformLocation(m_Program, "uMosaicChromaStrength");
+    m_RawUniforms.mosaicRadius = glGetUniformLocation(m_Program, "uMosaicRadius");
+    m_RawUniforms.mosaicEdgeProtection = glGetUniformLocation(m_Program, "uMosaicEdgeProtection");
+    m_RawUniforms.mosaicIterations = glGetUniformLocation(m_Program, "uMosaicIterations");
+    return true;
 }
 
 bool RawGpuPipeline::EnsureLinearProgram() {
@@ -1339,19 +1607,40 @@ bool RawGpuPipeline::EnsureLinearProgram() {
     m_LinearProgram = GLHelpers::CreateShaderProgram(kRawVertexShader, kLinearDngShader);
     if (m_LinearProgram == 0) {
         m_LastError = "Linear DNG GPU shader compile/link failed.";
+        return false;
     }
-    return m_LinearProgram != 0;
+    m_LinearUniforms.linearRgb = glGetUniformLocation(m_LinearProgram, "uLinearRgb");
+    m_LinearUniforms.visibleSize = glGetUniformLocation(m_LinearProgram, "uVisibleSize");
+    m_LinearUniforms.orientation = glGetUniformLocation(m_LinearProgram, "uOrientation");
+    m_LinearUniforms.rotateToFitFrame = glGetUniformLocation(m_LinearProgram, "uRotateToFitFrame");
+    m_LinearUniforms.flipHorizontally = glGetUniformLocation(m_LinearProgram, "uFlipHorizontally");
+    m_LinearUniforms.flipVertically = glGetUniformLocation(m_LinearProgram, "uFlipVertically");
+    m_LinearUniforms.topDownInput = glGetUniformLocation(m_LinearProgram, "uTopDownInput");
+    m_LinearUniforms.cameraToWorking = glGetUniformLocation(m_LinearProgram, "uCameraToWorking");
+    m_LinearUniforms.useCameraTransform = glGetUniformLocation(m_LinearProgram, "uUseCameraTransform");
+    m_LinearUniforms.debugView = glGetUniformLocation(m_LinearProgram, "uDebugView");
+    m_LinearUniforms.exposure = glGetUniformLocation(m_LinearProgram, "uExposure");
+    m_LinearUniforms.whiteBalance = glGetUniformLocation(m_LinearProgram, "uWhiteBalance");
+    m_LinearUniforms.applyWhiteBalance = glGetUniformLocation(m_LinearProgram, "uApplyWhiteBalance");
+    CacheToneCurveUniformLocations(
+        m_LinearProgram,
+        m_LinearUniforms.toneCurve.pointCount,
+        m_LinearUniforms.toneCurve.points);
+    return true;
 }
 
 bool RawGpuPipeline::UploadRawTexture(const RawImageData& raw) {
     const int width = raw.metadata.rawWidth;
     const int height = raw.metadata.rawHeight;
-    if (width <= 0 || height <= 0 || raw.rawBuffer.empty()) {
-        m_LastError = "RAW upload failed: missing raw dimensions or sensor buffer.";
+    if (!Stack::PixelBuffer::HasCompletePixelBuffer(
+            raw.rawBuffer.size(), width, height, 1)) {
+        m_LastError = "RAW upload failed: invalid dimensions or incomplete sensor buffer.";
         return false;
     }
-    const std::size_t fingerprint = HashRawBuffer(raw.rawBuffer);
+    const std::size_t fingerprint =
+        ImmutableContentFingerprint(raw, raw.rawBuffer);
     if (m_RawTexture != 0 && m_RawWidth == width && m_RawHeight == height && m_RawFingerprint == fingerprint) {
+        m_LastPreprocessTelemetry.sensorUploadCacheHit = true;
         return true;
     }
 
@@ -1360,17 +1649,19 @@ bool RawGpuPipeline::UploadRawTexture(const RawImageData& raw) {
         m_RawTexture = 0;
     }
 
-    glGenTextures(1, &m_RawTexture);
-    glBindTexture(GL_TEXTURE_2D, m_RawTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16UI, width, height, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, raw.rawBuffer.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    const auto uploadBegin = std::chrono::steady_clock::now();
+    m_RawTexture = GLHelpers::CreateTextureFromData(
+        raw.rawBuffer.data(), width, height,
+        GL_R16UI, GL_RED_INTEGER, GL_UNSIGNED_SHORT);
+    m_LastPreprocessTelemetry.sensorUploadMs =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - uploadBegin).count();
+    m_LastPreprocessTelemetry.sensorUploadBytes =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) * sizeof(std::uint16_t);
 
     if (m_RawTexture == 0) {
-        m_LastError = "RAW upload failed: GPU texture allocation returned 0.";
+        m_LastError = "RAW upload failed: the GPU could not allocate or upload the sensor texture.";
         return false;
     }
 
@@ -1381,79 +1672,6 @@ bool RawGpuPipeline::UploadRawTexture(const RawImageData& raw) {
 }
 
 namespace {
-
-int CfaColorAt(CfaPattern pattern, int x, int y) {
-    const int px = x & 1;
-    const int py = y & 1;
-    switch (pattern) {
-        case CfaPattern::RGGB:
-            if (py == 0 && px == 0) return 0;
-            if (py == 1 && px == 1) return 2;
-            return 1;
-        case CfaPattern::BGGR:
-            if (py == 0 && px == 0) return 2;
-            if (py == 1 && px == 1) return 0;
-            return 1;
-        case CfaPattern::GBRG:
-            if (py == 0 && px == 1) return 2;
-            if (py == 1 && px == 0) return 0;
-            return 1;
-        case CfaPattern::GRBG:
-            if (py == 0 && px == 1) return 0;
-            if (py == 1 && px == 0) return 2;
-            return 1;
-        case CfaPattern::Unknown:
-        default:
-            return 1;
-    }
-}
-
-float BlackForColor(const std::array<float, 4>& channelBlack, float fallback, int color) {
-    if (color == 0 && channelBlack[0] > 0.0f) return channelBlack[0];
-    if (color == 1 && channelBlack[1] > 0.0f) return channelBlack[1];
-    if (color == 2 && channelBlack[2] > 0.0f) return channelBlack[2];
-    return fallback;
-}
-
-float SampleGainMap(const DngGainMapOpcode& map, int visibleX, int visibleY) {
-    if (visibleY < map.top || visibleY >= map.bottom ||
-        visibleX < map.left || visibleX >= map.right ||
-        ((visibleY - map.top) % std::max(1, map.rowPitch)) != 0 ||
-        ((visibleX - map.left) % std::max(1, map.colPitch)) != 0 ||
-        map.mapPointsV <= 0 || map.mapPointsH <= 0 || map.gains.empty()) {
-        return 1.0f;
-    }
-
-    const float height = static_cast<float>(std::max(1, map.bottom - map.top - 1));
-    const float width = static_cast<float>(std::max(1, map.right - map.left - 1));
-    float gy = (static_cast<float>(visibleY - map.top) / height - static_cast<float>(map.mapOriginV)) *
-        static_cast<float>(std::max(0, map.mapPointsV - 1));
-    float gx = (static_cast<float>(visibleX - map.left) / width - static_cast<float>(map.mapOriginH)) *
-        static_cast<float>(std::max(0, map.mapPointsH - 1));
-    if (map.mapSpacingV > 0.0) {
-        gy = (static_cast<float>(visibleY - map.top) / height - static_cast<float>(map.mapOriginV)) /
-            static_cast<float>(map.mapSpacingV);
-    }
-    if (map.mapSpacingH > 0.0) {
-        gx = (static_cast<float>(visibleX - map.left) / width - static_cast<float>(map.mapOriginH)) /
-            static_cast<float>(map.mapSpacingH);
-    }
-    gy = std::clamp(gy, 0.0f, static_cast<float>(map.mapPointsV - 1));
-    gx = std::clamp(gx, 0.0f, static_cast<float>(map.mapPointsH - 1));
-    const int y0 = std::clamp(static_cast<int>(std::floor(gy)), 0, map.mapPointsV - 1);
-    const int x0 = std::clamp(static_cast<int>(std::floor(gx)), 0, map.mapPointsH - 1);
-    const int y1 = std::min(y0 + 1, map.mapPointsV - 1);
-    const int x1 = std::min(x0 + 1, map.mapPointsH - 1);
-    const float ty = gy - static_cast<float>(y0);
-    const float tx = gx - static_cast<float>(x0);
-    const auto at = [&map](int y, int x) {
-        const std::size_t index = static_cast<std::size_t>(y) * static_cast<std::size_t>(map.mapPointsH) + static_cast<std::size_t>(x);
-        return index < map.gains.size() ? map.gains[index] : 1.0f;
-    };
-    const float a = at(y0, x0) * (1.0f - tx) + at(y0, x1) * tx;
-    const float b = at(y1, x0) * (1.0f - tx) + at(y1, x1) * tx;
-    return std::max(0.0f, a * (1.0f - ty) + b * ty);
-}
 
 std::size_t HashDngGainMaps(const std::vector<DngGainMapOpcode>& maps) {
     std::size_t hash = 1469598103934665603ull;
@@ -1480,8 +1698,13 @@ std::size_t HashDngGainMaps(const std::vector<DngGainMapOpcode>& maps) {
 
 } // namespace
 
-bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const RawDevelopSettings& settings, bool& outHasCorrectedRaw) {
+bool RawGpuPipeline::UploadCorrectedRawTexture(
+    const RawImageData& raw,
+    const RawDevelopSettings& settings,
+    bool& outHasCorrectedRaw,
+    bool& outHasNoiseVariance) {
     outHasCorrectedRaw = false;
+    outHasNoiseVariance = false;
     const RawMetadata& metadata = raw.metadata;
     const bool hasNormalizedMosaic =
         raw.normalizedMosaicBuffer &&
@@ -1499,14 +1722,30 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
             ? static_cast<std::size_t>(raw.normalizedMosaicContentHash)
             : HashBuffer(normalized);
         MixHash(fingerprint, normalized.size());
+        MixHash(fingerprint, static_cast<std::size_t>(
+            raw.normalizedMosaicInputContract));
         MixHash(fingerprint, HashDngGainMaps(metadata.dngGainMaps));
+        const bool hasBracketVariance =
+            raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::BracketingPreGain &&
+            raw.multiFrameMeasurementSidecars && raw.multiFrameMeasurementSidecars->variance &&
+            raw.multiFrameMeasurementSidecars->variance->size() == normalized.size();
+        MixHash(fingerprint, hasBracketVariance);
         if (m_CorrectedRawTexture != 0 &&
             m_RawWidth == width &&
             m_RawHeight == height &&
             m_CorrectedRawFingerprint == fingerprint) {
+            m_LastPreprocessTelemetry.correctedCacheHit = true;
             outHasCorrectedRaw = true;
+            outHasNoiseVariance = hasBracketVariance && m_RawNoiseVarianceTexture != 0;
             return true;
         }
+
+        if (m_Preprocessor) m_Preprocessor->InvalidateOutputs();
+        if (m_RawNoiseVarianceTexture != 0) {
+            glDeleteTextures(1, &m_RawNoiseVarianceTexture);
+            m_RawNoiseVarianceTexture = 0;
+        }
+        m_RawNoiseVarianceFingerprint = 0;
 
         // MFD publishes pre-reference-gain samples. Apply the reference DNG
         // GainMap here exactly once, at the same seam used by ordinary
@@ -1514,7 +1753,19 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
         // normalization are intentionally not repeated.
         const float* uploadSamples = normalized.data();
         std::vector<float> gainCorrected;
+        std::vector<float> bracketVariance;
+        const bool preservesSceneRange =
+            raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::HdrVirtualAnchorPreGain ||
+            raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::BracketingPreGain;
+        if (hasBracketVariance) {
+            try { bracketVariance = *raw.multiFrameMeasurementSidecars->variance; }
+            catch (const std::bad_alloc&) {
+                m_LastError = "Bracketing variance upload could not allocate its working buffer.";
+                return false;
+            }
+        }
         if (!metadata.dngGainMaps.empty()) {
+            const auto correctionBegin = std::chrono::steady_clock::now();
             try {
                 gainCorrected.assign(
                     normalized.begin(),
@@ -1527,46 +1778,69 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
                     "Normalized RAW GainMap correction could not allocate its working buffer.";
                 return false;
             }
-            for (int y = 0; y < height; ++y) {
-                for (int x = 0; x < width; ++x) {
+            const RawSensorRect active =
+                Processing::ResolveActiveArea(metadata);
+            const int activeWidth = active.right - active.left;
+            const int activeHeight = active.bottom - active.top;
+            for (int y = active.top; y < active.bottom; ++y) {
+                for (int x = active.left; x < active.right; ++x) {
                     float& value = gainCorrected[
                         static_cast<std::size_t>(y) *
                             static_cast<std::size_t>(width) +
                         static_cast<std::size_t>(x)];
                     for (const DngGainMapOpcode& map :
                          metadata.dngGainMaps) {
-                        value *= SampleGainMap(map, x, y);
+                        const float gain = Processing::SampleDngGainMap(
+                                map,
+                                activeWidth,
+                                activeHeight,
+                                x - active.left,
+                                y - active.top);
+                        const float corrected = value * gain;
+                        if (hasBracketVariance)
+                            bracketVariance[static_cast<std::size_t>(y) * width + x] *= gain * gain;
+                        // Fused HDR values retain signed shadows and highlight
+                        // headroom through the reference GainMap correction.
+                        value = preservesSceneRange
+                            ? corrected : std::clamp(corrected,0.0f,1.0f);
                     }
                 }
             }
+            m_LastPreprocessTelemetry.cpuNormalizationMs =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - correctionBegin).count();
             uploadSamples = gainCorrected.data();
         }
 
+        const auto uploadBegin = std::chrono::steady_clock::now();
         if (m_CorrectedRawTexture) {
             glDeleteTextures(1, &m_CorrectedRawTexture);
             m_CorrectedRawTexture = 0;
         }
-        glGenTextures(1, &m_CorrectedRawTexture);
-        glBindTexture(GL_TEXTURE_2D, m_CorrectedRawTexture);
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_R32F,
-            width,
-            height,
-            0,
-            GL_RED,
-            GL_FLOAT,
-            uploadSamples);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_2D, 0);
+        m_CorrectedRawTexture = GLHelpers::CreateTextureFromData(
+            uploadSamples, width, height, GL_R32F, GL_RED, GL_FLOAT);
+        m_LastPreprocessTelemetry.correctedUploadMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - uploadBegin).count();
+        m_LastPreprocessTelemetry.correctedUploadBytes =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height) * sizeof(float);
         if (m_CorrectedRawTexture == 0) {
             m_LastError =
                 "Normalized RAW upload failed: GPU texture allocation returned 0.";
             return false;
+        }
+        if (hasBracketVariance) {
+            m_RawNoiseVarianceTexture = GLHelpers::CreateTextureFromData(
+                bracketVariance.data(), width, height, GL_R32F, GL_RED, GL_FLOAT);
+            if (!m_RawNoiseVarianceTexture) {
+                m_LastError = "Bracketing variance upload failed.";
+                return false;
+            }
+            m_RawNoiseVarianceFingerprint = fingerprint;
+            m_LastPreprocessTelemetry.varianceGenerated = true;
+            m_LastPreprocessTelemetry.varianceUploadBytes = bracketVariance.size() * sizeof(float);
+            outHasNoiseVariance = true;
         }
         m_RawWidth = width;
         m_RawHeight = height;
@@ -1575,10 +1849,6 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
         return true;
     }
 
-    const bool truthful = settings.processingVersion == RawProcessingVersion::TruthfulV1;
-    if (!truthful && metadata.dngGainMaps.empty()) {
-        return true;
-    }
     const int width = metadata.rawWidth;
     const int height = metadata.rawHeight;
     if (width <= 0 || height <= 0 || raw.rawBuffer.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
@@ -1586,7 +1856,8 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
         return false;
     }
 
-    std::size_t fingerprint = HashRawBuffer(raw.rawBuffer);
+    std::size_t fingerprint =
+        ImmutableContentFingerprint(raw, raw.rawBuffer);
     MixHash(fingerprint, static_cast<std::size_t>(metadata.rawWidth));
     MixHash(fingerprint, static_cast<std::size_t>(metadata.rawHeight));
     MixHash(fingerprint, static_cast<std::size_t>(metadata.visibleWidth));
@@ -1625,166 +1896,164 @@ bool RawGpuPipeline::UploadCorrectedRawTexture(const RawImageData& raw, const Ra
     MixHash(fingerprint, HashBuffer(metadata.dngBlackLevelDeltaV));
     MixHash(fingerprint, HashBuffer(metadata.dngWhiteLevelValues));
     MixHash(fingerprint, HashDngGainMaps(metadata.dngGainMaps));
-    MixHash(fingerprint, static_cast<std::size_t>(settings.processingVersion));
+    const std::size_t metadataFingerprint = fingerprint;
+
+    std::array<DngNoiseProfilePlane, 3> resolvedProfiles {};
+    const bool wantsNoiseVariance =
+        settings.mosaicDenoise.enabled &&
+        settings.mosaicDenoise.mode ==
+            RawMosaicDenoiseMode::DngNoiseProfile &&
+        metadata.hasDngNoiseProfile &&
+        Processing::ResolveDngNoiseProfile(
+            metadata,
+            resolvedProfiles);
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideBlackLevel));
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideWhiteLevel));
     MixFloatHash(fingerprint, settings.blackLevelOverride);
     MixFloatHash(fingerprint, settings.whiteLevelOverride);
-    if (m_CorrectedRawTexture != 0 && m_RawWidth == width && m_RawHeight == height && m_CorrectedRawFingerprint == fingerprint) {
+    MixHash(fingerprint, static_cast<std::size_t>(wantsNoiseVariance));
+    if (wantsNoiseVariance) {
+        for (const DngNoiseProfilePlane& profile : resolvedProfiles) {
+            MixDoubleHash(fingerprint, profile.shotScale);
+            MixDoubleHash(fingerprint, profile.readNoiseVariance);
+        }
+    }
+    if (m_CorrectedRawTexture != 0 &&
+        m_RawWidth == width &&
+        m_RawHeight == height &&
+        m_CorrectedRawFingerprint == fingerprint &&
+        (!wantsNoiseVariance ||
+            (m_RawNoiseVarianceTexture != 0 &&
+                m_RawNoiseVarianceFingerprint == fingerprint))) {
+        m_LastPreprocessTelemetry.correctedCacheHit = true;
+        m_LastPreprocessTelemetry.varianceGenerated = wantsNoiseVariance;
         outHasCorrectedRaw = true;
+        outHasNoiseVariance = wantsNoiseVariance;
         return true;
     }
 
-    std::vector<float> corrected(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0f);
-    if (truthful) {
-        std::string normalizationError;
-        if (!Processing::BuildTruthfulNormalizedMosaic(raw, settings, corrected, &normalizationError)) {
-            m_LastError = normalizationError;
-            return false;
-        }
-    } else {
-        const float black = settings.overrideBlackLevel ? settings.blackLevelOverride : metadata.blackLevel;
-        const float white = std::max(black + 1.0f, settings.overrideWhiteLevel ? settings.whiteLevelOverride : metadata.whiteLevel);
-        std::array<float, 4> channelBlack = metadata.perChannelBlack;
-        if (settings.overrideBlackLevel) {
-            channelBlack = { 0.0f, 0.0f, 0.0f, 0.0f };
-        } else if (channelBlack[1] > 0.0f && channelBlack[3] > 0.0f) {
-            channelBlack[1] = (channelBlack[1] + channelBlack[3]) * 0.5f;
-        }
-
-        const int cropX = std::max(0, metadata.leftMargin);
-        const int cropY = std::max(0, metadata.topMargin);
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int visibleX = x - cropX;
-                const int visibleY = y - cropY;
-                const int color = CfaColorAt(metadata.cfaPattern, std::max(0, visibleX), std::max(0, visibleY));
-                const float b = BlackForColor(channelBlack, black, color);
-                const float w = std::max(b + 1.0f, white);
-                float value = (static_cast<float>(raw.rawBuffer[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)]) - b) /
-                    std::max(1.0f, w - b);
-                if (visibleX >= 0 && visibleY >= 0) {
-                    for (const DngGainMapOpcode& map : metadata.dngGainMaps) {
-                        value *= SampleGainMap(map, visibleX, visibleY);
-                    }
-                }
-                corrected[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] = value;
-            }
-        }
+    std::string gpuPreprocessError;
+    if (!m_Preprocessor) {
+        m_Preprocessor = std::make_unique<RawGpuPreprocessor>();
+    }
+    if (m_Preprocessor->Process(
+            raw,
+            settings,
+            m_RawTexture,
+            fingerprint,
+            metadataFingerprint,
+            wantsNoiseVariance,
+            resolvedProfiles,
+            m_CorrectedRawTexture,
+            m_RawNoiseVarianceTexture,
+            m_LastPreprocessTelemetry,
+            gpuPreprocessError)) {
+        m_RawWidth = width;
+        m_RawHeight = height;
+        m_CorrectedRawFingerprint = fingerprint;
+        m_RawNoiseVarianceFingerprint =
+            wantsNoiseVariance ? fingerprint : 0;
+        outHasCorrectedRaw = true;
+        outHasNoiseVariance = wantsNoiseVariance;
+        return true;
     }
 
-    if (m_CorrectedRawTexture) {
+    // Keep the established CPU implementation as a parity-preserving escape
+    // hatch for old drivers and metadata that cannot be represented safely by
+    // the compact GPU atlas. Ordinary supported RAWs never enter this path.
+    m_LastPreprocessTelemetry.cpuFallback = true;
+    m_LastPreprocessTelemetry.fallbackReason = gpuPreprocessError;
+    m_Preprocessor->InvalidateOutputs();
+    if (m_CorrectedRawTexture != 0) {
         glDeleteTextures(1, &m_CorrectedRawTexture);
         m_CorrectedRawTexture = 0;
     }
-    glGenTextures(1, &m_CorrectedRawTexture);
-    glBindTexture(GL_TEXTURE_2D, m_CorrectedRawTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0, GL_RED, GL_FLOAT, corrected.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    if (m_CorrectedRawTexture == 0) {
-        m_LastError = "DNG GainMap correction failed: GPU texture allocation returned 0.";
-        return false;
-    }
-    m_RawWidth = width;
-    m_RawHeight = height;
-    m_CorrectedRawFingerprint = fingerprint;
-    outHasCorrectedRaw = true;
-    return true;
-}
-
-bool RawGpuPipeline::UploadRawNoiseVarianceTexture(
-    const RawImageData& raw,
-    const RawDevelopSettings& settings,
-    bool& outHasNoiseVariance) {
-    outHasNoiseVariance = false;
-    // A normalized multi-frame source has already received its CFA-domain
-    // noise reduction. The single-frame DNG noise profile does not describe
-    // the fused residual variance, so do not apply that denoiser a second
-    // time.
-    if (raw.normalizedMosaicBuffer) {
-        return true;
-    }
-    if (!settings.mosaicDenoise.enabled ||
-        settings.mosaicDenoise.mode !=
-            RawMosaicDenoiseMode::DngNoiseProfile ||
-        settings.processingVersion != RawProcessingVersion::TruthfulV1 ||
-        !raw.metadata.hasDngNoiseProfile ||
-        m_CorrectedRawTexture == 0) {
-        return true;
-    }
-
-    std::array<DngNoiseProfilePlane, 3> resolvedProfiles {};
-    if (!Processing::ResolveDngNoiseProfile(
-            raw.metadata,
-            resolvedProfiles)) {
-        // Missing or malformed metadata is an explicit fixed-threshold
-        // fallback, not a render failure.
-        return true;
-    }
-
-    std::size_t fingerprint = m_CorrectedRawFingerprint;
-    MixHash(
-        fingerprint,
-        static_cast<std::size_t>(settings.mosaicDenoise.mode));
-    for (const DngNoiseProfilePlane& profile : resolvedProfiles) {
-        MixDoubleHash(fingerprint, profile.shotScale);
-        MixDoubleHash(fingerprint, profile.readNoiseVariance);
-    }
-    if (m_RawNoiseVarianceTexture != 0 &&
-        m_RawWidth == raw.metadata.rawWidth &&
-        m_RawHeight == raw.metadata.rawHeight &&
-        m_RawNoiseVarianceFingerprint == fingerprint) {
-        outHasNoiseVariance = true;
-        return true;
-    }
-
-    std::vector<float> variance;
-    std::string varianceError;
-    if (!Processing::BuildTruthfulNoiseVarianceMosaic(
-            raw,
-            settings,
-            variance,
-            &varianceError)) {
-        // A source without a complete DNG profile keeps the historical
-        // fixed-threshold behavior. Invalid dimensions were already rejected
-        // by the corrected-mosaic upload.
-        return true;
-    }
-
-    if (m_RawNoiseVarianceTexture) {
+    if (m_RawNoiseVarianceTexture != 0) {
         glDeleteTextures(1, &m_RawNoiseVarianceTexture);
         m_RawNoiseVarianceTexture = 0;
     }
-    glGenTextures(1, &m_RawNoiseVarianceTexture);
-    glBindTexture(GL_TEXTURE_2D, m_RawNoiseVarianceTexture);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_R32F,
-        raw.metadata.rawWidth,
-        raw.metadata.rawHeight,
-        0,
-        GL_RED,
-        GL_FLOAT,
-        variance.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
 
-    if (m_RawNoiseVarianceTexture == 0) {
+    try {
+        std::vector<float> corrected;
+        std::string normalizationError;
+        const auto normalizeBegin = std::chrono::steady_clock::now();
+        if (!Processing::BuildTruthfulNormalizedMosaic(
+                raw,
+                settings,
+                corrected,
+                &normalizationError)) {
+            m_LastError = normalizationError;
+            return false;
+        }
+        m_LastPreprocessTelemetry.cpuNormalizationMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - normalizeBegin).count();
+
+        const auto correctedUploadBegin = std::chrono::steady_clock::now();
+        m_CorrectedRawTexture = GLHelpers::CreateTextureFromData(
+            corrected.data(), width, height, GL_R32F, GL_RED, GL_FLOAT);
+        m_LastPreprocessTelemetry.correctedUploadMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - correctedUploadBegin).count();
+        m_LastPreprocessTelemetry.correctedUploadBytes =
+            corrected.size() * sizeof(float);
+    } catch (const std::bad_alloc&) {
         m_LastError =
-            "DNG noise-variance upload failed: GPU texture allocation returned 0.";
+            "CPU RAW preprocessing fallback could not allocate the normalized mosaic.";
         return false;
     }
-    m_RawNoiseVarianceFingerprint = fingerprint;
-    outHasNoiseVariance = true;
+    if (m_CorrectedRawTexture == 0) {
+        m_LastError =
+            "CPU RAW preprocessing fallback could not upload the normalized mosaic.";
+        return false;
+    }
+
+    if (wantsNoiseVariance) {
+        try {
+            std::vector<float> variance;
+            std::string varianceError;
+            const auto varianceBegin = std::chrono::steady_clock::now();
+            if (!Processing::BuildTruthfulNoiseVarianceMosaic(
+                    raw,
+                    settings,
+                    variance,
+                    &varianceError)) {
+                m_LastError = varianceError;
+                return false;
+            }
+            m_LastPreprocessTelemetry.cpuVarianceMs =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - varianceBegin).count();
+
+            const auto varianceUploadBegin =
+                std::chrono::steady_clock::now();
+            m_RawNoiseVarianceTexture = GLHelpers::CreateTextureFromData(
+                variance.data(), width, height, GL_R32F, GL_RED, GL_FLOAT);
+            m_LastPreprocessTelemetry.varianceUploadMs =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - varianceUploadBegin).count();
+            m_LastPreprocessTelemetry.varianceUploadBytes =
+                variance.size() * sizeof(float);
+        } catch (const std::bad_alloc&) {
+            m_LastError =
+                "CPU RAW preprocessing fallback could not allocate the variance mosaic.";
+            return false;
+        }
+        if (m_RawNoiseVarianceTexture == 0) {
+            m_LastError =
+                "CPU RAW preprocessing fallback could not upload the variance mosaic.";
+            return false;
+        }
+    }
+
+    m_RawWidth = width;
+    m_RawHeight = height;
+    m_CorrectedRawFingerprint = fingerprint;
+    m_RawNoiseVarianceFingerprint =
+        wantsNoiseVariance ? fingerprint : 0;
+    m_LastPreprocessTelemetry.varianceGenerated = wantsNoiseVariance;
+    outHasCorrectedRaw = true;
+    outHasNoiseVariance = wantsNoiseVariance;
     return true;
 }
 
@@ -1792,13 +2061,20 @@ bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevel
     const RawMetadata& metadata = raw.metadata;
     const int width = metadata.visibleWidth > 0 ? metadata.visibleWidth : metadata.rawWidth;
     const int height = metadata.visibleHeight > 0 ? metadata.visibleHeight : metadata.rawHeight;
-    const int channels = std::clamp(metadata.linearChannels, 3, 4);
-    if (width <= 0 || height <= 0 || channels < 3) {
+    const int channels = metadata.linearChannels;
+    std::size_t pixelCount = 0;
+    std::size_t rgbaCount = 0;
+    if ((channels != 3 && channels != 4) ||
+        !Stack::PixelBuffer::TryComputePixelElementCount(width, height, 1, pixelCount) ||
+        !Stack::PixelBuffer::TryComputePixelElementCount(width, height, 4, rgbaCount)) {
         m_LastError = "Linear DNG upload failed: invalid dimensions or channel count.";
         return false;
     }
-    if (raw.linearUInt16Buffer.empty() && raw.linearFloatBuffer.empty()) {
-        m_LastError = "Linear DNG upload failed: missing RGB buffer.";
+    const std::size_t availableSamples = raw.linearUInt16Buffer.empty()
+        ? raw.linearFloatBuffer.size() : raw.linearUInt16Buffer.size();
+    if (!Stack::PixelBuffer::HasCompletePixelBuffer(
+            availableSamples, width, height, channels)) {
+        m_LastError = "Linear DNG upload failed: incomplete RGB buffer.";
         return false;
     }
 
@@ -1814,6 +2090,7 @@ bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevel
     MixHash(fingerprint, static_cast<std::size_t>(metadata.orientation));
     MixHash(fingerprint, static_cast<std::size_t>(metadata.pixelLayout));
     MixHash(fingerprint, static_cast<std::size_t>(metadata.linearSampleFormat));
+    MixHash(fingerprint, reinterpret_cast<std::size_t>(raw.outputCoverage.get()));
     MixFloatHash(fingerprint, metadata.blackLevel);
     MixFloatHash(fingerprint, metadata.whiteLevel);
     MixHash(fingerprint, static_cast<std::size_t>(settings.overrideBlackLevel));
@@ -1821,16 +2098,46 @@ bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevel
     MixFloatHash(fingerprint, settings.blackLevelOverride);
     MixFloatHash(fingerprint, settings.whiteLevelOverride);
     if (!raw.linearUInt16Buffer.empty()) {
-        MixHash(fingerprint, HashBuffer(raw.linearUInt16Buffer));
+        MixHash(
+            fingerprint,
+            ImmutableContentFingerprint(
+                raw, raw.linearUInt16Buffer));
     } else {
-        MixHash(fingerprint, HashBuffer(raw.linearFloatBuffer));
+        MixHash(
+            fingerprint,
+            ImmutableContentFingerprint(
+                raw, raw.linearFloatBuffer));
     }
     if (m_LinearTexture != 0 && m_RawWidth == width && m_RawHeight == height && m_LinearFingerprint == fingerprint) {
         return true;
     }
 
-    const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    std::vector<float> rgba(pixelCount * 4, 1.0f);
+    if(raw.reconstructedCameraRgb&&!raw.outputCoverage&&channels==3&&raw.linearFloatBuffer.size()==pixelCount*3) {
+        // The immutable reconstruction is already calibrated float camera RGB.
+        // Upload it directly, avoiding another full-resolution RGBA staging copy.
+        if (m_LinearTexture) glDeleteTextures(1, &m_LinearTexture);
+        m_LinearTexture = GLHelpers::CreateTextureFromData(
+            raw.linearFloatBuffer.data(), width, height,
+            GL_RGB32F, GL_RGB, GL_FLOAT, GL_LINEAR);
+        if (m_LinearTexture == 0) {
+            m_LastError = "Could not allocate or upload reconstructed camera RGB.";
+            return false;
+        }
+        m_RawWidth = width;
+        m_RawHeight = height;
+        m_LinearFingerprint = fingerprint;
+        return true;
+    }
+    std::vector<float> rgba;
+    try {
+        rgba.assign(rgbaCount, 1.0f);
+    } catch (const std::bad_alloc&) {
+        m_LastError = "Linear DNG upload could not allocate its RGBA working buffer.";
+        return false;
+    } catch (const std::length_error&) {
+        m_LastError = "Linear DNG upload exceeds the supported working-buffer size.";
+        return false;
+    }
     const float black = settings.overrideBlackLevel ? settings.blackLevelOverride : metadata.blackLevel;
     const float white = std::max(black + 1.0f, settings.overrideWhiteLevel ? settings.whiteLevelOverride : metadata.whiteLevel);
     if (!raw.linearUInt16Buffer.empty()) {
@@ -1857,21 +2164,19 @@ bool RawGpuPipeline::UploadLinearTexture(const RawImageData& raw, const RawDevel
         }
     }
 
+    if(raw.outputCoverage) {
+        if(raw.outputCoverage->size()!=pixelCount){m_LastError="Incomplete reconstructed-image coverage.";return false;}
+        for(std::size_t p=0;p<pixelCount;++p)rgba[p*4+3]=(*raw.outputCoverage)[p];
+    }
     if (m_LinearTexture) {
         glDeleteTextures(1, &m_LinearTexture);
         m_LinearTexture = 0;
     }
-    glGenTextures(1, &m_LinearTexture);
-    glBindTexture(GL_TEXTURE_2D, m_LinearTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, rgba.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    m_LinearTexture = GLHelpers::CreateTextureFromData(
+        rgba.data(), width, height, raw.reconstructedCameraRgb?GL_RGBA32F:GL_RGBA16F, GL_RGBA, GL_FLOAT, GL_LINEAR);
 
     if (m_LinearTexture == 0) {
-        m_LastError = "Linear DNG upload failed: GPU texture allocation returned 0.";
+        m_LastError = "Linear DNG upload failed: the GPU could not allocate or upload the RGB texture.";
         return false;
     }
     m_RawWidth = width;
@@ -1897,15 +2202,7 @@ bool RawGpuPipeline::EnsureOutput(int width, int height) {
         m_OutputTexture = 0;
     }
 
-    m_OutputTexture = 0;
-    glGenTextures(1, &m_OutputTexture);
-    glBindTexture(GL_TEXTURE_2D, m_OutputTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    m_OutputTexture = GLHelpers::CreateEmptyTexture(width, height);
 
     m_OutputFbo = GLHelpers::CreateFBO(m_OutputTexture);
     m_OutputWidth = width;
@@ -1967,49 +2264,19 @@ bool RawGpuPipeline::EnsureFullscreenQuad() {
     return true;
 }
 
-unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSettings& settings, int previewMaxDimension) {
+unsigned int RawGpuPipeline::Render(
+    const RawImageData& raw,
+    const RawDevelopSettings& settings,
+    int previewMaxDimension,
+    const std::function<bool()>& shouldCancel) {
     m_LastError.clear();
+    m_LastPreprocessTelemetry = {};
     const RawMetadata& metadata = raw.metadata;
 
-    // Combine EXIF orientation and manual rotation settings to compute effectiveOrientation
-    int exifRotationSteps = 0;
-    if (metadata.orientation == 3) exifRotationSteps = 2;       // 180°
-    else if (metadata.orientation == 5) exifRotationSteps = 1;  // approximate transposed+mirrored as 90° CW
-    else if (metadata.orientation == 6) exifRotationSteps = 1;  // 90° CW
-    else if (metadata.orientation == 8) exifRotationSteps = 3;  // 270° CW
-
-    // Map user-facing CW rotation degrees to shader rotation steps, inverting for
-    // OpenGL's bottom-left origin which causes a Y-flip that reverses visible rotation direction.
-    // 0° -> 0 steps, 90° CW (visual) -> 3 steps (270° CW in shader), 180° -> 2 steps, 270° CW (visual) -> 1 step.
-    int manualRotationSteps = 0;
-    if (settings.rotationDegrees == 90)       manualRotationSteps = 3;
-    else if (settings.rotationDegrees == 180) manualRotationSteps = 2;
-    else if (settings.rotationDegrees == 270) manualRotationSteps = 1;
-    int totalRotationSteps = (exifRotationSteps + manualRotationSteps) % 4;
-
-    int effectiveOrientation = metadata.orientation; // default fallback (preserves mirroring in 2, 4, 5, 7 if any)
-    if (metadata.orientation <= 1 || metadata.orientation == 3 || metadata.orientation == 6 || metadata.orientation == 8) {
-        if (totalRotationSteps == 0) effectiveOrientation = 1;
-        else if (totalRotationSteps == 1) effectiveOrientation = 6;
-        else if (totalRotationSteps == 2) effectiveOrientation = 3;
-        else if (totalRotationSteps == 3) effectiveOrientation = 8;
-    } else if (metadata.orientation == 2 || metadata.orientation == 4 || metadata.orientation == 5 || metadata.orientation == 7) {
-        // Mirrored orientations
-        int baseSteps = 0;
-        if (metadata.orientation == 2) baseSteps = 0;
-        else if (metadata.orientation == 7) baseSteps = 1;
-        else if (metadata.orientation == 4) baseSteps = 2;
-        else if (metadata.orientation == 5) baseSteps = 3;
-        
-        int finalSteps = (baseSteps + manualRotationSteps) % 4;
-        if (finalSteps == 0) effectiveOrientation = 2;
-        else if (finalSteps == 1) effectiveOrientation = 7;
-        else if (finalSteps == 2) effectiveOrientation = 4;
-        else if (finalSteps == 3) effectiveOrientation = 5;
-    }
+    const int effectiveOrientation = RotateExifOrientationClockwise(
+        metadata.orientation, settings.rotationDegrees);
 
     const bool truthfulMosaic =
-        settings.processingVersion == RawProcessingVersion::TruthfulV1 &&
         metadata.pixelLayout == RawPixelLayout::MosaicBayer;
     const RawSensorRect activeArea = Processing::ResolveActiveArea(metadata);
     const int visibleWidth = truthfulMosaic
@@ -2055,7 +2322,7 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(m_LinearProgram);
 
-        const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings, false);
+        const std::array<float, 9> cameraToWorking = BuildCameraToWorking(metadata, settings, raw.reconstructedCameraRgb);
         const float baselineExposure =
             settings.applyBaselineExposure && metadata.hasDngBaselineExposure
             ? metadata.dngBaselineExposure
@@ -2064,17 +2331,32 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_LinearTexture);
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uLinearRgb"), 0);
-        glUniform2i(glGetUniformLocation(m_LinearProgram, "uVisibleSize"), visibleWidth, visibleHeight);
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uOrientation"), effectiveOrientation);
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uRotateToFitFrame"), settings.rotateToFitFrame ? 1 : 0);
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uFlipHorizontally"), settings.flipHorizontally ? 1 : 0);
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uFlipVertically"), settings.flipVertically ? 1 : 0);
-        glUniformMatrix3fv(glGetUniformLocation(m_LinearProgram, "uCameraToWorking"), 1, settings.debugTransposeCameraMatrix ? GL_FALSE : GL_TRUE, cameraToWorking.data());
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uUseCameraTransform"), settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
-        glUniform1i(glGetUniformLocation(m_LinearProgram, "uDebugView"), DebugViewUniform(settings.debugView));
-        glUniform1f(glGetUniformLocation(m_LinearProgram, "uExposure"), exposure);
-        UploadToneCurveUniforms(m_LinearProgram, settings);
+        glUniform1i(m_LinearUniforms.linearRgb, 0);
+        glUniform1i(m_LinearUniforms.topDownInput,
+            raw.outputCoverage && !settings.rotateToFitFrame &&
+                outWidth == nativeOutWidth && outHeight == nativeOutHeight ? 2 : 1);
+        glUniform2i(m_LinearUniforms.visibleSize, visibleWidth, visibleHeight);
+        glUniform1i(m_LinearUniforms.orientation, effectiveOrientation);
+        glUniform1i(m_LinearUniforms.rotateToFitFrame, settings.rotateToFitFrame ? 1 : 0);
+        glUniform1i(m_LinearUniforms.flipHorizontally, settings.flipHorizontally ? 1 : 0);
+        glUniform1i(m_LinearUniforms.flipVertically, settings.flipVertically ? 1 : 0);
+        glUniformMatrix3fv(m_LinearUniforms.cameraToWorking, 1, settings.debugTransposeCameraMatrix ? GL_FALSE : GL_TRUE, cameraToWorking.data());
+        glUniform1i(m_LinearUniforms.useCameraTransform, settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
+        glUniform1i(m_LinearUniforms.debugView, DebugViewUniform(settings.debugView));
+        glUniform1f(m_LinearUniforms.exposure, exposure);
+        const std::array<float, 3> linearWhiteBalance = ResolveWhiteBalance(metadata, settings);
+        glUniform3f(
+            m_LinearUniforms.whiteBalance,
+            linearWhiteBalance[0],
+            linearWhiteBalance[1],
+            linearWhiteBalance[2]);
+        glUniform1i(
+            m_LinearUniforms.applyWhiteBalance,
+            1);
+        UploadToneCurveUniforms(
+            m_LinearUniforms.toneCurve.pointCount,
+            m_LinearUniforms.toneCurve.points,
+            settings);
 
         if (!EnsureFullscreenQuad()) {
             glBindTexture(GL_TEXTURE_2D, 0);
@@ -2110,10 +2392,10 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
                 static_cast<std::size_t>(metadata.rawHeight);
     if (!EnsureProgram() ||
         (!hasNormalizedMosaic && !UploadRawTexture(raw)) ||
-        !UploadCorrectedRawTexture(raw, settings, hasCorrectedRaw) ||
-        !UploadRawNoiseVarianceTexture(
+        !UploadCorrectedRawTexture(
             raw,
             settings,
+            hasCorrectedRaw,
             hasNoiseVariance) ||
         !EnsureOutput(outWidth, outHeight)) {
         return 0;
@@ -2147,65 +2429,72 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_RawTexture);
-    glUniform1i(glGetUniformLocation(m_Program, "uRaw"), 0);
+    glUniform1i(m_RawUniforms.raw, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, hasCorrectedRaw ? m_CorrectedRawTexture : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uCorrectedRaw"), 1);
-    glUniform1i(glGetUniformLocation(m_Program, "uUseCorrectedRaw"), hasCorrectedRaw ? 1 : 0);
+    glUniform1i(m_RawUniforms.correctedRaw, 1);
+    glUniform1i(m_RawUniforms.useCorrectedRaw, hasCorrectedRaw ? 1 : 0);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(
         GL_TEXTURE_2D,
         hasNoiseVariance ? m_RawNoiseVarianceTexture : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uRawNoiseVariance"), 2);
+    glUniform1i(m_RawUniforms.rawNoiseVariance, 2);
     glUniform1i(
-        glGetUniformLocation(m_Program, "uUseRawNoiseVariance"),
+        m_RawUniforms.useRawNoiseVariance,
         hasNoiseVariance ? 1 : 0);
-    glUniform2i(glGetUniformLocation(m_Program, "uRawSize"), metadata.rawWidth, metadata.rawHeight);
-    glUniform2i(glGetUniformLocation(m_Program, "uVisibleSize"), visibleWidth, visibleHeight);
-    glUniform2i(glGetUniformLocation(m_Program, "uCropOrigin"), cropOriginX, cropOriginY);
     glUniform1i(
-        glGetUniformLocation(m_Program, "uClampToActiveArea"),
-        settings.processingVersion == RawProcessingVersion::TruthfulV1 ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uOrientation"), effectiveOrientation);
-    glUniform1i(glGetUniformLocation(m_Program, "uRotateToFitFrame"), settings.rotateToFitFrame ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uFlipHorizontally"), settings.flipHorizontally ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uFlipVertically"), settings.flipVertically ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uCfaPattern"), PatternUniform(metadata.cfaPattern));
-    glUniform1f(glGetUniformLocation(m_Program, "uBlackLevel"), black);
-    glUniform4f(glGetUniformLocation(m_Program, "uChannelBlack"),
+        m_RawUniforms.hdrVirtualAnchor,
+        raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::BracketingPreGain ? 2 :
+        raw.normalizedMosaicInputContract == NormalizedMosaicInputContract::HdrVirtualAnchorPreGain ? 1 : 0);
+    glUniform2i(m_RawUniforms.rawSize, metadata.rawWidth, metadata.rawHeight);
+    glUniform2i(m_RawUniforms.visibleSize, visibleWidth, visibleHeight);
+    glUniform2i(m_RawUniforms.cropOrigin, cropOriginX, cropOriginY);
+    glUniform1i(
+        m_RawUniforms.clampToActiveArea,
+        1);
+    glUniform1i(m_RawUniforms.orientation, effectiveOrientation);
+    glUniform1i(m_RawUniforms.rotateToFitFrame, settings.rotateToFitFrame ? 1 : 0);
+    glUniform1i(m_RawUniforms.flipHorizontally, settings.flipHorizontally ? 1 : 0);
+    glUniform1i(m_RawUniforms.flipVertically, settings.flipVertically ? 1 : 0);
+    glUniform1i(m_RawUniforms.cfaPattern, PatternUniform(metadata.cfaPattern));
+    glUniform1f(m_RawUniforms.blackLevel, black);
+    glUniform4f(m_RawUniforms.channelBlack,
         channelBlack[0],
         channelBlack[1],
         channelBlack[2],
         channelBlack[3]);
-    glUniform1f(glGetUniformLocation(m_Program, "uWhiteLevel"), white);
-    glUniform3f(glGetUniformLocation(m_Program, "uWhiteBalance"), wb[0], wb[1], wb[2]);
+    glUniform1f(m_RawUniforms.whiteLevel, white);
+    glUniform3f(m_RawUniforms.whiteBalance, wb[0], wb[1], wb[2]);
     glUniform1i(
-        glGetUniformLocation(m_Program, "uWhiteBalanceBeforeDemosaic"),
-        settings.processingVersion == RawProcessingVersion::TruthfulV1 ? 1 : 0);
-    glUniformMatrix3fv(glGetUniformLocation(m_Program, "uCameraToWorking"), 1, settings.debugTransposeCameraMatrix ? GL_FALSE : GL_TRUE, cameraToWorking.data());
-    glUniform1i(glGetUniformLocation(m_Program, "uUseCameraTransform"), settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uDebugView"), DebugViewUniform(settings.debugView));
-    glUniform1f(glGetUniformLocation(m_Program, "uExposure"), exposure);
-    UploadToneCurveUniforms(m_Program, settings);
-    glUniform1i(glGetUniformLocation(m_Program, "uHighlightMode"), static_cast<int>(settings.highlightMode));
-    glUniform1f(glGetUniformLocation(m_Program, "uHighlightStrength"), settings.highlightStrength);
-    glUniform1f(glGetUniformLocation(m_Program, "uHighlightThreshold"), settings.highlightThreshold);
-    glUniform1i(glGetUniformLocation(m_Program, "uDemosaicMethod"), static_cast<int>(settings.demosaicMethod));
-    glUniform1f(glGetUniformLocation(m_Program, "uFalseColorSuppression"), settings.falseColorSuppression);
-    glUniform1f(glGetUniformLocation(m_Program, "uDefringeStrength"), settings.defringeStrength);
-    glUniform1f(glGetUniformLocation(m_Program, "uHighlightEdgeCleanup"), settings.highlightEdgeCleanup);
-    glUniform1i(glGetUniformLocation(m_Program, "uChromaRadius"), std::clamp(settings.chromaRadius, 1, 3));
-    glUniform1f(glGetUniformLocation(m_Program, "uPreserveRealColor"), settings.preserveRealColor);
-    glUniform1f(glGetUniformLocation(m_Program, "uLateralRedCyan"), settings.lateralRedCyan);
-    glUniform1f(glGetUniformLocation(m_Program, "uLateralBlueYellow"), settings.lateralBlueYellow);
-    glUniform1i(glGetUniformLocation(m_Program, "uMosaicDenoiseEnabled"), settings.mosaicDenoise.enabled ? 1 : 0);
-    glUniform1i(glGetUniformLocation(m_Program, "uMosaicHotPixelSuppression"), settings.mosaicDenoise.hotPixelSuppression ? 1 : 0);
-    glUniform1f(glGetUniformLocation(m_Program, "uMosaicHotPixelThreshold"), settings.mosaicDenoise.hotPixelThreshold);
-    glUniform1f(glGetUniformLocation(m_Program, "uMosaicLumaStrength"), settings.mosaicDenoise.lumaStrength);
-    glUniform1f(glGetUniformLocation(m_Program, "uMosaicChromaStrength"), settings.mosaicDenoise.chromaStrength);
-    glUniform1i(glGetUniformLocation(m_Program, "uMosaicRadius"), std::clamp(settings.mosaicDenoise.radius, 1, 4));
-    glUniform1f(glGetUniformLocation(m_Program, "uMosaicEdgeProtection"), settings.mosaicDenoise.edgeProtection);
-    glUniform1i(glGetUniformLocation(m_Program, "uMosaicIterations"), std::clamp(settings.mosaicDenoise.iterations, 1, 2));
+        m_RawUniforms.whiteBalanceBeforeDemosaic,
+        1);
+    glUniformMatrix3fv(m_RawUniforms.cameraToWorking, 1, settings.debugTransposeCameraMatrix ? GL_FALSE : GL_TRUE, cameraToWorking.data());
+    glUniform1i(m_RawUniforms.useCameraTransform, settings.cameraTransformEnabled && !settings.debugBypassCameraTransform ? 1 : 0);
+    glUniform1i(m_RawUniforms.debugView, DebugViewUniform(settings.debugView));
+    glUniform1f(m_RawUniforms.exposure, exposure);
+    UploadToneCurveUniforms(
+        m_RawUniforms.toneCurve.pointCount,
+        m_RawUniforms.toneCurve.points,
+        settings);
+    glUniform1i(m_RawUniforms.highlightMode, static_cast<int>(settings.highlightMode));
+    glUniform1f(m_RawUniforms.highlightStrength, settings.highlightStrength);
+    glUniform1f(m_RawUniforms.highlightThreshold, settings.highlightThreshold);
+    glUniform1i(m_RawUniforms.demosaicMethod, static_cast<int>(settings.demosaicMethod));
+    glUniform1f(m_RawUniforms.falseColorSuppression, settings.falseColorSuppression);
+    glUniform1f(m_RawUniforms.defringeStrength, settings.defringeStrength);
+    glUniform1f(m_RawUniforms.highlightEdgeCleanup, settings.highlightEdgeCleanup);
+    glUniform1i(m_RawUniforms.chromaRadius, std::clamp(settings.chromaRadius, 1, 3));
+    glUniform1f(m_RawUniforms.preserveRealColor, settings.preserveRealColor);
+    glUniform1f(m_RawUniforms.lateralRedCyan, settings.lateralRedCyan);
+    glUniform1f(m_RawUniforms.lateralBlueYellow, settings.lateralBlueYellow);
+    glUniform1i(m_RawUniforms.mosaicDenoiseEnabled, settings.mosaicDenoise.enabled ? 1 : 0);
+    glUniform1i(m_RawUniforms.mosaicHotPixelSuppression, settings.mosaicDenoise.hotPixelSuppression ? 1 : 0);
+    glUniform1f(m_RawUniforms.mosaicHotPixelThreshold, settings.mosaicDenoise.hotPixelThreshold);
+    glUniform1f(m_RawUniforms.mosaicLumaStrength, settings.mosaicDenoise.lumaStrength);
+    glUniform1f(m_RawUniforms.mosaicChromaStrength, settings.mosaicDenoise.chromaStrength);
+    glUniform1i(m_RawUniforms.mosaicRadius, std::clamp(settings.mosaicDenoise.radius, 1, 4));
+    glUniform1f(m_RawUniforms.mosaicEdgeProtection, settings.mosaicDenoise.edgeProtection);
+    glUniform1i(m_RawUniforms.mosaicIterations, std::clamp(settings.mosaicDenoise.iterations, 1, 2));
 
     if (!EnsureFullscreenQuad()) {
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -2215,7 +2504,17 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
         return 0;
     }
     glBindVertexArray(m_QuadVao);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    const std::uint64_t outputPixels =
+        static_cast<std::uint64_t>(outWidth) *
+        static_cast<std::uint64_t>(outHeight);
+    const bool cooperativeCfaScheduling =
+        settings.mosaicDenoise.enabled &&
+        outputPixels > kCooperativeCfaRasterPixelThreshold;
+    const bool completed = DrawRawFullscreenPass(
+        outWidth,
+        outHeight,
+        cooperativeCfaScheduling,
+        shouldCancel);
     glBindVertexArray(0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE1);
@@ -2226,6 +2525,10 @@ unsigned int RawGpuPipeline::Render(const RawImageData& raw, const RawDevelopSet
 
     glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    if (!completed) {
+        m_LastError = "RAW render canceled between cooperative CFA tiles.";
+        return 0;
+    }
     return m_OutputTexture;
 }
 

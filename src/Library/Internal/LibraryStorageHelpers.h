@@ -53,11 +53,6 @@ bool ShouldQueueAssetConflict(
 bool ReadFileBytes(const std::filesystem::path& path, std::vector<unsigned char>& outBytes);
 bool WriteFileBytes(const std::filesystem::path& path, const std::vector<unsigned char>& bytes);
 
-bool LoadLegacyProjectDocument(
-    const std::filesystem::path& path,
-    StackBinaryFormat::ProjectDocument& outDocument,
-    const StackBinaryFormat::ProjectLoadOptions& options);
-
 std::vector<unsigned char> DecodeDataUrl(const std::string& dataUrl);
 std::string ComputeImageHash(const std::vector<unsigned char>& data);
 

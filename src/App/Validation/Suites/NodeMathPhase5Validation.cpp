@@ -390,11 +390,11 @@ bool ValidateConnectionLabelInformationSystem() {
     image.descriptor.alpha = SemanticField<AlphaMode>::Known(AlphaMode::Straight);
     const Readout imageReadout = Build(image);
     ok &= Phase5Check(
-        imageReadout.primary == "Image · R, G, B, A" &&
-            imageReadout.secondary == "sRGB · scene encoded · straight alpha" &&
+        imageReadout.primary == "RGBA" &&
+            imageReadout.secondary == "4 channels" &&
             imageReadout.accessibleText ==
-                "Image · R, G, B, A. sRGB · scene encoded · straight alpha.",
-        "image wire readout does not expose the required source-oriented state");
+                "RGBA. 4 channels.",
+        "RGB wire readout must show its component layout and channel count");
 
     Input unknownImage;
     unknownImage.sourceSocket.logicalType = LogicalValueType::ColorImage;
@@ -402,9 +402,9 @@ bool ValidateConnectionLabelInformationSystem() {
     unknownImage.descriptor = MakeUnknownDescriptor(LogicalValueType::ColorImage);
     const Readout unknownImageReadout = Build(unknownImage);
     ok &= Phase5Check(
-        unknownImageReadout.primary == "Image · Unknown components" &&
+        unknownImageReadout.primary == "Unknown components" &&
             unknownImageReadout.attention == Attention::None &&
-            unknownImageReadout.secondary.find("Unknown") != std::string::npos,
+            unknownImageReadout.secondary == "Metadata unavailable",
         "unknown image metadata is not explicit and calm");
 
     Input field;
@@ -419,15 +419,15 @@ bool ValidateConnectionLabelInformationSystem() {
         { SpatialExtentKind::Finite, {}, { 0, 0, 1920, 1080 } });
     const Readout fieldReadout = Build(field);
     ok &= Phase5Check(
-        fieldReadout.primary == "Field · Scalar" &&
-            fieldReadout.secondary == "EV · 0 to 1",
-        "field wire readout does not prioritize units and declared range");
+        fieldReadout.primary == "1 channel · 1920 × 1080" &&
+            fieldReadout.secondary == "Metadata unavailable",
+        "single-channel wire readout must show its extent");
 
     Input mask;
     mask.sourceSocket.logicalType = LogicalValueType::Mask;
     const Readout maskReadout = Build(mask);
-    ok &= Phase5Check(maskReadout.primary == "Channel · Mask",
-        "mask wire readout is not normalized as Channel · Mask");
+    ok &= Phase5Check(maskReadout.primary == "1 channel",
+        "mask and channel wire labels must use the same one-channel description");
 
     Input vectorValue;
     vectorValue.sourceSocket.logicalType = LogicalValueType::Vector3;

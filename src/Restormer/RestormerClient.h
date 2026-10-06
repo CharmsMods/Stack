@@ -12,6 +12,8 @@
 
 namespace Stack::Restormer {
 
+bool IsExecutionEnabled();
+
 struct DenoiseResult {
     bool ok = false;
     bool cancelled = false;

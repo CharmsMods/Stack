@@ -1,4 +1,5 @@
 #include "LibraryManager.h"
+#include "Persistence/ProjectIndex.h"
 #include "TagManager.h"
 
 #include "App/AppPaths.h"
@@ -90,19 +91,24 @@ std::uintmax_t LibraryManager::BuildLibrarySignature() const {
 
     const auto accumulateEntry = [&](const std::filesystem::directory_entry& entry) {
         std::error_code ec;
+        const std::filesystem::path observedPath = entry.is_directory(ec) && !ec
+            ? Stack::Project::WorkingProjectDocumentPath(entry.path())
+            : entry.path();
+        ec.clear();
         ++fileCount;
-        if (entry.is_regular_file(ec)) {
-            totalSize += std::filesystem::file_size(entry.path(), ec);
+        if (std::filesystem::is_regular_file(observedPath, ec)) {
+            totalSize += std::filesystem::file_size(observedPath, ec);
         }
         if (ec) ec.clear();
 
-        const auto writeTime = std::filesystem::last_write_time(entry.path(), ec);
+        const auto writeTime = std::filesystem::last_write_time(observedPath, ec);
         if (!ec) {
             const auto stamp = static_cast<std::uintmax_t>(writeTime.time_since_epoch().count());
             if (stamp > latestWrite) latestWrite = stamp;
         }
 
-        nameHash ^= static_cast<std::uintmax_t>(std::hash<std::string>{}(entry.path().string()));
+        nameHash ^= static_cast<std::uintmax_t>(
+            std::hash<std::string>{}(observedPath.string()));
     };
 
     std::error_code ec;
@@ -145,6 +151,7 @@ int LibraryManager::GetProjectCount() const {
 void LibraryManager::RefreshLibrary(
     std::function<void(int current, int total, const std::string& name)> progressCallback,
     bool syncEmbeddedProjectAssets) {
+    (void)syncEmbeddedProjectAssets;
     std::lock_guard<std::mutex> lock(m_ProjectsMutex);
     TraceStartupStep("[LibraryManager] RefreshLibrary begin");
 
@@ -161,65 +168,48 @@ void LibraryManager::RefreshLibrary(
     }
     m_Assets.clear();
 
-    if (!std::filesystem::exists(m_LibraryPath)) {
-        std::filesystem::create_directories(m_LibraryPath);
-    }
-    if (!std::filesystem::exists(m_AssetsPath)) {
-        std::filesystem::create_directories(m_AssetsPath);
-    }
+    std::error_code ec;
+    std::filesystem::create_directories(m_LibraryPath, ec);
+    ec.clear();
+    std::filesystem::create_directories(m_AssetsPath, ec);
 
-    int totalItems = GetProjectCount();
+    Stack::Project::ProjectIndex::Get().RebuildDefaultRoots();
+    const std::vector<Stack::Project::ProjectRecord> indexedProjects =
+        Stack::Project::ProjectIndex::Get().Snapshot();
+    int totalItems = static_cast<int>(indexedProjects.size());
     int currentItem = 0;
     TraceStartupStep("[LibraryManager] Refresh counts: " + std::to_string(totalItems));
 
-    std::vector<std::string> activeAssetFiles;
-
-    for (const auto& entry : std::filesystem::directory_iterator(m_LibraryPath)) {
-        if (!IsSupportedProjectExtension(entry.path())) continue;
-
-        currentItem++;
-        TraceStartupStep("[LibraryManager] Loading project: " + entry.path().filename().string());
-        if (progressCallback) progressCallback(currentItem, totalItems, entry.path().filename().string());
-
-        StackFormat::ProjectLoadOptions options;
-        options.includeThumbnail = true;
-        options.includeSourceImage = syncEmbeddedProjectAssets;
-        options.includePipelineData = syncEmbeddedProjectAssets;
-        options.verifyChecksum = syncEmbeddedProjectAssets;
-
-        StackFormat::ProjectDocument document;
-        if (!LoadProjectDocument(entry.path().filename().string(), document, options)) {
-            std::cerr << "Failed to parse project: " << entry.path() << std::endl;
-            continue;
+    for (const Stack::Project::ProjectRecord& record : indexedProjects) {
+        ++currentItem;
+        TraceStartupStep("[LibraryManager] Indexing project: " + record.absolutePath.string());
+        if (progressCallback) {
+            progressCallback(currentItem, totalItems, record.displayName);
         }
-
         auto project = std::make_shared<ProjectEntry>();
-        project->fileName = entry.path().filename().string();
-        project->projectName = document.metadata.projectName;
-        project->timestamp = document.metadata.timestamp;
-        project->projectKind = document.metadata.projectKind;
-        project->thumbnailBytes = std::move(document.thumbnailBytes);
-        project->sourceWidth = document.metadata.sourceWidth;
-        project->sourceHeight = document.metadata.sourceHeight;
-
-        m_Projects.push_back(project);
-
-        if (syncEmbeddedProjectAssets) {
-            // Full asset sync is intentionally opt-in; startup only needs metadata and thumbnails.
-            std::vector<std::string> projectAssets = SyncProjectAssets(project->fileName, document);
-            activeAssetFiles.insert(activeAssetFiles.end(), projectAssets.begin(), projectAssets.end());
-        }
+        project->projectId = record.projectId;
+        project->fileName = record.absolutePath.string();
+        project->absolutePath = record.absolutePath;
+        project->projectName = record.displayName.empty()
+            ? record.absolutePath.stem().string()
+            : record.displayName;
+        project->timestamp = record.timestamp.empty() ? "Unknown" : record.timestamp;
+        project->projectKind = record.projectKind;
+        project->thumbnailBytes = record.coverThumbnailBytes;
+        project->sourceWidth = record.sourceWidth > 0 ? record.sourceWidth : 4;
+        project->sourceHeight = record.sourceHeight > 0 ? record.sourceHeight : 3;
+        project->needsAttention = record.needsAttention;
+        project->readOnlyRecovery = record.readOnlyRecovery;
+        project->errorMessage = record.errorMessage;
+        m_Projects.push_back(std::move(project));
     }
 
     SortProjectsNewestFirst(m_Projects);
 
-    if (syncEmbeddedProjectAssets) {
-        CleanupOrphanedAssets(activeAssetFiles);
-    }
-
-    // Populate m_Assets directly from the synced .hash files
-    if (std::filesystem::exists(m_AssetsPath)) {
-        for (const auto& entry : std::filesystem::directory_iterator(m_AssetsPath)) {
+    ec.clear();
+    if (std::filesystem::exists(m_AssetsPath, ec) && !ec) {
+        for (const auto& entry : std::filesystem::directory_iterator(m_AssetsPath, ec)) {
+            if (ec) break;
             std::string filename = entry.path().filename().string();
             if (filename.size() > 5 && filename.substr(filename.size() - 5) == ".hash") {
                 try {
@@ -292,9 +282,9 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
     const std::filesystem::path libraryPath = m_LibraryPath;
     const std::filesystem::path assetsPath = m_AssetsPath;
 
-    Async::TaskSystem::Get().Submit([this, generation, libraryPath, assetsPath, syncEmbeddedProjectAssets]() mutable {
+    const bool submitted = Async::TaskSystem::Get().Submit(MakeActivityMetadata("Refreshing library", true), [this, generation, libraryPath, assetsPath, syncEmbeddedProjectAssets]() mutable {
         LibraryScanResult result;
-        std::vector<std::string> activeAssetFiles;
+        (void)syncEmbeddedProjectAssets;
 
         auto updateProgress = [&](int current, int total, const std::string& item) {
             std::lock_guard<std::mutex> lock(m_RefreshMutex);
@@ -316,20 +306,10 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
             ec.clear();
             std::filesystem::create_directories(assetsPath, ec);
 
-            std::vector<std::filesystem::path> projectFiles;
+            Stack::Project::ProjectIndex::Get().RebuildDefaultRoots();
+            const std::vector<Stack::Project::ProjectRecord> indexedProjects =
+                Stack::Project::ProjectIndex::Get().Snapshot();
             std::vector<std::filesystem::path> assetMetadataFiles;
-
-            ec.clear();
-            if (std::filesystem::exists(libraryPath, ec) && !ec) {
-                for (const auto& entry : std::filesystem::directory_iterator(libraryPath, ec)) {
-                    if (ec) {
-                        break;
-                    }
-                    if (IsSupportedProjectExtension(entry.path())) {
-                        projectFiles.push_back(entry.path());
-                    }
-                }
-            }
 
             ec.clear();
             if (std::filesystem::exists(assetsPath, ec) && !ec) {
@@ -343,60 +323,33 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
                 }
             }
 
-            result.totalItems = static_cast<int>(projectFiles.size() + assetMetadataFiles.size());
+            result.totalItems = static_cast<int>(indexedProjects.size() + assetMetadataFiles.size());
             int currentItem = 0;
             updateProgress(currentItem, result.totalItems, "projects");
 
-            for (const std::filesystem::path& path : projectFiles) {
+            for (const Stack::Project::ProjectRecord& record : indexedProjects) {
                 ++currentItem;
-                updateProgress(currentItem, result.totalItems, path.filename().string());
-
-                StackFormat::ProjectLoadOptions options;
-                options.includeThumbnail = true;
-                options.includeSourceImage = syncEmbeddedProjectAssets;
-                options.includePipelineData = syncEmbeddedProjectAssets;
-                options.verifyChecksum = syncEmbeddedProjectAssets;
-
-                StackFormat::ProjectDocument document;
-                if (!LoadProjectDocument(path.filename().string(), document, options)) {
-                    continue;
-                }
+                updateProgress(currentItem, result.totalItems, record.displayName);
 
                 auto project = std::make_shared<ProjectEntry>();
-                project->fileName = path.filename().string();
-                project->projectName = document.metadata.projectName;
-                project->timestamp = document.metadata.timestamp;
-                project->projectKind = document.metadata.projectKind;
-                project->thumbnailBytes = std::move(document.thumbnailBytes);
-                project->sourceWidth = document.metadata.sourceWidth;
-                project->sourceHeight = document.metadata.sourceHeight;
+                project->projectId = record.projectId;
+                project->fileName = record.absolutePath.string();
+                project->absolutePath = record.absolutePath;
+                project->projectName = record.displayName.empty()
+                    ? record.absolutePath.stem().string()
+                    : record.displayName;
+                project->timestamp = record.timestamp.empty() ? "Unknown" : record.timestamp;
+                project->projectKind = record.projectKind;
+                project->thumbnailBytes = record.coverThumbnailBytes;
+                project->sourceWidth = record.sourceWidth > 0 ? record.sourceWidth : 4;
+                project->sourceHeight = record.sourceHeight > 0 ? record.sourceHeight : 3;
+                project->needsAttention = record.needsAttention;
+                project->readOnlyRecovery = record.readOnlyRecovery;
+                project->errorMessage = record.errorMessage;
                 result.projects.push_back(project);
-
-                if (syncEmbeddedProjectAssets) {
-                    std::vector<std::string> projectAssets = SyncProjectAssets(project->fileName, document);
-                    activeAssetFiles.insert(activeAssetFiles.end(), projectAssets.begin(), projectAssets.end());
-                }
             }
 
             SortProjectsNewestFirst(result.projects);
-
-            if (syncEmbeddedProjectAssets) {
-                CleanupOrphanedAssets(activeAssetFiles);
-
-                assetMetadataFiles.clear();
-                ec.clear();
-                if (std::filesystem::exists(assetsPath, ec) && !ec) {
-                    for (const auto& entry : std::filesystem::directory_iterator(assetsPath, ec)) {
-                        if (ec) {
-                            break;
-                        }
-                        if (IsSupportedAssetMetadataExtension(entry.path())) {
-                            assetMetadataFiles.push_back(entry.path());
-                        }
-                    }
-                }
-                result.totalItems = static_cast<int>(projectFiles.size() + assetMetadataFiles.size());
-            }
 
             for (const std::filesystem::path& path : assetMetadataFiles) {
                 ++currentItem;
@@ -468,6 +421,22 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
                 m_LibraryRefreshSnapshot.statusText = result.errorMessage.empty()
                     ? "Failed to scan library."
                     : result.errorMessage;
+                Stack::Notifications::NoticeSpec notice;
+                notice.title = "Library refresh failed";
+                notice.message = "The previous Library view is still available.";
+                notice.details = m_LibraryRefreshSnapshot.statusText;
+                notice.severity = Stack::Notifications::Severity::Error;
+                notice.dedupeKey = "library-refresh";
+                Stack::Notifications::ActionSpec retry;
+                retry.label = "Retry";
+                retry.resolveOnSuccess = false;
+                retry.canInvoke = [this] { return !IsRefreshBusy(); };
+                retry.invoke = [this] {
+                    RequestRefreshLibraryAsync();
+                    return Stack::Notifications::ActionResult::Success();
+                };
+                notice.actions.push_back(std::move(retry));
+                m_RefreshProblem = m_Notifier.Post(std::move(notice));
                 return;
             }
 
@@ -496,8 +465,19 @@ void LibraryManager::RequestRefreshLibraryAsync(bool syncEmbeddedProjectAssets) 
             m_LibraryRefreshSnapshot.assetCount = static_cast<int>(m_Assets.size());
             m_LibraryRefreshSnapshot.currentItem.clear();
             m_LibraryRefreshSnapshot.statusText = "Library ready.";
+            if (m_RefreshProblem) {
+                m_Notifier.Resolve(m_RefreshProblem);
+                m_RefreshProblem = 0;
+            }
         });
     });
+    if (!submitted) {
+        std::lock_guard<std::mutex> lock(m_RefreshMutex);
+        if (generation != m_LibraryRefreshGeneration) return;
+        m_LibraryRefreshSnapshot.state = Async::TaskState::Failed;
+        m_LibraryRefreshSnapshot.statusText = "The Library refresh could not be started.";
+        m_RefreshProblem = m_Notifier.Error(m_LibraryRefreshSnapshot.statusText);
+    }
 }
 
 void LibraryManager::CancelLibraryRefreshRequests() {
@@ -571,7 +551,7 @@ void LibraryManager::RequestLibrarySignatureAsync() {
         m_LibrarySignatureTaskState = Async::TaskState::Queued;
     }
 
-    Async::TaskSystem::Get().Submit([this, generation]() {
+    Async::TaskSystem::Get().Submit(MakeActivityMetadata("Checking library", true), [this, generation]() {
         {
             std::lock_guard<std::mutex> lock(m_SignatureMutex);
             if (generation != m_LibrarySignatureGeneration) {

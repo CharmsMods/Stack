@@ -24,13 +24,14 @@ enum class WhiteBalanceMode {
 };
 
 enum class RawProcessingVersion {
-    LegacyV1,
-    TruthfulV1
+    TruthfulV2
 };
 
 enum class DemosaicMethod {
     Bilinear,
-    MalvarHeCutler
+    MalvarHeCutler,
+    NearestNeighbor,
+    HamiltonAdams
 };
 
 enum class RawWorkingSpace {
@@ -48,6 +49,16 @@ enum class RawSampleFormat {
     Unknown,
     UInt16,
     Float32
+};
+
+// Declares how an optional float Bayer mosaic enters the shared RAW
+// developer. This prevents an HDR virtual exposure from being mistaken for
+// an ordinary normalized RAW or an already-denoised MFD result.
+enum class NormalizedMosaicInputContract {
+    None,
+    MfdReferencePreGain,
+    HdrVirtualAnchorPreGain,
+    BracketingPreGain
 };
 
 enum class RawDecoderBackend {
@@ -144,20 +155,18 @@ struct DngNoiseProfilePlane {
 };
 
 enum class RawMosaicDenoiseMode {
-    LegacyFixedThreshold = 0,
+    FixedThreshold = 0,
     DngNoiseProfile = 1
 };
 
 struct RawMosaicDenoiseSettings {
     bool enabled = false;
-    // New settings use the DNG model when it is available. Deserialization
-    // explicitly assigns LegacyFixedThreshold when this field is absent so
-    // previously-authored graphs retain their original pixels.
+    // Use the DNG model when it is available.
     RawMosaicDenoiseMode mode = RawMosaicDenoiseMode::DngNoiseProfile;
     bool hotPixelSuppression = true;
     float hotPixelThreshold = 0.12f;
-    // Compatibility names: these are green-plane and red/blue-plane strengths
-    // in the pre-demosaic CFA domain, not perceptual luminance/chroma controls.
+    // These are green-plane and red/blue-plane strengths in the pre-demosaic
+    // CFA domain, not perceptual luminance/chroma controls.
     float lumaStrength = 0.35f;
     float chromaStrength = 0.55f;
     int radius = 2;
@@ -171,6 +180,9 @@ struct RawToneCurvePoint {
 };
 
 struct RawDetailFusionSettings {
+    // Runtime color contract supplied by the node or RAW Development recipe.
+    RawProcessingVersion processingVersion = RawProcessingVersion::TruthfulV2;
+    RawWorkingSpace workingSpace = RawWorkingSpace::LinearSrgbD65;
     RawDetailFusionMode mode = RawDetailFusionMode::AutoAnalyze;
     RawDetailFusionDebugView debugView = RawDetailFusionDebugView::FinalImage;
     bool autoSafetyEnabled = true;
@@ -286,6 +298,7 @@ struct RawMetadata {
     int visibleHeight = 0;
     int leftMargin = 0;
     int topMargin = 0;
+    // TIFF/EXIF orientation 1..8. Legacy 0 means unspecified/upright.
     int orientation = 0;
     int bitDepth = 0;
     CfaPattern cfaPattern = CfaPattern::Unknown;
@@ -307,10 +320,15 @@ struct RawMetadata {
     float exposureTimeSeconds = 0.0f;
     float isoSpeed = 0.0f;
     float apertureFNumber = 0.0f;
+    float focalLengthMm = 0.0f;
+    float focusDistanceMeters = 0.0f;
+    std::string lensModel;
     std::int64_t captureTimestamp = 0;
     bool hasExposureTime = false;
     bool hasIsoSpeed = false;
     bool hasApertureFNumber = false;
+    bool hasFocalLength = false;
+    bool hasFocusDistance = false;
     bool hasCaptureTimestamp = false;
     std::array<float, 9> cameraToSrgb {
         1.0f, 0.0f, 0.0f,
@@ -401,7 +419,7 @@ struct RawMetadata {
 };
 
 struct RawDevelopSettings {
-    RawProcessingVersion processingVersion = RawProcessingVersion::LegacyV1;
+    RawProcessingVersion processingVersion = RawProcessingVersion::TruthfulV2;
     RawWorkingSpace workingSpace = RawWorkingSpace::LinearSrgbD65;
     bool applyBaselineExposure = false;
     bool encodeSrgbOutput = false;
@@ -425,9 +443,9 @@ struct RawDevelopSettings {
     bool rotateToFitFrame = false;
     bool flipHorizontally = false;
     bool flipVertically = false;
-    float falseColorSuppression = 0.25f;
-    float defringeStrength = 0.30f;
-    float highlightEdgeCleanup = 0.40f;
+    float falseColorSuppression = 0.0f;
+    float defringeStrength = 0.0f;
+    float highlightEdgeCleanup = 0.0f;
     int chromaRadius = 1;
     float preserveRealColor = 0.70f;
     float lateralRedCyan = 0.0f;
@@ -438,9 +456,23 @@ struct RawDevelopSettings {
 
 struct RawImageData {
     RawMetadata metadata;
+    // Stable decoded-content identity. Ordinary files derive this from the
+    // source SHA-256 plus the decoder/calibration contract; virtual RAWs may
+    // supply their own immutable graph identity. GPU and proxy caches use the
+    // compact hash instead of rescanning multi-megabyte pixel buffers.
+    std::string contentIdentity;
+    std::uint64_t contentIdentityHash = 0u;
+    std::string decoderIdentityVersion;
+    // Decoded sensor/linear buffers store row zero at the top, before EXIF.
     std::vector<std::uint16_t> rawBuffer;
     std::vector<std::uint16_t> linearUInt16Buffer;
     std::vector<float> linearFloatBuffer;
+    // Reconstructed camera RGB has already passed sensor normalization and
+    // pointwise calibration. White balance and camera color conversion follow.
+    bool reconstructedCameraRgb = false;
+    // Geometric coverage, independent of sensor validity or clipping. Null is opaque.
+    // Covered reconstructions store both color and coverage with row zero at the top.
+    std::shared_ptr<const std::vector<float>> outputCoverage;
     // Optional packed Bayer samples that have already passed DNG
     // linearization and black/white normalization. Samples remain in the
     // camera-native, pre-white-balance and pre-gain-map domain. Keeping the
@@ -448,6 +480,49 @@ struct RawImageData {
     // development pipeline without copying a full-resolution float mosaic.
     std::shared_ptr<const std::vector<float>> normalizedMosaicBuffer;
     std::uint64_t normalizedMosaicContentHash = 0u;
+    NormalizedMosaicInputContract normalizedMosaicInputContract =
+        NormalizedMosaicInputContract::None;
+
+    // Optional immutable HDR evidence. All unpacked maps use the active RAW
+    // mosaic dimensions except validityMask, which is one packed bit/sample.
+    struct HdrSidecars {
+        std::shared_ptr<const std::vector<float>> varianceProxy;
+        std::shared_ptr<const std::vector<float>> mergeConfidence;
+        std::shared_ptr<const std::vector<float>> effectiveSampleCount;
+        std::shared_ptr<const std::vector<float>> recoveredHeadroomStops;
+        std::shared_ptr<const std::vector<std::uint8_t>> validityMask;
+        std::shared_ptr<const std::vector<std::uint8_t>> ownerFrame;
+        std::shared_ptr<const std::vector<std::uint8_t>> flags;
+        std::string geometricReferenceFrameId;
+        std::string radiometricAnchorFrameId;
+    };
+    std::shared_ptr<const HdrSidecars> hdrSidecars;
+
+    // Processor-neutral evidence carried by a virtual Bayer measurement when
+    // it is fed into another MultiFrame node. Variance is in the same
+    // camera-native pre-gain domain as normalizedMosaicBuffer. A missing
+    // sidecar means the input is an original sensor capture whose variance is
+    // resolved from its RAW metadata; it never means zero variance.
+    struct MultiFrameMeasurementSidecars {
+        // Sensor/interpolation noise propagated through the actual weights.
+        std::shared_ptr<const std::vector<float>> variance;
+        // Registration and radiometric/model risk used by fusion. This is
+        // separate from random measurement noise and must not set denoise strength.
+        std::shared_ptr<const std::vector<float>> fusionUncertaintyVariance;
+        // The number of statistically independent measurements that actually
+        // survived clipping and registration rejection for this output sample.
+        std::shared_ptr<const std::vector<float>> effectiveSupport;
+        std::shared_ptr<const std::vector<std::uint8_t>> validity;
+        std::shared_ptr<const std::vector<std::uint8_t>> clipping;
+        // Non-zero when at least one locally aligned alternate was rejected.
+        std::shared_ptr<const std::vector<std::uint8_t>> localRejection;
+        // Bracketing MeasurementFallbackReason encoded as one byte per sample.
+        std::shared_ptr<const std::vector<std::uint8_t>> fallbackReason;
+        std::vector<std::string> originalFrameIds;
+        std::string evidenceIdentitySha256;
+    };
+    std::shared_ptr<const MultiFrameMeasurementSidecars>
+        multiFrameMeasurementSidecars;
 };
 
 const char* CfaPatternName(CfaPattern pattern);
@@ -457,6 +532,8 @@ const char* DemosaicMethodName(DemosaicMethod method);
 const char* RawWorkingSpaceName(RawWorkingSpace workingSpace);
 const char* RawPixelLayoutName(RawPixelLayout layout);
 const char* RawSampleFormatName(RawSampleFormat format);
+const char* NormalizedMosaicInputContractName(
+    NormalizedMosaicInputContract contract);
 const char* RawDebugViewName(RawDebugView view);
 const char* RawCameraTransformSourceName(RawCameraTransformSource source);
 const char* HighlightReconstructionModeName(HighlightReconstructionMode mode);

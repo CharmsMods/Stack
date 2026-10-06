@@ -1,9 +1,11 @@
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
+#include "App/AppHeaderStyle.h"
 #include "App/settings/AppearanceTheme.h"
 #include "Editor/EditorModule.h"
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Graph/GraphDocumentRules.h"
 
 #include <algorithm>
 #include <cctype>
@@ -222,59 +224,9 @@ bool RenderBrowserCard(
 }
 
 
-bool PrototypeHasCompatibleInput(
-    EditorNodeGraph::Graph& compatibilityGraph,
-    int& nextPrototypeNodeId,
-    int fromNodeId,
-    const std::string& fromSocketId,
-    const NodeBrowserEntry& entry) {
-    const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-    EditorNodeGraph::Node testNode = prototype;
-    testNode.id = nextPrototypeNodeId++;
-    compatibilityGraph.EditNodes().push_back(testNode);
 
-    bool compatible = false;
-    for (const EditorNodeGraph::SocketDefinition& socket : compatibilityGraph.GetSockets(testNode, true)) {
-        if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
-            continue;
-        }
-        if (compatibilityGraph.CanConnectSockets(fromNodeId, fromSocketId, testNode.id, socket.id)) {
-            compatible = true;
-            break;
-        }
-    }
-    compatibilityGraph.GetNodes().pop_back();
-    return compatible;
-}
 
-bool PrototypeHasCompatibleOutput(
-    EditorNodeGraph::Graph& compatibilityGraph,
-    int& nextPrototypeNodeId,
-    const NodeBrowserEntry& entry,
-    int toNodeId,
-    const std::string& toSocketId) {
-    const EditorNodeGraph::Node* to = compatibilityGraph.FindNode(toNodeId);
-    if (!to) {
-        return false;
-    }
-    const EditorNodeGraph::Node prototype = EditorNodeGraphDefinitions::BuildPrototypeNode(entry);
-    EditorNodeGraph::Node testNode = prototype;
-    testNode.id = nextPrototypeNodeId++;
-    compatibilityGraph.EditNodes().push_back(testNode);
 
-    bool compatible = false;
-    for (const EditorNodeGraph::SocketDefinition& socket : compatibilityGraph.GetSockets(testNode, true)) {
-        if (socket.direction != EditorNodeGraph::SocketDirection::Output) {
-            continue;
-        }
-        if (compatibilityGraph.CanConnectSockets(testNode.id, socket.id, toNodeId, toSocketId)) {
-            compatible = true;
-            break;
-        }
-    }
-    compatibilityGraph.GetNodes().pop_back();
-    return compatible;
-}
 
 int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry, const EditorNodeGraph::Vec2& graphPos) {
     if (!editor) {
@@ -327,6 +279,9 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
             break;
         case EditorNodeGraph::NodeKind::Reformat:
             editor->AddReformatNodeAt(graphPos);
+            break;
+        case EditorNodeGraph::NodeKind::RawOperation:
+            editor->AddRawOperationNodeAt(static_cast<Stack::RawRecipe::GraphOperationKind>(entry.value), graphPos);
             break;
         case EditorNodeGraph::NodeKind::TechnicalImage:
             editor->AddTechnicalImageNodeAt(
@@ -425,6 +380,28 @@ int AddNodeFromBrowserEntry(EditorModule* editor, const NodeBrowserEntry& entry,
 
 } // namespace
 
+void EditorNodeGraphUI::SetCatalogHost(const ImVec2& position, const ImVec2& size,
+    bool expanded, float visibleWidth) {
+    const bool enabled = size.x > 0.0f && size.y > 0.0f;
+    const bool wasDocked = IsCatalogDocked();
+    if (!enabled && HasCatalogHost()) CloseNodeBrowser();
+    if (wasDocked && enabled && !expanded) {
+        // Explicit collapse closes both the docked view and any insertion
+        // operation. Tab may reopen it temporarily after the panel closes.
+        CloseNodeBrowser();
+        m_NodeBrowserFocusSearch = false;
+        m_NodeBrowserSearchFocused = false;
+    }
+    if (wasDocked != (enabled && expanded) || size.x != m_CatalogHostSize.x)
+        m_NodeBrowserRestoreScroll = true;
+    m_CatalogHostPosition = position;
+    m_CatalogHostSize = enabled ? size : ImVec2();
+    m_CatalogHostExpanded = enabled && expanded;
+    m_CatalogHostVisibleWidth = enabled
+        ? std::clamp(visibleWidth < 0.0f ? (expanded ? size.x : 0.0f) : visibleWidth, 0.0f, size.x)
+        : 0.0f;
+}
+
 void EditorNodeGraphUI::OpenNodeBrowser(NodeBrowserMode mode, const EditorNodeGraph::Vec2& graphPos) {
     m_NodeBrowserMode = mode;
     m_NodeBrowserGraphPos = graphPos;
@@ -435,9 +412,13 @@ void EditorNodeGraphUI::OpenNodeBrowser(NodeBrowserMode mode, const EditorNodeGr
     m_NodeBrowserFilterCacheValid = false;
     m_NodeBrowserOpenedAt = ImGui::GetTime();
     m_NodeBrowserLastFrameTime = m_NodeBrowserOpenedAt;
-    m_NodeBrowserDrawerAlpha = 0.0f;
-    m_NodeBrowserStablePanelWidth = 0.0f;
-    m_NodeBrowserSearchBuffer[0] = '\0';
+    if (!IsCatalogDocked()) m_NodeBrowserDrawerAlpha = 0.0f;
+    if (!HasCatalogHost()) {
+        m_NodeBrowserStablePanelWidth = 0.0f;
+        m_NodeBrowserSearchBuffer[0] = '\0';
+        m_NodeBrowserScrollY = 0.0f;
+    }
+    m_NodeBrowserRestoreScroll = true;
     m_NodeBrowserFilteredEntryIndices.clear();
     m_NodeBrowserEntryAlpha.clear();
     m_NodeBrowserCardHoverAnim.clear();
@@ -463,15 +444,19 @@ void EditorNodeGraphUI::CloseNodeBrowser() {
         m_DrawerMode = DrawerMode::None;
     }
     m_NodeBrowserFocusSearch = false;
-    m_NodeBrowserThumbnailCatalogEnsured = false;
+    m_NodeBrowserSearchFocused = false;
+    m_NodeBrowserMode = NodeBrowserMode::GeneralAdd;
     m_NodeBrowserFilterCacheValid = false;
     m_NodeBrowserDragFromNodeId = -1;
     m_NodeBrowserDragFromSocketId.clear();
     m_NodeBrowserDragToNodeId = -1;
     m_NodeBrowserDragToSocketId.clear();
     m_NodeBrowserFilteredEntryIndices.clear();
-    m_NodeBrowserEntryAlpha.clear();
-    m_NodeBrowserCardHoverAnim.clear();
+    if (!IsCatalogDocked()) {
+        m_NodeBrowserThumbnailCatalogEnsured = false;
+        m_NodeBrowserEntryAlpha.clear();
+        m_NodeBrowserCardHoverAnim.clear();
+    }
 }
 
 void EditorNodeGraphUI::RenderNodeBrowser(EditorModule* editor) {
@@ -493,7 +478,15 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         return;
     }
 
-    const bool isOpen = m_DrawerMode == DrawerMode::NodeBrowser;
+    const bool hosted = HasCatalogHost();
+    const bool operationOpen = IsNodeBrowserOpen();
+    const bool docked = IsCatalogDocked() ||
+        (hosted && !operationOpen && m_CatalogHostVisibleWidth > 0.5f);
+    const bool isOpen = operationOpen || docked;
+    if (hosted) {
+        targetPanelWidth = m_CatalogHostSize.x;
+        panelWidth = docked ? m_CatalogHostVisibleWidth : m_CatalogHostSize.x;
+    }
     const int frameCount = ImGui::GetFrameCount();
     if (m_NodeBrowserTextureUploadBudgetFrame != frameCount) {
         m_NodeBrowserTextureUploadBudgetFrame = frameCount;
@@ -505,12 +498,12 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     m_NodeBrowserLastFrameTime = now;
 
     const float targetAlpha = isOpen ? 1.0f : 0.0f;
-    if (!isOpen && m_NodeBrowserDrawerAlpha < 0.01f) {
+    if (docked || (!isOpen && m_NodeBrowserDrawerAlpha < 0.01f)) {
         m_NodeBrowserDrawerAlpha = 0.0f;
     } else {
         m_NodeBrowserDrawerAlpha += (targetAlpha - m_NodeBrowserDrawerAlpha) * dt * 15.0f;
     }
-    const float alpha = std::clamp(m_NodeBrowserDrawerAlpha, 0.0f, 1.0f);
+    const float alpha = docked ? 1.0f : std::clamp(m_NodeBrowserDrawerAlpha, 0.0f, 1.0f);
     if (isOpen && targetPanelWidth > 1.0f) {
         m_NodeBrowserStablePanelWidth = targetPanelWidth;
     } else {
@@ -537,13 +530,14 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             m_NodeBrowserFilteredEntryIndices.clear();
             m_NodeBrowserFilteredEntryIndices.reserve(entries.size());
 
-            const bool requiresCompatibilityChecks = m_NodeBrowserMode != NodeBrowserMode::GeneralAdd;
-            EditorNodeGraph::Graph compatibilityGraph;
-            int nextPrototypeNodeId = 1;
-            if (requiresCompatibilityChecks) {
-                compatibilityGraph = graph;
-                nextPrototypeNodeId = std::max(1, graph.GetNextNodeId() + 1000);
-            }
+            std::optional<std::pair<int, std::string>> endpoint;
+            if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput)
+                endpoint = {{m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId}};
+            else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput)
+                endpoint = {{m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId}};
+            const auto available = editor->GetGraphEditorContext().queryAvailableNodes(endpoint);
+            std::unordered_set<std::string> availableKeys;
+            for (const auto& entry : available) availableKeys.insert(EntryKey(entry));
 
             for (std::size_t index = 0; index < entries.size(); ++index) {
                 const NodeBrowserEntry& entry = entries[index];
@@ -555,29 +549,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                     continue;
                 }
 
-                const bool compatibleOutput =
-                    m_NodeBrowserMode != NodeBrowserMode::ConnectFromOutput ||
-                    PrototypeHasCompatibleInput(
-                        compatibilityGraph,
-                        nextPrototypeNodeId,
-                        m_NodeBrowserDragFromNodeId,
-                        m_NodeBrowserDragFromSocketId,
-                        entry);
-                if (!compatibleOutput) {
-                    continue;
-                }
-
-                const bool compatibleInput =
-                    m_NodeBrowserMode != NodeBrowserMode::ConnectFromInput ||
-                    PrototypeHasCompatibleOutput(
-                        compatibilityGraph,
-                        nextPrototypeNodeId,
-                        entry,
-                        m_NodeBrowserDragToNodeId,
-                        m_NodeBrowserDragToSocketId);
-                if (!compatibleInput) {
-                    continue;
-                }
+                if (!availableKeys.count(EntryKey(entry))) continue;
 
                 m_NodeBrowserFilteredEntryIndices.push_back(index);
             }
@@ -650,78 +622,37 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     const ImVec4 themeText = appearance ? appearance->GetWorkingTheme().colors[ImGuiCol_Text] : ImGui::GetStyleColorVec4(ImGuiCol_Text);
     const ImVec4 themeMuted = appearance ? appearance->GetWorkingTheme().colors[ImGuiCol_TextDisabled] : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
     const ImVec4 themeAccent = appearance ? appearance->GetWorkingTheme().colors[ImGuiCol_CheckMark] : ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
-    const ImVec4 spotlightTint = isLightBg
-        ? ImVec4(0.86f, 0.96f, 1.0f, 1.0f)
-        : ImVec4(0.00f, 0.11f, 0.14f, 1.0f);
-    const ImVec4 blackTint(0.01f, 0.02f, 0.03f, 1.0f);
-
-    ImVec4 colBgOpaqueVec = spotlightGraph
-        ? BlendColor(workspaceColor, spotlightTint, isLightBg ? 0.18f : 0.34f)
-        : (blackNodeGraph
-            ? BlendColor(workspaceColor, blackTint, isLightBg ? 0.90f : 0.58f)
-            : workspaceColor);
-    if (wallpaperSurfaces) {
-        colBgOpaqueVec = surfacePalette.drawerSurface;
-        colBgOpaqueVec.w = 0.98f * alpha;
-    } else {
-        colBgOpaqueVec.w = (spotlightGraph
-            ? (isLightBg ? 0.88f : 0.84f)
-            : (blackNodeGraph ? 0.96f : (isLightBg ? 0.94f : 0.92f))) * alpha;
-    }
+    ImVec4 colBgOpaqueVec = docked ? surfacePalette.panelSurface : surfacePalette.drawerSurface;
+    const float backgroundOpacity = hosted && docked
+        ? Stack::Header::ResolveSectionTintOpacity(m_CatalogHostVisibleWidth / m_CatalogHostSize.x)
+        : 1.0f;
+    colBgOpaqueVec.w = alpha * backgroundOpacity;
     const ImU32 colBgOpaque = ImGui::ColorConvertFloat4ToU32(colBgOpaqueVec);
+    const ImU32 colBgTrans = ColorWithAlpha(colBgOpaqueVec,0);
+    const ImU32 colTitleText = ColorWithAlpha(themeText,alpha);
+    const ImU32 colPassiveText = ColorWithAlpha(themeMuted,alpha);
+    const ImU32 colNormalText = ColorWithAlpha(themeText,alpha);
+    const ImU32 colHoveredHeader = ColorWithAlpha(surfacePalette.controlSurfaceHovered,alpha);
+    const ImU32 colActiveHeader = ColorWithAlpha(surfacePalette.controlSurfaceActive,alpha);
+    const ImU32 colCardHoverFill = colHoveredHeader;
 
-    ImVec4 colBgTransVec = colBgOpaqueVec;
-    colBgTransVec.w = 0.0f;
-    const ImU32 colBgTrans = ImGui::ColorConvertFloat4ToU32(colBgTransVec);
-
-    const ImU32 colTitleText = blackNodeGraph
-        ? ColorWithAlpha(ImVec4(0.94f, 0.96f, 0.98f, 1.0f), alpha)
-        : spotlightGraph
-        ? ColorWithAlpha(themeText, alpha)
-        : ScaleAlpha(isLightBg ? IM_COL32(18, 24, 30, 255) : IM_COL32(255, 255, 255, 255), alpha);
-    const ImU32 colPassiveText = blackNodeGraph
-        ? ColorWithAlpha(BlendColor(ImVec4(0.68f, 0.72f, 0.76f, 1.0f), themeAccent, 0.08f), 0.90f * alpha)
-        : spotlightGraph
-        ? ColorWithAlpha(BlendColor(themeMuted, themeAccent, 0.10f), 0.86f * alpha)
-        : ScaleAlpha(isLightBg ? IM_COL32(80, 95, 105, 220) : IM_COL32(140, 160, 170, 200), alpha);
-    const ImU32 colNormalText = blackNodeGraph
-        ? ColorWithAlpha(ImVec4(0.88f, 0.91f, 0.94f, 1.0f), 0.96f * alpha)
-        : spotlightGraph
-        ? ColorWithAlpha(BlendColor(themeText, themeMuted, 0.14f), 0.92f * alpha)
-        : ScaleAlpha(isLightBg ? IM_COL32(40, 50, 60, 220) : IM_COL32(200, 210, 220, 200), alpha);
-    const ImU32 colHoveredHeader = blackNodeGraph
-        ? ColorWithAlpha(BlendColor(themeAccent, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.18f), 0.18f * alpha)
-        : spotlightGraph
-        ? ColorWithAlpha(BlendColor(themeAccent, spotlightTint, 0.16f), 0.18f * alpha)
-        : ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 28) : IM_COL32(92, 178, 255, 30), alpha);
-    const ImU32 colActiveHeader = blackNodeGraph
-        ? ColorWithAlpha(BlendColor(themeAccent, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.24f), 0.28f * alpha)
-        : spotlightGraph
-        ? ColorWithAlpha(BlendColor(themeAccent, themeText, 0.12f), 0.26f * alpha)
-        : ScaleAlpha(isLightBg ? IM_COL32(16, 110, 190, 48) : IM_COL32(92, 178, 255, 50), alpha);
-    const ImU32 colCardHoverFill = wallpaperSurfaces
-        ? ColorWithAlpha(surfacePalette.controlSurfaceHovered, 0.98f * alpha)
-        : (blackNodeGraph
-            ? ColorWithAlpha(BlendColor(colBgOpaqueVec, themeAccent, 0.12f), 0.98f * alpha)
-            : spotlightGraph
-                ? ColorWithAlpha(BlendColor(colBgOpaqueVec, themeAccent, 0.14f), 0.94f * alpha)
-                : ScaleAlpha(isLightBg ? IM_COL32(46, 62, 72, 224) : IM_COL32(24, 40, 48, 236), alpha));
-    const ImU32 colCardOverlay = ColorWithAlpha(BlendColor(themeAccent, themeText, 0.22f), 0.72f * alpha);
+    const ImU32 colCardOverlay = ColorWithAlpha(themeAccent,0.72f*alpha);
     const ImGuiViewport* rootViewport = ImGui::GetMainViewport();
-    const ImVec2 overlayPos = rootViewport ? rootViewport->Pos : workspacePos;
-    const ImVec2 overlaySize = rootViewport ? rootViewport->Size : ImVec2(std::max(layoutPanelWidth, panelWidth), paneHeight);
-    const float overlayHeight = std::max(paneHeight, overlaySize.y);
-    const float drawerWidth = std::max(0.0f, panelWidth);
-    const float featherWidth = std::min(92.0f, std::max(0.0f, drawerWidth * 0.22f));
-    const float solidWidth = std::max(0.0f, drawerWidth - featherWidth);
+    const ImVec2 overlayPos = hosted ? m_CatalogHostPosition : rootViewport ? rootViewport->Pos : workspacePos;
+    const ImVec2 overlaySize = rootViewport ? rootViewport->Size : ImVec2(std::max(layoutPanelWidth,panelWidth),paneHeight);
+    const float overlayHeight = hosted ? m_CatalogHostSize.y : std::max(paneHeight,overlaySize.y);
+    const float drawerWidth = std::max(0.0f, hosted && !docked ? panelWidth * alpha : panelWidth);
+    const float featherWidth = hosted ? 0.0f : std::min(92.0f,std::max(0.0f,drawerWidth*0.22f));
+    const float solidWidth = std::max(0.0f,drawerWidth-featherWidth);
     const float horizontalPadding = 18.0f;
-    const float topPadding = 74.0f;
+    const float topPadding = hosted ? 20.0f : 74.0f;
     const float bottomPadding = 18.0f;
-    const float contentWidth = std::max(1.0f, drawerWidth - featherWidth - horizontalPadding * 2.0f + 8.0f);
+    const float contentWidth = std::max(1.0f,
+        (hosted ? m_CatalogHostSize.x : drawerWidth - featherWidth) - horizontalPadding * 2.0f + (hosted ? 0.0f : 8.0f));
 
     bool closeBrowser = false;
     const bool closeAllowed =
-        isOpen &&
+        operationOpen && !docked &&
         (now - m_NodeBrowserOpenedAt) > 0.12 &&
         !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.0f);
     if (closeAllowed) {
@@ -735,31 +666,39 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
     }
 
     if (drawerWidth > 1.0f || alpha > 0.01f) {
-        const bool interactiveOverlay = isOpen;
+        const bool interactiveOverlay = isOpen && (!docked ||
+            (m_CatalogHostExpanded && m_CatalogHostVisibleWidth >= m_CatalogHostSize.x - .5f));
         ImGui::SetNextWindowPos(overlayPos, ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(std::max(1.0f, drawerWidth), overlayHeight), ImGuiCond_Always);
         if (rootViewport) {
             ImGui::SetNextWindowViewport(rootViewport->ID);
         }
-        if (interactiveOverlay) {
+        if (interactiveOverlay && m_NodeBrowserFocusSearch) {
             ImGui::SetNextWindowFocus();
         }
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.0f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
         ImGuiWindowFlags overlayFlags =
             ImGuiWindowFlags_NoDecoration |
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings |
             ImGuiWindowFlags_NoDocking |
-            ImGuiWindowFlags_NoNav;
+            ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoFocusOnAppearing;
         if (!interactiveOverlay) {
             overlayFlags |= ImGuiWindowFlags_NoInputs;
         }
-        ImGui::Begin("##NodeBrowserDrawerOverlay", nullptr, overlayFlags);
+        const std::string windowName = "##NodeBrowserDrawerOverlay_" +
+            std::to_string(reinterpret_cast<std::uintptr_t>(this));
+        ImGui::Begin(windowName.c_str(), nullptr, overlayFlags);
         ImGui::PopStyleColor();
-        ImGui::PopStyleVar(3);
+        ImGui::PopStyleVar(4);
+        ImGui::BeginDisabled(!interactiveOverlay);
 
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         const ImVec2 panelMin = ImGui::GetWindowPos();
@@ -784,8 +723,14 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         const float revealOffsetY = (1.0f - reveal) * 10.0f;
         const float scrollFadeHeight = 34.0f;
         ImGui::SetCursorPos(ImVec2(horizontalPadding, topPadding + revealOffsetY));
+        if (hosted) {
+            ImGui::PushStyleColor(ImGuiCol_Text, colTitleText);
+            ImGui::TextUnformatted("Node library");
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        }
 
-        if (isOpen && m_NodeBrowserFocusSearch) {
+        if (interactiveOverlay && m_NodeBrowserFocusSearch) {
             ImGui::SetKeyboardFocusHere();
             m_NodeBrowserFocusSearch = false;
         }
@@ -825,7 +770,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::PushItemWidth(contentWidth);
         ImGuiInputTextFlags searchFlags = isOpen ? ImGuiInputTextFlags_None : ImGuiInputTextFlags_ReadOnly;
         ImGui::InputTextWithHint("##NodesPanelSearch", prompt, m_NodeBrowserSearchBuffer, sizeof(m_NodeBrowserSearchBuffer), searchFlags);
-        const float searchHeight = ImGui::GetItemRectSize().y;
+        m_NodeBrowserSearchFocused = ImGui::IsItemActive();
         ImGui::PopItemWidth();
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(5);
@@ -835,7 +780,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImVec2 resultsMin(0.0f, 0.0f);
         ImVec2 resultsMax(0.0f, 0.0f);
         const NodeBrowserEntry* activatedEntry = nullptr;
-        const float resultsHeight = std::max(0.0f, overlayHeight - (topPadding + revealOffsetY + searchHeight + 16.0f + bottomPadding));
+        const float resultsHeight = std::max(1.0f, overlayHeight - ImGui::GetCursorPosY() - bottomPadding);
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, IM_COL32(0, 0, 0, 0));
@@ -845,6 +790,10 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 999.0f);
         ImGui::BeginChild("NodesPanelScrollingResults", ImVec2(contentWidth, resultsHeight), false, ImGuiWindowFlags_NoNav);
+        if (m_NodeBrowserRestoreScroll) {
+            ImGui::SetScrollY(m_NodeBrowserScrollY);
+            m_NodeBrowserRestoreScroll = false;
+        }
         resultsMin = ImGui::GetWindowPos();
         resultsMax = ImVec2(resultsMin.x + ImGui::GetWindowSize().x, resultsMin.y + ImGui::GetWindowSize().y);
 
@@ -852,7 +801,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         const int columnCount = std::max(1, static_cast<int>(std::floor(contentWidth / kCardWidth)));
 
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 6.0f));
-        if (ImGui::BeginTable("NodesPanelGrid", columnCount, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX | ImGuiTableFlags_NoPadInnerX | ImGuiTableFlags_NoSavedSettings)) {
+        if (ImGui::BeginTable("NodesPanelGrid", columnCount, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX | ImGuiTableFlags_NoPadInnerX | ImGuiTableFlags_NoSavedSettings, ImVec2(contentWidth, 0.0f))) {
             for (int column = 0; column < columnCount; ++column) {
                 ImGui::TableSetupColumn(("NodePreviewCol" + std::to_string(column)).c_str(), ImGuiTableColumnFlags_WidthFixed, kCardWidth);
             }
@@ -907,7 +856,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                             previewFallback,
                             entry->previewStrategy != EditorNodeGraphDefinitions::NodeCatalogPreviewStrategy::NoPreview,
                             entryAlpha * alpha,
-                            isOpen,
+                            interactiveOverlay,
                             hoverAnim,
                             dt,
                             colCardHoverFill,
@@ -915,14 +864,14 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                             colPassiveText,
                             colCardOverlay);
 
-                        if (isOpen && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                        if (interactiveOverlay && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                             const NodeBrowserEntry* dragEntry = entry;
                             ImGui::SetDragDropPayload("ADD_NODE_DRAG_PAYLOAD", &dragEntry, sizeof(NodeBrowserEntry*));
                             ImGui::Text("Add %s", entry->label.c_str());
                             ImGui::EndDragDropSource();
                         }
 
-                        if (pressed && isOpen) {
+                        if (pressed && interactiveOverlay) {
                             activatedEntry = entry;
                         }
                     }
@@ -939,6 +888,7 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
             ImGui::PopStyleColor();
         }
 
+        m_NodeBrowserScrollY = ImGui::GetScrollY();
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(5);
@@ -965,7 +915,8 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
         const bool submitPressed =
             ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
-        if (isOpen && !activatedEntry && submitPressed) {
+        const bool catalogFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        if (interactiveOverlay && catalogFocused && !activatedEntry && submitPressed) {
             if (!filtered.empty()) {
                 activatedEntry = filtered.front();
             } else {
@@ -989,49 +940,31 @@ void EditorNodeGraphUI::RenderNodesPanelDrawer(
                 }
             }
 
+            if (docked && !operationOpen) {
+                m_NodeBrowserGraphPos = previousSelectedNode
+                    ? EditorNodeGraph::Vec2{previousSelectedNode->position.x + 340.0f, previousSelectedNode->position.y}
+                    : m_HasLastGraphMousePos ? m_LastGraphMousePos
+                    : ScreenToGraph(EditorNodeGraph::Vec2{
+                        (m_CanvasMin.x + m_CanvasMax.x) * 0.5f,
+                        (m_CanvasMin.y + m_CanvasMax.y) * 0.5f});
+            }
             const int newNodeId = AddNodeFromBrowserEntry(editor, *activatedEntry, m_NodeBrowserGraphPos);
             if (newNodeId > 0) {
                 if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromOutput) {
                     EditorNodeGraphUI::ConnectOutputToBestInput(editor, m_NodeBrowserDragFromNodeId, m_NodeBrowserDragFromSocketId, newNodeId);
                 } else if (m_NodeBrowserMode == NodeBrowserMode::ConnectFromInput) {
                     EditorNodeGraphUI::ConnectBestOutputToInput(editor, newNodeId, m_NodeBrowserDragToNodeId, m_NodeBrowserDragToSocketId);
-                } else if (previousSelectedNodeId > 0) {
-                    bool inserted = false;
-                    if (selectedNodeIds.size() == 1 && hasDownstreamLink && downstreamLinkCopy.fromNodeId == previousSelectedNodeId) {
-                        if (editor->RemoveGraphLink(
-                                downstreamLinkCopy.fromNodeId,
-                                downstreamLinkCopy.fromSocketId,
-                                downstreamLinkCopy.toNodeId,
-                                downstreamLinkCopy.toSocketId)) {
-                            const bool connectedFirst = EditorNodeGraphUI::ConnectOutputToBestInput(editor, previousSelectedNodeId, previousOutputSocket, newNodeId);
-                            const bool connectedSecond = connectedFirst
-                                ? EditorNodeGraphUI::ConnectBestOutputToInput(editor, newNodeId, downstreamLinkCopy.toNodeId, downstreamLinkCopy.toSocketId)
-                                : false;
-                            if (!connectedFirst || !connectedSecond) {
-                                editor->RemoveGraphNode(newNodeId);
-                                editor->ConnectGraphSockets(
-                                    downstreamLinkCopy.fromNodeId,
-                                    downstreamLinkCopy.fromSocketId,
-                                    downstreamLinkCopy.toNodeId,
-                                    downstreamLinkCopy.toSocketId,
-                                    nullptr);
-                            } else {
-                                inserted = true;
-                            }
-                        }
-                    }
-                    if (!inserted && selectedNodeIds.size() == 1) {
-                        EditorNodeGraphUI::ConnectOutputToBestInput(editor, previousSelectedNodeId, previousOutputSocket, newNodeId);
-                    }
                 }
             }
+
             CloseNodeBrowser();
         }
 
-        if (isOpen && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        if (interactiveOverlay && (catalogFocused || operationOpen) && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             closeBrowser = true;
         }
 
+        ImGui::EndDisabled();
         ImGui::End();
     }
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
@@ -46,59 +47,62 @@ using RenderNodeIndex =
 using IncomingLinkIndex =
     std::unordered_map<int, std::vector<const RenderGraphLink*>>;
 
+using OutputEndpoint = std::pair<int, std::string>;
+
 struct ReachableGraphOrder {
     bool valid = false;
-    std::vector<int> preorder;
-    std::vector<int> postorder;
+    std::vector<OutputEndpoint> preorder;
+    std::vector<OutputEndpoint> postorder;
     std::string reason;
 };
 
 template <typename IncludeLink>
 ReachableGraphOrder BuildReachableGraphOrder(
-    int rootNodeId,
+    const OutputEndpoint& root,
     const RenderNodeIndex& nodes,
     const IncomingLinkIndex& incomingLinks,
     IncludeLink&& includeLink,
     const char* cycleReason,
     const char* missingNodeReason) {
     struct Frame {
-        int nodeId = -1;
+        OutputEndpoint output;
         std::size_t nextInput = 0;
     };
 
     ReachableGraphOrder result;
     result.preorder.reserve(nodes.size());
     result.postorder.reserve(nodes.size());
-    std::unordered_map<int, std::uint8_t> states;
-    states.reserve(nodes.size());
+    std::map<OutputEndpoint, std::uint8_t> states;
     std::vector<Frame> pending;
     pending.reserve(nodes.size());
 
-    if (nodes.find(rootNodeId) == nodes.end()) {
+    if (nodes.find(root.first) == nodes.end()) {
         result.reason = missingNodeReason;
         return result;
     }
-    states.emplace(rootNodeId, 1u);
-    result.preorder.push_back(rootNodeId);
-    pending.push_back({ rootNodeId, 0 });
+    states.emplace(root, 1u);
+    result.preorder.push_back(root);
+    pending.push_back({ root, 0 });
 
     while (!pending.empty()) {
         Frame& frame = pending.back();
-        const auto incoming = incomingLinks.find(frame.nodeId);
+        const auto incoming = incomingLinks.find(frame.output.first);
         const std::vector<const RenderGraphLink*>* inputs =
             incoming == incomingLinks.end() ? nullptr : &incoming->second;
 
         bool descended = false;
         while (inputs && frame.nextInput < inputs->size()) {
             const RenderGraphLink& link = *(*inputs)[frame.nextInput++];
-            if (!includeLink(link)) {
+            if (!includeLink(link) || !Stack::GraphModel::OutputDependsOnInput(
+                    nodes.at(frame.output.first)->outputDependencies, frame.output.second, link.toSocketId)) {
                 continue;
             }
             if (nodes.find(link.fromNodeId) == nodes.end()) {
                 result.reason = missingNodeReason;
                 return result;
             }
-            const auto state = states.find(link.fromNodeId);
+            const OutputEndpoint upstream{link.fromNodeId, link.fromSocketId};
+            const auto state = states.find(upstream);
             if (state != states.end()) {
                 if (state->second == 1u) {
                     result.reason = cycleReason;
@@ -106,9 +110,9 @@ ReachableGraphOrder BuildReachableGraphOrder(
                 }
                 continue;
             }
-            states.emplace(link.fromNodeId, 1u);
-            result.preorder.push_back(link.fromNodeId);
-            pending.push_back({ link.fromNodeId, 0 });
+            states.emplace(upstream, 1u);
+            result.preorder.push_back(upstream);
+            pending.push_back({ upstream, 0 });
             descended = true;
             break;
         }
@@ -116,8 +120,8 @@ ReachableGraphOrder BuildReachableGraphOrder(
             continue;
         }
 
-        states[frame.nodeId] = 2u;
-        result.postorder.push_back(frame.nodeId);
+        states[frame.output] = 2u;
+        result.postorder.push_back(frame.output);
         pending.pop_back();
     }
 
@@ -448,8 +452,8 @@ RenderGraphRegionPlan PlanGraphRegions(
 
     bool extentFailure = false;
     std::string extentFailureReason;
-    std::unordered_map<int, Stack::NodeMath::SpatialDescriptor> spatialMemo;
-    spatialMemo.reserve(nodes.size());
+    std::map<OutputEndpoint, Stack::NodeMath::SpatialDescriptor> spatialMemo;
+    const OutputEndpoint root{graph.outputNodeId, graph.outputSocketId.empty() ? "imageOut" : graph.outputSocketId};
     const auto fallbackSpatial = [&]() {
         Stack::NodeMath::SpatialDescriptor spatial;
         spatial.kind = Stack::NodeMath::SpatialExtentKind::Finite;
@@ -476,7 +480,7 @@ RenderGraphRegionPlan PlanGraphRegions(
             source->second->kind != RenderGraphNodeKind::FieldMean;
     };
     const ReachableGraphOrder spatialOrder = BuildReachableGraphOrder(
-        graph.outputNodeId,
+        root,
         nodes,
         incomingLinks,
         isSpatialDependency,
@@ -487,7 +491,8 @@ RenderGraphRegionPlan PlanGraphRegions(
         extentFailureReason = spatialOrder.reason;
     }
 
-    for (const int nodeId : spatialOrder.postorder) {
+    for (const auto& endpoint : spatialOrder.postorder) {
+        const int nodeId = endpoint.first;
         const RenderGraphNode& node = *nodes.at(nodeId);
         Stack::NodeMath::SpatialDescriptor result;
         if (node.kind == RenderGraphNodeKind::Image &&
@@ -502,10 +507,11 @@ RenderGraphRegionPlan PlanGraphRegions(
             const auto incoming = incomingLinks.find(nodeId);
             if (incoming != incomingLinks.end()) {
                 for (const RenderGraphLink* link : incoming->second) {
-                    if (!link || !isSpatialDependency(*link)) {
+                    if (!link || !isSpatialDependency(*link) ||
+                        !Stack::GraphModel::OutputDependsOnInput(node.outputDependencies, endpoint.second, link->toSocketId)) {
                         continue;
                     }
-                    const auto inputSpatial = spatialMemo.find(link->fromNodeId);
+                    const auto inputSpatial = spatialMemo.find({link->fromNodeId, link->fromSocketId});
                     if (inputSpatial != spatialMemo.end() &&
                         inputSpatial->second.kind ==
                             Stack::NodeMath::SpatialExtentKind::Finite) {
@@ -536,9 +542,9 @@ RenderGraphRegionPlan PlanGraphRegions(
                 }
             }
         }
-        spatialMemo.emplace(nodeId, std::move(result));
+        spatialMemo.emplace(endpoint, std::move(result));
     }
-    const auto outputSpatial = spatialMemo.find(graph.outputNodeId);
+    const auto outputSpatial = spatialMemo.find(root);
     const Stack::NodeMath::SpatialDescriptor resolvedOutputSpatial =
         outputSpatial == spatialMemo.end()
             ? Stack::NodeMath::SpatialDescriptor{}
@@ -548,7 +554,7 @@ RenderGraphRegionPlan PlanGraphRegions(
     bool fullFrameBoundary = false;
     std::string failureReason;
     const ReachableGraphOrder haloOrder = BuildReachableGraphOrder(
-        graph.outputNodeId,
+        root,
         nodes,
         incomingLinks,
         [](const RenderGraphLink&) { return true; },
@@ -562,7 +568,9 @@ RenderGraphRegionPlan PlanGraphRegions(
     std::unordered_map<int, Locality> localities;
     localities.reserve(haloOrder.preorder.size());
     plan.stages.reserve(haloOrder.preorder.size());
-    for (const int nodeId : haloOrder.preorder) {
+    for (const auto& endpoint : haloOrder.preorder) {
+        const int nodeId = endpoint.first;
+        if (localities.count(nodeId)) continue;
         const RenderGraphNode& node = *nodes.at(nodeId);
         Locality locality =
             ClassifyNode(node, renderScale, fullWidth, fullHeight);
@@ -582,7 +590,7 @@ RenderGraphRegionPlan PlanGraphRegions(
         stage.regionRequirement = locality.regionRequirement;
         stage.scalePolicy = locality.scalePolicy;
         stage.cancellation = locality.cancellation;
-        const auto spatial = spatialMemo.find(nodeId);
+        const auto spatial = spatialMemo.find(endpoint);
         if (spatial != spatialMemo.end()) {
             stage.outputSpatial = spatial->second;
         }
@@ -590,12 +598,12 @@ RenderGraphRegionPlan PlanGraphRegions(
         localities.emplace(nodeId, std::move(locality));
     }
 
-    std::unordered_map<int, std::pair<int, int>> haloMemo;
-    haloMemo.reserve(haloOrder.postorder.size());
-    for (const int nodeId : haloOrder.postorder) {
+    std::map<OutputEndpoint, std::pair<int, int>> haloMemo;
+    for (const auto& endpoint : haloOrder.postorder) {
+        const int nodeId = endpoint.first;
         const Locality& locality = localities.at(nodeId);
         if (!locality.recognized) {
-            haloMemo.emplace(nodeId, std::pair<int, int>{ 0, 0 });
+            haloMemo.emplace(endpoint, std::pair<int, int>{ 0, 0 });
             continue;
         }
         int upstreamX = 0;
@@ -603,10 +611,11 @@ RenderGraphRegionPlan PlanGraphRegions(
         const auto incoming = incomingLinks.find(nodeId);
         if (incoming != incomingLinks.end()) {
             for (const RenderGraphLink* link : incoming->second) {
-                if (!link) {
+                if (!link || !Stack::GraphModel::OutputDependsOnInput(
+                        nodes.at(nodeId)->outputDependencies, endpoint.second, link->toSocketId)) {
                     continue;
                 }
-                const auto inputHalo = haloMemo.find(link->fromNodeId);
+                const auto inputHalo = haloMemo.find({link->fromNodeId, link->fromSocketId});
                 if (inputHalo == haloMemo.end()) {
                     structuralFailure = true;
                     if (failureReason.empty()) {
@@ -622,14 +631,14 @@ RenderGraphRegionPlan PlanGraphRegions(
             std::max(locality.support.left, locality.support.right));
         const int localY = static_cast<int>(
             std::max(locality.support.bottom, locality.support.top));
-        haloMemo.emplace(nodeId, std::pair<int, int>{
+        haloMemo.emplace(endpoint, std::pair<int, int>{
             upstreamX > std::numeric_limits<int>::max() - localX
                 ? std::numeric_limits<int>::max() : upstreamX + localX,
             upstreamY > std::numeric_limits<int>::max() - localY
                 ? std::numeric_limits<int>::max() : upstreamY + localY
         });
     }
-    const auto outputHalo = haloMemo.find(graph.outputNodeId);
+    const auto outputHalo = haloMemo.find(root);
     const std::pair<int, int> halo =
         outputHalo == haloMemo.end()
             ? std::pair<int, int>{ 0, 0 }

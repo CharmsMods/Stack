@@ -4,6 +4,7 @@
 #include "Editor/LayerRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraphSelectionExport.h"
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
+#include "Editor/Timeline/TimelinePersistence.h"
 #include "ThirdParty/stb_image.h"
 #include "Utils/PixelBufferUtils.h"
 
@@ -42,6 +43,7 @@ nlohmann::json SerializeMaskSettings(const EditorNodeGraph::MaskGeneratorSetting
         { "centerX", settings.centerX },
         { "centerY", settings.centerY },
         { "radius", settings.radius },
+        { "radiusY", settings.radiusY },
         { "feather", settings.feather },
         { "invert", settings.invert }
     };
@@ -57,6 +59,7 @@ EditorNodeGraph::MaskGeneratorSettings DeserializeMaskSettings(const nlohmann::j
     settings.centerX = value.value("centerX", settings.centerX);
     settings.centerY = value.value("centerY", settings.centerY);
     settings.radius = value.value("radius", settings.radius);
+    settings.radiusY = value.value("radiusY", settings.radius);
     settings.feather = value.value("feather", settings.feather);
     settings.invert = value.value("invert", settings.invert);
     return settings;
@@ -389,6 +392,8 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         return false;
     }
 
+    try {
+    const auto context = editor->GetGraphEditorContext();
     const nlohmann::json serializerPayload = clipboardPayload.value("payload", nlohmann::json::object());
     if (!serializerPayload.is_object() || !serializerPayload.contains("nodeGraph")) {
         if (outSummary) *outSummary = "Graph payload is missing node data.";
@@ -410,12 +415,14 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
     }
 
     const nlohmann::json layerArray = EditorNodeGraph::ExtractLayerArray(serializerPayload);
-    std::vector<std::shared_ptr<LayerBase>> importedLayers;
     std::vector<std::string> warnings;
-    BuildImportedLayers(layerArray, importedLayers, warnings);
+    if (!EditorNodeGraph::IsCurrentGraphPayload(serializerPayload) || !layerArray.is_array()) {
+        if (outSummary) *outSummary = "This graph uses an unsupported document format.";
+        return false;
+    }
 
     EditorNodeGraph::Graph tempGraph;
-    EditorNodeGraph::DeserializeGraphPayload(serializerPayload, tempGraph, static_cast<int>(importedLayers.size()), {}, 0, 0, 0);
+    EditorNodeGraph::DeserializeGraphPayload(serializerPayload, tempGraph, static_cast<int>(layerArray.size()), {}, 0, 0, 0);
 
     std::vector<int> syntheticOutputNodeIds;
     for (const EditorNodeGraph::Node& node : tempGraph.GetNodes()) {
@@ -428,6 +435,15 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         tempGraph.RemoveNode(nodeId);
     }
 
+    if (tempGraph.GetNodes().size() != serializedNodeIds.size() ||
+        tempGraph.GetLinks().size() != graphJson.at("links").size()) {
+        if (outSummary) *outSummary = "The graph cannot be pasted without dropping nodes or connections.";
+        return false;
+    }
+    for (const auto& node : tempGraph.GetNodes()) if (!node.definitionResolved) {
+        if (outSummary) *outSummary = node.definitionResolutionError;
+        return false;
+    }
     if (clipboardPayload.value("layout", std::string("preserved")) == "omitted") {
         tempGraph.AutoLayout();
     }
@@ -438,11 +454,11 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         return false;
     }
 
-    m_ClipboardPasteCount++;
-    const float offsetX = m_ClipboardPasteCount * 40.0f;
-    const float offsetY = m_ClipboardPasteCount * 40.0f;
-    const float cursorOffsetX = std::max(0, m_ClipboardPasteCount - 1) * 40.0f;
-    const float cursorOffsetY = std::max(0, m_ClipboardPasteCount - 1) * 40.0f;
+    const int pasteCount = m_ClipboardPasteCount + 1;
+    const float offsetX = pasteCount * 40.0f;
+    const float offsetY = pasteCount * 40.0f;
+    const float cursorOffsetX = std::max(0, pasteCount - 1) * 40.0f;
+    const float cursorOffsetY = std::max(0, pasteCount - 1) * 40.0f;
 
     const ImVec2 mousePos = ImGui::GetMousePos();
     const bool mouseInsideCanvas =
@@ -464,31 +480,45 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         }
     }
 
-    auto& targetGraph = editor->GetNodeGraph();
-    auto& targetLayers = editor->GetLayers();
-    for (const Stack::NodeMath::CompoundDefinition& definition : tempGraph.GetCompoundDefinitions()) {
-        std::string definitionError;
-        if (!targetGraph.AddCompoundDefinition(definition, &definitionError) && !definitionError.empty()) {
-            warnings.push_back(definitionError);
+    auto targetGraph = *context.graph;
+    auto targetSettings = nlohmann::json::array();
+    for (const auto& layer : editor->GetLayers()) targetSettings.push_back(layer->Serialize());
+    auto animation = *context.animation;
+    for (const auto& definition : tempGraph.GetCompoundDefinitions()) {
+        std::string error;
+        if (!targetGraph.AddCompoundDefinition(definition, &error) && !error.empty()) {
+            if (outSummary) *outSummary = error;
+            return false;
         }
     }
     std::unordered_map<int, int> layerIndexMap;
-    for (int i = 0; i < static_cast<int>(importedLayers.size()); ++i) {
-        if (!importedLayers[i]) {
-            continue;
-        }
-        layerIndexMap[i] = static_cast<int>(targetLayers.size());
-        targetLayers.push_back(importedLayers[i]);
+    for (int i = 0; i < static_cast<int>(layerArray.size()); ++i) {
+        layerIndexMap[i] = static_cast<int>(targetSettings.size());
+        targetSettings.push_back(layerArray[i]);
     }
-
+    const auto sourceGraphId = serializerPayload.value("graphId", std::string("project"));
+    std::unordered_map<std::string, std::string> uuidMap;
     std::unordered_map<int, int> oldNodeIdToNew;
     std::vector<int> pastedNodeIds;
     int importedNodeCount = 0;
     for (const EditorNodeGraph::Node& sourceNode : nodes) {
+        if (sourceNode.role == Stack::GraphModel::NodeRole::OriginalImage || sourceNode.role == Stack::GraphModel::NodeRole::CurrentImage) {
+            const auto found = std::find_if(targetGraph.GetNodes().begin(), targetGraph.GetNodes().end(),
+                [&](const auto& node) { return node.role == sourceNode.role; });
+            if (found == targetGraph.GetNodes().end()) {
+                if (outSummary) *outSummary = "This graph has no matching protected layer source. Paste its creative branches into a RAW layer.";
+                return false;
+            }
+            oldNodeIdToNew[sourceNode.id] = found->id;
+            uuidMap[sourceNode.instanceUuid] = found->instanceUuid;
+            continue;
+        }
         EditorNodeGraph::Node nodeCopy = sourceNode;
+        if (nodeCopy.role == Stack::GraphModel::NodeRole::LayerResult) nodeCopy.role = Stack::GraphModel::NodeRole::Ordinary;
         nodeCopy.id = targetGraph.GetNextNodeId();
         targetGraph.SetNextNodeId(nodeCopy.id + 1);
         nodeCopy.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
+        uuidMap[sourceNode.instanceUuid] = nodeCopy.instanceUuid;
         if (nodeCopy.kind == EditorNodeGraph::NodeKind::Compound) {
             nodeCopy.compound.instance.instanceUuid = nodeCopy.instanceUuid;
         }
@@ -504,8 +534,8 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         if (nodeCopy.kind == EditorNodeGraph::NodeKind::Layer) {
             const auto layerIt = layerIndexMap.find(sourceNode.layerIndex);
             if (layerIt == layerIndexMap.end()) {
-                warnings.push_back("Skipped a layer node because its layer state could not be created.");
-                continue;
+                if (outSummary) *outSummary = "An effect node is missing its saved settings.";
+                return false;
             }
             nodeCopy.layerIndex = layerIt->second;
         }
@@ -519,23 +549,43 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         importedNodeCount++;
     }
 
+    for (int id : pastedNodeIds) {
+        auto* node = targetGraph.FindNode(id);
+        if (node->role == Stack::GraphModel::NodeRole::Reference && node->reference.graphId == sourceGraphId) {
+            const auto mapped = uuidMap.find(node->reference.nodeUuid);
+            if (mapped != uuidMap.end()) {
+                node->reference.graphId = context.graphId; node->reference.nodeUuid = mapped->second;
+            }
+        }
+    }
+    if (serializerPayload.contains("graphAnimation")) {
+        const auto imported = Stack::Timeline::DeserializeTimelineDocument(serializerPayload.at("graphAnimation"));
+        for (auto track : imported.animation.tracks) {
+            const auto mapped = uuidMap.find(track.target.nodeUuid);
+            const auto local = oldNodeIdToNew.find(track.target.nodeId);
+            if (mapped == uuidMap.end() || local == oldNodeIdToNew.end()) {
+                if (outSummary) *outSummary = "An animation target is outside the copied graph.";
+                return false;
+            }
+            track.target.graphId = context.graphId; track.target.nodeUuid = mapped->second; track.target.nodeId = local->second;
+            animation.tracks.push_back(std::move(track));
+        }
+    }
     int importedLinkCount = 0;
     int skippedLinkCount = 0;
     for (const EditorNodeGraph::Link& link : tempGraph.GetLinks()) {
         const auto fromIt = oldNodeIdToNew.find(link.fromNodeId);
         const auto toIt = oldNodeIdToNew.find(link.toNodeId);
         if (fromIt == oldNodeIdToNew.end() || toIt == oldNodeIdToNew.end()) {
-            skippedLinkCount++;
-            continue;
+            if (outSummary) *outSummary = "A copied connection has no producer or destination.";
+            return false;
         }
         std::string errorMessage;
         if (targetGraph.TryConnectSockets(fromIt->second, link.fromSocketId, toIt->second, link.toSocketId, &errorMessage)) {
             importedLinkCount++;
         } else {
-            skippedLinkCount++;
-            if (!errorMessage.empty()) {
-                warnings.push_back(errorMessage);
-            }
+            if (outSummary) *outSummary = errorMessage;
+            return false;
         }
     }
 
@@ -554,12 +604,19 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         }
     }
 
-    editor->RefreshGraphLayerMetadata();
     targetGraph.ClearSelection();
     for (int nodeId : pastedNodeIds) {
         targetGraph.SelectNode(nodeId, true);
     }
-    editor->MarkRenderDirty();
+    auto proposal = Stack::GraphModel::ProposeEdit(*context.graph, context.revision,
+        [&](auto& candidate) { candidate = std::move(targetGraph); });
+    std::string error;
+    if (!context.applyDocumentEdit(std::move(proposal), std::move(targetSettings), std::move(animation), error)) {
+        if (outSummary) *outSummary = error;
+        return false;
+    }
+    m_ClipboardPasteCount = pasteCount;
+    editor->RefreshGraphLayerMetadata();
 
     std::ostringstream summary;
     summary << "Imported " << importedNodeCount << " nodes, " << importedLinkCount << " links, and " << importedGroupCount << " groups";
@@ -573,6 +630,10 @@ bool EditorNodeGraphUI::PasteClipboardPayload(EditorModule* editor, const nlohma
         *outSummary = summary.str();
     }
     return true;
+    } catch (const std::exception& error) {
+        if (outSummary) *outSummary = std::string("Cannot paste graph: ") + error.what();
+        return false;
+    }
 }
 
 bool EditorNodeGraphUI::ApplyPresetPayload(EditorModule* editor, const nlohmann::json& graphPayload, std::string* outSummary) {
@@ -666,7 +727,7 @@ void EditorNodeGraphUI::CopyGraphInfo(
     if (nodeIds.empty()) {
         PostNodeGraphClipboardNotification(
             editor,
-            UiNotificationSeverity::Info,
+            UiNotificationSeverity::Warning,
             wholeGraph ? "Graph is empty." : "Select at least one node to copy graph info.",
             "editor-node-graph-clipboard");
         return;
@@ -703,7 +764,7 @@ void EditorNodeGraphUI::PasteGraphInfo(EditorModule* editor) {
     std::string error;
     const SystemClipboardGraphPayloadState clipboardState = TryReadSystemClipboardGraphPayload(payload, &error);
     if (clipboardState == SystemClipboardGraphPayloadState::Missing) {
-        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Info, "Clipboard is empty.", "editor-node-graph-clipboard");
+        PostNodeGraphClipboardNotification(editor, UiNotificationSeverity::Warning, "Clipboard is empty.", "editor-node-graph-clipboard");
         return;
     }
     if (clipboardState == SystemClipboardGraphPayloadState::Invalid) {

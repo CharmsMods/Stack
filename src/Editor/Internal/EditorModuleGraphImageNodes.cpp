@@ -1,4 +1,5 @@
 #include "Editor/EditorModule.h"
+#include "Editor/Internal/GraphEditorCommands.h"
 
 #include "Async/TaskSystem.h"
 #include "Editor/NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
@@ -194,10 +195,22 @@ void EditorModule::RequestPromptAddImageNodeAt(EditorNodeGraph::Vec2 graphPositi
 }
 
 bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph::Vec2 graphPosition) {
+    if (IsEditingRawLayerMaskGraph()) {
+        if (Raw::RawLoader::IsRawPath(path)) {
+            m_RawLayerStatus = "Use a developed pipeline image or an RGB image as this mask source.";
+            return false;
+        }
+        DecodedImageData decoded;
+        if (!DecodeImageFromFile(path, decoded) || decoded.pixels.empty()) return false;
+        auto payload=BuildImagePayloadFromDecoded(path,std::move(decoded));
+        return Stack::Editor::AddGraphNode(*this,[&](auto& graph) {
+            return graph.AddImageNode(std::move(payload),graphPosition);
+        })>0;
+    }
     if (Raw::RawLoader::IsRawPath(path)) {
         const Raw::LibRawRuntimeStatus& runtimeStatus = Raw::GetLibRawRuntimeStatus();
         if (!runtimeStatus.runtimeAvailable) {
-            QueueUiNotification(UiNotificationSeverity::Error, runtimeStatus.message, "editor-raw-runtime");
+            PostNotification(UiNotificationSeverity::Error, runtimeStatus.message, "editor-raw-runtime");
             return false;
         }
         return AddGraphRawChainFromFile(path, graphPosition);
@@ -213,6 +226,9 @@ bool EditorModule::AddImageNodeFromFile(const std::string& path, EditorNodeGraph
 bool EditorModule::StartAsyncGraphImageNodeImport(
     const std::string& path,
     EditorNodeGraph::Vec2 graphPosition) {
+    // The mask workspace imports into its captured edit draft. The ordinary
+    // asynchronous importer currently owns root-graph node IDs only.
+    if (IsEditingRawLayerMaskGraph()) return AddImageNodeFromFile(path, graphPosition);
     if (path.empty()) {
         return false;
     }
@@ -221,7 +237,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
     }
 
     const std::vector<int> selectionBefore =
-        m_NodeGraph.GetSelectedNodeIds();
+        m_Project->graph.GetSelectedNodeIds();
     const std::uint64_t requestId = m_NextGraphImageImportRequestId++;
     EditorNodeGraph::ImagePayload pendingPayload;
     pendingPayload.label = FileNameFromPath(path);
@@ -232,7 +248,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
     pendingPayload.isLoading = true;
     pendingPayload.importRequestId = requestId;
 
-    EditorNodeGraph::Node* pendingNode = m_NodeGraph.AddImageNode(std::move(pendingPayload), graphPosition);
+    EditorNodeGraph::Node* pendingNode = m_Project->graph.AddImageNode(std::move(pendingPayload), graphPosition);
     if (!pendingNode) {
         return false;
     }
@@ -243,24 +259,24 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
     const auto queuedAt = std::chrono::steady_clock::now();
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().SubmitHighPriority([this, path, nodeId, requestId, queuedAt]() {
+        submitted = ProjectTasks().SubmitHighPriority("Importing image", [this, path, nodeId, requestId, queuedAt]() {
         auto postImportFailure = [this, nodeId, requestId]() {
-            return Async::TaskSystem::Get().PostToMain([this, nodeId, requestId]() {
-                EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+            return ProjectTasks().PostToMain([this, nodeId, requestId]() {
+                EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
                 if (node && node->kind == EditorNodeGraph::NodeKind::Image &&
                     node->image.isLoading && node->image.importRequestId == requestId) {
-                    m_NodeGraph.RemoveNode(nodeId);
+                    m_Project->graph.RemoveNode(nodeId);
                     MarkDirty();
                 }
-                QueueUiNotification(
+                PostNotification(
                     UiNotificationSeverity::Error,
                     "Failed to load the selected slice.",
                     "editor-graph-image-import");
             });
         };
         auto postEmbeddingFailure = [this, nodeId, requestId]() {
-            return Async::TaskSystem::Get().PostToMain([this, nodeId, requestId]() {
-                EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+            return ProjectTasks().PostToMain([this, nodeId, requestId]() {
+                EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
                 if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
                     !node->image.isEmbedding ||
                     node->image.embeddingRequestId != requestId) {
@@ -268,7 +284,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
                 }
                 node->image.isEmbedding = false;
                 node->image.embeddingRequestId = 0;
-                QueueUiNotification(
+                PostNotification(
                     UiNotificationSeverity::Error,
                     "The slice loaded, but Stack could not embed it for project storage.",
                     "editor-graph-image-embed");
@@ -305,7 +321,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         const int channels = payload.channels;
         const std::size_t pixelBytes = storagePixels.size();
 
-        payloadQueued = Async::TaskSystem::Get().PostToMain([
+        payloadQueued = ProjectTasks().PostToMain([
             this,
             nodeId,
             requestId,
@@ -316,7 +332,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
             pixelBytes,
             payload = std::move(payload)
         ]() mutable {
-            EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+            EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
             if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
                 !node->image.isLoading || node->image.importRequestId != requestId) {
                 return;
@@ -341,7 +357,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         std::vector<unsigned char> pngBytes =
             EncodePngBytesForImageStorageOwned(std::move(storagePixels), width, height, channels);
         const double embedMs = MillisecondsSince(embedBegin);
-        Async::TaskSystem::Get().PostToMain([
+        ProjectTasks().PostToMain([
             this,
             nodeId,
             requestId,
@@ -350,7 +366,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         ]() mutable {
             m_GraphPerformanceStats.lastSliceImportEmbedMs = embedMs;
             m_GraphPerformanceStats.lastSliceImportEmbeddedBytes = pngBytes.size();
-            EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+            EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
             if (!node || node->kind != EditorNodeGraph::NodeKind::Image ||
                 !node->image.isEmbedding || node->image.embeddingRequestId != requestId) {
                 return;
@@ -359,7 +375,7 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
             if (pngBytes.empty()) {
                 node->image.isEmbedding = false;
                 node->image.embeddingRequestId = 0;
-                QueueUiNotification(
+                PostNotification(
                     UiNotificationSeverity::Error,
                     "The slice loaded, but Stack could not embed it for project storage.",
                     "editor-graph-image-embed");
@@ -371,6 +387,8 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
             node->image.isEmbedding = false;
             node->image.embeddingRequestId = 0;
             MarkDirty();
+            PostNotification(UiNotificationSeverity::Success,
+                "Imported " + node->title + ".", "editor-graph-image-import");
         });
         } catch (...) {
             if (payloadQueued) {
@@ -388,13 +406,13 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
         submitted = false;
     }
     if (!submitted) {
-        m_NodeGraph.RemoveNode(nodeId);
-        m_NodeGraph.ClearSelection();
+        m_Project->graph.RemoveNode(nodeId);
+        m_Project->graph.ClearSelection();
         for (const int selectedNodeId : selectionBefore) {
-            m_NodeGraph.SelectNode(selectedNodeId, true);
+            m_Project->graph.SelectNode(selectedNodeId, true);
         }
         MarkDirty();
-        QueueUiNotification(
+        PostNotification(
             UiNotificationSeverity::Error,
             "The image import could not be queued.",
             "editor-graph-image-import");
@@ -406,8 +424,8 @@ bool EditorModule::StartAsyncGraphImageNodeImport(
 
 bool EditorModule::HasPendingGraphImageImports() const {
     return std::any_of(
-        m_NodeGraph.GetNodes().begin(),
-        m_NodeGraph.GetNodes().end(),
+        m_Project->graph.GetNodes().begin(),
+        m_Project->graph.GetNodes().end(),
         [](const EditorNodeGraph::Node& node) {
             return node.kind == EditorNodeGraph::NodeKind::Image &&
                 (node.image.isLoading || node.image.isEmbedding);
@@ -433,7 +451,7 @@ bool EditorModule::AddRawSourceNodeFromFile(const std::string& path, EditorNodeG
 }
 
 bool EditorModule::AddImageNodeFromPayload(EditorNodeGraph::ImagePayload payload, EditorNodeGraph::Vec2 graphPosition) {
-    EditorNodeGraph::Node* node = m_NodeGraph.AddImageNode(std::move(payload), graphPosition);
+    EditorNodeGraph::Node* node = m_Project->graph.AddImageNode(std::move(payload), graphPosition);
     if (node) {
         SelectGraphNode(node->id);
     }
@@ -450,7 +468,7 @@ bool EditorModule::AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload
         payload.metadata.error = Raw::GetLibRawRuntimeStatus().message;
     }
 
-    EditorNodeGraph::Node* node = m_NodeGraph.AddRawSourceNode(std::move(payload), graphPosition);
+    EditorNodeGraph::Node* node = m_Project->graph.AddRawSourceNode(std::move(payload), graphPosition);
     if (node) {
         SelectGraphNode(node->id);
         MarkRenderDirty(node->id);
@@ -461,6 +479,14 @@ bool EditorModule::AddRawSourceNodeFromPayload(EditorNodeGraph::RawSourcePayload
 bool EditorModule::RequestGraphImageChainImports(
     const std::vector<std::string>& paths,
     EditorNodeGraph::Vec2 sourcePosition) {
+    if (IsEditingRawLayerMaskGraph()) {
+        bool imported = false;
+        for (const auto& path : paths) {
+            imported = AddImageNodeFromFile(path, sourcePosition) || imported;
+            sourcePosition.y += 220.0f;
+        }
+        return imported;
+    }
     std::vector<std::string> validPaths;
     validPaths.reserve(paths.size());
     for (const std::string& path : paths) {
@@ -495,7 +521,7 @@ bool EditorModule::StartGraphImageChainImport(
 
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().SubmitHighPriority([this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
+        submitted = ProjectTasks().SubmitHighPriority("Importing images", [this, generation, validPaths = std::move(validPaths), sourcePosition]() mutable {
         try {
         std::vector<EditorNodeGraph::ImagePayload> importedImages;
         importedImages.reserve(validPaths.size());
@@ -514,7 +540,7 @@ bool EditorModule::StartGraphImageChainImport(
             importedImages.push_back(BuildImagePayloadFromDecoded(path, std::move(decoded)));
         }
 
-        Async::TaskSystem::Get().PostToMain([
+        ProjectTasks().PostToMain([
             this,
             generation,
             sourcePosition,
@@ -532,7 +558,7 @@ bool EditorModule::StartGraphImageChainImport(
             if (importedImages.empty() && rawPaths.empty()) {
                 m_GraphDropImportTaskState = Async::TaskState::Failed;
                 m_GraphDropImportStatusText = "Failed to import the dropped slices.";
-                QueueUiNotification(UiNotificationSeverity::Error, "Failed to import the dropped slices.", "editor-graph-drop-import");
+                PostNotification(UiNotificationSeverity::Error, "Failed to import the dropped slices.", "editor-graph-drop-import");
                 if (!m_PendingGraphDropImports.empty()) {
                     PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
                     m_PendingGraphDropImports.erase(m_PendingGraphDropImports.begin());
@@ -559,7 +585,7 @@ bool EditorModule::StartGraphImageChainImport(
                 }
             }
             if (rawRuntimeUnavailable) {
-                QueueUiNotification(UiNotificationSeverity::Error, rawRuntimeStatus.message, "editor-raw-runtime");
+                PostNotification(UiNotificationSeverity::Error, rawRuntimeStatus.message, "editor-raw-runtime");
                 outputIndex += rawPaths.size();
             } else {
                 for (const std::string& path : rawPaths) {
@@ -577,7 +603,7 @@ bool EditorModule::StartGraphImageChainImport(
                     m_GraphDropImportStatusText = rawRuntimeStatus.message;
                 } else {
                     m_GraphDropImportStatusText = "Failed to create graph nodes for the dropped slices.";
-                    QueueUiNotification(UiNotificationSeverity::Error, "Failed to create graph nodes for the dropped slices.", "editor-graph-drop-import");
+                    PostNotification(UiNotificationSeverity::Error, "Failed to create graph nodes for the dropped slices.", "editor-graph-drop-import");
                 }
                 if (!m_PendingGraphDropImports.empty()) {
                     PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
@@ -596,7 +622,18 @@ bool EditorModule::StartGraphImageChainImport(
                 m_GraphDropImportStatusText =
                     "Imported " + std::to_string(importedCount) + " of " + std::to_string(requestedCount) + " dropped slices.";
             }
-            QueueUiNotification(UiNotificationSeverity::Success, m_GraphDropImportStatusText, "editor-graph-drop-import");
+            Stack::Notifications::NoticeSpec outcome;
+            const bool complete = importedCount == static_cast<int>(requestedCount);
+            outcome.title = "Image import";
+            outcome.severity = complete ? UiNotificationSeverity::Success : UiNotificationSeverity::Warning;
+            outcome.outcome = complete ? Stack::Notifications::Outcome::Success : Stack::Notifications::Outcome::Partial;
+            outcome.message = m_GraphDropImportStatusText;
+            outcome.dedupeKey = "editor-graph-drop-import";
+            const auto execution = Async::TaskSystem::CurrentActivity();
+            if (execution.ownerId == GetNotifier().GetOwner().id &&
+                execution.ownerGeneration == GetNotifier().GetOwner().generation)
+                outcome.operationId = execution.operationId;
+            GetNotifier().Post(std::move(outcome));
 
             if (!m_PendingGraphDropImports.empty()) {
                 PendingGraphDropImportRequest nextRequest = std::move(m_PendingGraphDropImports.front());
@@ -605,7 +642,7 @@ bool EditorModule::StartGraphImageChainImport(
             }
         });
         } catch (...) {
-            Async::TaskSystem::Get().PostToMain([this, generation]() {
+            ProjectTasks().PostToMain([this, generation]() {
                 if (generation != m_GraphDropImportGeneration) {
                     return;
                 }
@@ -613,7 +650,7 @@ bool EditorModule::StartGraphImageChainImport(
                 SetImportStatusNoThrow(
                     m_GraphDropImportStatusText,
                     "The dropped slices could not be decoded.");
-                QueueUiNotification(
+                PostNotification(
                     UiNotificationSeverity::Error,
                     "The dropped slices could not be decoded.",
                     "editor-graph-drop-import");
@@ -640,6 +677,8 @@ bool EditorModule::StartGraphImageChainImport(
         SetImportStatusNoThrow(
             m_GraphDropImportStatusText,
             "The dropped slices could not be queued for import.");
+        PostNotification(UiNotificationSeverity::Error,
+            "The dropped slices could not be queued for import.", "editor-graph-drop-import");
         return false;
     }
 
@@ -647,13 +686,14 @@ bool EditorModule::StartGraphImageChainImport(
 }
 
 bool EditorModule::UseGraphImageNodeAsActiveSource(int nodeId) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    if (IsEditingRawLayerMaskGraph()) { SelectGraphNode(nodeId); return true; }
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Image || node->image.pixels.empty()) {
         return false;
     }
 
     LoadSourceFromImagePayload(node->image, true, false);
-    m_NodeGraph.SetActiveImageNodeId(nodeId);
+    m_Project->graph.SetActiveImageNodeId(nodeId);
     MarkNodeBrowserThumbnailSourceChanged();
     SelectGraphNode(nodeId);
     MarkRenderDirty(nodeId);
@@ -661,7 +701,11 @@ bool EditorModule::UseGraphImageNodeAsActiveSource(int nodeId) {
 }
 
 bool EditorModule::ConnectGraphImageNode(int nodeId) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    if (IsEditingRawLayerMaskGraph()) {
+        m_RawLayerStatus = "Connect an image through channel selection or image-to-mask conversion to Mask Output.";
+        return false;
+    }
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node) {
         return false;
     }
@@ -671,13 +715,13 @@ bool EditorModule::ConnectGraphImageNode(int nodeId) {
             return false;
         }
         LoadSourceFromImagePayload(node->image, true, false);
-        m_NodeGraph.SetActiveImageNodeId(nodeId);
+        m_Project->graph.SetActiveImageNodeId(nodeId);
         sourceChanged = true;
     } else if (node->kind != EditorNodeGraph::NodeKind::RawDevelop) {
         return false;
     }
 
-    m_NodeGraph.ConnectImageToOutput(nodeId);
+    m_Project->graph.ConnectImageToOutput(nodeId);
     if (sourceChanged) {
         MarkNodeBrowserThumbnailSourceChanged();
     }
@@ -687,7 +731,7 @@ bool EditorModule::ConnectGraphImageNode(int nodeId) {
 }
 
 bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = GetNodeGraph().FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::Image) {
         return false;
     }
@@ -716,6 +760,8 @@ bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
     node->image.pixels = std::move(rotatedPixels);
     // PNG compression can be expensive for large slices; rebuild storage bytes lazily on save/export.
     node->image.pngBytes.clear();
+    node->image.managedAssetId.clear();
+    node->image.projectAssetPath.clear();
     node->image.isEmbedding = false;
     node->image.embeddingRequestId = 0;
     EditorNodeGraph::InvalidateImagePayloadRuntime(node->image);
@@ -729,11 +775,11 @@ bool EditorModule::RotateImageNode(int nodeId, int quarterTurnsClockwise) {
         node->image.previewHeight,
         node->image.previewChannels);
 
-    if (m_NodeGraph.GetActiveImageNodeId() == nodeId) {
+    if (!IsEditingRawLayerMaskGraph() && m_Project->graph.GetActiveImageNodeId() == nodeId) {
         LoadSourceFromImagePayload(node->image, true, false);
         MarkNodeBrowserThumbnailSourceChanged();
     }
 
-    MarkRenderDirty(nodeId);
+    MarkGraphEdited(nodeId);
     return true;
 }

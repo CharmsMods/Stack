@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -587,6 +588,7 @@ std::vector<StackBinaryFormat::NodeBrowserThumbnailEntry> EditorModule::GetPersi
 
 void EditorModule::ResetNodeBrowserThumbnailState() {
     ++m_NodeBrowserThumbnailGeneration;
+    ++m_NodeBrowserThumbnailWarmGeneration;
     m_NodeBrowserThumbnailEntries.clear();
     m_NodeBrowserPreviewRequestMeta.clear();
     m_NodeBrowserThumbnailWarmPendingEntries = 0;
@@ -620,11 +622,11 @@ void EditorModule::WarmNodeBrowserThumbnailPixelsAsync() {
         return;
     }
 
-    const std::uint64_t generation = m_NodeBrowserThumbnailGeneration;
+    const std::uint64_t generation = ++m_NodeBrowserThumbnailWarmGeneration;
     m_NodeBrowserThumbnailWarmPendingEntries = pending.size();
     bool submitted = false;
     try {
-        submitted = Async::TaskSystem::Get().Submit(
+        submitted = ProjectTasks().Submit("Preparing Graph previews",
             [this, generation, pending = std::move(pending)]() mutable {
                 try {
                     struct DecodedThumbnail {
@@ -656,9 +658,9 @@ void EditorModule::WarmNodeBrowserThumbnailPixelsAsync() {
                         decoded.push_back(std::move(thumb));
                     }
 
-                    Async::TaskSystem::Get().PostToMain(
+                    ProjectTasks().PostToMain(
                         [this, generation, decoded = std::move(decoded)]() mutable {
-                            if (generation != m_NodeBrowserThumbnailGeneration) {
+                            if (generation != m_NodeBrowserThumbnailWarmGeneration) {
                                 return;
                             }
                             std::size_t processedCount = 0;
@@ -682,8 +684,8 @@ void EditorModule::WarmNodeBrowserThumbnailPixelsAsync() {
                             }
                         });
                 } catch (...) {
-                    Async::TaskSystem::Get().PostToMain([this, generation]() {
-                        if (generation == m_NodeBrowserThumbnailGeneration) {
+                    ProjectTasks().PostToMain([this, generation]() {
+                        if (generation == m_NodeBrowserThumbnailWarmGeneration) {
                             m_NodeBrowserThumbnailWarmPendingEntries = 0;
                         }
                     });
@@ -692,7 +694,7 @@ void EditorModule::WarmNodeBrowserThumbnailPixelsAsync() {
     } catch (...) {
         submitted = false;
     }
-    if (!submitted && generation == m_NodeBrowserThumbnailGeneration) {
+    if (!submitted && generation == m_NodeBrowserThumbnailWarmGeneration) {
         m_NodeBrowserThumbnailWarmPendingEntries = 0;
     }
 }
@@ -710,7 +712,7 @@ EditorModule::NodeBrowserPreviewSeed EditorModule::ResolveNodeBrowserPreviewSeed
     };
 
     NodeBrowserPreviewSeed seed;
-    const EditorNodeGraph::Node* activeNode = m_NodeGraph.FindNode(m_NodeGraph.GetActiveImageNodeId());
+    const EditorNodeGraph::Node* activeNode = m_Project->graph.FindNode(m_Project->graph.GetActiveImageNodeId());
 
     if (activeNode && activeNode->kind == EditorNodeGraph::NodeKind::Image) {
         std::vector<unsigned char> pixels = activeNode->image.pixels;
@@ -815,6 +817,13 @@ void EditorModule::EnsureNodeBrowserThumbnailCatalog() {
 }
 
 void EditorModule::MarkNodeBrowserThumbnailSourceChanged() {
+    if(IsRawWorkspaceProjectActive()&&m_RawWorkspaceRootTabActive) {
+        ++m_NodeBrowserThumbnailGeneration;++m_NodeBrowserThumbnailWarmGeneration;
+        for(auto& [key,entry]:m_NodeBrowserThumbnailEntries) {(void)key;entry.pending=false;}
+        m_NodeBrowserThumbnailPendingEntries=0;m_NodeBrowserThumbnailWarmPendingEntries=0;
+        m_NodeBrowserThumbnailGenerationQueued=false;m_NodeBrowserThumbnailSeedHash.clear();
+        m_NodeBrowserPreviewRequestMeta.clear();return;
+    }
     StartNodeBrowserThumbnailGeneration(true);
 }
 
@@ -823,9 +832,10 @@ void EditorModule::FinalizeNodeBrowserThumbnailBatch(std::uint64_t generation) {
         return;
     }
     m_NodeBrowserThumbnailGenerationQueued = false;
-    if (m_NodeBrowserThumbnailBatchHasChanges && !m_CurrentProjectFileName.empty()) {
+    if (m_NodeBrowserThumbnailBatchHasChanges && !m_Project->fileName.empty() &&
+        !IsUnifiedProjectStoreActive()) {
         LibraryManager::Get().RequestPersistNodeBrowserThumbnails(
-            m_CurrentProjectFileName,
+            m_Project->fileName,
             GetPersistedNodeBrowserThumbnails());
     }
 }
@@ -835,11 +845,13 @@ void EditorModule::StartNodeBrowserThumbnailGeneration(bool forceRefresh) {
         StartNodeBrowserThumbnailGenerationImpl(forceRefresh);
     } catch (...) {
         ++m_NodeBrowserThumbnailGeneration;
+        ++m_NodeBrowserThumbnailWarmGeneration;
         for (auto& [previewKey, entry] : m_NodeBrowserThumbnailEntries) {
             (void)previewKey;
             entry.pending = false;
         }
         m_NodeBrowserThumbnailPendingEntries = 0;
+        m_NodeBrowserThumbnailWarmPendingEntries = 0;
         m_NodeBrowserThumbnailGenerationQueued = false;
         m_NodeBrowserThumbnailBatchHasChanges = false;
         m_NodeBrowserThumbnailSeedHash.clear();
@@ -913,15 +925,18 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
     if (pendingEntries.empty()) {
         m_NodeBrowserThumbnailGenerationQueued = false;
         m_NodeBrowserThumbnailPendingEntries = 0;
-        if (clearedSuppressedEntries && !m_CurrentProjectFileName.empty()) {
+        if (clearedSuppressedEntries && !m_Project->fileName.empty() &&
+            !IsUnifiedProjectStoreActive()) {
             LibraryManager::Get().RequestPersistNodeBrowserThumbnails(
-                m_CurrentProjectFileName,
+                m_Project->fileName,
                 GetPersistedNodeBrowserThumbnails());
         }
         return;
     }
 
     ++m_NodeBrowserThumbnailGeneration;
+    ++m_NodeBrowserThumbnailWarmGeneration;
+    m_NodeBrowserThumbnailWarmPendingEntries = 0;
     const std::uint64_t generation = m_NodeBrowserThumbnailGeneration;
     m_NodeBrowserThumbnailGenerationQueued = true;
     m_NodeBrowserThumbnailPendingEntries = pendingEntries.size();
@@ -1473,7 +1488,7 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
 
         bool submitted = false;
         try {
-            submitted = Async::TaskSystem::Get().Submit([
+            submitted = ProjectTasks().Submit("Preparing Graph previews", [
                 this,
                 generation,
                 seedHash,
@@ -1483,7 +1498,7 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
                 try {
                     std::vector<EncodedNodeBrowserFallback> encoded =
                         EncodeNodeBrowserFallbacks(batch, seedHash);
-                    Async::TaskSystem::Get().PostToMain([
+                    ProjectTasks().PostToMain([
                         this,
                         generation,
                         encoded = std::move(encoded)
@@ -1519,7 +1534,7 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
                         FinalizeNodeBrowserThumbnailBatch(generation);
                     });
                 } catch (...) {
-                    Async::TaskSystem::Get().PostToMain([
+                    ProjectTasks().PostToMain([
                         this,
                         generation,
                         previewKeys = std::move(previewKeys)
@@ -1552,7 +1567,7 @@ void EditorModule::StartNodeBrowserThumbnailGenerationImpl(bool forceRefresh) {
 void EditorModule::ConsumeNodeBrowserThumbnailWorkerResults() {
     EditorRenderWorker::Result result;
     while (m_NodeBrowserRenderWorker.TryConsumeCompleted(result)) {
-        if (result.generation < m_NodeBrowserThumbnailGeneration) {
+        if (result.generation != m_NodeBrowserThumbnailGeneration) {
             continue;
         }
 
@@ -1611,11 +1626,21 @@ void EditorModule::ConsumeNodeBrowserThumbnailWorkerResults() {
             jobs.push_back(std::move(job));
         }
 
-        if (jobs.empty()) {
-            continue;
+        std::unordered_set<std::string> completedKeys;
+        for(const auto& job:jobs) completedKeys.insert(job.previewKey);
+        for(const auto& [previewNodeId,meta]:m_NodeBrowserPreviewRequestMeta) {
+            (void)previewNodeId;
+            if(completedKeys.find(meta.previewKey)!=completedKeys.end()) continue;
+            EncodedPreview job;job.previewKey=meta.previewKey;
+            job.previewSeedHash=m_NodeBrowserThumbnailSeedHash;
+            job.previewRecipeVersion=meta.previewRecipeVersion;job.fallback=true;
+            job.decodedPixels=BuildFallbackCardPixels(job.previewKey);
+            job.width=kFallbackCardWidth;job.height=kFallbackCardHeight;job.channels=4;
+            job.pngBytes=EncodePngBytesTopLeft(job.decodedPixels,job.width,job.height,4);
+            jobs.push_back(std::move(job));
         }
 
-        Async::TaskSystem::Get().PostToMain([this, generation = result.generation, jobs = std::move(jobs)]() mutable {
+        ProjectTasks().PostToMain([this, generation = result.generation, jobs = std::move(jobs)]() mutable {
             if (generation != m_NodeBrowserThumbnailGeneration) {
                 return;
             }

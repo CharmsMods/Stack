@@ -6,6 +6,8 @@
 #include "Editor/NodeGraph/EditorNodeGraphSerializer.h"
 #include "Raw/RawLoader.h"
 #include "Raw/RawGpuPipeline.h"
+#include "Raw/RawGpuPreprocessor.h"
+#include "Raw/RawProcessingMath.h"
 #include "Renderer/GLLoader.h"
 #include "Renderer/MaskRenderTypes.h"
 #include "Renderer/RenderPipeline.h"
@@ -19,6 +21,8 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -234,6 +238,213 @@ Raw::RawImageData BuildSyntheticRawScene(SyntheticRawScene scene, int width, int
 
     raw.metadata.rawMaximum = observedMax;
     return raw;
+}
+
+bool ValidateRawGpuPreprocessParity(
+    float& outNormalizedMaxError,
+    float& outVarianceMaxError) {
+    constexpr int width = 10;
+    constexpr int height = 8;
+    Raw::RawImageData raw;
+    raw.metadata.rawWidth = width;
+    raw.metadata.rawHeight = height;
+    raw.metadata.visibleWidth = 7;
+    raw.metadata.visibleHeight = 6;
+    raw.metadata.leftMargin = 2;
+    raw.metadata.topMargin = 1;
+    raw.metadata.pixelLayout = Raw::RawPixelLayout::MosaicBayer;
+    raw.metadata.cfaPattern = Raw::CfaPattern::RGGB;
+    raw.metadata.hasDngActiveArea = true;
+    raw.metadata.dngActiveArea = { 1, 2, 7, 9 };
+    raw.metadata.dngCfaRepeatPatternDim = { 2, 2 };
+    raw.metadata.dngCfaPattern = { 0, 1, 1, 2 };
+    raw.metadata.dngCfaPlaneColor = { 0, 1, 2 };
+    raw.metadata.blackLevel = 64.0f;
+    raw.metadata.perChannelBlack = { 72.0f, 68.0f, 80.0f, 0.0f };
+    raw.metadata.whiteLevel = 3800.0f;
+    raw.metadata.dngBlackLevelRepeatDim = { 2, 2 };
+    raw.metadata.dngBlackLevelValues = { 64.0f, 67.0f, 70.0f, 73.0f };
+    raw.metadata.dngBlackLevelDeltaH = {
+        0.0f, 0.5f, -0.25f, 0.75f, -0.5f, 0.25f, 0.0f
+    };
+    raw.metadata.dngBlackLevelDeltaV = {
+        0.0f, -0.4f, 0.2f, 0.6f, -0.3f, 0.1f
+    };
+    raw.metadata.dngWhiteLevelValues = { 3500.0f, 3600.0f, 3700.0f };
+    raw.metadata.dngLinearizationTable.resize(4096);
+    for (std::size_t index = 0;
+         index < raw.metadata.dngLinearizationTable.size();
+         ++index) {
+        raw.metadata.dngLinearizationTable[index] =
+            static_cast<std::uint16_t>(std::min<std::size_t>(
+                4095u,
+                index + index / 257u));
+    }
+
+    Raw::DngGainMapOpcode fullMap;
+    fullMap.top = 0;
+    fullMap.left = 0;
+    fullMap.bottom = 6;
+    fullMap.right = 7;
+    fullMap.plane = 0;
+    fullMap.planes = 1;
+    fullMap.rowPitch = 1;
+    fullMap.colPitch = 1;
+    fullMap.mapPointsV = 3;
+    fullMap.mapPointsH = 4;
+    fullMap.mapPlanes = 2;
+    fullMap.mapSpacingV = 0.42;
+    fullMap.mapSpacingH = 0.31;
+    fullMap.mapOriginV = 0.02;
+    fullMap.mapOriginH = -0.03;
+    fullMap.gains = {
+        0.82f, 1.60f, 0.91f, 1.55f, 1.04f, 1.50f, 1.12f, 1.45f,
+        0.88f, 1.40f, 0.97f, 1.35f, 1.09f, 1.30f, 1.18f, 1.25f,
+        0.94f, 1.20f, 1.03f, 1.15f, 1.15f, 1.10f, 1.24f, 1.05f
+    };
+    Raw::DngGainMapOpcode pitchedMap;
+    pitchedMap.top = 1;
+    pitchedMap.left = 1;
+    pitchedMap.bottom = 6;
+    pitchedMap.right = 7;
+    pitchedMap.plane = 0;
+    pitchedMap.planes = 1;
+    pitchedMap.rowPitch = 2;
+    pitchedMap.colPitch = 2;
+    pitchedMap.mapPointsV = 2;
+    pitchedMap.mapPointsH = 2;
+    pitchedMap.mapPlanes = 1;
+    pitchedMap.mapSpacingV = 0.72;
+    pitchedMap.mapSpacingH = 0.68;
+    pitchedMap.mapOriginV = 0.08;
+    pitchedMap.mapOriginH = 0.05;
+    pitchedMap.gains = { 1.24f, 0.76f, 1.10f, 0.92f };
+    raw.metadata.dngGainMaps = { fullMap, pitchedMap };
+    raw.metadata.hasDngNoiseProfile = true;
+    raw.metadata.dngNoiseProfile = {
+        Raw::DngNoiseProfilePlane { 0.0045, 0.000035 }
+    };
+
+    raw.rawBuffer.resize(static_cast<std::size_t>(width) * height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            raw.rawBuffer[static_cast<std::size_t>(y) * width + x] =
+                static_cast<std::uint16_t>(
+                    180 + x * 271 + y * 193 + ((x + y) % 3) * 47);
+        }
+    }
+
+    Raw::RawDevelopSettings settings;
+    settings.mosaicDenoise.enabled = true;
+    settings.mosaicDenoise.mode =
+        Raw::RawMosaicDenoiseMode::DngNoiseProfile;
+    std::vector<float> expectedNormalized;
+    std::vector<float> expectedVariance;
+    std::string cpuError;
+    if (!Raw::Processing::BuildTruthfulNormalizedMosaic(
+            raw, settings, expectedNormalized, &cpuError) ||
+        !Raw::Processing::BuildTruthfulNoiseVarianceMosaic(
+            raw, settings, expectedVariance, &cpuError)) {
+        std::cerr << "RAW GPU preprocess fixture setup failed: "
+                  << cpuError << "\n";
+        return false;
+    }
+
+    std::array<Raw::DngNoiseProfilePlane, 3> profiles {};
+    if (!Raw::Processing::ResolveDngNoiseProfile(raw.metadata, profiles)) {
+        return false;
+    }
+
+    unsigned int rawTexture = 0;
+    unsigned int correctedTexture = 0;
+    unsigned int varianceTexture = 0;
+    glGenTextures(1, &rawTexture);
+    glBindTexture(GL_TEXTURE_2D, rawTexture);
+    glTexImage2D(
+        GL_TEXTURE_2D, 0, GL_R16UI, width, height, 0,
+        GL_RED_INTEGER, GL_UNSIGNED_SHORT, raw.rawBuffer.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    Raw::RawGpuPreprocessor preprocessor;
+    Raw::RawGpuPreprocessTelemetry telemetry;
+    std::string gpuError;
+    const bool dispatched = preprocessor.Process(
+        raw,
+        settings,
+        rawTexture,
+        0x12345678u,
+        0x87654321u,
+        true,
+        profiles,
+        correctedTexture,
+        varianceTexture,
+        telemetry,
+        gpuError);
+    glFinish();
+
+    std::vector<float> gpuNormalized(expectedNormalized.size(), 0.0f);
+    std::vector<float> gpuVariance(expectedVariance.size(), 0.0f);
+    if (dispatched && correctedTexture != 0 && varianceTexture != 0) {
+        glBindTexture(GL_TEXTURE_2D, correctedTexture);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_FLOAT,
+            gpuNormalized.data());
+        glBindTexture(GL_TEXTURE_2D, varianceTexture);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_FLOAT,
+            gpuVariance.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    outNormalizedMaxError = 0.0f;
+    outVarianceMaxError = 0.0f;
+    for (std::size_t index = 0; index < expectedNormalized.size(); ++index) {
+        outNormalizedMaxError = std::max(
+            outNormalizedMaxError,
+            std::abs(expectedNormalized[index] - gpuNormalized[index]));
+        outVarianceMaxError = std::max(
+            outVarianceMaxError,
+            std::abs(expectedVariance[index] - gpuVariance[index]));
+    }
+
+    Raw::RawGpuPreprocessTelemetry cacheTelemetry;
+    std::string cacheError;
+    const bool cacheReuse = preprocessor.Process(
+        raw,
+        settings,
+        rawTexture,
+        0x12345678u,
+        0x87654321u,
+        true,
+        profiles,
+        correctedTexture,
+        varianceTexture,
+        cacheTelemetry,
+        cacheError);
+    const bool parity =
+        dispatched &&
+        telemetry.gpuDispatched &&
+        !telemetry.cpuFallback &&
+        telemetry.metadataUploadBytes > 0u &&
+        outNormalizedMaxError <= 0.00002f &&
+        outVarianceMaxError <= 0.000002f &&
+        cacheReuse &&
+        cacheTelemetry.correctedCacheHit &&
+        !cacheTelemetry.gpuDispatched;
+    if (!parity) {
+        std::cerr
+            << "RAW GPU preprocess parity failed: error=" << gpuError
+            << " normalizedMaxError=" << outNormalizedMaxError
+            << " varianceMaxError=" << outVarianceMaxError
+            << " cacheError=" << cacheError
+            << "\n";
+    }
+
+    preprocessor.Clear();
+    if (varianceTexture != 0) glDeleteTextures(1, &varianceTexture);
+    if (correctedTexture != 0) glDeleteTextures(1, &correctedTexture);
+    if (rawTexture != 0) glDeleteTextures(1, &rawTexture);
+    return parity;
 }
 
 Raw::RawImageData BuildSyntheticWhiteBalanceFlat(int width, int height) {
@@ -563,21 +774,8 @@ bool ValidateDevelopAutoIntentSerialization() {
             break;
         }
     }
-    EditorNodeGraph::Graph legacyGraph;
-    EditorNodeGraph::DeserializeGraphPayload(legacySerialized, legacyGraph, 0, {}, 0, 0, 0);
-    const EditorNodeGraph::Node* legacyNode = legacyGraph.FindNode(developNodeId);
-    const bool legacyDefaultsToNatural =
-        legacyNode &&
-        legacyNode->rawDevelop.autoGuidance.intent == EditorNodeGraph::DevelopAutoIntent::NaturalFinished &&
-        std::abs(legacyNode->rawDevelop.autoGuidance.subjectSceneBias) < 0.0001f &&
-        std::abs(legacyNode->rawDevelop.autoGuidance.moodReadabilityBias) < 0.0001f &&
-        !legacyNode->rawDevelop.subjectImportance.enabled &&
-        !legacyNode->rawDevelop.subjectImportance.showInterpretedMapOverlay &&
-        !legacyNode->rawDevelop.subjectImportance.showRefinedMapOverlay &&
-        legacyNode->rawDevelop.subjectImportance.activeRegionId == 0 &&
-        legacyNode->rawDevelop.subjectImportance.activeStrokeId == 0 &&
-        legacyNode->rawDevelop.subjectImportance.regions.empty() &&
-        legacyNode->rawDevelop.subjectImportance.strokes.empty();
+    const bool legacyRejected =
+        !EditorNodeGraph::IsCurrentGraphPayload(legacySerialized);
 
     nlohmann::json unknownSerialized = serialized;
     for (nlohmann::json& item : unknownSerialized["nodeGraph"]["nodes"]) {
@@ -589,21 +787,8 @@ bool ValidateDevelopAutoIntentSerialization() {
             break;
         }
     }
-    EditorNodeGraph::Graph unknownGraph;
-    EditorNodeGraph::DeserializeGraphPayload(unknownSerialized, unknownGraph, 0, {}, 0, 0, 0);
-    const EditorNodeGraph::Node* unknownNode = unknownGraph.FindNode(developNodeId);
-    const bool unknownDefaultsToNatural =
-        unknownNode &&
-        unknownNode->rawDevelop.autoGuidance.intent == EditorNodeGraph::DevelopAutoIntent::NaturalFinished &&
-        std::abs(unknownNode->rawDevelop.autoGuidance.subjectSceneBias - payload.autoGuidance.subjectSceneBias) < 0.0001f &&
-        std::abs(unknownNode->rawDevelop.autoGuidance.moodReadabilityBias - payload.autoGuidance.moodReadabilityBias) < 0.0001f &&
-        unknownNode->rawDevelop.subjectImportance.activeRegionId == payload.subjectImportance.activeRegionId &&
-        unknownNode->rawDevelop.subjectImportance.activeStrokeId == payload.subjectImportance.activeStrokeId &&
-        unknownNode->rawDevelop.subjectImportance.brushMode == EditorNodeGraph::DevelopSubjectImportanceMode::Important &&
-        unknownNode->rawDevelop.subjectImportance.regions.size() == 1 &&
-        unknownNode->rawDevelop.subjectImportance.regions[0].mode == EditorNodeGraph::DevelopSubjectImportanceMode::Important &&
-        unknownNode->rawDevelop.subjectImportance.strokes.size() == 1 &&
-        unknownNode->rawDevelop.subjectImportance.strokes[0].mode == EditorNodeGraph::DevelopSubjectImportanceMode::Important;
+    const bool unknownRejected =
+        !EditorNodeGraph::IsCurrentGraphPayload(unknownSerialized);
 
     EditorModule viewportModule;
     EditorNodeGraph::RawDevelopPayload viewportPayload = payload;
@@ -640,8 +825,8 @@ bool ValidateDevelopAutoIntentSerialization() {
         serializedUserIntentAxes &&
         serializedSubjectImportance &&
         roundTripPreserved &&
-        legacyDefaultsToNatural &&
-        unknownDefaultsToNatural &&
+        legacyRejected &&
+        unknownRejected &&
         interpretedMapViewportState &&
         !developNodeJson.empty();
     if (!success) {
@@ -654,8 +839,8 @@ bool ValidateDevelopAutoIntentSerialization() {
             << " serializedUserIntentAxes=" << serializedUserIntentAxes
             << " serializedSubjectImportance=" << serializedSubjectImportance
             << " roundTripPreserved=" << roundTripPreserved
-            << " legacyDefaultsToNatural=" << legacyDefaultsToNatural
-            << " unknownDefaultsToNatural=" << unknownDefaultsToNatural
+            << " legacyRejected=" << legacyRejected
+            << " unknownRejected=" << unknownRejected
             << " interpretedMapViewportState=" << interpretedMapViewportState
             << " developNodeFound=" << !developNodeJson.empty()
             << "\n";
@@ -737,6 +922,8 @@ bool ValidateDevelopNodeSmoke() {
     bool demosaicMhcWhiteBalancePhaseStable = false;
     bool profiledMosaicDenoiseChangesNoise = false;
     bool profiledMosaicDenoisePreservesHotPixelMask = false;
+    bool rawGpuPreprocessParity = false;
+    bool rawGpuPreprocessTelemetryVisible = false;
     bool manualOrientationNonBlank = false;
     bool developGraphBalancedNonBlank = false;
     bool developGraphDarkNonBlank = false;
@@ -745,6 +932,7 @@ bool ValidateDevelopNodeSmoke() {
     bool developGraphNoisyToneOnlyNonBlank = false;
     bool developGraphDngCalibrationNonBlank = false;
     bool manualRawDecodeChainNonBlank = false;
+    bool adoptedMultiFrameRawNonBlank = false;
     bool developGraphRawStageCacheReuseObserved = false;
     bool developGraphPreFinishStageCacheReuseObserved = false;
     bool noisyCombinedToneNotCollapsed = false;
@@ -752,6 +940,8 @@ bool ValidateDevelopNodeSmoke() {
     float darkMaxRgb = 0.0f;
     float highlightMaxRgb = 0.0f;
     float demosaicMhcWhiteBalancePhaseSpread = std::numeric_limits<float>::infinity();
+    float rawGpuNormalizedMaxError = std::numeric_limits<float>::infinity();
+    float rawGpuVarianceMaxError = std::numeric_limits<float>::infinity();
     float manualOrientationMaxRgb = 0.0f;
     float developGraphBalancedMaxRgb = 0.0f;
     float developGraphDarkMaxRgb = 0.0f;
@@ -760,6 +950,7 @@ bool ValidateDevelopNodeSmoke() {
     float developGraphNoisyToneOnlyMaxRgb = 0.0f;
     float developGraphDngCalibrationMaxRgb = 0.0f;
     float manualRawDecodeChainMaxRgb = 0.0f;
+    float adoptedMultiFrameRawMaxRgb = 0.0f;
     float developGraphNoisyAvgLuma = 0.0f;
     float developGraphNoisyToneOnlyAvgLuma = 0.0f;
 
@@ -767,6 +958,11 @@ bool ValidateDevelopNodeSmoke() {
     if (!LoadGLFunctions()) {
         std::cerr << "Develop smoke validation failed: unable to load OpenGL functions.\n";
     } else {
+        std::cout << "Develop smoke: RAW GPU preprocess parity..." << std::endl;
+        rawGpuPreprocessParity = ValidateRawGpuPreprocessParity(
+            rawGpuNormalizedMaxError,
+            rawGpuVarianceMaxError);
+        std::cout << "Develop smoke: direct RAW pipeline..." << std::endl;
         Raw::RawGpuPipeline rawPipeline;
         const Raw::RawImageData balancedRaw = BuildSyntheticRawScene(SyntheticRawScene::Balanced, kRawWidth, kRawHeight);
         const Raw::RawImageData darkRaw = BuildSyntheticRawScene(SyntheticRawScene::DarkMid, kRawWidth, kRawHeight);
@@ -820,7 +1016,7 @@ bool ValidateDevelopNodeSmoke() {
         demosaicBilinearStable = balancedNonBlank && !bilinearPixels.empty();
 
         Raw::RawDevelopSettings mhcWhiteBalanceSettings;
-        mhcWhiteBalanceSettings.processingVersion = Raw::RawProcessingVersion::TruthfulV1;
+        mhcWhiteBalanceSettings.processingVersion = Raw::RawProcessingVersion::TruthfulV2;
         mhcWhiteBalanceSettings.whiteBalanceMode = Raw::WhiteBalanceMode::Manual;
         mhcWhiteBalanceSettings.manualWhiteBalance = { 2.0f, 1.0f, 1.5f };
         mhcWhiteBalanceSettings.demosaicMethod = Raw::DemosaicMethod::MalvarHeCutler;
@@ -851,7 +1047,7 @@ bool ValidateDevelopNodeSmoke() {
 
         Raw::RawDevelopSettings profiledDenoiseSettings;
         profiledDenoiseSettings.processingVersion =
-            Raw::RawProcessingVersion::TruthfulV1;
+            Raw::RawProcessingVersion::TruthfulV2;
         profiledDenoiseSettings.cameraTransformEnabled = false;
         profiledDenoiseSettings.demosaicMethod =
             Raw::DemosaicMethod::Bilinear;
@@ -922,7 +1118,7 @@ bool ValidateDevelopNodeSmoke() {
         Raw::RawDevelopSettings legacyHotPixelSettings =
             profiledHotPixelSettings;
         legacyHotPixelSettings.mosaicDenoise.mode =
-            Raw::RawMosaicDenoiseMode::LegacyFixedThreshold;
+            Raw::RawMosaicDenoiseMode::FixedThreshold;
         const unsigned int legacyHotPixelTexture =
             rawPipeline.Render(noisyRaw, legacyHotPixelSettings);
         const std::vector<float> legacyHotPixelPixels =
@@ -973,9 +1169,9 @@ bool ValidateDevelopNodeSmoke() {
             orientationH == kRawWidth &&
             manualOrientationMaxRgb > 0.01f;
 
-        RenderPipeline graphPipeline;
-        graphPipeline.Initialize();
-        graphPipeline.Resize(kRawWidth, kRawHeight);
+        auto graphPipeline = std::make_unique<RenderPipeline>();
+        graphPipeline->Initialize();
+        graphPipeline->Resize(kRawWidth, kRawHeight);
         auto runDevelopGraph = [&](const Raw::RawImageData& raw,
                                    const EditorNodeGraph::RawDevelopPayload& payload,
                                    std::uint64_t requestRevision,
@@ -1014,27 +1210,27 @@ bool ValidateDevelopNodeSmoke() {
             graph.links.push_back(RenderGraphLink{ 1, "rawOut", 2, "rawIn" });
             graph.links.push_back(RenderGraphLink{ 2, "imageOut", 3, "imageIn" });
 
-            graphPipeline.Resize(kRawWidth, kRawHeight);
-            graphPipeline.ExecuteGraph(graph);
+            graphPipeline->Resize(kRawWidth, kRawHeight);
+            graphPipeline->ExecuteGraph(graph);
             if (outRawBaseCacheHit) {
-                *outRawBaseCacheHit = graphPipeline.WasGraphImageCacheHit(2, "__rawDevelopBase");
+                *outRawBaseCacheHit = graphPipeline->WasGraphImageCacheHit(2, "__rawDevelopBase");
             }
             if (outPreFinishCacheHit) {
-                *outPreFinishCacheHit = graphPipeline.WasGraphImageCacheHit(
+                *outPreFinishCacheHit = graphPipeline->WasGraphImageCacheHit(
                     2,
                     EditorNodeGraph::kPreFinishImageOutputSocketId);
             }
             outMaxRgb = ReadTextureMaxRgb(
-                graphPipeline.GetOutputTexture(),
-                graphPipeline.GetCanvasWidth(),
-                graphPipeline.GetCanvasHeight());
+                graphPipeline->GetOutputTexture(),
+                graphPipeline->GetCanvasWidth(),
+                graphPipeline->GetCanvasHeight());
             int outputW = 0;
             int outputH = 0;
-            const std::vector<unsigned char> outputPixels = graphPipeline.GetOutputPixels(outputW, outputH);
+            const std::vector<unsigned char> outputPixels = graphPipeline->GetOutputPixels(outputW, outputH);
             if (outAvgLuma) {
                 *outAvgLuma = ComputeAverageNormalizedLuma(outputPixels);
             }
-            return graphPipeline.GetOutputTexture() != 0 &&
+            return graphPipeline->GetOutputTexture() != 0 &&
                 outputW == kRawWidth &&
                 outputH == kRawHeight &&
                 !outputPixels.empty() &&
@@ -1089,16 +1285,16 @@ bool ValidateDevelopNodeSmoke() {
             graph.links.push_back(RenderGraphLink{ 3, "imageOut", 4, "imageIn" });
             graph.links.push_back(RenderGraphLink{ 4, "imageOut", 5, "imageIn" });
 
-            graphPipeline.Resize(kRawWidth, kRawHeight);
-            graphPipeline.ExecuteGraph(graph);
+            graphPipeline->Resize(kRawWidth, kRawHeight);
+            graphPipeline->ExecuteGraph(graph);
             outMaxRgb = ReadTextureMaxRgb(
-                graphPipeline.GetOutputTexture(),
-                graphPipeline.GetCanvasWidth(),
-                graphPipeline.GetCanvasHeight());
+                graphPipeline->GetOutputTexture(),
+                graphPipeline->GetCanvasWidth(),
+                graphPipeline->GetCanvasHeight());
             int outputW = 0;
             int outputH = 0;
-            const std::vector<unsigned char> outputPixels = graphPipeline.GetOutputPixels(outputW, outputH);
-            return graphPipeline.GetOutputTexture() != 0 &&
+            const std::vector<unsigned char> outputPixels = graphPipeline->GetOutputPixels(outputW, outputH);
+            return graphPipeline->GetOutputTexture() != 0 &&
                 outputW == kRawWidth &&
                 outputH == kRawHeight &&
                 !outputPixels.empty() &&
@@ -1106,6 +1302,18 @@ bool ValidateDevelopNodeSmoke() {
         };
         developGraphBalancedNonBlank =
             runDevelopGraph(balancedRaw, neutralPayload, 101, developGraphBalancedMaxRgb, nullptr);
+        {
+            const GraphExecutionStats& rawStats =
+                graphPipeline->GetLastGraphExecutionStats();
+            rawGpuPreprocessTelemetryVisible =
+                rawStats.rawGpuPreprocessDispatches > 0 &&
+                rawStats.rawSensorUploadBytes > 0u &&
+                rawStats.rawMetadataUploadBytes > 0u &&
+                rawStats.rawCorrectedUploadBytes == 0u &&
+                rawStats.rawVarianceUploadBytes == 0u &&
+                rawStats.rawCpuPreprocessFallbacks == 0;
+        }
+        std::cout << "Develop smoke: first graph RAW render complete." << std::endl;
         developGraphDarkNonBlank =
             runDevelopGraph(darkRaw, biasedPayload, 102, developGraphDarkMaxRgb, nullptr);
         developGraphHighlightNonBlank =
@@ -1120,6 +1328,89 @@ bool ValidateDevelopNodeSmoke() {
         dngCalibrationPayload.settings.cameraTransformSource = Raw::RawCameraTransformSource::DngAuto;
         developGraphDngCalibrationNonBlank =
             runDevelopGraph(dngCalibrationRaw, dngCalibrationPayload, 106, developGraphDngCalibrationMaxRgb, nullptr);
+        {
+            RenderPipeline adoptedPipeline;
+            adoptedPipeline.Initialize();
+            adoptedPipeline.Resize(kRawWidth, kRawHeight);
+            RenderGraphSnapshot graph;
+            graph.outputNodeId = 12;
+
+            RenderGraphNode adoptedRawNode;
+            adoptedRawNode.nodeId = 11;
+            adoptedRawNode.kind = RenderGraphNodeKind::RawProjectSourceSet;
+            adoptedRawNode.requestRevision = 107;
+            adoptedRawNode.rawProjectSourceSet.sourceSetId =
+                "synthetic-hdr-source-set";
+            adoptedRawNode.rawProjectSourceSet.inputRevision = 7;
+            adoptedRawNode.rawProjectSourceSet.contentHash = 0x1234u;
+            adoptedRawNode.rawProjectSourceSet.resultAvailable = true;
+            adoptedRawNode.rawDevelopment.recipe =
+                Stack::RawRecipe::MakeDefaultRecipe(
+                    "hdr://synthetic-project/synthetic-hdr-source-set",
+                    "Synthetic HDR result");
+            adoptedRawNode.rawDevelopment.recipe.technical.processingVersion =
+                Raw::RawProcessingVersion::TruthfulV2;
+            adoptedRawNode.rawDevelopment.recipe.technical
+                .applyBaselineExposure = false;
+            adoptedRawNode.rawDevelopment.recipe.colorWarp.enabled = true;
+            Stack::RawRecipe::RawColorWarpPin adoptedColorPin;
+            adoptedColorPin.id = "synthetic-spatial-color";
+            adoptedColorPin.sourceA = 0.0f;
+            adoptedColorPin.sourceB = 0.0f;
+            adoptedColorPin.targetA = 0.04f;
+            adoptedColorPin.targetB = 0.025f;
+            adoptedColorPin.radius = 0.75f;
+            adoptedColorPin.regionId = "synthetic-spatial-region";
+            adoptedColorPin.evCurve =
+                Stack::RawRecipe::MakeColorWarpEvCurveHump(
+                    -1.0f, 7.0f, 1.0f);
+            Stack::RawRecipe::RawColorWarpRegion adoptedColorRegion;
+            adoptedColorRegion.id = adoptedColorPin.regionId;
+            adoptedColorRegion.spatialMode =
+                Stack::RawRecipe::RawColorWarpSpatialMode::Cohesive;
+            adoptedColorRegion.featherPixels = 2.0f;
+            adoptedColorRegion.circles.push_back({
+                "synthetic-spatial-circle", 0.5f, 0.5f, 0.35f, 0.35f,
+                Stack::RawRecipe::RawColorWarpInterpretationMode::GuidedFamily,
+                Stack::RawRecipe::RawColorWarpSamplePolarity::Include
+            });
+            adoptedRawNode.rawDevelopment.recipe.colorWarp.pins = {
+                adoptedColorPin
+            };
+            adoptedRawNode.rawDevelopment.recipe.colorWarp.regions = {
+                adoptedColorRegion
+            };
+            adoptedRawNode.rawDevelopment.embeddedRawData =
+                std::make_shared<const Raw::RawImageData>(balancedRaw);
+            graph.nodes.push_back(std::move(adoptedRawNode));
+
+            RenderGraphNode outputNode;
+            outputNode.nodeId = 12;
+            outputNode.kind = RenderGraphNodeKind::Output;
+            outputNode.requestRevision = 107;
+            graph.nodes.push_back(std::move(outputNode));
+            graph.links.push_back(RenderGraphLink{
+                11,
+                EditorNodeGraph::kImageOutputSocketId,
+                12,
+                EditorNodeGraph::kImageInputSocketId });
+
+            adoptedPipeline.ExecuteGraph(graph);
+            adoptedMultiFrameRawMaxRgb = ReadTextureMaxRgb(
+                adoptedPipeline.GetOutputTexture(),
+                adoptedPipeline.GetCanvasWidth(),
+                adoptedPipeline.GetCanvasHeight());
+            int outputWidth = 0;
+            int outputHeight = 0;
+            const std::vector<unsigned char> outputPixels =
+                adoptedPipeline.GetOutputPixels(outputWidth, outputHeight);
+            adoptedMultiFrameRawNonBlank =
+                adoptedPipeline.GetOutputTexture() != 0 &&
+                outputWidth == kRawWidth &&
+                outputHeight == kRawHeight &&
+                !outputPixels.empty() &&
+                adoptedMultiFrameRawMaxRgb > 0.01f;
+        }
         EditorNodeGraph::RawDecodePayload manualRawDecodePayload;
         manualRawDecodePayload.settings = neutralPayload.settings;
         ToneCurveLayer manualToneCurveLayer;
@@ -1179,6 +1470,8 @@ bool ValidateDevelopNodeSmoke() {
             highlightNonBlank &&
             demosaicBilinearStable &&
             demosaicMhcWhiteBalancePhaseStable &&
+            rawGpuPreprocessParity &&
+            rawGpuPreprocessTelemetryVisible &&
             profiledMosaicDenoiseChangesNoise &&
             profiledMosaicDenoisePreservesHotPixelMask &&
             manualOrientationNonBlank &&
@@ -1187,6 +1480,7 @@ bool ValidateDevelopNodeSmoke() {
             developGraphHighlightNonBlank &&
             developGraphDngCalibrationNonBlank &&
             manualRawDecodeChainNonBlank &&
+            adoptedMultiFrameRawNonBlank &&
             developGraphRawStageCacheReuseObserved &&
             developGraphPreFinishStageCacheReuseObserved &&
             noisyCombinedToneNotCollapsed;
@@ -1213,6 +1507,10 @@ bool ValidateDevelopNodeSmoke() {
             << " demosaicBilinearStable=" << demosaicBilinearStable
             << " demosaicMhcWhiteBalancePhaseStable=" << demosaicMhcWhiteBalancePhaseStable
             << " demosaicMhcWhiteBalancePhaseSpread=" << demosaicMhcWhiteBalancePhaseSpread
+            << " rawGpuPreprocessParity=" << rawGpuPreprocessParity
+            << " rawGpuPreprocessTelemetryVisible=" << rawGpuPreprocessTelemetryVisible
+            << " rawGpuNormalizedMaxError=" << rawGpuNormalizedMaxError
+            << " rawGpuVarianceMaxError=" << rawGpuVarianceMaxError
             << " profiledMosaicDenoiseChangesNoise=" << profiledMosaicDenoiseChangesNoise
             << " profiledMosaicDenoisePreservesHotPixelMask=" << profiledMosaicDenoisePreservesHotPixelMask
             << " manualOrientationNonBlank=" << manualOrientationNonBlank
@@ -1223,6 +1521,7 @@ bool ValidateDevelopNodeSmoke() {
             << " developGraphNoisyToneOnlyNonBlank=" << developGraphNoisyToneOnlyNonBlank
             << " developGraphDngCalibrationNonBlank=" << developGraphDngCalibrationNonBlank
             << " manualRawDecodeChainNonBlank=" << manualRawDecodeChainNonBlank
+            << " adoptedMultiFrameRawNonBlank=" << adoptedMultiFrameRawNonBlank
             << " developGraphRawStageCacheReuseObserved=" << developGraphRawStageCacheReuseObserved
             << " developGraphPreFinishStageCacheReuseObserved=" << developGraphPreFinishStageCacheReuseObserved
             << " noisyCombinedToneNotCollapsed=" << noisyCombinedToneNotCollapsed
@@ -1243,6 +1542,7 @@ bool ValidateDevelopNodeSmoke() {
             << " developGraphNoisyToneOnlyMaxRgb=" << developGraphNoisyToneOnlyMaxRgb
             << " developGraphDngCalibrationMaxRgb=" << developGraphDngCalibrationMaxRgb
             << " manualRawDecodeChainMaxRgb=" << manualRawDecodeChainMaxRgb
+            << " adoptedMultiFrameRawMaxRgb=" << adoptedMultiFrameRawMaxRgb
             << " developGraphNoisyAvgLuma=" << developGraphNoisyAvgLuma
             << " developGraphNoisyToneOnlyAvgLuma=" << developGraphNoisyToneOnlyAvgLuma
             << "\n";
@@ -1324,10 +1624,11 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
         std::cerr << "Develop real RAW smoke validation failed: unable to load OpenGL functions.\n";
         success = false;
     } else {
-        RenderPipeline graphPipeline;
-        graphPipeline.Initialize();
-        graphPipeline.SetPreviewMaxDimension(1024);
-        graphPipeline.Resize(64, 64);
+        std::cout << "Develop real RAW smoke: graph pipeline..." << std::endl;
+        auto graphPipeline = std::make_unique<RenderPipeline>();
+        graphPipeline->Initialize();
+        graphPipeline->SetPreviewMaxDimension(1024);
+        graphPipeline->Resize(64, 64);
 
         auto runDevelopGraph = [&](const Raw::RawImageData& raw,
                                    const EditorNodeGraph::RawDevelopPayload& payload,
@@ -1368,14 +1669,14 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             graph.links.push_back(RenderGraphLink{ 1, "rawOut", 2, "rawIn" });
             graph.links.push_back(RenderGraphLink{ 2, "imageOut", 3, "imageIn" });
 
-            graphPipeline.Resize(64, 64);
-            graphPipeline.ExecuteGraph(graph);
-            const int outputW = graphPipeline.GetCanvasWidth();
-            const int outputH = graphPipeline.GetCanvasHeight();
-            outMaxRgb = ReadTextureMaxRgb(graphPipeline.GetOutputTexture(), outputW, outputH);
+            graphPipeline->Resize(64, 64);
+            graphPipeline->ExecuteGraph(graph);
+            const int outputW = graphPipeline->GetCanvasWidth();
+            const int outputH = graphPipeline->GetCanvasHeight();
+            outMaxRgb = ReadTextureMaxRgb(graphPipeline->GetOutputTexture(), outputW, outputH);
             int pixelW = 0;
             int pixelH = 0;
-            const std::vector<unsigned char> outputPixels = graphPipeline.GetOutputPixels(pixelW, pixelH);
+            const std::vector<unsigned char> outputPixels = graphPipeline->GetOutputPixels(pixelW, pixelH);
             if (outPixels) {
                 *outPixels = outputPixels;
             }
@@ -1385,8 +1686,8 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             if (outPixelH) {
                 *outPixelH = pixelH;
             }
-            outFeedbacks = graphPipeline.GetToneCurveAutoRewriteFeedback();
-            return graphPipeline.GetOutputTexture() != 0 &&
+            outFeedbacks = graphPipeline->GetToneCurveAutoRewriteFeedback();
+            return graphPipeline->GetOutputTexture() != 0 &&
                 outputW > 0 &&
                 outputH > 0 &&
                 pixelW == outputW &&
@@ -1405,17 +1706,16 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 success = false;
                 continue;
             }
-
-            RenderPipeline rawWorkspacePipeline;
-            rawWorkspacePipeline.Initialize();
-            rawWorkspacePipeline.SetPreviewMaxDimension(1024);
-            rawWorkspacePipeline.Resize(64, 64);
+            auto rawWorkspacePipeline = std::make_unique<RenderPipeline>();
+            rawWorkspacePipeline->Initialize();
+            rawWorkspacePipeline->SetPreviewMaxDimension(1024);
+            rawWorkspacePipeline->Resize(64, 64);
             Stack::RawRecipe::RawDevelopmentRecipe rawWorkspaceRecipe =
                 Stack::RawRecipe::MakeDefaultRecipe(
                     path.string(),
                     path.filename().string());
             rawWorkspaceRecipe.technical.processingVersion =
-                Raw::RawProcessingVersion::TruthfulV1;
+                Raw::RawProcessingVersion::TruthfulV2;
             rawWorkspaceRecipe.technical.demosaicMethod =
                 Raw::DemosaicMethod::MalvarHeCutler;
             rawWorkspaceRecipe.preToneExposureEv = 0.25f;
@@ -1440,6 +1740,10 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             RawDevelopmentGraphScopeStage requestedGraphScopeStage =
                 RawDevelopmentGraphScopeStage::None;
             int requestedGraphScopeMaxDimension = 0;
+            RawDevelopmentGradingScopeSource requestedGradingScopeSource =
+                RawDevelopmentGradingScopeSource::None;
+            int requestedGradingScopeMaxDimension = 0;
+            bool requestedGradingScopePixels = true;
 
             auto runRawWorkspaceGraph =
                 [&](const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
@@ -1467,28 +1771,33 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     graph.nodes.push_back(std::move(outputNode));
                     graph.links.push_back(RenderGraphLink{ 1, "imageOut", 2, "imageIn" });
 
-                    rawWorkspacePipeline.SetRawDevelopmentAnalysisEnabled(analysisEnabled);
-                    rawWorkspacePipeline.SetRawDevelopmentStageImageReadbackMaxDimension(
+                    rawWorkspacePipeline->SetRawDevelopmentAnalysisEnabled(analysisEnabled);
+                    rawWorkspacePipeline->SetRawDevelopmentStageImageReadbackMaxDimension(
                         stageImageReadbackMaxDimension);
-                    rawWorkspacePipeline.SetRawDevelopmentGraphScopeReadbackRequest(
+                    rawWorkspacePipeline->SetRawDevelopmentGraphScopeReadbackRequest(
                         requestedGraphScopeStage,
                         requestedGraphScopeMaxDimension);
+                    rawWorkspacePipeline->SetRawDevelopmentGradingScopeReadbackRequest(
+                        requestedGradingScopeSource,
+                        requestedGradingScopeMaxDimension,
+                        revision,
+                        path.string(), requestedGradingScopePixels);
                     const auto begin = std::chrono::steady_clock::now();
-                    rawWorkspacePipeline.ExecuteGraph(graph);
+                    rawWorkspacePipeline->ExecuteGraph(graph);
                     glFinish();
                     outMilliseconds = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - begin).count();
-                    outGraphStats = rawWorkspacePipeline.GetLastGraphExecutionStats();
+                    outGraphStats = rawWorkspacePipeline->GetLastGraphExecutionStats();
                     if (outFloatPixels) {
                         *outFloatPixels = ReadTextureRgbaFloat(
-                            rawWorkspacePipeline.GetOutputTexture(),
-                            rawWorkspacePipeline.GetCanvasWidth(),
-                            rawWorkspacePipeline.GetCanvasHeight());
+                            rawWorkspacePipeline->GetOutputTexture(),
+                            rawWorkspacePipeline->GetCanvasWidth(),
+                            rawWorkspacePipeline->GetCanvasHeight());
                     }
                     int pixelW = 0;
                     int pixelH = 0;
-                    outPixels = rawWorkspacePipeline.GetOutputPixels(pixelW, pixelH);
-                    return rawWorkspacePipeline.GetOutputTexture() != 0 &&
+                    outPixels = rawWorkspacePipeline->GetOutputPixels(pixelW, pixelH);
+                    return rawWorkspacePipeline->GetOutputTexture() != 0 &&
                         pixelW > 0 &&
                         pixelH > 0 &&
                         !outPixels.empty();
@@ -1537,13 +1846,13 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     graph.nodes.push_back(std::move(outputNode));
                     graph.links.push_back(RenderGraphLink{ 1, "imageOut", 2, "imageIn" });
 
-                    rawWorkspacePipeline.SetRawDevelopmentAnalysisEnabled(false);
-                    rawWorkspacePipeline.SetRawDevelopmentStageImageReadbackMaxDimension(0);
-                    rawWorkspacePipeline.ExecuteGraph(graph);
+                    rawWorkspacePipeline->SetRawDevelopmentAnalysisEnabled(false);
+                    rawWorkspacePipeline->SetRawDevelopmentStageImageReadbackMaxDimension(0);
+                    rawWorkspacePipeline->ExecuteGraph(graph);
                     glFinish();
 
                     probe.sampleValid =
-                        rawWorkspacePipeline.GetRawDevelopmentLocalRangeTargetSample(
+                        rawWorkspacePipeline->GetRawDevelopmentLocalRangeTargetSample(
                             probe.sceneEv,
                             probe.sceneLuma,
                             probe.sampleU,
@@ -1555,9 +1864,9 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     int pixelW = 0;
                     int pixelH = 0;
                     probe.outputPixels =
-                        rawWorkspacePipeline.GetOutputPixels(pixelW, pixelH);
+                        rawWorkspacePipeline->GetOutputPixels(pixelW, pixelH);
                     probe.renderValid =
-                        rawWorkspacePipeline.GetOutputTexture() != 0 &&
+                        rawWorkspacePipeline->GetOutputTexture() != 0 &&
                         pixelW > 0 &&
                         pixelH > 0 &&
                         !probe.outputPixels.empty();
@@ -1565,7 +1874,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     int overlayW = 0;
                     int overlayH = 0;
                     const unsigned int overlayTexture =
-                        rawWorkspacePipeline.TakeRawDevelopmentLocalRangeOverlayTexture(
+                        rawWorkspacePipeline->TakeRawDevelopmentLocalRangeOverlayTexture(
                             overlayW,
                             overlayH);
                     probe.overlayTextureValid =
@@ -1580,7 +1889,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     int publishedW = 0;
                     int publishedH = 0;
                     const unsigned int publishedTexture =
-                        rawWorkspacePipeline.PublishSharedOutputTexture(
+                        rawWorkspacePipeline->PublishSharedOutputTexture(
                             publishedW,
                             publishedH,
                             true);
@@ -1638,6 +1947,94 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 nullptr,
                 rawWorkspaceWarmStats,
                 rawWorkspaceWarmMs);
+            const int uncroppedWorkspaceWidth =
+                rawWorkspacePipeline->GetCanvasWidth();
+            const int uncroppedWorkspaceHeight =
+                rawWorkspacePipeline->GetCanvasHeight();
+            int tiledExportWidth = 0;
+            int tiledExportHeight = 0;
+            const std::vector<unsigned char> tiledExportPixels =
+                rawWorkspacePipeline->GetOutputPixelsTiledPbo(
+                    tiledExportWidth,
+                    tiledExportHeight,
+                    73);
+            const bool tiledExportReadbackOk =
+                rawWorkspaceWarmOk &&
+                tiledExportWidth == uncroppedWorkspaceWidth &&
+                tiledExportHeight == uncroppedWorkspaceHeight &&
+                tiledExportPixels == rawWorkspaceWarmPixels;
+            success = success && tiledExportReadbackOk;
+            std::cout
+                << "RAW worker tiled export readback: "
+                << path.filename().string()
+                << " output=" << tiledExportWidth << 'x'
+                << tiledExportHeight
+                << " passed=" << tiledExportReadbackOk
+                << "\n";
+            if (!tiledExportReadbackOk) {
+                std::cerr
+                    << "Develop real RAW smoke validation failed: tiled "
+                       "PBO export readback diverged from monolithic output for "
+                    << path.string() << "\n";
+            }
+
+            Stack::RawRecipe::RawDevelopmentRecipe croppedWorkspaceRecipe =
+                rawWorkspaceRecipe;
+            croppedWorkspaceRecipe.cropRotation.cropEnabled = true;
+            croppedWorkspaceRecipe.cropRotation.cropX = 0.25f;
+            croppedWorkspaceRecipe.cropRotation.cropY = 0.25f;
+            croppedWorkspaceRecipe.cropRotation.cropWidth = 0.50f;
+            croppedWorkspaceRecipe.cropRotation.cropHeight = 0.50f;
+            std::vector<unsigned char> croppedWorkspacePixels;
+            GraphExecutionStats croppedWorkspaceStats;
+            double croppedWorkspaceMs = 0.0;
+            const bool croppedWorkspaceOk = runRawWorkspaceGraph(
+                croppedWorkspaceRecipe,
+                false,
+                0,
+                requestBase + 131,
+                croppedWorkspacePixels,
+                nullptr,
+                croppedWorkspaceStats,
+                croppedWorkspaceMs);
+            const int croppedWorkspaceWidth =
+                rawWorkspacePipeline->GetCanvasWidth();
+            const int croppedWorkspaceHeight =
+                rawWorkspacePipeline->GetCanvasHeight();
+            const int expectedCroppedWidth =
+                static_cast<int>(std::ceil(
+                    0.75f * static_cast<float>(uncroppedWorkspaceWidth))) -
+                static_cast<int>(std::floor(
+                    0.25f * static_cast<float>(uncroppedWorkspaceWidth)));
+            const int expectedCroppedHeight =
+                static_cast<int>(std::ceil(
+                    0.75f * static_cast<float>(uncroppedWorkspaceHeight))) -
+                static_cast<int>(std::floor(
+                    0.25f * static_cast<float>(uncroppedWorkspaceHeight)));
+
+            const bool cropSemanticsContractOk =
+                rawWorkspaceWarmOk &&
+                croppedWorkspaceOk &&
+                croppedWorkspaceWidth == expectedCroppedWidth &&
+                croppedWorkspaceHeight == expectedCroppedHeight;
+            success = success && cropSemanticsContractOk;
+            std::cout
+                << "RAW workspace crop semantics: "
+                << path.filename().string()
+                << " source=" << uncroppedWorkspaceWidth << 'x'
+                << uncroppedWorkspaceHeight
+                << " cropped=" << croppedWorkspaceWidth << 'x'
+                << croppedWorkspaceHeight
+                << " expected=" << expectedCroppedWidth << 'x'
+                << expectedCroppedHeight
+                << " passed=" << cropSemanticsContractOk
+                << "\n";
+            if (!cropSemanticsContractOk) {
+                std::cerr
+                    << "Develop real RAW smoke validation failed: crop "
+                       "geometry failed for "
+                    << path.string() << "\n";
+            }
             requestedGraphScopeStage =
                 RawDevelopmentGraphScopeStage::LocalRangeInput;
             requestedGraphScopeMaxDimension = 64;
@@ -1651,7 +2048,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 rawWorkspaceAnalyzedStats,
                 rawWorkspaceAnalyzedMs);
             const RawDevelopmentGraphScopeReadback localRangeScope =
-                rawWorkspacePipeline.GetRawDevelopmentGraphScopeReadback();
+                rawWorkspacePipeline->GetRawDevelopmentGraphScopeReadback();
 
             requestedGraphScopeStage =
                 RawDevelopmentGraphScopeStage::FinishToneInput;
@@ -1668,7 +2065,24 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 finishToneScopeGraphStats,
                 finishToneScopeMs);
             const RawDevelopmentGraphScopeReadback finishToneScope =
-                rawWorkspacePipeline.GetRawDevelopmentGraphScopeReadback();
+                rawWorkspacePipeline->GetRawDevelopmentGraphScopeReadback();
+
+            requestedGraphScopeStage =
+                RawDevelopmentGraphScopeStage::ColorWarpInput;
+            std::vector<unsigned char> colorWarpScopePixels;
+            GraphExecutionStats colorWarpScopeGraphStats;
+            double colorWarpScopeMs = 0.0;
+            const bool colorWarpScopeRenderOk = runRawWorkspaceGraph(
+                rawWorkspaceRecipe,
+                true,
+                0,
+                requestBase + 128,
+                colorWarpScopePixels,
+                nullptr,
+                colorWarpScopeGraphStats,
+                colorWarpScopeMs);
+            const RawDevelopmentGraphScopeReadback colorWarpScope =
+                rawWorkspacePipeline->GetRawDevelopmentGraphScopeReadback();
 
             requestedGraphScopeStage =
                 RawDevelopmentGraphScopeStage::LocalRangeInput;
@@ -1682,7 +2096,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 rawWorkspaceInteractiveStats,
                 rawWorkspaceInteractiveMs);
             const RawDevelopmentGraphScopeReadback interactiveScope =
-                rawWorkspacePipeline.GetRawDevelopmentGraphScopeReadback();
+                rawWorkspacePipeline->GetRawDevelopmentGraphScopeReadback();
             requestedGraphScopeStage = RawDevelopmentGraphScopeStage::None;
             requestedGraphScopeMaxDimension = 0;
 
@@ -1726,6 +2140,11 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     finishToneScope,
                     RawDevelopmentGraphScopeStage::FinishToneInput,
                     false) &&
+                colorWarpScopeRenderOk &&
+                scopeReadbackValid(
+                    colorWarpScope,
+                    RawDevelopmentGraphScopeStage::ColorWarpInput,
+                    false) &&
                 !interactiveScope.valid &&
                 interactiveScope.pixels.empty() &&
                 interactiveScope.controlSignal.empty();
@@ -1738,15 +2157,281 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                     (localRangeScope.controlSignalDomain == "edge-aware-scene-ev")
                 << " finish=" << finishToneScope.width << "x" << finishToneScope.height
                 << " finishMs=" << finishToneScopeMs
+                << " color=" << colorWarpScope.width << "x" << colorWarpScope.height
+                << " colorMs=" << colorWarpScopeMs
                 << " interactiveSkipped=" << !interactiveScope.valid
                 << " passed=" << graphScopeContractOk
                 << "\n";
             if (!graphScopeContractOk) {
                 std::cerr
-                    << "Develop real RAW smoke validation failed: the Zones/Curve "
+                    << "Develop real RAW smoke validation failed: the Zones/Curve/Color "
                     << "scope readback was missing, used the wrong scene-linear "
                     << "boundary/control signal, exceeded its decimation bound, or "
                     << "ran during the interactive analysis-free pass for "
+                    << path.string()
+                    << "\n";
+            }
+
+            Stack::RawRecipe::RawDevelopmentRecipe activeColorWarpRecipe =
+                rawWorkspaceRecipe;
+            activeColorWarpRecipe.colorWarp.enabled = true;
+            Stack::RawRecipe::RawColorWarpPin smokeColorPin;
+            smokeColorPin.id = "real-raw-smoke-color";
+            smokeColorPin.name = "Real RAW smoke color";
+            smokeColorPin.sourceA = 0.0f;
+            smokeColorPin.sourceB = 0.0f;
+            smokeColorPin.targetA = 0.12f;
+            smokeColorPin.targetB = 0.08f;
+            smokeColorPin.radius = 0.75f;
+            smokeColorPin.softness = 0.6f;
+            smokeColorPin.evCurve =
+                Stack::RawRecipe::MakeColorWarpEvCurveHump(
+                    -1.0f, 5.0f, 0.75f);
+            smokeColorPin.regionId = "real-raw-smoke-region";
+            smokeColorPin.lightnessDeltaEv = 0.15f;
+            activeColorWarpRecipe.colorWarp.pins = { smokeColorPin };
+            Stack::RawRecipe::RawColorWarpRegion smokeColorRegion;
+            smokeColorRegion.id = smokeColorPin.regionId;
+            smokeColorRegion.spatialMode =
+                Stack::RawRecipe::RawColorWarpSpatialMode::Cohesive;
+            smokeColorRegion.featherPixels = 12.0f;
+            smokeColorRegion.featherDirection =
+                Stack::RawRecipe::RawColorWarpFeatherDirection::Centered;
+            smokeColorRegion.circles.push_back({
+                "real-raw-smoke-circle", 0.5f, 0.5f, 0.18f, 0.18f,
+                Stack::RawRecipe::RawColorWarpInterpretationMode::GuidedFamily,
+                Stack::RawRecipe::RawColorWarpSamplePolarity::Include
+            });
+            activeColorWarpRecipe.colorWarp.regions = { smokeColorRegion };
+            std::vector<unsigned char> colorWarpPixels;
+            std::vector<unsigned char> repeatedColorWarpPixels;
+            GraphExecutionStats colorWarpStats;
+            GraphExecutionStats repeatedColorWarpStats;
+            double colorWarpMs = 0.0;
+            double repeatedColorWarpMs = 0.0;
+            std::vector<unsigned char> targetDraggedColorWarpPixels;
+            GraphExecutionStats targetDraggedColorWarpStats;
+            double targetDraggedColorWarpMs = 0.0;
+            const bool colorWarpRenderOk = runRawWorkspaceGraph(
+                activeColorWarpRecipe,
+                false,
+                0,
+                requestBase + 129,
+                colorWarpPixels,
+                nullptr,
+                colorWarpStats,
+                colorWarpMs);
+            const bool repeatedColorWarpRenderOk = runRawWorkspaceGraph(
+                activeColorWarpRecipe,
+                false,
+                0,
+                requestBase + 130,
+                repeatedColorWarpPixels,
+                nullptr,
+                repeatedColorWarpStats,
+                repeatedColorWarpMs);
+            auto targetDraggedColorWarpRecipe = activeColorWarpRecipe;
+            targetDraggedColorWarpRecipe.colorWarp.pins.front().targetA = 0.10f;
+            const bool targetDraggedColorWarpRenderOk = runRawWorkspaceGraph(
+                targetDraggedColorWarpRecipe,
+                false,
+                0,
+                requestBase + 131,
+                targetDraggedColorWarpPixels,
+                nullptr,
+                targetDraggedColorWarpStats,
+                targetDraggedColorWarpMs);
+            std::size_t changedColorWarpBytes = 0;
+            if (colorWarpPixels.size() == rawWorkspaceInteractivePixels.size()) {
+                for (std::size_t byte = 0; byte < colorWarpPixels.size(); ++byte) {
+                    changedColorWarpBytes +=
+                        colorWarpPixels[byte] != rawWorkspaceInteractivePixels[byte]
+                        ? 1u
+                        : 0u;
+                }
+            }
+            const bool colorWarpGpuContractOk =
+                colorWarpRenderOk &&
+                repeatedColorWarpRenderOk &&
+                targetDraggedColorWarpRenderOk &&
+                !colorWarpPixels.empty() &&
+                changedColorWarpBytes > 0u &&
+                repeatedColorWarpPixels == colorWarpPixels &&
+                targetDraggedColorWarpStats.colorWarpMaskCacheHits > 0 &&
+                targetDraggedColorWarpStats.colorWarpMaskCacheMisses == 0;
+            success = success && colorWarpGpuContractOk;
+            std::cout
+                << "RAW workspace Color Warp: "
+                << path.filename().string()
+                << " changedBytes=" << changedColorWarpBytes
+                << " firstMs=" << colorWarpMs
+                << " repeatMs=" << repeatedColorWarpMs
+                << " targetDragMs=" << targetDraggedColorWarpMs
+                << " maskHits=" << targetDraggedColorWarpStats.colorWarpMaskCacheHits
+                << " maskBytes=" << targetDraggedColorWarpStats.colorWarpMaskBytesRetained
+                << " passed=" << colorWarpGpuContractOk
+                << "\n";
+            if (!colorWarpGpuContractOk) {
+                std::cerr
+                    << "Develop real RAW smoke validation failed: Color Warp "
+                    << "did not render, change the selected family, or repeat "
+                    << "deterministically for "
+                    << path.string()
+                    << "\n";
+            }
+
+            const auto gradingScopeReadbackValid = [](
+                                                       const RawDevelopmentGradingScopeReadback& scope,
+                                                       RawDevelopmentGradingScopeSource expectedSource) {
+                const std::size_t expectedPixels =
+                    static_cast<std::size_t>(std::max(0, scope.width)) *
+                    static_cast<std::size_t>(std::max(0, scope.height));
+                return scope.valid &&
+                    scope.source == expectedSource &&
+                    scope.width > 0 && scope.height > 0 &&
+                    scope.width <= 64 && scope.height <= 64 &&
+                    scope.sourceWidth > 0 && scope.sourceHeight > 0 &&
+                    scope.pixels.size() == expectedPixels * 3u &&
+                    std::all_of(
+                        scope.pixels.begin(),
+                        scope.pixels.end(),
+                        [](float value) { return std::isfinite(value); });
+            };
+            auto captureGradingScope = [&] (
+                                           const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
+                                           RawDevelopmentGradingScopeSource source,
+                                           std::uint64_t revision,
+                                           RawDevelopmentGradingScopeReadback& outScope) {
+                requestedGradingScopeSource = source;
+                requestedGradingScopeMaxDimension = 64;
+                std::vector<unsigned char> outputPixels;
+                GraphExecutionStats graphStats;
+                double elapsedMilliseconds = 0.0;
+                const bool renderOk = runRawWorkspaceGraph(
+                    recipe,
+                    false,
+                    0,
+                    revision,
+                    outputPixels,
+                    nullptr,
+                    graphStats,
+                    elapsedMilliseconds);
+                const bool published =
+                    rawWorkspacePipeline->PollRawDevelopmentGradingScopeReadback();
+                outScope =
+                    rawWorkspacePipeline->GetRawDevelopmentGradingScopeReadback();
+                return renderOk && published &&
+                    gradingScopeReadbackValid(outScope, source);
+            };
+            RawDevelopmentGradingScopeReadback neutralScopeBefore;
+            RawDevelopmentGradingScopeReadback displayScopeBefore;
+            RawDevelopmentGradingScopeReadback neutralScopeAfter;
+            RawDevelopmentGradingScopeReadback displayScopeAfter;
+            const bool neutralScopeBeforeOk = captureGradingScope(
+                rawWorkspaceRecipe,
+                RawDevelopmentGradingScopeSource::NeutralScene,
+                requestBase + 124,
+                neutralScopeBefore);
+            const bool displayScopeBeforeOk = captureGradingScope(
+                rawWorkspaceRecipe,
+                RawDevelopmentGradingScopeSource::DisplayCandidate,
+                requestBase + 125,
+                displayScopeBefore);
+            Stack::RawRecipe::RawDevelopmentRecipe gradingAdjustedRecipe =
+                rawWorkspaceRecipe;
+            gradingAdjustedRecipe.viewTransform.layerJson["exposure"] = 0.75f;
+            const bool neutralScopeAfterOk = captureGradingScope(
+                gradingAdjustedRecipe,
+                RawDevelopmentGradingScopeSource::NeutralScene,
+                requestBase + 126,
+                neutralScopeAfter);
+            const bool displayScopeAfterOk = captureGradingScope(
+                gradingAdjustedRecipe,
+                RawDevelopmentGradingScopeSource::DisplayCandidate,
+                requestBase + 127,
+                displayScopeAfter);
+            const auto checkChangedScopeRequest = [&](int edge, bool includePixels) {
+                requestedGradingScopeMaxDimension = edge;
+                requestedGradingScopePixels = includePixels;
+                std::vector<unsigned char> pixels;
+                GraphExecutionStats stats;
+                double milliseconds = 0;
+                const bool rendered = runRawWorkspaceGraph(gradingAdjustedRecipe, false, 0,
+                    requestBase + 127, pixels, nullptr, stats, milliseconds);
+                const bool published = rawWorkspacePipeline->PollRawDevelopmentGradingScopeReadback();
+                const auto& scope = rawWorkspacePipeline->GetRawDevelopmentGradingScopeReadback();
+                const auto count = static_cast<std::size_t>(scope.width) * scope.height * 3;
+                const bool valid = rendered && published && scope.valid && scope.visualization &&
+                    scope.generation == requestBase + 127 &&
+                    scope.source == RawDevelopmentGradingScopeSource::DisplayCandidate &&
+                    std::max(scope.width, scope.height) == std::min(edge, std::max(scope.sourceWidth, scope.sourceHeight)) &&
+                    (includePixels ? scope.pixels.size() == count : scope.pixels.empty());
+                if (!valid) std::cerr << "Grading request change failed: edge=" << edge << " pixels=" << includePixels
+                    << " rendered=" << rendered << " published=" << published << " valid=" << scope.valid
+                    << " plot=" << static_cast<bool>(scope.visualization) << " size=" << scope.width << 'x' << scope.height
+                    << " samples=" << scope.pixels.size() << " generation=" << scope.generation << '\n';
+                return valid;
+            };
+            // Request options can change while the rendered image generation stays cached.
+            const bool plotRequestChangesOk = checkChangedScopeRequest(64, false) &&
+                checkChangedScopeRequest(48, false) && checkChangedScopeRequest(48, true);
+            requestedGradingScopePixels = true;
+            requestedGradingScopeSource =
+                RawDevelopmentGradingScopeSource::None;
+            requestedGradingScopeMaxDimension = 0;
+
+            const auto maximumScopeDifference = [](
+                                                  const RawDevelopmentGradingScopeReadback& first,
+                                                  const RawDevelopmentGradingScopeReadback& second) {
+                if (first.width != second.width ||
+                    first.height != second.height ||
+                    first.pixels.size() != second.pixels.size()) {
+                    return std::numeric_limits<float>::infinity();
+                }
+                float maximum = 0.0f;
+                for (std::size_t index = 0; index < first.pixels.size(); ++index) {
+                    maximum = std::max(
+                        maximum,
+                        std::abs(first.pixels[index] - second.pixels[index]));
+                }
+                return maximum;
+            };
+            const float neutralScopeDelta = maximumScopeDifference(
+                neutralScopeBefore,
+                neutralScopeAfter);
+            const float displayScopeDelta = maximumScopeDifference(
+                displayScopeBefore,
+                displayScopeAfter);
+            const bool gradingScopeContractOk =
+                plotRequestChangesOk &&
+                neutralScopeBeforeOk &&
+                displayScopeBeforeOk &&
+                neutralScopeAfterOk &&
+                displayScopeAfterOk &&
+                neutralScopeBefore.sceneLinear &&
+                !neutralScopeBefore.encodedSrgb &&
+                displayScopeBefore.encodedSrgb &&
+                neutralScopeDelta <= 0.000001f &&
+                std::isfinite(displayScopeDelta) &&
+                displayScopeDelta > 0.0001f;
+            success = success && gradingScopeContractOk;
+            std::cout
+                << "RAW workspace live grading scopes: "
+                << path.filename().string()
+                << " neutral=" << neutralScopeBefore.width << "x"
+                << neutralScopeBefore.height
+                << " display=" << displayScopeBefore.width << "x"
+                << displayScopeBefore.height
+                << " neutralDelta=" << neutralScopeDelta
+                << " displayDelta=" << displayScopeDelta
+                << " passed=" << gradingScopeContractOk
+                << "\n";
+            if (!gradingScopeContractOk) {
+                std::cerr
+                    << "Develop real RAW smoke validation failed: the asynchronous "
+                    << "grading scope did not preserve the Neutral Scene boundary, "
+                    << "did not react at the Display Candidate boundary, or exceeded "
+                    << "its decimation contract for "
                     << path.string()
                     << "\n";
             }
@@ -1995,6 +2680,8 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             rgbDenoiseRecipe.rgbDenoise.colorNoise = 0.35f;
             rgbDenoiseRecipe.rgbDenoise.luminanceNoise = 0.20f;
             rgbDenoiseRecipe.rgbDenoise.detailProtection = 0.75f;
+            rgbDenoiseRecipe.rgbDenoise.lumaMap.baseMultiplier = 0.20f;
+            rgbDenoiseRecipe.rgbDenoise.chromaMap.baseMultiplier = 0.35f;
             std::vector<unsigned char> rgbDenoisePixels;
             std::vector<unsigned char> rgbDenoiseExposurePixels;
             std::vector<unsigned char> rgbDenoiseRepeatPixels;
@@ -2288,18 +2975,16 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             targetOutlineGraph.links.push_back(
                 RenderGraphLink{ 1, "imageOut", 2, "imageIn" });
 
-            rawWorkspacePipeline.SetRawDevelopmentAnalysisEnabled(false);
-            rawWorkspacePipeline.ExecuteGraph(targetOutlineGraph);
+            rawWorkspacePipeline->SetRawDevelopmentAnalysisEnabled(false);
+            rawWorkspacePipeline->ExecuteGraph(targetOutlineGraph);
             glFinish();
             for (int poll = 0;
                  poll < 100 &&
-                 !rawWorkspacePipeline
-                      .IsRawDevelopmentLocalRangeTargetPreviewRefined();
+                 !rawWorkspacePipeline->IsRawDevelopmentLocalRangeTargetPreviewRefined();
                  ++poll) {
-                rawWorkspacePipeline.ExecuteGraph(targetOutlineGraph);
+                rawWorkspacePipeline->ExecuteGraph(targetOutlineGraph);
                 glFinish();
-                if (!rawWorkspacePipeline
-                         .IsRawDevelopmentLocalRangeTargetPreviewRefined()) {
+                if (!rawWorkspacePipeline->IsRawDevelopmentLocalRangeTargetPreviewRefined()) {
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(1));
                 }
@@ -2307,7 +2992,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             int targetOutlineWidth = 0;
             int targetOutlineHeight = 0;
             const std::vector<unsigned char> targetOutlinePixels =
-                rawWorkspacePipeline.GetRawDevelopmentLocalRangeOverlayPixels(
+                rawWorkspacePipeline->GetRawDevelopmentLocalRangeOverlayPixels(
                     targetOutlineWidth,
                     targetOutlineHeight);
             std::size_t targetOutlineVisiblePixels = 0;
@@ -2362,17 +3047,15 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             const std::size_t targetOutlinePixelCount =
                 targetOutlineVisiblePixels + targetOutlineTransparentPixels;
             const RawLocalRangeTargetPreviewMetrics targetOutlineMetrics =
-                rawWorkspacePipeline
-                    .GetRawDevelopmentLocalRangeTargetPreviewMetrics();
+                rawWorkspacePipeline->GetRawDevelopmentLocalRangeTargetPreviewMetrics();
             const bool targetOutlineContractOk =
-                rawWorkspacePipeline
-                    .IsRawDevelopmentLocalRangeTargetPreviewRefined() &&
+                rawWorkspacePipeline->IsRawDevelopmentLocalRangeTargetPreviewRefined() &&
                 targetOutlineWidth > 0 &&
                 targetOutlineHeight > 0 &&
                 targetOutlineVisiblePixels > 0 &&
                 targetOutlinePixelCount > 0 &&
-                targetOutlineTransparentPixels * 20 >
-                    targetOutlinePixelCount * 19 &&
+                targetOutlineTransparentPixels * 100 >
+                    targetOutlinePixelCount * 94 &&
                 targetOutlineNeighboringVisiblePixels * 10 >=
                     targetOutlineVisiblePixels * 8 &&
                 targetOutlineMetrics.maximumDimension > 0 &&
@@ -2382,8 +3065,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
                 << "RAW workspace target outline: "
                 << path.filename().string()
                 << " refined="
-                << rawWorkspacePipeline
-                       .IsRawDevelopmentLocalRangeTargetPreviewRefined()
+                << rawWorkspacePipeline->IsRawDevelopmentLocalRangeTargetPreviewRefined()
                 << " visiblePixels=" << targetOutlineVisiblePixels
                 << " neighboringVisiblePixels="
                 << targetOutlineNeighboringVisiblePixels
@@ -2400,8 +3082,7 @@ bool ValidateDevelopRealRawSmoke(int rawArgCount, char** rawArgs) {
             int discardedOutlineWidth = 0;
             int discardedOutlineHeight = 0;
             const unsigned int discardedOutlineTexture =
-                rawWorkspacePipeline
-                    .TakeRawDevelopmentLocalRangeOverlayTexture(
+                rawWorkspacePipeline->TakeRawDevelopmentLocalRangeOverlayTexture(
                         discardedOutlineWidth,
                         discardedOutlineHeight);
             if (discardedOutlineTexture != 0) {

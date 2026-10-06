@@ -1,3 +1,4 @@
+#include "ContinuousLinkStroke.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
@@ -263,16 +264,6 @@ void DrawSemanticLinkInspection(
             : input.descriptor.provenance.value.operationIdentity;
         if (!provenance.empty()) ImGui::TextWrapped("From: %s", provenance.c_str());
     }
-    // Destination diagnostics remain inspectable here; they never feed the
-    // source-oriented wire readout.
-    const std::string affected = "node-" + std::to_string(link.toNodeId);
-    for (const Stack::NodeMath::Diagnostic& diagnostic : editor->GetGraphSemanticDiagnostics()) {
-        if (diagnostic.affectedIdentity != affected) continue;
-        const ImVec4 color = diagnostic.severity == Stack::NodeMath::DiagnosticSeverity::Information
-            ? ImVec4(0.62f, 0.76f, 0.88f, 1.0f)
-            : ImVec4(0.94f, 0.73f, 0.36f, 1.0f);
-        ImGui::TextColored(color, "%s", diagnostic.message.c_str());
-    }
     ImGui::EndTooltip();
 }
 
@@ -294,121 +285,33 @@ void DrawLinkStrokeWithEdgeFade(
     if (!drawList || thickness <= 0.0f) {
         return;
     }
-    const bool hasGap = gapStartT >= 0.0f && gapEndT > gapStartT;
-    const auto insideGap = [&](float t) {
-        return hasGap && t >= gapStartT && t <= gapEndT;
-    };
-    if (straight) {
-        if (fadeDistance <= 0.0f && !hasGap) {
-            DrawStraightLinkStroke(drawList, p0, p3, color, thickness, dotted);
-            return;
-        }
-
-        const float dx = p3.x - p0.x;
-        const float dy = p3.y - p0.y;
-        const float length = std::sqrt((dx * dx) + (dy * dy));
-        const int sampleCount = std::clamp(static_cast<int>(length / 5.0f), 12, 180);
-
-        if (dotted) {
-            const float radius = std::max(0.25f, thickness * 0.5f);
-            const float spacing = std::max(1.4f, radius * 2.6f);
-            for (float distance = 0.0f; distance <= length; distance += spacing) {
-                const float t = length > 1e-4f ? (distance / length) : 0.0f;
-                if (insideGap(t)) continue;
-                const ImVec2 dotPos(
-                    p0.x + dx * t,
-                    p0.y + dy * t);
-                const float alpha = LinkEdgeFadeAlpha(dotPos, fadeMin, fadeMax, fadeDistance);
-                if (alpha > 0.001f) {
-                    drawList->AddCircleFilled(dotPos, radius, ScaleColorAlpha(color, alpha));
-                }
-            }
-            return;
-        }
-
-        ImVec2 previous = p0;
-        for (int index = 1; index <= sampleCount; ++index) {
-            const float t = static_cast<float>(index) / static_cast<float>(sampleCount);
-            const ImVec2 current(
-                p0.x + dx * t,
-                p0.y + dy * t);
-            const ImVec2 midpoint((previous.x + current.x) * 0.5f, (previous.y + current.y) * 0.5f);
-            const float midpointT = (static_cast<float>(index) - 0.5f) /
-                static_cast<float>(sampleCount);
-            const float alpha = LinkEdgeFadeAlpha(midpoint, fadeMin, fadeMax, fadeDistance);
-            if (!insideGap(midpointT) && alpha > 0.001f) {
-                drawList->AddLine(previous, current, ScaleColorAlpha(color, alpha), thickness);
-            }
-            previous = current;
-        }
+    if (!dotted) {
+        Stack::Editor::NodeGraphUIVisuals::DrawContinuousLinkStroke(drawList,p0,p1,p2,p3,color,thickness,
+            straight,fadeMin,fadeMax,fadeDistance,gapStartT,gapEndT);
         return;
     }
-
-    if (fadeDistance <= 0.0f && !hasGap) {
-        DrawBezierLinkStroke(drawList, p0, p1, p2, p3, color, thickness, dotted);
-        return;
-    }
-
-    auto pointDistance = [](const ImVec2& a, const ImVec2& b) {
-        const float dx = b.x - a.x;
-        const float dy = b.y - a.y;
-        return std::sqrt((dx * dx) + (dy * dy));
-    };
-
-    const float estimate =
-        pointDistance(p0, p1) +
-        pointDistance(p1, p2) +
-        pointDistance(p2, p3);
-    const int sampleCount = std::clamp(static_cast<int>(estimate / 5.0f), 32, 160);
-
-    if (dotted) {
-        const float radius = std::max(0.25f, thickness * 0.5f);
-        const float spacing = std::max(1.4f, radius * 2.6f);
-        ImVec2 previous = p0;
-        float distanceToNextDot = 0.0f;
-        for (int index = 1; index <= sampleCount; ++index) {
-            const float t = static_cast<float>(index) / static_cast<float>(sampleCount);
-            const ImVec2 current = SampleCubicBezierPoint(p0, p1, p2, p3, t);
-            const ImVec2 delta(current.x - previous.x, current.y - previous.y);
-            const float segmentLength = std::sqrt((delta.x * delta.x) + (delta.y * delta.y));
-            if (segmentLength <= 1e-4f) {
-                previous = current;
-                continue;
-            }
-
-            while (distanceToNextDot <= segmentLength) {
-                const float dotT = distanceToNextDot / segmentLength;
-                const float curveT = (static_cast<float>(index - 1) + dotT) /
-                    static_cast<float>(sampleCount);
-                const ImVec2 dotPos(
-                    previous.x + (delta.x * dotT),
-                    previous.y + (delta.y * dotT));
-                const float alpha = LinkEdgeFadeAlpha(dotPos, fadeMin, fadeMax, fadeDistance);
-                if (!insideGap(curveT) && alpha > 0.001f) {
-                    drawList->AddCircleFilled(dotPos, radius, ScaleColorAlpha(color, alpha));
-                }
-                distanceToNextDot += spacing;
-            }
-
-            distanceToNextDot -= segmentLength;
-            previous = current;
+    const bool hasGap=gapStartT>=0 && gapEndT>gapStartT;
+    const ImVec2 middle((p0.x+p3.x)*0.5f,(p0.y+p3.y)*0.5f);
+    const auto samples=SampleLinkCurve(p0,straight ? middle : p1,straight ? middle : p2,p3);
+    const float radius=std::max(0.25f,thickness*0.5f), spacing=std::max(1.4f,radius*2.6f);
+    float distanceToNextDot=0;
+    for (size_t i=1;i<samples.size();++i) {
+        const auto previous=samples[i-1].point, current=samples[i].point;
+        const ImVec2 delta(current.x-previous.x,current.y-previous.y);
+        const float length=std::hypot(delta.x,delta.y);
+        if (length<1e-4f) continue;
+        while (distanceToNextDot<=length) {
+            const float u=distanceToNextDot/length;
+            const float t=samples[i-1].t+(samples[i].t-samples[i-1].t)*u;
+            const ImVec2 point(previous.x+delta.x*u,previous.y+delta.y*u);
+            const float alpha=LinkEdgeFadeAlpha(point,fadeMin,fadeMax,fadeDistance);
+            if (!(hasGap && t>=gapStartT && t<=gapEndT) && alpha>0.001f)
+                drawList->AddCircleFilled(point,radius,ScaleColorAlpha(color,alpha));
+            distanceToNextDot+=spacing;
         }
-        return;
+        distanceToNextDot-=length;
     }
 
-    ImVec2 previous = p0;
-    for (int index = 1; index <= sampleCount; ++index) {
-        const float t = static_cast<float>(index) / static_cast<float>(sampleCount);
-        const ImVec2 current = SampleCubicBezierPoint(p0, p1, p2, p3, t);
-        const ImVec2 midpoint((previous.x + current.x) * 0.5f, (previous.y + current.y) * 0.5f);
-        const float midpointT = (static_cast<float>(index) - 0.5f) /
-            static_cast<float>(sampleCount);
-        const float alpha = LinkEdgeFadeAlpha(midpoint, fadeMin, fadeMax, fadeDistance);
-        if (!insideGap(midpointT) && alpha > 0.001f) {
-            drawList->AddLine(previous, current, ScaleColorAlpha(color, alpha), thickness);
-        }
-        previous = current;
-    }
 }
 
 } // namespace
@@ -468,14 +371,11 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             hoveredLink.fromSocketId == link.fromSocketId &&
             hoveredLink.toNodeId == link.toNodeId &&
             hoveredLink.toSocketId == link.toSocketId;
-        LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, link);
+        LinkVisualStyle visualStyle = ResolveLinkVisualStyle(graph, link, m_ActiveEditor);
         if (!GraphDottedMaskLinksEnabled(m_ActiveEditor)) {
             visualStyle.dotted = false;
         }
         const std::string& channel = visualStyle.channel;
-        const float laneOffset = graphStyle.enabled ? ChannelLaneOffset(channel, m_Zoom) : 0.0f;
-        p1.y += laneOffset;
-        p2.y += laneOffset;
         const float cullHandle = ResolveLinkHandle(p1, p2, straightLinks);
         const ImVec2 linkMin(
             std::min({ p1.x, p2.x, p1.x + cullHandle, p2.x - cullHandle }),
@@ -502,7 +402,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
             ? appearance->GetGraphConnectionTextSize()
             : StackAppearance::kGraphConnectionTextSizeDefault;
         const bool textOutline = appearance && appearance->GetGraphConnectionTextOutline();
-        const bool interactionReveal = labelsVisible;
+
         int labelLineCount = labelsVisible ? 2 : 0;
 
         LinkTextContent linkText;
@@ -598,7 +498,9 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
 
             const struct Candidate { float t; float y; } candidates[] = {
                 { 0.50f, 0.0f }, { 0.42f, 0.0f }, { 0.58f, 0.0f },
-                { 0.50f, -18.0f }, { 0.50f, 18.0f }
+                { 0.50f, -18.0f }, { 0.50f, 18.0f },
+                { 0.32f, -36.0f }, { 0.68f, 36.0f },
+                { 0.50f, -54.0f }, { 0.50f, 54.0f }
             };
             for (int requestedLines = labelLineCount; requestedLines >= 1 && !drawLabels; --requestedLines) {
                 for (const Candidate& candidate : candidates) {
@@ -618,7 +520,7 @@ void EditorNodeGraphUI::RenderLinks(const EditorNodeGraph::Graph& graph) {
                         &candidateTangent,
                         &candidateNormal,
                         &candidateAngle);
-                    if (interactionReveal || !collides(rect)) {
+                    if (selected || hovered || !collides(rect)) {
                         labelLineCount = requestedLines;
                         labelCenter = candidateCenter;
                         primaryCenter = candidatePrimaryCenter;
@@ -871,9 +773,8 @@ void EditorNodeGraphUI::RenderPendingOutputLinkDrag(
     const ImVec2 sourcePin = ToImVec2(OutputPinScreenPos(*from, m_DragOutputSocketId));
     ImVec2 p1 = sourcePin;
     ImVec2 p2 = ImGui::GetMousePos();
-    const float laneOffset = ChannelLaneOffset(visualStyle.channel, m_Zoom);
-    p1.y += laneOffset;
-    p2.y += laneOffset;
+    if (hoveredInputConnectable) if (const auto* target=graph.FindNode(hoveredInput.nodeId))
+        p2=ToImVec2(InputPinScreenPos(*target,hoveredInput.socketId));
     const float handle = ResolveLinkHandle(p1, p2, straightLinks);
     const ImU32 dragColor = graphStyle.enabled
         ? ColorToU32(LinkColorVec(visualStyle, graphStyle))
@@ -943,11 +844,10 @@ void EditorNodeGraphUI::RenderPendingInputLinkDrag(
     const bool straightLinks = GraphStraightLinksEnabled(editor);
     const GraphStyleTokens graphStyle = BuildGraphStyleTokens(editor);
     ImVec2 p1 = ImGui::GetMousePos();
+    if (hoveredOutputConnectable) if (const auto* source=graph.FindNode(hoveredOutput.nodeId))
+        p1=ToImVec2(OutputPinScreenPos(*source,hoveredOutput.socketId));
     const ImVec2 targetPin = ToImVec2(InputPinScreenPos(*to, m_DragInputSocketId));
     ImVec2 p2 = targetPin;
-    const float laneOffset = ChannelLaneOffset(visualStyle.channel, m_Zoom);
-    p1.y += laneOffset;
-    p2.y += laneOffset;
     const float handle = ResolveLinkHandle(p1, p2, straightLinks);
     const ImU32 dragColor = graphStyle.enabled
         ? ColorToU32(LinkColorVec(visualStyle, graphStyle))
@@ -1103,12 +1003,14 @@ void EditorNodeGraphUI::RenderGroups(EditorModule* editor, EditorNodeGraph::Grap
 
             if (ImGui::InputText("##rename", m_GroupRenameBuffer, sizeof(m_GroupRenameBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
                 group.title = m_GroupRenameBuffer;
+                editor->MarkGraphEdited(-1, false);
                 m_EditingGroupId = -1;
             }
 
             if (ImGui::IsItemDeactivated()) {
                 if (ImGui::IsItemDeactivatedAfterEdit()) {
                     group.title = m_GroupRenameBuffer;
+                    editor->MarkGraphEdited(-1, false);
                 }
                 m_EditingGroupId = -1;
             }

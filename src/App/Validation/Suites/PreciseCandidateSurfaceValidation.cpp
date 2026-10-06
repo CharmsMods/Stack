@@ -1,3 +1,4 @@
+#include "Renderer/RawCandidateRenderer.h"
 #include "App/Validation/ValidationSuites.h"
 
 #include "Editor/EditorRenderWorker.h"
@@ -212,7 +213,7 @@ bool SameVisibleRecipe(
     return PreciseRaw::CanonicalRecipeBytes(a) == PreciseRaw::CanonicalRecipeBytes(b);
 }
 
-WarmStartResult BuildPass94WarmStart(
+WarmStartResult BuildWarmStart(
     const RawRecipe::RawDevelopmentRecipe& baseRecipe,
     const Raw::RawMetadata& metadata,
     const std::string& sourceKey,
@@ -251,7 +252,7 @@ WarmStartResult BuildPass94WarmStart(
         std::vector<RawAutoStartPoint::RawAutoStartPointCandidateRenderRequest> requests =
             RawAutoStartPoint::CollectCandidateRenderRequests(diagnostics);
         for (int candidatePass = 0; candidatePass < 4 && !requests.empty(); ++candidatePass) {
-            const auto rendered = EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+            const auto rendered = Stack::Renderer::RenderRawCandidates(
                 pipeline, graph, sourceKey, requests);
             const bool anySuccess = std::any_of(rendered.begin(), rendered.end(), [](const auto& item) {
                 return item.success;
@@ -371,7 +372,7 @@ RenderedEvaluation RenderAndEvaluate(
     request.reason = "Phase 03 isolated objective-surface measurement.";
 
     const auto featureBegin = std::chrono::steady_clock::now();
-    const auto results = EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+    const auto results = Stack::Renderer::RenderRawCandidates(
         pipeline, graph, proposal.identities.sourceIdentity, { request });
     CandidateRenderEvidence render;
     render.attempted = true;
@@ -602,7 +603,7 @@ nlohmann::json RunSource(
         RawRecipe::MakeDefaultRecipe(input.path.string(), input.path.filename().string());
     defaultRecipe.source.fingerprint = sourceIdentity.sha256;
     defaultRecipe.source.fileSizeBytes = sourceIdentity.byteSize;
-    const WarmStartResult warm = BuildPass94WarmStart(
+    const WarmStartResult warm = BuildWarmStart(
         defaultRecipe, metadata, sourceIdentity.sha256, options.warmMaxDimension);
     if (!warm.valid) {
         return {
@@ -652,7 +653,7 @@ nlohmann::json RunSource(
     noReadbackRequest.hasRecipe = true;
     noReadbackRequest.recipe = warmProposal.recipe;
     noReadbackRequest.featureReadbackMaxDimension = 0;
-    const auto noReadback = EditorRenderWorker::RenderRawWorkspaceStartPointCandidateRequests(
+    const auto noReadback = Stack::Renderer::RenderRawCandidates(
         proxyPipeline, graph, sourceIdentity.sha256, { noReadbackRequest });
     const bool readbackOptInOnly = !noReadback.empty() &&
         noReadback.front().success && noReadback.front().stageImageReadbacks.empty();

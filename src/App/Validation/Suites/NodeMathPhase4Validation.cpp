@@ -20,6 +20,7 @@
 #include <vector>
 
 namespace Stack::Validation {
+bool ValidateGraphChannelRangesWithContext();
 namespace {
 
 using Stack::NodeMath::PointwiseOperation;
@@ -1171,7 +1172,8 @@ bool ValidateNodeMathPhase4Integration() {
         glfwTerminate();
         return false;
     }
-    const bool result = RunValidationWithContext();
+    const bool channelRanges = ValidateGraphChannelRangesWithContext();
+    const bool result = RunValidationWithContext() && channelRanges;
     glfwMakeContextCurrent(nullptr);
     glfwDestroyWindow(window);
     glfwTerminate();

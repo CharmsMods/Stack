@@ -100,7 +100,6 @@ bool ReadRadiometric(
 bool ReadRegistration(
     const nlohmann::json& value,
     RegistrationParameters& p,
-    std::uint32_t schemaVersion,
     std::string* error) {
     if (!value.is_object()) return Fail(error, "MFD registration parameters must be an object.");
 #define MFD_READ_REG(name) if (!ReadRequired(value, #name, p.name)) return Fail(error, "Missing or invalid MFD registration parameter: " #name);
@@ -138,21 +137,19 @@ bool ReadRegistration(
     MFD_READ_REG(flatSafeMinimumValidFraction)
     MFD_READ_REG(flatSafeNeighborDifferenceLimitRawPixels)
     MFD_READ_REG(keysBicubicParameter)
-    if (schemaVersion >= 2u) {
-        MFD_READ_REG(minimumTileValidFraction)
-        MFD_READ_REG(minimumStructuredSamples)
-        MFD_READ_REG(localHessianConditionLimit)
-        MFD_READ_REG(localHessianAbsoluteDamping)
-        MFD_READ_REG(localCovarianceRegularization)
-        MFD_READ_REG(localNumericalVarianceFloor)
-        MFD_READ_REG(subpixelConvergencePlanePixels)
-        MFD_READ_REG(maximumSubpixelCostIncreases)
-        MFD_READ_REG(cappedResidualSquared)
-        MFD_READ_REG(flatSafeUnobservableSigmaRawPixels)
-        MFD_READ_REG(covarianceResidualScaleFloor)
-        MFD_READ_REG(candidateTieTolerance)
-        MFD_READ_REG(interpolationWeightEpsilon)
-    }
+    MFD_READ_REG(minimumTileValidFraction)
+    MFD_READ_REG(minimumStructuredSamples)
+    MFD_READ_REG(localHessianConditionLimit)
+    MFD_READ_REG(localHessianAbsoluteDamping)
+    MFD_READ_REG(localCovarianceRegularization)
+    MFD_READ_REG(localNumericalVarianceFloor)
+    MFD_READ_REG(subpixelConvergencePlanePixels)
+    MFD_READ_REG(maximumSubpixelCostIncreases)
+    MFD_READ_REG(cappedResidualSquared)
+    MFD_READ_REG(flatSafeUnobservableSigmaRawPixels)
+    MFD_READ_REG(covarianceResidualScaleFloor)
+    MFD_READ_REG(candidateTieTolerance)
+    MFD_READ_REG(interpolationWeightEpsilon)
 #undef MFD_READ_REG
     return true;
 }
@@ -160,7 +157,6 @@ bool ReadRegistration(
 bool ReadReliability(
     const nlohmann::json& value,
     ReliabilityParameters& p,
-    std::uint32_t schemaVersion,
     std::string* error) {
     if (!value.is_object()) return Fail(error, "MFD reliability parameters must be an object.");
 #define MFD_READ_REL(name) if (!ReadRequired(value, #name, p.name)) return Fail(error, "Missing or invalid MFD reliability parameter: " #name);
@@ -180,13 +176,11 @@ bool ReadReliability(
     MFD_READ_REL(absoluteSafetyNoiseSigmaMultiplier)
     MFD_READ_REL(absoluteSafetyRelativeFraction)
     MFD_READ_REL(noiseModelConfidence)
-    if (schemaVersion >= 3u) {
-        MFD_READ_REL(storageTileCells)
-        MFD_READ_REL(frameUsableReliabilityThreshold)
-        MFD_READ_REL(frameUsableMaximumFraction)
-        MFD_READ_REL(frameUsableMinimumCells)
-        MFD_READ_REL(frameUsableMinimumFraction)
-    }
+    MFD_READ_REL(storageTileCells)
+    MFD_READ_REL(frameUsableReliabilityThreshold)
+    MFD_READ_REL(frameUsableMaximumFraction)
+    MFD_READ_REL(frameUsableMinimumCells)
+    MFD_READ_REL(frameUsableMinimumFraction)
 #undef MFD_READ_REL
     return true;
 }
@@ -198,6 +192,8 @@ bool ReadFusion(
     if (!value.is_object()) return Fail(error, "MFD fusion parameters must be an object.");
 #define MFD_READ_FUS(name) if (!ReadRequired(value, #name, p.name)) return Fail(error, "Missing or invalid MFD fusion parameter: " #name);
     MFD_READ_FUS(accumulatorPrecision)
+    MFD_READ_FUS(method)
+    MFD_READ_FUS(smoothing)
     MFD_READ_FUS(oneAlternateWeightCapRelativeToReference)
     MFD_READ_FUS(lowConfidenceTotalWeightCapRelativeToReference)
     MFD_READ_FUS(exactFallbackAlternateToReferenceRatio)
@@ -609,6 +605,8 @@ nlohmann::json SerializeParameters(const Parameters& p) {
         } },
         { "fusion", {
             { "accumulatorPrecision", p.fusion.accumulatorPrecision },
+            { "method", p.fusion.method },
+            { "smoothing", p.fusion.smoothing },
             { "oneAlternateWeightCapRelativeToReference", p.fusion.oneAlternateWeightCapRelativeToReference },
             { "lowConfidenceTotalWeightCapRelativeToReference", p.fusion.lowConfidenceTotalWeightCapRelativeToReference },
             { "exactFallbackAlternateToReferenceRatio", p.fusion.exactFallbackAlternateToReferenceRatio },
@@ -638,31 +636,19 @@ bool DeserializeParameters(
     const auto registration = value.find("registration");
     const auto reliability = value.find("reliability");
     const auto fusion = value.find("fusion");
-    const std::uint32_t serializedSchemaVersion = parsed.schemaVersion;
-    if (serializedSchemaVersion != kLegacyParameterSchemaVersion &&
-        serializedSchemaVersion != kPhase5ParameterSchemaVersion &&
-        serializedSchemaVersion != kParameterSchemaVersion) {
+    if (parsed.schemaVersion != kParameterSchemaVersion) {
         return Fail(error, "MFD parameter schema version is unsupported.");
     }
     if (radiometric == value.end() ||
         !ReadRadiometric(*radiometric, parsed.radiometric, error) ||
         registration == value.end() ||
-        !ReadRegistration(
-            *registration,
-            parsed.registration,
-            serializedSchemaVersion,
-            error) ||
+        !ReadRegistration(*registration, parsed.registration, error) ||
         reliability == value.end() ||
-        !ReadReliability(
-            *reliability,
-            parsed.reliability,
-            serializedSchemaVersion,
-            error) ||
+        !ReadReliability(*reliability, parsed.reliability, error) ||
         fusion == value.end() ||
         !ReadFusion(*fusion, parsed.fusion, error)) {
         return false;
     }
-    parsed.schemaVersion = kParameterSchemaVersion;
     if (!ValidateParameters(parsed, error)) return false;
     parameters = std::move(parsed);
     return true;
@@ -790,6 +776,9 @@ bool ValidateParameters(const Parameters& p, std::string* error) {
         if (!unit(value)) return Fail(error, "MFD noise-model confidence must remain in [0,1].");
     }
     if (p.fusion.accumulatorPrecision != "float64" ||
+        (p.fusion.method != "robust" &&
+         p.fusion.method != "weighted-average") ||
+        !unit(p.fusion.smoothing) ||
         !positive(p.fusion.oneAlternateWeightCapRelativeToReference) ||
         !positive(p.fusion.lowConfidenceTotalWeightCapRelativeToReference) ||
         p.fusion.lowConfidenceTotalWeightCapRelativeToReference <

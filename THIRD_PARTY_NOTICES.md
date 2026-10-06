@@ -1,61 +1,54 @@
-# Third Party Notices
+﻿# Third-Party Notices
 
-Stack is proprietary software. The third-party components listed below remain
-licensed by their original authors under their own separate license terms.
+This file is generated from legal/THIRD_PARTY_COMPONENTS.json.
+Stack's proprietary terms do not replace or restrict the licenses below.
 
 ## Dear ImGui
 
-- Component: Dear ImGui
+- Version: commit 5a76f2adf1b0403b86a45010121fb32a6bff8680
 - Upstream: https://github.com/ocornut/imgui
 - License: MIT
 - Copyright: Copyright (c) 2014-2026 Omar Cornut
-
-Stack statically links Dear ImGui. The Dear ImGui license text should be
-distributed with Stack release artifacts.
+- Included license files: `DearImGui-MIT.txt`
 
 ## GLFW
 
-- Component: GLFW
+- Version: 3.4
 - Upstream: https://www.glfw.org/
 - License: zlib/libpng
 - Copyright: Copyright (c) 2002-2006 Marcus Geelnard; Copyright (c) 2006-2019 Camilla Lowy
+- Included license files: `GLFW-zlib-libpng.txt`
 
-Stack links GLFW as part of its application runtime. The GLFW license text
-should be distributed with Stack release artifacts.
+## JSON for Modern C++
+
+- Version: 3.11.2
+- Upstream: https://github.com/nlohmann/json
+- License: MIT
+- Copyright: Copyright (c) 2013-2022 Niels Lohmann
+- Included license files: `NlohmannJSON-MIT.txt`
+
+## stb_image, stb_image_write, and stb_truetype
+
+- Version: stb_image 2.30; stb_image_write 1.16; stb_truetype (Dear ImGui bundled revision)
+- Upstream: https://github.com/nothings/stb
+- License: MIT or public domain
+- Copyright: Copyright (c) 2017 Sean Barrett
+- Included license files: `stb-MIT-or-Public-Domain.txt`
 
 ## LibRaw
 
-- Component: LibRaw
-- Version: `0.22.1`
-- Git tag: `0.22.1`
-- Git commit: `b860248a89d9082b8e0a1e202e516f46af9adb29`
+- Version: 0.22.1 (commit b860248a89d9082b8e0a1e202e516f46af9adb29)
 - Upstream: https://github.com/LibRaw/LibRaw
+- License: GNU LGPL 2.1 option
 - Copyright: Copyright (C) 2008-2026 LibRaw LLC
-- Stack distribution path: GNU LGPL 2.1 option
-- Alternate upstream option: CDDL 1.0
+- Included license files: `LibRaw-LGPL-2.1.txt`, `LibRaw-COPYRIGHT.txt`
 
-Stack uses LibRaw as an isolated, dynamically linked RAW decoder backend for file reading, unpacking, and metadata extraction. Stack's main RAW rendering path performs RAW development in Stack GPU code and does not use `dcraw_process()` as the final image processor.
+Stack dynamically links LibRaw under the LGPL 2.1 option. The applicable release includes the exact corresponding source archive, and the DLL may be replaced by an interface-compatible modified version as permitted by that license.
 
-License texts that should be distributed with Stack release artifacts:
+## Microsoft Windows App SDK Bootstrap
 
-- LGPL 2.1: include `LICENSE.LGPL` from the LibRaw source distribution, or another unmodified copy of the GNU Lesser General Public License version 2.1.
-
-LibRaw may include additional upstream notices in its source distribution. Release packaging should preserve and ship the license and notice files included with the exact pinned LibRaw source.
-
-Distribution assumption: Stack's current Windows production-readiness layout ships `libraw.dll` beside `Stack.exe`, plus this notices file and the LibRaw license/copyright files. This is a practical engineering note, not legal advice or legal certainty. Final legal review is still needed before public or commercial distribution.
-
-Optional acceleration/extra decoder note: RawSpeed, Adobe DNG SDK, and other optional LibRaw-adjacent acceleration/extra decoder components are not enabled in Stack RAW V1. Do not enable them without separately reviewing and documenting their licenses and notice requirements.
-
-## Optional FFmpeg Provider
-
-- Component: FFmpeg
-- Upstream: https://ffmpeg.org/
-- Planned integration boundary: app-local external `ffmpeg.exe`
-- Runtime path when packaged: `tools/ffmpeg/ffmpeg.exe`
-- Provider manifest: `tools/ffmpeg/ffmpeg-provider.json`
-
-Stack's initial video-export architecture treats FFmpeg as an optional external executable provider, not as linked FFmpeg DLLs or libraries. Stack must continue to launch and run when this provider is absent; direct video encoding can remain unavailable until an approved provider is present.
-
-Release packaging may include FFmpeg only from a reviewed provider folder whose `ffmpeg-provider.json` confirms the exact binary, version, license marker, configure line, redistribution approval, license files, and source-reference files. Do not package FFmpeg builds that use `--enable-gpl` or `--enable-nonfree` as Stack's approved provider unless the project makes a separate legal/license decision and updates this policy.
-
-When an approved FFmpeg provider is packaged, keep the exact provider manifest, license files, source-reference files, and notice files beside the provider under `tools/ffmpeg`. This note is an engineering distribution policy, not legal advice or legal certainty. Final legal review is still needed before public or commercial distribution.
+- Version: resolved build dependency
+- Upstream: https://learn.microsoft.com/windows/apps/windows-app-sdk/
+- License: Microsoft Software License Terms
+- Copyright: Copyright Microsoft Corporation
+- Included license files: `Microsoft-WindowsAppSDK-License.txt`

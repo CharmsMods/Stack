@@ -996,7 +996,7 @@ void EditorModule::RenderRawDetailAutoMaskControls(EditorNodeGraph::Node& node, 
 
     Raw::RawDetailFusionSettings& settings = node.rawDetailAutoMask.settings;
     const Raw::RawDetailFusionSettings settingsBefore = settings;
-    const bool hasImageInput = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId) != nullptr;
+    const bool hasImageInput = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId) != nullptr;
     bool changed = false;
 
     settings.mode = Raw::RawDetailFusionMode::AutoAnalyze;
@@ -1058,8 +1058,8 @@ void EditorModule::RenderRawDetailFusionControls(EditorNodeGraph::Node& node, fl
 
     Raw::RawDetailFusionSettings& settings = node.rawDetailFusion.settings;
     const Raw::RawDetailFusionSettings settingsBefore = settings;
-    const bool hasImageInput = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId) != nullptr;
-    const bool hasHybridMask = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kMaskInputSocketId) != nullptr;
+    const bool hasImageInput = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kImageInputSocketId) != nullptr;
+    const bool hasHybridMask = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kMaskInputSocketId) != nullptr;
     const RenderPipeline::PreLocalExposureSummary* liveSummary = m_Pipeline.GetPreLocalExposureSummary(node.id);
     bool changed = false;
 

@@ -6,12 +6,13 @@
 #include <initializer_list>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace Stack::NodeMath {
 
-inline constexpr std::uint32_t kSemanticDescriptorSchemaVersion = 3;
+inline constexpr std::uint32_t kSemanticDescriptorSchemaVersion = 4;
 
 enum class LogicalValueType {
     Invalid,
@@ -219,6 +220,10 @@ struct SpatialDescriptor {
     Rect dataWindow;
     RasterOrigin rasterOrigin = RasterOrigin::BottomLeft;
     double pixelAspect = 1.0;
+    // Native dimensions and normalized output-to-source coordinates survive proxies.
+    int nativeWidth = 0;
+    int nativeHeight = 0;
+    std::array<double, 9> sourceTransform{1,0,0, 0,1,0, 0,0,1};
 };
 
 bool operator==(const SpatialDescriptor& left, const SpatialDescriptor& right);
@@ -357,6 +362,8 @@ bool IsValidScopedId(const std::string& id);
 bool IsValidContentHash(const std::string& hash);
 bool IsValidCanonicalUuid(const std::string& uuid);
 std::string Sha256ContentIdentity(const std::string& content);
+std::string Sha256ContentIdentity(
+    const std::vector<std::string_view>& contentChunks);
 
 enum class DiagnosticStage {
     Connection,

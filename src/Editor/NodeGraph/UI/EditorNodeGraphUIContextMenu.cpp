@@ -1,3 +1,4 @@
+#include "Utils/UiBusyState.h"
 #include "Editor/NodeGraph/EditorNodeGraphUI.h"
 
 #include "Editor/EditorModule.h"
@@ -41,6 +42,7 @@ std::string DefaultPresetName(const EditorModule* editor) {
 } // namespace
 
 void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
+    std::optional<std::pair<int, bool>> pendingDelete;
     if (m_OpenRenameProjectPopup) {
         ImGui::OpenPopup("Rename Project##EditorNodeGraph");
         m_OpenRenameProjectPopup = false;
@@ -67,13 +69,17 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         EditorNodeGraph::Node* node = editor->GetNodeGraph().FindNode(m_ContextNodeId);
         if (node) {
             ImGui::TextDisabled("%s", node->title.c_str());
-            const bool canDeleteNode =
-                node->kind != EditorNodeGraph::NodeKind::Output ||
-                editor->GetNodeGraph().GetOutputNodeIds().size() > 1;
+            const bool protectedNode = node->role == Stack::GraphModel::NodeRole::OriginalImage ||
+                node->role == Stack::GraphModel::NodeRole::CurrentImage || node->role == Stack::GraphModel::NodeRole::LayerResult;
+            const bool canDeleteNode = !protectedNode && (node->kind != EditorNodeGraph::NodeKind::Output ||
+                editor->GetNodeGraph().GetOutputNodeIds().size() > 1);
             if (canDeleteNode && ImGui::MenuItem("Delete Node")) {
-                editor->RemoveGraphNode(node->id);
+                pendingDelete = {{node->id, true}};
             }
-            if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+            if (canDeleteNode && ImGui::MenuItem("Delete and disconnect")) pendingDelete = {{node->id, false}};
+            if (node->kind == EditorNodeGraph::NodeKind::RawOperation && ImGui::MenuItem("Edit photo controls"))
+                editor->GetGraphEditorContext().inspectParameters(node->id);
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, !protectedNode)) {
                 if (!editor->GetNodeGraph().IsNodeSelected(node->id)) {
                     editor->GetNodeGraph().SelectNode(node->id, false);
                 }
@@ -288,8 +294,8 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                     }
                     editor->RequestOpenRawWorkspaceTab();
                 }
-                if (ImGui::MenuItem("Decompose To Nodes")) {
-                    editor->DecomposeActiveRawWorkspaceProjectToManagedGraph();
+                if (ImGui::MenuItem("Open Background graph")) {
+                    editor->OpenRawLayerMaskGraph(Stack::Project::kRawBackgroundId);
                 }
             }
             if (node->kind == EditorNodeGraph::NodeKind::Compound) {
@@ -320,7 +326,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
                 if (ImGui::MenuItem("Update To Newer Embedded Version")) {
                     std::string error;
                     if (!editor->UpdateCompoundNodeToLatestEmbeddedVersion(compoundNodeId, &error)) {
-                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Info,
+                        PostNodeGraphContextNotification(editor, UiNotificationSeverity::Warning,
                             error, "compound-update");
                     }
                 }
@@ -337,9 +343,9 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
     else if (contextMenuOpen) {
         const bool canRenameProject = editor &&
             (!editor->GetCurrentProjectName().empty() || !editor->GetCurrentProjectFileName().empty());
-        const bool saveBusy = Async::IsBusy(LibraryManager::Get().GetSaveTaskState());
+        const bool saveBusy = (editor && (editor->IsProjectFileSaveBusy() || editor->IsRawWorkspaceProjectSaveBusy()));
 
-        ImGui::BeginDisabled(!canRenameProject || saveBusy);
+        Stack::UiActivity::BeginDisabledForWork(saveBusy, !canRenameProject);
         if (ImGui::MenuItem("Rename Project")) {
             const std::string currentName = editor->GetCurrentProjectName().empty()
                 ? "Untitled Project"
@@ -633,6 +639,7 @@ void EditorNodeGraphUI::RenderContextMenu(EditorModule* editor) {
         m_ContextMenuFadeActive = false;
     }
     ImGui::PopStyleVar();
+    if (pendingDelete) editor->RemoveGraphNode(pendingDelete->first, pendingDelete->second);
 
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("Rename Project##EditorNodeGraph", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {

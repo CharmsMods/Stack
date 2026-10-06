@@ -24,11 +24,34 @@ ImVec4 BlendColor(const ImVec4& from, const ImVec4& to, float t) {
 
 } // namespace
 
+void LibraryModule::SetSectionPanelHosted(bool hosted) {
+    m_SectionPanelHosted = hosted;
+    if (hosted) {
+        m_FilterPanelExpanded = false;
+        m_FilterPanelWidthAnim = 0.0f;
+        m_FilterPanelHoverGrace = 0.0f;
+    }
+}
+
+void LibraryModule::RenderSectionPanel() {
+    ImGui::TextUnformatted("Projects");
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##ProjectSearch", "Search projects", m_SearchFilter, sizeof(m_SearchFilter));
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    if (!m_SelectedProjects.empty()) {
+        ImGui::TextDisabled("%d selected", static_cast<int>(m_SelectedProjects.size()));
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    }
+    RenderTagFilters(false, {});
+}
+
 void LibraryModule::RenderTagsDrawer(
     StackAppearance::AppearanceManager* appearance,
     bool wallpaperSurfaces,
     const StackAppearance::RuntimeSurfacePalette& surfacePalette,
     float dt) {
+    if (m_SectionPanelHosted) return;
     (void)appearance;
     const ImVec2 gridPos = ImGui::GetWindowPos();
     const ImVec2 gridSize = ImGui::GetWindowSize();
@@ -121,6 +144,16 @@ void LibraryModule::RenderTagsDrawer(
         false,
         ImGuiWindowFlags_None);
 
+    RenderTagFilters(wallpaperSurfaces, surfacePalette);
+
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+}
+
+void LibraryModule::RenderTagFilters(bool wallpaperSurfaces,
+    const StackAppearance::RuntimeSurfacePalette& surfacePalette) {
+    const auto allTags = TagManager::Get().GetAllKnownTags();
     ImGui::TextUnformatted("Filters");
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
@@ -207,8 +240,4 @@ void LibraryModule::RenderTagsDrawer(
     if (submittedTag) {
         applyTagToSelection();
     }
-
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 }

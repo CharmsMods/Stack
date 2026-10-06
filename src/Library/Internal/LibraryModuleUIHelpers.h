@@ -26,6 +26,7 @@ struct LibraryPackedCard {
     std::size_t index = 0;
     ImVec2 pos = ImVec2(0.0f, 0.0f);
     ImVec2 size = ImVec2(0.0f, 0.0f);
+    float scaleMultiplier = 1.0f;
 };
 
 template <typename TMap>
@@ -62,6 +63,7 @@ void PruneCardMotionStates(TMap& states, int frameCount) {
 }
 
 unsigned int LoadIconTexture(const std::string& filename);
+unsigned int LoadIconTextureFromMemory(const unsigned char* data, unsigned int size);
 
 void ComputeCoverUv(float sourceWidth, float sourceHeight, const ImRect& targetRect, ImVec2& outUv0, ImVec2& outUv1);
 void DrawCardMotionFrame(ImDrawList* drawList, const ImRect& rect, float hover, float selected, bool hovered);
@@ -77,7 +79,11 @@ void DrawSplitHandle(ImDrawList* drawList, const ImRect& rect, float split, ImGu
 bool ProjectMatchesFilter(const ProjectEntry& project, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly);
 bool AssetMatchesFilter(const AssetEntry& asset, const char* filter, const std::unordered_set<std::string>& activeTags, bool noTagOnly);
 ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight, float viewScale = 1.0f);
-std::vector<LibraryPackedCard> PackLibraryCards(const std::vector<LibraryPackedCard>& inputCards, float contentWidth, float gap);
+std::vector<LibraryPackedCard> PackLibraryCards(
+    const std::vector<LibraryPackedCard>& inputCards,
+    float contentWidth,
+    float gap,
+    float maximumScaleMultiplier = 1.08f);
 std::uint64_t HashCombine(std::uint64_t seed, std::uint64_t value);
 std::uint64_t HashString(const std::string& value);
 std::string BuildTagFilterKey(const std::unordered_set<std::string>& activeTags);

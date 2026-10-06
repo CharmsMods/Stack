@@ -202,7 +202,7 @@ void EditorModule::ApplyDevelopCandidateRenderFeedback(
 
     bool persistedStateChanged = false;
     for (const auto& entry : resultsByNode) {
-        EditorNodeGraph::Node* node = m_NodeGraph.FindNode(entry.first);
+        EditorNodeGraph::Node* node = m_Project->graph.FindNode(entry.first);
         if (!node ||
             node->kind != EditorNodeGraph::NodeKind::RawDevelop ||
             !node->rawDevelop.integratedToneLayerJson.is_object()) {
@@ -1241,7 +1241,7 @@ void EditorModule::ApplyDevelopCandidateRenderFeedback(
         }
         if (renderedFeedbackWorthTrying) {
             const EditorNodeGraph::Node* rawSource =
-                FindUpstreamRawSourceForDevelopNode(m_NodeGraph, *node);
+                FindUpstreamRawSourceForDevelopNode(m_Project->graph, *node);
             if (rawSource && rawSource->kind == EditorNodeGraph::NodeKind::RawSource) {
                 if (UpdateDevelopAutoState(
                         node->id,
@@ -1257,6 +1257,6 @@ void EditorModule::ApplyDevelopCandidateRenderFeedback(
     }
 
     if (persistedStateChanged) {
-        m_Dirty = true;
+        MarkDirty();
     }
 }

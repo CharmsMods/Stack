@@ -1,4 +1,4 @@
-#include "App/Validation/PreciseCandidateValidationRuntime.h"
+#include "Renderer/RawCandidateEvaluation.h"
 #include "App/Validation/ValidationSuites.h"
 
 #include "Raw/LibRawDecoder.h"
@@ -24,8 +24,8 @@
 namespace Stack::Validation {
 namespace {
 
-using PreciseCandidateRuntime::RenderedEvaluation;
-using PreciseCandidateRuntime::WarmStartResult;
+using Renderer::RawCandidateEvaluation::RenderedEvaluation;
+using Renderer::RawCandidateEvaluation::WarmStartResult;
 using PreciseRaw::CandidateEvaluationRecord;
 using PreciseRaw::CandidateIdentityContext;
 using PreciseRaw::CandidateProposal;
@@ -63,7 +63,7 @@ struct EvaluationSession {
     bool fullReadbackComplete = false;
 
     CandidateEvaluationRecord EvaluateProxy(const CandidateProposal& proposal) {
-        RenderedEvaluation rendered = PreciseCandidateRuntime::RenderAndEvaluate(
+        RenderedEvaluation rendered = Renderer::RawCandidateEvaluation::RenderAndEvaluate(
             proxyPipeline,
             graph,
             proposal,
@@ -76,14 +76,14 @@ struct EvaluationSession {
             featureMaxDimension,
             *solverBaseRecipe,
             "Phase 05 precise dry-run proxy candidate; diagnostic only, no apply.");
-        const bool complete = PreciseCandidateRuntime::HasRequiredStages(rendered);
+        const bool complete = Renderer::RawCandidateEvaluation::HasRequiredStages(rendered);
         everyProxyReadbackComplete = everyProxyReadbackComplete && complete;
         if (warmImages.empty() && complete) warmImages = rendered.images;
         return std::move(rendered.evaluation);
     }
 
     CandidateEvaluationRecord EvaluateFull(const CandidateProposal& proposal) {
-        RenderedEvaluation rendered = PreciseCandidateRuntime::RenderAndEvaluate(
+        RenderedEvaluation rendered = Renderer::RawCandidateEvaluation::RenderAndEvaluate(
             fullPipeline,
             graph,
             proposal,
@@ -96,7 +96,7 @@ struct EvaluationSession {
             std::max(512, featureMaxDimension),
             *solverBaseRecipe,
             "Phase 05 independent full-resolution finalist verification; diagnostic only, no apply.");
-        fullReadbackComplete = PreciseCandidateRuntime::HasRequiredStages(rendered);
+        fullReadbackComplete = Renderer::RawCandidateEvaluation::HasRequiredStages(rendered);
         return std::move(rendered.evaluation);
     }
 };
@@ -323,7 +323,7 @@ nlohmann::json RunSource(
     inputProjectRecipe.source.fileSizeBytes = sourceIdentity.byteSize;
     const std::string inputProjectBefore =
         PreciseRaw::CanonicalRecipeBytes(inputProjectRecipe);
-    const WarmStartResult warm = PreciseCandidateRuntime::BuildPass94WarmStart(
+    const WarmStartResult warm = Renderer::RawCandidateEvaluation::BuildWarmStart(
         inputProjectRecipe, metadata, sourceIdentity.sha256, options.warmMaxDimension);
     if (!warm.valid) {
         return {
@@ -367,7 +367,7 @@ nlohmann::json RunSource(
     request.stagePolicies = PreciseDryRun::DefaultStagePolicies();
 
     EvaluationSession session;
-    session.graph = PreciseCandidateRuntime::BuildGraph(solverBaseRecipe);
+    session.graph = Renderer::RawCandidateEvaluation::BuildGraph(solverBaseRecipe);
     session.parameterSpace = &parameterSpace;
     session.rawEvidence = &rawEvidence;
     session.metadata = &metadata;

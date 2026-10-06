@@ -157,7 +157,12 @@ unsigned int CreateComputeProgram(const char* computeSrc) {
     return program;
 }
 
-unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int height, int channels) {
+unsigned int CreateTextureFromPixels(
+    const unsigned char* data,
+    int width,
+    int height,
+    int channels,
+    bool generateMipmaps) {
     if (!IsSupportedTextureExtent(width, height) ||
         channels < 1 || channels > 4) {
         return 0;
@@ -190,13 +195,50 @@ unsigned int CreateTextureFromPixels(const unsigned char* data, int width, int h
         glDeleteTextures(1, &tex);
         return 0;
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    if (generateMipmaps) {
+        glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    glTexParameteri(
+        GL_TEXTURE_2D,
+        GL_TEXTURE_MIN_FILTER,
+        generateMipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     
     savedTexture.Restore();
     return tex;
+}
+
+unsigned int CreateTextureFromData(
+    const void* data, int width, int height,
+    unsigned int internalFormat, unsigned int format, unsigned int type,
+    unsigned int filter) {
+    if (!IsSupportedTextureExtent(width, height)) return 0;
+
+    const Stack::Renderer::GLState::TextureBinding savedTexture(
+        GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D);
+    const Stack::Renderer::GLState::PixelUnpackState savedUnpack;
+    unsigned int texture = 0;
+    ClearGlErrors();
+    glGenTextures(1, &texture);
+    if (texture == 0) return 0;
+    glBindTexture(GL_TEXTURE_2D, texture);
+    savedUnpack.ConfigureTightCpuUpload();
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0,
+        format, type, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    const GLenum uploadError = glGetError();
+    savedUnpack.Restore();
+    savedTexture.Restore();
+    if (uploadError != GL_NO_ERROR) {
+        glDeleteTextures(1, &texture);
+        return 0;
+    }
+    return texture;
 }
 
 unsigned int CreateEmptyTexture(int width, int height) {

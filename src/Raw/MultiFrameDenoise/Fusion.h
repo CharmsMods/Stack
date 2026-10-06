@@ -44,6 +44,7 @@ struct FusionReferenceSample {
     double fusionVariance = 0.0;
     double darkVariance = 0.0;
     double effectiveDnStep = 0.0;
+    CfaSite site = CfaSite::Red;
 };
 
 struct FusionCandidateSample {
@@ -58,6 +59,10 @@ struct FusionCandidateSample {
     double darkVariance = 0.0;
     double effectiveDnStep = 0.0;
     double reliability = 0.0;
+    // Stable project order is part of Shared Burst determinism. Trust may
+    // attenuate an accepted observation but can never increase it.
+    std::uint64_t sourceOrdinal = 0u;
+    double trustAttenuation = 1.0;
 
     // The reference-defect path cannot compare against the defective sample.
     // Its upstream, reference-independent confidence must be explicit.
@@ -72,16 +77,30 @@ struct FusionPixelDiagnostics {
     bool referenceDefectReconstructed = false;
     bool referenceDefectRepairDeferred = false;
     bool lowConfidenceTotalCapApplied = false;
-    std::uint64_t eligibleAlternateCount = 0u;
-    std::uint64_t contributingAlternateCount = 0u;
-    std::uint64_t rejectedAlternateCount = 0u;
-    std::uint64_t individuallyCappedAlternateCount = 0u;
+    // Per-pixel support is bounded by the processor's source-count contract.
+    // Keeping these as 16-bit values avoids paying for four 64-bit counters
+    // at every sensor sample while retaining ample rollback headroom.
+    std::uint16_t eligibleAlternateCount = 0u;
+    std::uint16_t contributingAlternateCount = 0u;
+    std::uint16_t rejectedAlternateCount = 0u;
+    std::uint16_t individuallyCappedAlternateCount = 0u;
     double referenceWeight = 0.0;
     double alternateWeight = 0.0;
     double alternateToReferenceWeightRatio = 0.0;
     double effectiveSampleCount = 1.0;
+    std::uint16_t rawSupportCount = 1u;
+    std::uint16_t ownerSourceIndex = 0u;
+    float ownerContribution = 1.0f;
+    float robustAttenuation = 1.0f;
+    float modelQuadraticVariance = 0.0f;
+    float policyConditionalSamplingVariance = 0.0f;
+    float finiteSampleRobustVariance = 0.0f;
     double outputVarianceComparisonDomain = 0.0;
 };
+
+static_assert(
+    sizeof(FusionPixelDiagnostics) <= 88u,
+    "Per-pixel fusion diagnostics must remain bounded for full-resolution bursts.");
 
 struct FusionPixelResult {
     bool valid = false;

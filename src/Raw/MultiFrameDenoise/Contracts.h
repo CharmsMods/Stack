@@ -10,9 +10,7 @@
 
 namespace Raw::Mfd {
 
-inline constexpr std::uint32_t kLegacyParameterSchemaVersion = 1;
-inline constexpr std::uint32_t kPhase5ParameterSchemaVersion = 2;
-inline constexpr std::uint32_t kParameterSchemaVersion = 3;
+inline constexpr std::uint32_t kParameterSchemaVersion = 4;
 inline constexpr std::uint32_t kAlgorithmVersion = 1;
 inline constexpr const char* kAlgorithmId = "ra-cfa";
 inline constexpr const char* kAlgorithmVersionId = "ra-cfa-v1";
@@ -148,7 +146,7 @@ OutputContract CanonicalOutputContract();
 bool IsCanonical(const NormalizedMosaicContract& contract);
 bool IsCanonical(const OutputContract& contract);
 
-enum class DecisionReason {
+enum class DecisionReason : std::uint8_t {
     None,
     ReferenceUnreadable,
     ReferenceIncompatible,
@@ -300,6 +298,11 @@ struct ReliabilityParameters {
 
 struct FusionParameters {
     std::string accumulatorPrecision = "float64";
+    // Robust keeps the original confidence weights. Weighted average softens
+    // only accepted confidence weights so static bursts approach their real
+    // frame count without bypassing motion/outlier safety gates.
+    std::string method = "weighted-average";
+    double smoothing = 0.70;
     double oneAlternateWeightCapRelativeToReference = 4.0;
     double lowConfidenceTotalWeightCapRelativeToReference = 8.0;
     double exactFallbackAlternateToReferenceRatio = 0.05;

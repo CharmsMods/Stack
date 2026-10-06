@@ -334,8 +334,7 @@ AdapterResult ApplyOutput(
         sourceRgba, width, height, workingSpace);
     result.inputExposureGain = inputExposureGain;
     outRgba = sourceRgba;
-    if (!settings.enabled ||
-        (settings.colorNoise <= 0.0f && settings.luminanceNoise <= 0.0f)) {
+    if (!RawRecipe::IsRgbDenoiseActive(settings)) {
         result.ok = true;
         return result;
     }

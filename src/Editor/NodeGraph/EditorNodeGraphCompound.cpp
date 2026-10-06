@@ -214,6 +214,9 @@ Node CloneImageNodeForCompoundExpansion(const Node& source) {
     clone.id = source.id;
     clone.instanceUuid = source.instanceUuid;
     clone.kind = source.kind;
+    clone.role = source.role;
+    clone.reference = source.reference;
+    clone.referenceType = source.referenceType;
     clone.typeId = source.typeId;
     clone.title = source.title;
     clone.position = source.position;
@@ -227,6 +230,8 @@ Node CloneImageNodeForCompoundExpansion(const Node& source) {
 
     clone.image.label = source.image.label;
     clone.image.sourcePath = source.image.sourcePath;
+    clone.image.managedAssetId = source.image.managedAssetId;
+    clone.image.projectAssetPath = source.image.projectAssetPath;
     clone.image.width = source.image.width;
     clone.image.height = source.image.height;
     clone.image.channels = source.image.channels;
@@ -535,7 +540,8 @@ bool Graph::UpdateCompoundNodeDefinition(
 bool Graph::UnpackCompoundNode(
     int nodeId,
     std::vector<int>* unpackedNodeIds,
-    std::string* error) {
+    std::string* error,
+    std::vector<CompoundOutputBinding>* outputBindings) {
     Node* instanceNode = FindNode(nodeId);
     if (!instanceNode || instanceNode->kind != NodeKind::Compound) {
         if (error) *error = "Selected node is not a compound instance.";
@@ -777,6 +783,14 @@ bool Graph::UnpackCompoundNode(
         link.toSocketId = std::move(normalizedTarget);
     }
 
+    std::vector<CompoundOutputBinding> bindings;
+    if (outputBindings) {
+        for (const auto& port : definition->ports) {
+            if (port.direction != Stack::NodeMath::PortDirection::Output) continue;
+            const auto source = uuidToNew.find(port.internalInstanceUuid);
+            if (source != uuidToNew.end()) bindings.push_back({ nodeId, port.id, source->second, port.internalSocketId });
+        }
+    }
     if (!RemoveNode(nodeId)) {
         rollbackTransientExpansion();
         if (error) *error = "Unpack could not remove the compound instance.";
@@ -795,11 +809,13 @@ bool Graph::UnpackCompoundNode(
     if (unpackedNodeIds) {
         *unpackedNodeIds = std::move(unpackedResult);
     }
+    if (outputBindings) *outputBindings = std::move(bindings);
     TouchStructure();
     return true;
 }
 
-bool Graph::ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* result) const {
+Graph Graph::CloneForAnalysis() const {
+    Graph expanded;
     expanded.m_Nodes.clear();
     expanded.m_Nodes.reserve(m_Nodes.size());
     for (const Node& source : m_Nodes) {
@@ -825,6 +841,11 @@ bool Graph::ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* res
     expanded.m_CompletedChainsCacheRevision = 0;
     expanded.m_CompletedChainsCache.clear();
     expanded.m_OutputConnectionDiagnosticCache.clear();
+    return expanded;
+}
+
+bool Graph::ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* result) const {
+    expanded = CloneForAnalysis();
     CompoundExpansionResult local;
     for (int iteration = 0; iteration < 256; ++iteration) {
         int compoundNodeId = -1;
@@ -840,12 +861,22 @@ bool Graph::ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* res
             return true;
         }
         std::vector<int> unpacked;
+        std::vector<CompoundOutputBinding> bindings;
         std::string unpackError;
         local.authoredCompoundNodeIds.push_back(compoundNodeId);
-        if (!expanded.UnpackCompoundNode(compoundNodeId, &unpacked, &unpackError)) {
+        if (!expanded.UnpackCompoundNode(compoundNodeId, &unpacked, &unpackError, &bindings)) {
             local.error = unpackError;
             if (result) *result = std::move(local);
             return false;
+        }
+        for (const auto& binding : bindings) {
+            for (auto& existing : local.outputBindings) {
+                if (existing.expandedNodeId == binding.authoredNodeId && existing.expandedSocketId == binding.authoredSocketId) {
+                    existing.expandedNodeId = binding.expandedNodeId;
+                    existing.expandedSocketId = binding.expandedSocketId;
+                }
+            }
+            local.outputBindings.push_back(binding);
         }
         local.expandedNodeIds.insert(local.expandedNodeIds.end(), unpacked.begin(), unpacked.end());
     }

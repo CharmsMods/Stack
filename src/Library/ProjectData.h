@@ -4,12 +4,18 @@
 #include <cstdint>
 #include <vector>
 #include "ThirdParty/json.hpp"
+#include <filesystem>
 
 struct ProjectEntry {
+    std::string projectId;
     std::string fileName;
+    std::filesystem::path absolutePath;
     std::string projectName;
     std::string timestamp;
     std::string projectKind;
+    bool needsAttention = false;
+    bool readOnlyRecovery = false;
+    std::string errorMessage;
     std::vector<unsigned char> thumbnailBytes;
     
     // Metadata

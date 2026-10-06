@@ -228,6 +228,43 @@ bool ValidatePixelAndAbsoluteGates() {
             Raw::Mfd::FlatTopQuinticGate(5.0, 2.5, 5.0) == 0.0 &&
             Raw::Mfd::FlatTopQuinticGate(3.75, 2.5, 5.0) > 0.0,
         "pixel flat-top gate endpoints or transition are invalid");
+    const double belowFull = std::nextafter(2.5, 0.0);
+    const double aboveFull = std::nextafter(
+        2.5, std::numeric_limits<double>::infinity());
+    const double belowZero = std::nextafter(5.0, 0.0);
+    const double aboveZero = std::nextafter(
+        5.0, std::numeric_limits<double>::infinity());
+    for (const double magnitude : {
+            -std::numeric_limits<double>::infinity(),
+            -aboveZero, -belowZero, -aboveFull, -belowFull,
+            -0.0, 0.0,
+            belowFull, aboveFull, belowZero, aboveZero,
+            std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::quiet_NaN() }) {
+        const double gate = Raw::Mfd::FlatTopQuinticGate(
+            magnitude, 2.5, 5.0);
+        ok &= Check(std::isfinite(gate) && gate >= 0.0 && gate <= 1.0,
+            "pixel flat-top gate escaped its finite closed [0,1] contract");
+    }
+    const auto& reliability = parameters.reliability;
+    for (const double confidence : {
+            -std::numeric_limits<double>::infinity(),
+            std::nextafter(reliability.reliabilityRemapMin, 0.0),
+            reliability.reliabilityRemapMin,
+            std::nextafter(reliability.reliabilityRemapMin, 1.0),
+            0.5 * (reliability.reliabilityRemapMin +
+                reliability.reliabilityRemapMax),
+            std::nextafter(reliability.reliabilityRemapMax, 0.0),
+            reliability.reliabilityRemapMax,
+            std::nextafter(reliability.reliabilityRemapMax, 1.0),
+            std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::quiet_NaN() }) {
+        const double remapped = Raw::Mfd::RemapReliabilityConfidence(
+            confidence, reliability);
+        ok &= Check(
+            std::isfinite(remapped) && remapped >= 0.0 && remapped <= 1.0,
+            "reliability remap escaped its finite closed [0,1] contract");
+    }
 
     Raw::Mfd::CandidateGateInput thin;
     thin.hardValid = true;

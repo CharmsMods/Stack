@@ -1,4 +1,7 @@
 #include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Graph/GraphImageRules.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
+#include "Raw/RawGraphParameters.h"
 #include "Editor/NodeGraph/EditorCompoundDefinitions.h"
 
 #include "Editor/LayerRegistry.h"
@@ -49,6 +52,7 @@ int VariantForNode(const Node& node) {
         case NodeKind::ImageGenerator: return static_cast<int>(node.imageGeneratorKind);
         case NodeKind::DataMath: return static_cast<int>(node.dataMathMode);
         case NodeKind::Value: return static_cast<int>(node.value.value.logicalType);
+        case NodeKind::RawOperation: return static_cast<int>(node.rawOperation.kind);
         case NodeKind::TechnicalImage: return static_cast<int>(node.technicalImageSettings.operation);
         case NodeKind::FrequencyFilter: return 0;
         case NodeKind::FrequencyMask: return static_cast<int>(node.frequencyMaskShape);
@@ -73,6 +77,9 @@ Node Prototype(NodeKind kind, int variant) {
         case NodeKind::DataMath: node.dataMathMode = static_cast<EditorNodeGraph::DataMathMode>(variant); break;
         case NodeKind::Value:
             node.value.value = BuildDefaultFirstClassValue(static_cast<LogicalValueType>(variant));
+            break;
+        case NodeKind::RawOperation:
+            node.rawOperation = Stack::RawRecipe::MakeGraphOperation(static_cast<Stack::RawRecipe::GraphOperationKind>(variant));
             break;
         case NodeKind::TechnicalImage:
             node.technicalImageSettings.operation = static_cast<Stack::NodeMath::TechnicalImageOperation>(variant);
@@ -152,6 +159,15 @@ LiveParameterDefinition BooleanParameter(
 
 std::vector<LiveParameterDefinition> BuildParameters(const Node& node) {
     std::vector<LiveParameterDefinition> parameters;
+    if (node.kind == NodeKind::RawOperation) {
+        for (const auto& source : Stack::RawRecipe::GraphParameters(node.rawOperation.kind)) {
+            auto parameter = NumericParameter(source.id, source.label, source.initial, source.minimum, source.maximum,
+                source.units, LiveAnimationPolicy::Linear, source.path);
+            parameter.graphInputCapable = true;
+            parameters.push_back(std::move(parameter));
+        }
+        return parameters;
+    }
     if (node.kind == NodeKind::Layer) {
         for (const Stack::Timeline::AnimatableParameterDefinition& source :
              Stack::Timeline::DescribeAnimatableParametersForLayer(node.layerType)) {
@@ -245,6 +261,7 @@ std::vector<LiveParameterDefinition> BuildParameters(const Node& node) {
             parameters.push_back(NumericParameter("center-x", "Center X", 0.5, -2.0, 3.0, "normalized-coordinate", LiveAnimationPolicy::Linear, "maskSettings.centerX"));
             parameters.push_back(NumericParameter("center-y", "Center Y", 0.5, -2.0, 3.0, "normalized-coordinate", LiveAnimationPolicy::Linear, "maskSettings.centerY"));
             parameters.push_back(NumericParameter("radius", "Radius", 0.35, 0.0, 4.0, "normalized-extent", LiveAnimationPolicy::Linear, "maskSettings.radius"));
+            parameters.push_back(NumericParameter("radius-y", "Radius Y", 0.45, 0.001, 4.0, "normalized-extent", LiveAnimationPolicy::Linear, "maskSettings.radiusY"));
             parameters.push_back(NumericParameter("feather", "Feather", 0.1, 0.0, 1.0, "normalized", LiveAnimationPolicy::Linear, "maskSettings.feather"));
             parameters.push_back(BooleanParameter("invert", "Invert", false, "maskSettings.invert"));
             break;
@@ -428,10 +445,10 @@ std::vector<NodeCatalogEntry> AllEntries() {
             "RAW Project Frame", "managed:raw-project-frame"),
         Synthetic(NodeKind::MultiFrameDenoise,
             "Multi-Frame Denoise", "managed:multi-frame-denoise"),
+        Synthetic(NodeKind::MultiFrameHdr,
+            "Multi-Frame HDR", "managed:multi-frame-hdr"),
         Synthetic(NodeKind::RawProjectSourceSet,
             "RAW Project Source Set", "managed:raw-project-source-set"),
-        Synthetic(NodeKind::RawNeuralDenoise,
-            "Legacy RAW Neural Denoise (Bypass)", "raw-neural-denoise"),
         Synthetic(NodeKind::RawDetailAutoMask, "RAW Detail Auto Mask", "raw-detail:auto-mask"),
         Synthetic(NodeKind::RawDetailFusion, "Pre-Local Exposure", "raw-detail:fusion"),
         Synthetic(NodeKind::Composite, "Composite", "composite"),
@@ -465,6 +482,7 @@ Stack::NodeMath::Inspectability InspectabilityFor(NodeKind kind) {
         case NodeKind::RawSource:
         case NodeKind::RawProjectFrame:
         case NodeKind::MultiFrameDenoise:
+        case NodeKind::MultiFrameHdr:
         case NodeKind::RawProjectSourceSet:
         case NodeKind::RawDevelopment:
         case NodeKind::RawNeuralDenoise:
@@ -507,6 +525,13 @@ std::string ComputeLiveNodeDefinitionHash(const LiveNodeDefinition& definition) 
             { "visible", socket.visible }
         });
     }
+    canonical["executable"] = definition.executable;
+    canonical["graphRoles"] = definition.graphRoles;
+    canonical["requiresSceneLinearRgb"] = definition.requiresSceneLinearRgb;
+    canonical["bypass"] = definition.bypassBindings;
+    canonical["outputDependencies"] = nlohmann::json::array();
+    for (const auto& rule : definition.outputDependencies)
+        canonical["outputDependencies"].push_back({{"output", rule.output}, {"inputs", rule.inputs}});
     canonical["parameters"] = nlohmann::json::array();
     for (const LiveParameterDefinition& parameter : definition.parameters) {
         canonical["parameters"].push_back({
@@ -563,6 +588,34 @@ const std::vector<LiveNodeDefinition>& GetUnifiedNodeDefinitionRegistry() {
             definition.visibleInBrowser = Contains(browserEntries, entry.kind, entry.value);
             definition.sockets = BuildSockets(prototype, false);
             definition.parameters = BuildParameters(prototype);
+            definition.requiresSceneLinearRgb = entry.kind == NodeKind::RawOperation;
+            switch (entry.kind) {
+                case NodeKind::RawOperation: case NodeKind::Layer: case NodeKind::Lut:
+                case NodeKind::TechnicalImage: case NodeKind::Reformat:
+                case NodeKind::RawDetailFusion: case NodeKind::RawDetailAutoMask:
+                    definition.bypassBindings.push_back({"imageOut", "imageIn"}); break;
+                case NodeKind::MaskUtility:
+                    definition.bypassBindings.push_back({"maskOut", "maskIn"}); break;
+                case NodeKind::RawNeuralDenoise:
+                    definition.bypassBindings.push_back({"rawOut", "rawIn"}); break;
+                case NodeKind::MaskCombine:
+                    definition.bypassBindings = {{"maskOut", "maskA"}, {"maskOut", "maskB"}}; break;
+                case NodeKind::Mix:
+                    definition.bypassBindings = {{"imageOut", "imageA"}, {"imageOut", "imageB"}}; break;
+                case NodeKind::DataMath:
+                    for (int i = 0; i < EditorNodeGraph::kMaxDataMathInputCount; ++i)
+                        definition.bypassBindings.push_back({"imageOut", EditorNodeGraph::DataMathInputSocketId(i)});
+                    break;
+                default: break;
+            }
+
+            if (entry.kind == NodeKind::RawOperation) {
+                definition.outputDependencies.push_back({"inputImageOut", {"imageIn"}});
+                definition.outputDependencies.push_back({"measurementImageOut", {"imageIn", "referenceIn"}});
+            }
+            if (entry.kind == NodeKind::RawDevelop)
+                definition.outputDependencies.push_back({EditorNodeGraph::kPreFinishImageOutputSocketId,
+                    {EditorNodeGraph::kRawInputSocketId}});
             definition.identity.contentHash = ComputeLiveNodeDefinitionHash(definition);
             definitions.push_back(std::move(definition));
         }
@@ -613,7 +666,18 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildRegisteredSockets(
     // MFD input sockets are stable per-frame bindings generated from the
     // project manifest. The live definition establishes the node identity,
     // while the instance remains authoritative for its dynamic RAW inputs.
-    if (node.kind == NodeKind::MultiFrameDenoise) {
+    if (node.kind == NodeKind::RawOperation) {
+        auto sockets = BuildSockets(node, visibleOnly);
+        for (const auto& parameter : Stack::RawRecipe::GraphParameters(node.rawOperation.kind)) {
+            EditorNodeGraph::SocketDefinition socket{EditorNodeGraph::ParameterInputSocketId(parameter.id), node.id,
+                EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Scalar, parameter.label, true, true};
+            socket.logicalType = LogicalValueType::Scalar;
+            sockets.push_back(std::move(socket));
+        }
+        return sockets;
+    }
+    if (node.kind == NodeKind::MultiFrameDenoise ||
+        node.kind == NodeKind::MultiFrameHdr) {
         return BuildSockets(node, visibleOnly);
     }
     const LiveNodeDefinition* definition = FindLiveNodeDefinition(node);
@@ -726,6 +790,131 @@ bool ValidateUnifiedNodeDefinitionRegistry(std::vector<std::string>* errors) {
     }
     if (errors) *errors = local;
     return local.empty();
+}
+
+bool DefinitionSupportsGraphRole(const LiveNodeDefinition& definition, LiveGraphRole role) {
+    return definition.executable && (definition.graphRoles & static_cast<unsigned>(role)) != 0;
+}
+
+std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph& graph,
+    const Node& node, const std::string& socketId) {
+    using namespace Stack::NodeMath;
+    EditorNodeGraph::SocketDefinition socket;
+    if (!graph.FindSocket(node.id, socketId, &socket)) return std::nullopt;
+    LivePortContract result;
+    result.port.id = socket.id;
+    result.port.direction = socket.direction == EditorNodeGraph::SocketDirection::Input ? PortDirection::Input : PortDirection::Output;
+    result.port.logicalType = socket.logicalType;
+    result.port.acceptedLogicalTypes = {socket.logicalType};
+    result.port.optional = socket.optional;
+    result.port.minimumConnections = socket.optional ? 0 : 1;
+    result.port.maximumConnections = 1;
+    result.requiredSemantics = MakeUnknownDescriptor(socket.logicalType);
+    if (socket.type == EditorNodeGraph::SocketType::ImageOrChannel ||
+        (socket.type == EditorNodeGraph::SocketType::Image && node.kind == NodeKind::Layer))
+        result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage,LogicalValueType::Channel,LogicalValueType::ScalarField};
+    if (socket.type == EditorNodeGraph::SocketType::Mask || socket.type == EditorNodeGraph::SocketType::Channel ||
+        socket.type == EditorNodeGraph::SocketType::ScalarField)
+        result.port.acceptedLogicalTypes = {LogicalValueType::Channel,LogicalValueType::ScalarField,LogicalValueType::Mask};
+    const auto* definition = FindLiveNodeDefinition(node);
+    const bool sceneInput = (definition && definition->requiresSceneLinearRgb &&
+        (socketId == "imageIn" || socketId == "referenceIn")) ||
+        (node.role == Stack::GraphModel::NodeRole::LayerResult && socketId == "imageIn");
+    if (sceneInput) {
+        result.port.acceptedLogicalTypes = {LogicalValueType::ColorImage};
+        result.port.semanticRequirement = RequirementPolicy::Strict;
+        result.port.requirementDescription = "Scene-linear RGB with straight or opaque alpha";
+        result.requiredSemantics.transfer = SemanticField<TransferDescriptor>::Known({TransferKind::Linear,0,{}});
+        result.requiredSemantics.reference = SemanticField<ReferenceState>::Known(ReferenceState::Scene);
+        result.acceptedAlpha = {AlphaMode::Absent,AlphaMode::Straight,AlphaMode::Opaque};
+    }
+    if (socketId == "maskIn") result.defaultValue = 1.0;
+    if (socketId == "referenceIn") result.defaultInput = "imageIn";
+    if (socketId.rfind("area:",0) == 0 || socketId.rfind("gradient:",0) == 0) result.defaultValue = 0.0;
+    if (socketId.rfind("param:",0) == 0 && definition) {
+        for (const auto& parameter : definition->parameters) if (socketId.substr(6) == parameter.id) {
+            result.defaultValue = parameter.defaultValue;
+            UnitDescriptor unit; unit.kind = parameter.units == "unitless" ? UnitKind::Unitless : UnitKind::Custom; unit.customKey = parameter.units == "unitless" ? std::string{} : parameter.units;
+            result.port.units = SemanticField<UnitDescriptor>::Known(unit);
+        }
+    }
+    if (socket.type == EditorNodeGraph::SocketType::Mask) {
+        const auto* conversion = FindLiveNodeDefinition(NodeKind::ImageToMask, static_cast<int>(EditorNodeGraph::ImageToMaskKind::Luminance));
+        if (conversion) result.explicitConversions.push_back(conversion->identity);
+    }
+    return result;
+}
+
+bool AcceptsTypedParameterInput(const Node& node, const std::string& socketId, EditorNodeGraph::SocketType type) {
+    if (type != EditorNodeGraph::SocketType::Scalar) return false;
+    if (node.kind == NodeKind::TechnicalImage) return socketId == EditorNodeGraph::kExposureValueInputSocketId;
+    if (socketId.rfind("param:", 0) != 0) return false;
+    const auto id = socketId.substr(6);
+    if (node.kind == NodeKind::RawOperation) {
+        const auto* definition = FindLiveNodeDefinition(node);
+        if (!definition) return false;
+        return std::any_of(definition->parameters.begin(), definition->parameters.end(), [&](const auto& p) {
+            return p.id == id && p.graphInputCapable;
+        });
+    }
+    return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), id) != node.exposedParameterIds.end();
+}
+
+bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input) {
+    if (node.kind == NodeKind::RawOperation && output == "measurementImageOut")
+        return input == (graph.FindInputLink(node.id, "referenceIn") ? "referenceIn" : "imageIn");
+    if (node.kind == EditorNodeGraph::NodeKind::Compound) {
+        std::vector<std::string> dependencies;
+        if (graph.ResolveCompoundOutputInputDependencies(node.id, output, dependencies))
+            return std::find(dependencies.begin(), dependencies.end(), input) != dependencies.end();
+    }
+    return OutputDependsOnInput(node, output, input);
+}
+
+bool OutputDependsOnInput(const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input) {
+    const auto* definition = FindLiveNodeDefinition(node);
+    return !definition || Stack::GraphModel::OutputDependsOnInput(
+        definition->outputDependencies, output, input);
+}
+
+bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node, const std::string& socketId,
+    const Stack::NodeMath::ValueDescriptor& value, std::string& error) {
+    using namespace Stack::NodeMath;
+    const bool single = value.logicalType == LogicalValueType::Channel || value.logicalType == LogicalValueType::Mask || value.logicalType == LogicalValueType::ScalarField;
+    if (node.kind == NodeKind::Mix && (socketId == "imageA" || socketId == "imageB")) {
+        const auto* other = graph.FindInputLink(node.id,socketId == "imageA" ? "imageB" : "imageA");
+        if (other && !Stack::GraphModel::ValidateImageCombination(value,
+                EditorNodeGraph::DescribeGraphOutput(graph,other->fromNodeId,other->fromSocketId).descriptor,error)) return false;
+    }
+    const bool photo = (node.kind == NodeKind::RawOperation && (socketId == "imageIn" || socketId == "referenceIn")) ||
+        (node.role == Stack::GraphModel::NodeRole::LayerResult && socketId == "imageIn");
+    const bool coverage = socketId == "maskIn" || (node.kind == NodeKind::Output && node.outputSettings.maskOutput && socketId == "imageIn");
+    if (photo && value.logicalType != LogicalValueType::Invalid && value.logicalType != LogicalValueType::ColorImage) {
+        error = "Photo operations require a full scene-linear color image."; return false;
+    }
+    if (coverage && value.logicalType == LogicalValueType::ColorImage) {
+        error = "Coverage needs one channel. Select a channel or convert the image to a mask."; return false;
+    }
+    const auto contract = GetLivePortContract(graph, node, socketId);
+    if (!contract || contract->port.semanticRequirement != RequirementPolicy::Strict || single) return true;
+    const auto& required = contract->requiredSemantics;
+    if ((required.transfer.state == KnowledgeState::Known && value.transfer.state == KnowledgeState::Known && value.transfer.value.kind != required.transfer.value.kind) ||
+        (required.reference.state == KnowledgeState::Known && value.reference.state == KnowledgeState::Known && value.reference.value != required.reference.value)) {
+        error = "This input requires " + contract->port.requirementDescription + ". Add an explicit conversion."; return false;
+    }
+    if (!contract->acceptedAlpha.empty() && value.alpha.state == KnowledgeState::Known &&
+        std::find(contract->acceptedAlpha.begin(),contract->acceptedAlpha.end(),value.alpha.value) == contract->acceptedAlpha.end()) {
+        error = "This input requires straight or opaque RGB. Unpremultiply alpha explicitly first."; return false;
+    }
+    if (!contract->acceptsUnknownSemantics && value.logicalType != LogicalValueType::Invalid &&
+        ((required.transfer.state == KnowledgeState::Known && value.transfer.state != KnowledgeState::Known) ||
+         (required.reference.state == KnowledgeState::Known && value.reference.state != KnowledgeState::Known))) {
+        error = "This input needs known " + contract->port.requirementDescription + ". Declare or convert the source explicitly."; return false;
+    }
+    return true;
 }
 
 } // namespace EditorNodeGraphDefinitions

@@ -1,11 +1,14 @@
 #include "Raw/MultiFrameDenoise/Reliability.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace Raw::Mfd {
@@ -28,12 +31,13 @@ bool Fail(std::string* error, const std::string& message) {
 }
 
 double Clamp01(double value) {
+    if (!Finite(value)) return 0.0;
     return std::max(0.0, std::min(1.0, value));
 }
 
 double Smootherstep5(double value) {
     const double x = Clamp01(value);
-    return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+    return Clamp01(x * x * x * (x * (x * 6.0 - 15.0) + 10.0));
 }
 
 std::size_t CellIndex(PixelExtent extent, std::uint32_t x, std::uint32_t y) {
@@ -49,7 +53,7 @@ std::size_t EvidenceIndex(
     return 4u * CellIndex(extent, x, y) + siteIndex;
 }
 
-double Median(std::vector<double> values) {
+double MedianInPlace(std::vector<double>& values) {
     if (values.empty()) return 0.0;
     const std::size_t middle = values.size() / 2u;
     std::nth_element(values.begin(), values.begin() + middle, values.end());
@@ -90,9 +94,9 @@ double FlatTopQuinticGate(
     const double absolute = std::abs(magnitude);
     if (absolute <= fullWeightThreshold) return 1.0;
     if (absolute >= zeroWeightThreshold) return 0.0;
-    return 1.0 - Smootherstep5(
+    return Clamp01(1.0 - Smootherstep5(
         (absolute - fullWeightThreshold) /
-        (zeroWeightThreshold - fullWeightThreshold));
+        (zeroWeightThreshold - fullWeightThreshold)));
 }
 
 double PatchReliabilityGate(
@@ -111,9 +115,9 @@ double RemapReliabilityConfidence(
         !(parameters.reliabilityRemapMax > parameters.reliabilityRemapMin)) {
         return 0.0;
     }
-    return Smootherstep5(
+    return Clamp01(Smootherstep5(
         (erodedConfidence - parameters.reliabilityRemapMin) /
-        (parameters.reliabilityRemapMax - parameters.reliabilityRemapMin));
+        (parameters.reliabilityRemapMax - parameters.reliabilityRemapMin)));
 }
 
 std::uint64_t MinimumUsableReliabilityCells(
@@ -146,9 +150,16 @@ bool BuildReliabilityMap(
         result.message = "MFD reliability request is invalid.";
         return Fail(error, result.message);
     }
+    const std::uint32_t cellStride = request.cellStrideBayerCells;
+    if (cellStride == 0u || cellStride > 16u) {
+        result.message = "MFD reliability cell stride is invalid.";
+        return Fail(error, result.message);
+    }
+    const std::uint64_t rawCellWidth = request.rawExtent.width / 2u;
+    const std::uint64_t rawCellHeight = request.rawExtent.height / 2u;
     result.cellExtent = {
-        request.rawExtent.width / 2u,
-        request.rawExtent.height / 2u
+        (rawCellWidth + cellStride - 1u) / cellStride,
+        (rawCellHeight + cellStride - 1u) / cellStride
     };
     if (result.cellExtent.width == 0u || result.cellExtent.height == 0u ||
         result.cellExtent.width > static_cast<std::uint64_t>(
@@ -178,6 +189,7 @@ bool BuildReliabilityMap(
     const std::uint64_t totalProgressRows =
         result.cellExtent.height * 3u;
     std::uint64_t completedProgressRows = 0u;
+    std::mutex progressMutex;
     const auto reportProgress = [&]() {
         if (request.reportProgress) {
             request.reportProgress(totalProgressRows == 0u
@@ -189,15 +201,42 @@ bool BuildReliabilityMap(
     const auto canceled = [&]() {
         return request.shouldCancel && request.shouldCancel();
     };
+    const auto processRows = [&](auto&& processRow) {
+        std::atomic<std::uint32_t> nextRow { 0u };
+        std::atomic<bool> wasCanceled { false };
+        const std::uint32_t workerCount = std::max<std::uint32_t>(
+            1u,
+            std::min<std::uint32_t>(
+                request.workerCount,
+                static_cast<std::uint32_t>(result.cellExtent.height)));
+        const auto run = [&]() {
+            while (!wasCanceled.load(std::memory_order_relaxed)) {
+                if (canceled()) {
+                    wasCanceled.store(true, std::memory_order_relaxed);
+                    break;
+                }
+                const std::uint32_t row = nextRow.fetch_add(
+                    1u, std::memory_order_relaxed);
+                if (row >= result.cellExtent.height) break;
+                processRow(row);
+                {
+                    std::lock_guard<std::mutex> lock(progressMutex);
+                    ++completedProgressRows;
+                    reportProgress();
+                }
+            }
+        };
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount > 0u ? workerCount - 1u : 0u);
+        for (std::uint32_t worker = 1u; worker < workerCount; ++worker)
+            workers.emplace_back(run);
+        run();
+        for (auto& worker : workers) worker.join();
+        return !wasCanceled.load(std::memory_order_relaxed) && !canceled();
+    };
     reportProgress();
 
-    for (std::uint32_t cellY = 0u;
-         cellY < result.cellExtent.height;
-         ++cellY) {
-        if (canceled()) {
-            result.message = "MFD reliability processing was canceled.";
-            return Fail(error, result.message);
-        }
+    if (!processRows([&](std::uint32_t cellY) {
         for (std::uint32_t cellX = 0u;
              cellX < result.cellExtent.width;
              ++cellX) {
@@ -207,9 +246,15 @@ bool BuildReliabilityMap(
             diagnostic.cellY = cellY;
             LocalMotionFieldSample centerMotion;
             std::string ignored;
+            const std::uint64_t sampledCellX = std::min<std::uint64_t>(
+                rawCellWidth - 1u,
+                static_cast<std::uint64_t>(cellX) * cellStride + cellStride / 2u);
+            const std::uint64_t sampledCellY = std::min<std::uint64_t>(
+                rawCellHeight - 1u,
+                static_cast<std::uint64_t>(cellY) * cellStride + cellStride / 2u);
             const RawCoordinate centerRaw {
-                2.0 * static_cast<double>(cellX) + 0.5,
-                2.0 * static_cast<double>(cellY) + 0.5
+                2.0 * static_cast<double>(sampledCellX) + 0.5,
+                2.0 * static_cast<double>(sampledCellY) + 0.5
             };
             if (EvaluateLocalMotionField(
                     *request.motionGrid,
@@ -227,8 +272,8 @@ bool BuildReliabilityMap(
                 const CfaSite site = kSites[siteIndex];
                 const CfaOffset offset = request.layout.OffsetFor(site);
                 const RawCoordinate referenceRaw {
-                    2.0 * static_cast<double>(cellX) + offset.x,
-                    2.0 * static_cast<double>(cellY) + offset.y
+                    2.0 * static_cast<double>(sampledCellX) + offset.x,
+                    2.0 * static_cast<double>(sampledCellY) + offset.y
                 };
                 CachedResidualEvidence& cached = evidence[EvidenceIndex(
                     result.cellExtent, cellX, cellY, siteIndex)];
@@ -268,19 +313,22 @@ bool BuildReliabilityMap(
                 cached.sampleValid = Finite(cached.standardizedResidual);
             }
         }
-        ++completedProgressRows;
-        reportProgress();
+    })) {
+        result.message = "MFD reliability processing was canceled.";
+        return Fail(error, result.message);
     }
 
     const std::int32_t patchRadius = static_cast<std::int32_t>(
         request.parameters.reliability.patchSupportBayerCells / 2u);
-    for (std::uint32_t cellY = 0u;
-         cellY < result.cellExtent.height;
-         ++cellY) {
-        if (canceled()) {
-            result.message = "MFD reliability processing was canceled.";
-            return Fail(error, result.message);
-        }
+    const std::uint32_t nominalResiduals =
+        request.parameters.reliability.patchSupportBayerCells *
+        request.parameters.reliability.patchSupportBayerCells * 4u;
+    if (!processRows([&](std::uint32_t cellY) {
+        // Reuse one patch scratch buffer per row/worker. A full-resolution
+        // reliability map contains millions of cells; allocating and freeing
+        // a vector for every cell dominated large-burst confidence analysis.
+        std::vector<double> absoluteResiduals;
+        absoluteResiduals.reserve(nominalResiduals);
         for (std::uint32_t cellX = 0u;
              cellX < result.cellExtent.width;
              ++cellX) {
@@ -314,11 +362,7 @@ bool BuildReliabilityMap(
                     ReliabilityRejectBit::NoiseUnavailable);
             }
 
-            std::vector<double> absoluteResiduals;
-            const std::uint32_t nominalResiduals =
-                request.parameters.reliability.patchSupportBayerCells *
-                request.parameters.reliability.patchSupportBayerCells * 4u;
-            absoluteResiduals.reserve(nominalResiduals);
+            absoluteResiduals.clear();
             for (std::int32_t dy = -patchRadius; dy <= patchRadius; ++dy) {
                 const std::int32_t patchY =
                     static_cast<std::int32_t>(cellY) + dy;
@@ -355,7 +399,7 @@ bool BuildReliabilityMap(
                 diagnostic.rejectionBits |= ReliabilityRejectMask(
                     ReliabilityRejectBit::InsufficientPatchSupport);
             } else {
-                diagnostic.patchScale = Median(std::move(absoluteResiduals)) /
+                diagnostic.patchScale = MedianInPlace(absoluteResiduals) /
                     kStandardNormalMedianAbsoluteValue;
                 diagnostic.patchGate = PatchReliabilityGate(
                     diagnostic.patchScale,
@@ -375,19 +419,15 @@ bool BuildReliabilityMap(
                     diagnostic.alignmentConfidence * diagnostic.patchGate)
                 : 0.0;
         }
-        ++completedProgressRows;
-        reportProgress();
+    })) {
+        result.message = "MFD reliability processing was canceled.";
+        return Fail(error, result.message);
     }
 
+    if(request.reportObservation)try{request.reportObservation(result,true);}catch(...){}
     const std::int32_t erosionRadius = static_cast<std::int32_t>(
         request.parameters.reliability.minimumFilterRadiusCells);
-    for (std::uint32_t cellY = 0u;
-         cellY < result.cellExtent.height;
-         ++cellY) {
-        if (canceled()) {
-            result.message = "MFD reliability processing was canceled.";
-            return Fail(error, result.message);
-        }
+    if (!processRows([&](std::uint32_t cellY) {
         for (std::uint32_t cellX = 0u;
              cellX < result.cellExtent.width;
              ++cellX) {
@@ -425,8 +465,9 @@ bool BuildReliabilityMap(
                 diagnostic.erodedConfidence,
                 request.parameters.reliability);
         }
-        ++completedProgressRows;
-        reportProgress();
+    })) {
+        result.message = "MFD reliability processing was canceled.";
+        return Fail(error, result.message);
     }
 
     result.minimumUsableCellCount = MinimumUsableReliabilityCells(
@@ -454,6 +495,7 @@ bool BuildReliabilityMap(
     result.message = result.frameUsable
         ? "MFD reliability map is usable."
         : "MFD reliability map has insufficient spatially usable area.";
+    if(request.reportObservation)try{request.reportObservation(result,false);}catch(...){}
     return true;
 }
 

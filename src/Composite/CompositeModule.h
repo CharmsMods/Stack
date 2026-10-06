@@ -120,6 +120,8 @@ public:
     bool HasLayers() const;
     bool IsDirty() const { return m_Dirty; }
     void ClearDirty() { m_Dirty = false; }
+    void SetLibraryWindowHovered(bool hovered) { m_LibraryWindowHovered = hovered; }
+    bool IsLibraryWindowHovered() const { return m_LibraryWindowHovered; }
 
     const std::string& GetCurrentProjectName() const { return m_ProjectName; }
     const std::string& GetCurrentProjectFileName() const { return m_ProjectFileName; }
@@ -341,4 +343,5 @@ private:
     bool m_Dirty = false;
     bool m_CanvasFocused = false;
     bool m_Initialized = false;
+    bool m_LibraryWindowHovered = false;
 };

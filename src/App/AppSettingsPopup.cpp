@@ -1,23 +1,129 @@
+#include "App/settings/PaletteWorkshop.h"
 #include "AppSettingsPopup.h"
+#include "Raw/RawViewportSettings.h"
 
 #include "AppVersion.h"
 #include "../Editor/EditorModule.h"
 #include "../Utils/FileDialogs.h"
 #include "../Utils/ImGuiExtras.h"
+#include "App/Resources/EmbeddedTabIcons.h"
+#include "Renderer/GLHelpers.h"
+#include "ThirdParty/stb_image.h"
 
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace AppSettingsPopup {
 namespace {
+void ReportActionResult(State& state, const std::string& key, const std::string& error) {
+    auto& event = state.actionErrors[key];
+    if (error.empty()) {
+        state.notifier.Resolve(event);
+        event = 0;
+        return;
+    }
+    Stack::Notifications::NoticeSpec notice;
+    notice.title = "Settings action failed";
+    notice.message = error;
+    notice.severity = Stack::Notifications::Severity::Error;
+    notice.outcome = Stack::Notifications::Outcome::Failure;
+    notice.dedupeKey = "settings-" + key;
+    event = state.notifier.Post(std::move(notice));
+}
+
+void ReportPreferenceResult(State& state, const std::string& key, const std::string& setting,
+    const StackAppearance::PreferenceMutationResult& result) {
+    auto& event = state.actionErrors[key];
+    if (result.persisted) {
+        state.notifier.Resolve(event);
+        event = 0;
+        return;
+    }
+    Stack::Notifications::NoticeSpec notice;
+    notice.title = result.applied ? "Setting not saved" : "Setting not changed";
+    notice.message = result.applied
+        ? "The change is active for now, but may be lost when Stack restarts."
+        : "The setting could not be applied.";
+    notice.context = setting;
+    notice.details = result.error;
+    notice.severity = result.applied ? Stack::Notifications::Severity::Warning : Stack::Notifications::Severity::Error;
+    notice.outcome = result.applied ? Stack::Notifications::Outcome::Partial : Stack::Notifications::Outcome::Failure;
+    notice.dedupeKey = "settings-" + key;
+    event = state.notifier.Post(std::move(notice));
+}
 
 constexpr float kSettingsItemGap = 7.0f;
 constexpr float kSettingsGroupGap = 14.0f;
 constexpr float kSettingsControlWidth = 280.0f;
+
+unsigned int GetArrowIconTexture() {
+    static unsigned int s_Texture = 0;
+    if (s_Texture == 0 && EmbeddedTabIcons::Arrow_png_data && EmbeddedTabIcons::Arrow_png_size > 0) {
+        int width = 0;
+        int height = 0;
+        int channels = 0;
+        stbi_set_flip_vertically_on_load(0);
+        unsigned char* pixels = stbi_load_from_memory(
+            EmbeddedTabIcons::Arrow_png_data,
+            static_cast<int>(EmbeddedTabIcons::Arrow_png_size),
+            &width,
+            &height,
+            &channels,
+            4);
+        if (pixels) {
+            s_Texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+            stbi_image_free(pixels);
+        }
+    }
+    return s_Texture;
+}
+
+void DrawRotatedImage(
+    ImDrawList* drawList,
+    ImTextureID texture,
+    const ImVec2& centerPos,
+    const ImVec2& size,
+    float angleRad,
+    ImU32 tintColor) {
+    const float halfW = size.x * 0.5f;
+    const float halfH = size.y * 0.5f;
+
+    const float cosA = std::cos(angleRad);
+    const float sinA = std::sin(angleRad);
+
+    const auto rotatePoint = [&](float x, float y) -> ImVec2 {
+        return ImVec2(
+            centerPos.x + x * cosA - y * sinA,
+            centerPos.y + x * sinA + y * cosA);
+    };
+
+    const ImVec2 p0 = rotatePoint(-halfW, -halfH);
+    const ImVec2 p1 = rotatePoint(halfW, -halfH);
+    const ImVec2 p2 = rotatePoint(halfW, halfH);
+    const ImVec2 p3 = rotatePoint(-halfW, halfH);
+
+    drawList->AddImageQuad(
+        texture,
+        p0, p1, p2, p3,
+        ImVec2(0.0f, 0.0f),
+        ImVec2(1.0f, 0.0f),
+        ImVec2(1.0f, 1.0f),
+        ImVec2(0.0f, 1.0f),
+        tintColor);
+}
+
+struct WheelArrowAnimationState {
+    ImVec2 pos = ImVec2(0.0f, 0.0f);
+    float angle = 0.0f;
+    bool initialized = false;
+};
+
+static WheelArrowAnimationState s_ArrowState;
 
 void RenderSectionIntro(const char* label, const char* description) {
     ImGuiExtras::RichSectionLabel(label);
@@ -38,17 +144,13 @@ std::string TruncateToWidth(const std::string& value, const float maxWidth) {
     if (ImGui::CalcTextSize(value.c_str()).x <= maxWidth) {
         return value;
     }
-    constexpr const char* suffix = "...";
-    std::string truncated = value;
-    while (!truncated.empty()) {
-        truncated.pop_back();
-        while (!truncated.empty() &&
-               (static_cast<unsigned char>(truncated.back()) & 0xC0u) == 0x80u) {
-            truncated.pop_back();
-        }
-        const std::string candidate = truncated + suffix;
-        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
-            return candidate;
+    std::string candidate = value;
+    const std::string suffix = "...";
+    while (candidate.size() > 1) {
+        candidate.pop_back();
+        std::string testStr = candidate + suffix;
+        if (ImGui::CalcTextSize(testStr.c_str()).x <= maxWidth) {
+            return testStr;
         }
     }
     return suffix;
@@ -73,9 +175,12 @@ bool RenderCategoryButton(
     const bool pressed = ImGui::InvisibleButton(label, actualSize);
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    if (selected || hovered)
+        drawList->AddRectFilled(start, ImVec2(start.x + actualSize.x, start.y + actualSize.y),
+            ImGui::GetColorU32(selected ? ImGuiCol_TabSelected : ImGuiCol_TabHovered), 4.0f);
     const ImU32 textColor = ImGui::GetColorU32(
         selected
-            ? ImGuiCol_CheckMark
+            ? ImGuiCol_TabSelectedOverline
             : (hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled));
     const ImVec2 textSize = ImGui::CalcTextSize(label);
     drawList->AddText(
@@ -85,64 +190,14 @@ bool RenderCategoryButton(
     return pressed;
 }
 
-void RenderThemeCards(StackAppearance::AppearanceManager* appearance, const float contentWidth) {
+
+void RenderAppearanceSection(StackAppearance::AppearanceManager* appearance, State& state, const float contentWidth) {
     if (!appearance) {
         ImGui::TextDisabled("Appearance settings are unavailable.");
         return;
     }
 
-    const std::string activePresetId = appearance->GetActivePresetId();
-    const std::vector<StackAppearance::ThemeDefinition>& factoryThemes = appearance->GetFactoryThemes();
-    const std::vector<StackAppearance::ThemeDefinition>& customThemes = appearance->GetLibrary().customPresets;
-    std::vector<const StackAppearance::ThemeDefinition*> themes;
-    themes.reserve(factoryThemes.size() + customThemes.size());
-    for (const auto& theme : factoryThemes) themes.push_back(&theme);
-    for (const auto& theme : customThemes) themes.push_back(&theme);
-
-    constexpr float columnGap = 48.0f;
-    const int columns = contentWidth >= 420.0f ? 2 : 1;
-    const float listWidth = std::min(contentWidth, columns == 2 ? 520.0f : 260.0f);
-    const float cellWidth = columns == 2
-        ? (listWidth - columnGap) * 0.5f
-        : listWidth;
-    const float startX = ImGui::GetCursorPosX() + std::max(0.0f, (contentWidth - listWidth) * 0.5f);
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    for (std::size_t index = 0; index < themes.size(); ++index) {
-        if (columns == 2 && (index % 2) == 1) {
-            ImGui::SameLine(0.0f, columnGap);
-        } else {
-            ImGui::SetCursorPosX(startX);
-        }
-        const auto& theme = *themes[index];
-        const bool active = activePresetId == theme.id;
-        ImGui::PushID(theme.id.c_str());
-        const ImVec2 itemMin = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##ThemeChoice", ImVec2(cellWidth, 42.0f));
-        const bool hovered = ImGui::IsItemHovered();
-        const ImVec2 textSize = ImGui::CalcTextSize(theme.displayName.c_str());
-        drawList->AddText(
-            ImVec2(
-                itemMin.x + (cellWidth - textSize.x) * 0.5f,
-                itemMin.y + (42.0f - textSize.y) * 0.5f),
-            ImGui::GetColorU32(
-                active
-                    ? ImGuiCol_CheckMark
-                    : (hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled)),
-            theme.displayName.c_str());
-        if (ImGui::IsItemClicked() && !active && appearance->SelectPresetById(theme.id)) {
-            ApplyTheme(appearance);
-        }
-        ImGui::PopID();
-    }
-}
-
-void RenderAppearanceSection(StackAppearance::AppearanceManager* appearance, const float contentWidth) {
-    if (!appearance) {
-        ImGui::TextDisabled("Appearance settings are unavailable.");
-        return;
-    }
-
-    RenderThemeCards(appearance, contentWidth);
+    StackAppearance::RenderPaletteWorkshop(*appearance, state.paletteWorkshop, state.notifier);
 }
 
 void RenderExperimentalSection(
@@ -162,6 +217,69 @@ void RenderExperimentalSection(
     if (ImGui::Checkbox("Island", &islandEnabled)) {
         appearance->SetExperimentalIslandEnabled(islandEnabled);
     }
+}
+
+void RenderRawSection(EditorModule* editor, const float contentWidth) {
+    RenderSectionIntro(
+        "RAW",
+        "Choose RAW editing and preview preferences.");
+    if (editor == nullptr) {
+        ImGui::TextDisabled("RAW settings are unavailable.");
+        return;
+    }
+
+    ImGui::TextWrapped("Editing modules are selected from the left icon sidebar. Their controls appear beside it.");
+    ImGui::Spacing();
+    int targetFps = editor->GetRawViewportRequestedFps();
+    ImGui::SetNextItemWidth(std::min(contentWidth, kSettingsControlWidth));
+    if (ImGui::SliderInt("Target viewport FPS", &targetFps,
+        Raw::kMinimumViewportTargetFps, std::max({240,editor->GetRawViewportMaximumFps(),targetFps}), "%d FPS",
+        ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+        editor->SetRawViewportTargetFps(targetFps);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) editor->FinishRawViewportTargetFpsEdit();
+    ImGui::TextDisabled("Display limit: %d FPS", editor->GetRawViewportMaximumFps());
+    const double nativeFps = editor->GetRawViewportNativeFps();
+    if (nativeFps > 0.0) ImGui::Text("Whole image rebuild: approximately %.1f FPS", nativeFps);
+    const double visibleFps = editor->GetRawViewportVisibleNativeFps();
+    if (visibleFps > 0.0) ImGui::Text("Native visible area, cached input: approximately %.1f FPS", visibleFps);
+    if (editor->GetRawViewportRequestedFps()>editor->GetRawViewportMaximumFps())
+        ImGui::TextDisabled("Requested %d FPS; using %d FPS on this display",editor->GetRawViewportRequestedFps(),editor->GetRawViewportTargetFps());
+    auto preferences=editor->GetRawViewportPreferences();
+    int mode=static_cast<int>(preferences.mode);
+    ImGui::SetNextItemWidth(std::min(contentWidth,kSettingsControlWidth));
+    if (ImGui::Combo("During adjustments",&mode,"Target FPS\0Preserve detail\0")) {
+        preferences.mode=static_cast<Raw::ViewportInteractionMode>(mode);
+        editor->SetRawViewportPreferences(preferences);
+    }
+    ImGui::BeginDisabled(preferences.mode!=Raw::ViewportInteractionMode::PreserveDetail);
+    ImGui::SetNextItemWidth(std::min(contentWidth,kSettingsControlWidth));
+    if (ImGui::SliderInt("Minimum display detail",&preferences.minimumDetailPercent,25,100,"%d%%",ImGuiSliderFlags_AlwaysClamp))
+        editor->SetRawViewportPreferences(preferences);
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("100%% matches physical display detail at the current zoom, up to native source detail. Preserving detail can lower the achieved update rate.");
+    ImGui::TextWrapped("%s",editor->GetRawViewportDecisionStatus().c_str());
+    if (ImGui::Checkbox("Learn missing timings while idle",&preferences.backgroundLearning))
+        editor->SetRawViewportPreferences(preferences);
+    if (ImGui::Button("Reset learned timings for this hardware")) editor->ResetRawViewportLearnedTimings();
+    bool smoothUpdates = editor->GetSmoothRawViewportUpdates();
+    if (ImGui::Checkbox("Fade slower RAW preview updates", &smoothUpdates))
+        editor->SetSmoothRawViewportUpdates(smoothUpdates);
+    ImGui::BeginDisabled(!smoothUpdates);
+    int fadeBelowFps = editor->GetRawViewportFadeBelowFps();
+    ImGui::SetNextItemWidth(std::min(contentWidth, kSettingsControlWidth));
+    if (ImGui::SliderInt("Fade below update rate", &fadeBelowFps,
+        Raw::kMinimumViewportFadeBelowFps,
+        editor->GetRawViewportMaximumFps(), "%d FPS",
+        ImGuiSliderFlags_AlwaysClamp)) {
+        editor->SetRawViewportFadeBelowFps(fadeBelowFps);
+    }
+    ImGui::TextWrapped("Higher values fade more updates. This does not change rendering speed or resolution. Fade length adapts to completed updates, including full-quality results after an adjustment.");
+    ImGui::TextWrapped("When an adjustment ends, increases in preview resolution use a quick fade even above this rate.");
+    ImGui::EndDisabled();
+    const std::string calibrationStatus = editor->GetRawViewportCalibrationStatus();
+    ImGui::TextWrapped("%s", calibrationStatus.c_str());
+    ImGui::TextWrapped("During adjustments, resolution adapts toward this target. Lower FPS allows more detail; higher FPS favors responsiveness. After input settles, the visible area returns to native detail where memory permits.");
 }
 
 void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, State& state, const float contentWidth) {
@@ -190,10 +308,11 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
         if (!path.empty()) {
             std::string errorMessage;
             if (!appearance->ImportBackgroundImageFromPath(path, &errorMessage)) {
-                state.lastActionError = errorMessage;
+                state.lastActionError = errorMessage.empty() ? "Could not add the background image." : errorMessage;
             } else {
                 state.lastActionError.clear();
             }
+            ReportActionResult(state, "background-import", state.lastActionError);
         }
     }
     ImGui::PopStyleColor(3);
@@ -205,16 +324,6 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
         appearance->SetBackgroundImageStrength(backgroundStrength);
     }
 
-    float uiSurfaceTransparency = appearance->GetUiSurfaceTransparency();
-    ImGui::SetCursorPosX(controlX);
-    ImGui::SetNextItemWidth(std::min(controlBlockWidth, kSettingsControlWidth));
-    if (ImGui::SliderFloat("UI Surface Transparency", &uiSurfaceTransparency, 0.0f, 1.0f, "%.2f")) {
-        if (appearance->SetUiSurfaceTransparency(uiSurfaceTransparency)) {
-            ApplyTheme(appearance);
-        }
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 12.0f));
     const std::vector<StackAppearance::BackgroundImageEntry>& images = appearance->GetBackgroundImages();
     if (images.empty()) {
         ImGui::SetCursorPosX(controlX);
@@ -278,10 +387,11 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
                 if (activeIt != images.end()) {
                     std::string errorMessage;
                     if (!appearance->RemoveBackgroundImageById(activeIt->id, &errorMessage)) {
-                        state.lastActionError = errorMessage;
+                        state.lastActionError = errorMessage.empty() ? "Could not remove the background image." : errorMessage;
                     } else {
                         state.lastActionError.clear();
                     }
+                    ReportActionResult(state, "background-remove", state.lastActionError);
                 }
             }
             ImGui::PopStyleColor(3);
@@ -290,64 +400,15 @@ void RenderBackgroundSection(StackAppearance::AppearanceManager* appearance, Sta
 
     if (!state.lastActionError.empty()) {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.48f, 0.48f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
         ImGui::TextWrapped("%s", state.lastActionError.c_str());
         ImGui::PopStyleColor();
     }
 }
 
-void RenderGraphModeButtons(StackAppearance::AppearanceManager* appearance, const float contentWidth) {
-    StackAppearance::GraphVisualMode graphMode = appearance->GetGraphVisualMode();
-    const StackAppearance::GraphVisualMode graphModes[] = {
-        StackAppearance::GraphVisualMode::Classic,
-        StackAppearance::GraphVisualMode::BlackNodes,
-        StackAppearance::GraphVisualMode::SpotlightPrototype
-    };
 
-    const float buttonGap = 8.0f;
-    constexpr float buttonWidth = 166.0f;
-    const bool stackButtons = contentWidth < buttonWidth * 3.0f + buttonGap * 2.0f;
-    for (int i = 0; i < IM_ARRAYSIZE(graphModes); ++i) {
-        if (i > 0 && !stackButtons) {
-            ImGui::SameLine(0.0f, buttonGap);
-        }
-        const StackAppearance::GraphVisualMode candidate = graphModes[i];
-        const bool selected = graphMode == candidate;
-        if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
-        }
-        if (ImGui::Button(StackAppearance::GraphVisualModeLabel(candidate), ImVec2(buttonWidth, 0.0f))) {
-            if (appearance->SetGraphVisualMode(candidate)) {
-                graphMode = candidate;
-            }
-        }
-        if (selected) {
-            ImGui::PopStyleColor(3);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", StackAppearance::GraphVisualModeDescription(candidate));
-        }
-    }
-
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextWrapped("%s", StackAppearance::GraphVisualModeDescription(graphMode));
-    ImGui::PopStyleColor();
-
-    if (graphMode == StackAppearance::GraphVisualMode::SpotlightPrototype) {
-        bool haloOutlines = appearance->GetGraphSpotlightHaloOutlines();
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        if (ImGui::Checkbox("Halo edge outlines", &haloOutlines)) {
-            appearance->SetGraphSpotlightHaloOutlines(haloOutlines);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Draw a faint edge halo around spotlight nodes.");
-        }
-    }
-}
-
-void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorModule* editor, const float contentWidth) {
+void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorModule* editor, State& state,
+    const float contentWidth) {
     if (!appearance || !editor) {
         ImGui::TextDisabled("Graph settings are unavailable.");
         return;
@@ -355,8 +416,6 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
 
     RenderSectionIntro("GRAPH", "Choose how graph nodes render and which live graph diagnostics stay available while you work.");
 
-    ImGuiExtras::RichSectionLabel("VISUAL MODE");
-    RenderGraphModeButtons(appearance, contentWidth);
 
     RenderSubsectionLabel("CONNECTIONS");
 
@@ -451,7 +510,8 @@ void RenderGraphSection(StackAppearance::AppearanceManager* appearance, EditorMo
     float graphPanSensitivity = appearance->GetGraphPanSensitivity();
     ImGui::SetNextItemWidth(std::min(contentWidth, 320.0f));
     if (ImGui::SliderFloat("Middle-Mouse Pan Sensitivity", &graphPanSensitivity, 0.10f, 1.0f, "%.2f")) {
-        appearance->SetGraphPanSensitivity(graphPanSensitivity);
+        const auto result = appearance->SetGraphPanSensitivity(graphPanSensitivity);
+        ReportPreferenceResult(state, "graph-pan-sensitivity", "Middle-mouse pan sensitivity", result);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Adjust how far the graph moves while panning with the middle mouse button.");
@@ -646,52 +706,6 @@ void RenderCanvasCompositionSection(EditorModule* editor, const float contentWid
     ImGui::PopStyleColor();
 }
 
-void RenderUpdateInstallPopup(AppUpdate::UpdateManager* updateManager, State& state) {
-    if (state.showInstallConfirmPopup) {
-        ImGui::OpenPopup("Install Update##Stack");
-        state.showInstallConfirmPopup = false;
-    }
-
-    if (updateManager == nullptr) {
-        return;
-    }
-
-    if (ImGui::BeginPopupModal("Install Update##Stack", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        const AppUpdate::Snapshot& snapshot = updateManager->GetSnapshot();
-        ImGui::TextWrapped("Stack needs to close to finish installing the update. Save your work before continuing.");
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        ImGui::TextWrapped("Windows may ask for administrator permission to continue.");
-        if (!snapshot.isInstalledBuild) {
-            ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            ImGui::TextWrapped("Portable build detected. This will launch the installer for a normal installed copy instead of overwriting the current folder.");
-        }
-        ImGui::Dummy(ImVec2(0.0f, 12.0f));
-
-        const float popupWidth = ImGui::GetContentRegionAvail().x;
-        const bool stackButtons = popupWidth < 270.0f;
-        if (ImGui::Button("Install and Restart", ImVec2(stackButtons ? std::max(1.0f, popupWidth) : 160.0f, 0.0f))) {
-            std::string errorMessage;
-            if (!updateManager->InstallAndRestart(&errorMessage)) {
-                state.lastActionError = errorMessage;
-            } else {
-                state.lastActionError.clear();
-            }
-            ImGui::CloseCurrentPopup();
-        }
-
-        if (stackButtons) {
-            ImGui::Dummy(ImVec2(0.0f, 6.0f));
-        } else {
-            ImGui::SameLine();
-        }
-        if (ImGui::Button("Cancel", ImVec2(stackButtons ? std::max(1.0f, popupWidth) : 100.0f, 0.0f))) {
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
-    }
-}
-
 void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state, const float contentWidth) {
     RenderSectionIntro("APP UPDATES", "Check GitHub Releases for new Stack installers, download them in the background, and hand off safely to the installer when you're ready.");
 
@@ -701,6 +715,17 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     }
 
     const AppUpdate::Snapshot& snapshot = updateManager->GetSnapshot();
+    bool automaticStartupCheck = updateManager->IsAutomaticStartupCheckEnabled();
+    if (ImGui::Checkbox("Check automatically when Stack starts", &automaticStartupCheck)) {
+        updateManager->SetAutomaticStartupCheckEnabled(automaticStartupCheck);
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("When enabled, Stack requests the official GitHub Releases API after legal acceptance. Stack does not send images, projects, or intentional product telemetry with this check.");
+    if (snapshot.isLocalTestBuild) {
+        ImGui::TextWrapped("Automatic and manual update checks are disabled for local-test builds so they cannot upgrade into or impersonate a public release.");
+    }
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
     ImGui::Text("Install Mode: %s", snapshot.isInstalledBuild ? "Installed" : "Portable");
     ImGui::Text("Current Version: %s", snapshot.currentVersion.c_str());
     ImGui::Text("Latest Version: %s", snapshot.latestVersion.empty() ? "Unknown" : snapshot.latestVersion.c_str());
@@ -741,7 +766,9 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     }
     if (ImGui::Button("Open GitHub Releases", ImVec2(174.0f, 0.0f))) {
         state.lastActionError.clear();
-        updateManager->OpenReleasesPage(&state.lastActionError);
+        if (!updateManager->OpenReleasesPage(&state.lastActionError) && state.lastActionError.empty())
+            state.lastActionError = "Could not open the releases page.";
+        ReportActionResult(state, "open-releases", state.lastActionError);
     }
 
     if (!stackTopActions) {
@@ -749,7 +776,9 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
     }
     if (ImGui::Button("Open Website Download Page", ImVec2(204.0f, 0.0f))) {
         state.lastActionError.clear();
-        updateManager->OpenWebsiteDownloadPage(&state.lastActionError);
+        if (!updateManager->OpenWebsiteDownloadPage(&state.lastActionError) && state.lastActionError.empty())
+            state.lastActionError = "Could not open the download page.";
+        ReportActionResult(state, "open-download-page", state.lastActionError);
     }
 
     if (updateManager->CanDownloadUpdate()) {
@@ -776,7 +805,9 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
         }
         if (ImGui::Button("Show Downloaded File", ImVec2(stackDownloadActions ? std::max(1.0f, contentWidth) : 190.0f, 0.0f))) {
             state.lastActionError.clear();
-            updateManager->RevealDownloadedUpdate(&state.lastActionError);
+            if (!updateManager->RevealDownloadedUpdate(&state.lastActionError) && state.lastActionError.empty())
+                state.lastActionError = "Could not show the downloaded update.";
+            ReportActionResult(state, "reveal-update", state.lastActionError);
         }
     }
 
@@ -795,18 +826,72 @@ void RenderUpdatesSection(AppUpdate::UpdateManager* updateManager, State& state,
 
     if (!state.lastActionError.empty()) {
         ImGui::Dummy(ImVec2(0.0f, 10.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.48f, 0.48f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
         ImGui::TextWrapped("%s", state.lastActionError.c_str());
         ImGui::PopStyleColor();
     }
 
-    RenderUpdateInstallPopup(updateManager, state);
+
+}
+
+void RenderLegalSection(AppLegal::Manager* legalManager, State& state, const float contentWidth) {
+    RenderSectionIntro(
+        "ABOUT & LEGAL",
+        "Stack is published by Darynn Ho. Stack, Charm, and CharmsMods are product or publishing brands.");
+
+    ImGui::Text("Product: Stack Image Editor");
+    ImGui::Text("Version: %s", AppVersion::kVersionString);
+    ImGui::Text("Publisher and copyright owner: %s", AppVersion::kPublisher);
+    ImGui::TextWrapped("%s", AppVersion::kCopyright);
+
+    if (legalManager == nullptr) {
+        ImGui::TextDisabled("Legal documents are unavailable.");
+        return;
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::TextWrapped("%s", legalManager->GetStatusMessage().c_str());
+    ImGui::TextWrapped("Acceptance record: %s", legalManager->GetAcceptanceLocationLabel().c_str());
+
+    struct LegalAction {
+        const char* label;
+        AppLegal::Document document;
+    };
+    const LegalAction actions[] = {
+        { "Open EULA", AppLegal::Document::Eula },
+        { "Open Privacy Notice", AppLegal::Document::Privacy },
+        { "Open Source License", AppLegal::Document::SourceLicense },
+        { "Open Third-Party Notices", AppLegal::Document::ThirdPartyNotices },
+        { "Open Third-Party Licenses", AppLegal::Document::ThirdPartyDirectory },
+        { "Open Legal Folder", AppLegal::Document::LegalDirectory }
+    };
+
+    RenderSubsectionLabel("DOCUMENTS");
+    const float buttonWidth = std::min(240.0f, std::max(1.0f, contentWidth));
+    if (ImGui::Button("View Initial Legal Agreement Surface", ImVec2(buttonWidth, 0.0f))) {
+        state.requestShowLegalGate = true;
+    }
+    for (const LegalAction& action : actions) {
+        if (ImGui::Button(action.label, ImVec2(buttonWidth, 0.0f))) {
+            state.lastActionError.clear();
+            if (!legalManager->OpenDocument(action.document, &state.lastActionError) && state.lastActionError.empty())
+                state.lastActionError = "Could not open the legal document.";
+            ReportActionResult(state, "open-legal-" + std::to_string(static_cast<int>(action.document)), state.lastActionError);
+        }
+    }
+
+    if (!state.lastActionError.empty()) {
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        ImGui::TextWrapped("%s", state.lastActionError.c_str());
+        ImGui::PopStyleColor();
+    }
 }
 
 void RenderFooter() {
     ImGui::Dummy(ImVec2(0.0f, 5.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextUnformatted("Stack Image Editor");
+    ImGui::TextUnformatted("Stack Image Editor by Darynn Ho");
     ImGui::SameLine(0.0f, 16.0f);
     ImGui::Text("Version %s", AppVersion::kVersionString);
     ImGui::SameLine(0.0f, 16.0f);
@@ -816,10 +901,53 @@ void RenderFooter() {
 
 } // namespace
 
+void UpdateNotifications(AppUpdate::UpdateManager* updateManager, State& state) {
+    using namespace Stack::Notifications;
+    if (state.installOperation && (!updateManager || updateManager->GetSnapshot().downloadedFilePath != state.installTarget)) {
+        state.notifier.InvalidateOperation(state.installOperation);
+        state.installOperation = 0;
+    }
+    if (!state.showInstallConfirmPopup || !updateManager) return;
+    state.showInstallConfirmPopup = false;
+    if (!updateManager->CanInstallUpdate()) return;
+    if (state.installOperation) state.notifier.InvalidateOperation(state.installOperation);
+    state.installOperation = state.notifier.NewOperation();
+    state.installTarget = updateManager->GetSnapshot().downloadedFilePath;
+    const auto scope = state.notifier;
+    const auto operation = state.installOperation;
+    const auto target = state.installTarget;
+    NoticeSpec spec;
+    spec.title = "Install update?";
+    spec.message = "Stack will close to install the update. Save your work before continuing.";
+    spec.details = "Windows may ask for administrator permission.";
+    if (!updateManager->GetSnapshot().isInstalledBuild)
+        spec.details += " This portable copy will stay in place. The installer creates an installed copy.";
+    spec.severity = Severity::Warning; spec.operationId = operation; spec.foreground = true;
+    const auto current = [scope, operation, target, updateManager] {
+        return scope.IsOperationCurrent(operation) && updateManager->CanInstallUpdate() &&
+            updateManager->GetSnapshot().downloadedFilePath == target;
+    };
+    ActionSpec cancel;
+    cancel.label = "Cancel"; cancel.safeCancel = true;
+    cancel.invoke = [] { return ActionResult::Success(); };
+    spec.actions.push_back(std::move(cancel));
+    ActionSpec install;
+    install.label = "Install and restart"; install.destructive = true; install.canInvoke = current;
+    install.invoke = [current, updateManager] {
+        if (!current()) return ActionResult::Failure("The update changed. Review it again in Settings.");
+        std::string error;
+        return updateManager->InstallAndRestart(&error) ? ActionResult::Success() :
+            ActionResult::Failure(error.empty() ? "The installer could not be started. Try again." : error);
+    };
+    spec.actions.push_back(std::move(install));
+    scope.RequestDecision(std::move(spec));
+}
+
 void RenderContents(
     StackAppearance::AppearanceManager* appearance,
     EditorModule* editor,
     AppUpdate::UpdateManager* updateManager,
+    AppLegal::Manager* legalManager,
     State& state) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const bool wallpaperSurfaces = SeamlessSurfaceStylingEnabled(appearance);
@@ -845,10 +973,10 @@ void RenderContents(
         ImVec2(railWidth, 0.0f),
         ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar);
-    constexpr float categoryHeights[] = { 32.0f, 32.0f, 32.0f, 32.0f, 36.0f, 32.0f, 32.0f };
+    constexpr float categoryHeights[] = { 32.0f, 32.0f, 32.0f, 32.0f, 32.0f, 36.0f, 32.0f, 32.0f, 32.0f };
     float categoryListHeight = 0.0f;
     for (float height : categoryHeights) categoryListHeight += height;
-    categoryListHeight += kSettingsItemGap * 6.0f;
+    categoryListHeight += kSettingsItemGap * 8.0f;
     ImGui::SetCursorPosY(std::max(
         ImGui::GetCursorPosY(),
         (ImGui::GetWindowHeight() - categoryListHeight) * 0.5f));
@@ -857,6 +985,9 @@ void RenderContents(
     }
     if (RenderCategoryButton(appearance, "Background", state.activeCategory == Category::Background, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Background;
+    }
+    if (RenderCategoryButton(appearance, "RAW", state.activeCategory == Category::Raw, ImVec2(-1.0f, 32.0f))) {
+        state.activeCategory = Category::Raw;
     }
     if (RenderCategoryButton(appearance, "Graph", state.activeCategory == Category::Graph, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Graph;
@@ -872,6 +1003,9 @@ void RenderContents(
     }
     if (RenderCategoryButton(appearance, "Updates", state.activeCategory == Category::Updates, ImVec2(-1.0f, 32.0f))) {
         state.activeCategory = Category::Updates;
+    }
+    if (RenderCategoryButton(appearance, "Legal", state.activeCategory == Category::Legal, ImVec2(-1.0f, 32.0f))) {
+        state.activeCategory = Category::Legal;
     }
     ImGui::EndChild();
     if (wallpaperSurfaces) {
@@ -899,17 +1033,10 @@ void RenderContents(
     ImGui::SetCursorPosX(
         ImGui::GetCursorPosX() + std::max(0.0f, (fullDetailWidth - detailWidth) * 0.5f));
     if (state.activeCategory == Category::Appearance) {
-        const std::size_t themeCount = appearance
-            ? appearance->GetFactoryThemes().size() +
-                appearance->GetLibrary().customPresets.size()
-            : 0;
-        const int columns = detailWidth >= 420.0f ? 2 : 1;
-        const std::size_t rows = columns > 1 ? (themeCount + 1) / 2 : themeCount;
-        const float listHeight = static_cast<float>(rows) * 42.0f +
-            (rows > 0 ? static_cast<float>(rows - 1) * kSettingsItemGap : 0.0f);
+        constexpr float wheelHeight = 244.0f;
         ImGui::SetCursorPosY(std::max(
             ImGui::GetCursorPosY(),
-            (ImGui::GetWindowHeight() - listHeight) * 0.5f));
+            (ImGui::GetWindowHeight() - wheelHeight) * 0.5f));
     } else if (state.activeCategory == Category::Background && appearance) {
         const std::size_t imageCount = appearance->GetBackgroundImages().size();
         const std::size_t rows = (imageCount + 1) / 2;
@@ -927,13 +1054,16 @@ void RenderContents(
     }
     switch (state.activeCategory) {
     case Category::Appearance:
-        RenderAppearanceSection(appearance, detailWidth);
+        RenderAppearanceSection(appearance, state, detailWidth);
         break;
     case Category::Background:
         RenderBackgroundSection(appearance, state, detailWidth);
         break;
+    case Category::Raw:
+        RenderRawSection(editor, detailWidth);
+        break;
     case Category::Graph:
-        RenderGraphSection(appearance, editor, detailWidth);
+        RenderGraphSection(appearance, editor, state, detailWidth);
         break;
     case Category::Viewport:
         RenderViewportSection(appearance, detailWidth);
@@ -946,6 +1076,9 @@ void RenderContents(
         break;
     case Category::Updates:
         RenderUpdatesSection(updateManager, state, detailWidth);
+        break;
+    case Category::Legal:
+        RenderLegalSection(legalManager, state, detailWidth);
         break;
     }
     ImGui::EndChild();

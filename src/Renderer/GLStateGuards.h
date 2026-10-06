@@ -48,6 +48,7 @@ struct PixelPackState {
     GLint rowLength = 0;
     GLint skipRows = 0;
     GLint skipPixels = 0;
+    GLint swapBytes = GL_FALSE;
 
     PixelPackState() {
         glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &buffer);
@@ -55,6 +56,7 @@ struct PixelPackState {
         glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLength);
         glGetIntegerv(GL_PACK_SKIP_ROWS, &skipRows);
         glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipPixels);
+        glGetIntegerv(GL_PACK_SWAP_BYTES, &swapBytes);
     }
 
     void ConfigureTightCpuReadback() const {
@@ -63,6 +65,7 @@ struct PixelPackState {
         glPixelStorei(GL_PACK_ROW_LENGTH, 0);
         glPixelStorei(GL_PACK_SKIP_ROWS, 0);
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_PACK_SWAP_BYTES, GL_FALSE);
     }
 
     void Restore() const {
@@ -73,6 +76,7 @@ struct PixelPackState {
         glPixelStorei(GL_PACK_ROW_LENGTH, rowLength);
         glPixelStorei(GL_PACK_SKIP_ROWS, skipRows);
         glPixelStorei(GL_PACK_SKIP_PIXELS, skipPixels);
+        glPixelStorei(GL_PACK_SWAP_BYTES, swapBytes);
     }
 };
 
@@ -82,6 +86,7 @@ struct PixelUnpackState {
     GLint rowLength = 0;
     GLint skipRows = 0;
     GLint skipPixels = 0;
+    GLint swapBytes = GL_FALSE;
 
     PixelUnpackState() {
         glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &buffer);
@@ -89,6 +94,7 @@ struct PixelUnpackState {
         glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength);
         glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows);
         glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPixels);
+        glGetIntegerv(GL_UNPACK_SWAP_BYTES, &swapBytes);
     }
 
     void ConfigureTightCpuUpload() const {
@@ -97,6 +103,7 @@ struct PixelUnpackState {
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
     }
 
     void Restore() const {
@@ -107,6 +114,7 @@ struct PixelUnpackState {
         glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels);
+        glPixelStorei(GL_UNPACK_SWAP_BYTES, swapBytes);
     }
 };
 

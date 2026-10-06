@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Color/LutData.h"
+#include "Graph/OutputDependencies.h"
 #include "Editor/Layers/LayerBase.h"
 #include "MFSR/MFSRTypes.h"
 #include "NeuralDenoise/NeuralDenoiseTypes.h"
@@ -9,6 +10,7 @@
 #include "NodeMath/TechnicalImageMath.h"
 #include "NodeMath/GeometryMath.h"
 #include "Raw/RawDevelopmentRecipe.h"
+#include "Raw/RawGraphOperation.h"
 #include "Raw/RawImageData.h"
 #include "ThirdParty/json.hpp"
 #include "Utils/SharedPixelBuffer.h"
@@ -16,13 +18,17 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 enum class RenderMaskGeneratorKind {
     Solid,
     LinearGradient,
     RadialGradient,
-    Noise
+    Noise,
+    Square,
+    RawGradient,
+    PaintedArea
 };
 
 enum class RenderMaskCombineMode {
@@ -73,6 +79,7 @@ struct RenderMaskSettings {
     float centerX = 0.5f;
     float centerY = 0.5f;
     float radius = 0.45f;
+    float radiusY = 0.45f;
     float feather = 0.2f;
     bool invert = false;
 };
@@ -203,7 +210,9 @@ enum class RenderGraphNodeKind {
     MagnitudePhase,
     SpectrumAnalyzer,
     FieldMean,
-    Reformat
+    Reformat,
+    RawOperation,
+    Value
 };
 
 enum class RenderMixBlendMode {
@@ -506,6 +515,16 @@ struct ToneCurveAutoRewriteFeedback {
 };
 
 struct RenderGraphNode {
+    Stack::GraphModel::NodeRole role = Stack::GraphModel::NodeRole::Ordinary;
+    Stack::GraphModel::Endpoint reference;
+    Stack::NodeMath::LogicalValueType publishedType = Stack::NodeMath::LogicalValueType::Invalid;
+    double scalarValue = 0.0;
+    Stack::RawRecipe::GraphOperation rawOperation;
+    nlohmann::json rawCoverage = nlohmann::json::object();
+    Raw::RawWorkingSpace rawWorkingSpace = Raw::RawWorkingSpace::LinearRec2020D65;
+    int nativeWidth = 0;
+    int nativeHeight = 0;
+    std::vector<Stack::GraphModel::OutputDependency> outputDependencies;
     int nodeId = -1;
     std::uint64_t requestRevision = 0;
     std::string definitionId;
@@ -588,6 +607,28 @@ struct RawLocalRangeTargetPreviewRequest {
 };
 
 struct RenderGraphSnapshot {
+    struct OutputAlias {
+        Stack::GraphModel::Endpoint authored;
+        int nodeId = 0;
+        std::string socketId;
+    };
+    // Public compound endpoints survive expansion. The layer compiler resolves
+    // publications through these bindings, including nested compound outputs.
+    std::vector<OutputAlias> authoredOutputAliases;
+    // Explicit lowering boundaries keep later RAW interaction overlays from
+    // reintroducing display mapping inside a developed layer stack.
+    int rawLayerBackgroundNodeId = 0;
+    int rawLayerViewNodeId = 0;
+    // Authored workspace IDs are local to a layer. Preview requests must resolve
+    // them through this table rather than collide with project-graph node IDs.
+    std::unordered_map<std::string, std::unordered_map<int, int>> rawLayerMaskNodeIds;
+    std::unordered_map<std::string, int> rawLayerStageNodeIds;
+    // Numerical outputs used by attachments, including the zero-coverage fallback.
+    std::unordered_map<std::string, std::pair<int, std::string>> rawLayerMaskOutputs;
+    int rawLayerScopeNodeId = 0;
+    int rawLayerScopeOperationId = 0;
+    std::string rawLayerScopeSocketId = "imageOut";
+    std::unordered_map<int, std::string> unavailableOutputs;
     int outputNodeId = -1;
     std::string outputSocketId;
     bool autoGainMaskPreview = false;

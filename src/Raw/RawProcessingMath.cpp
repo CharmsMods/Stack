@@ -41,7 +41,7 @@ float SampleGainMap(
         map.gains.empty()) {
         return 1.0f;
     }
-    // Truthful V1 currently uploads a single-plane CFA mosaic. Do not silently
+    // The RAW engine uploads a single-plane CFA mosaic. Do not silently
     // apply an opcode whose declared plane range does not include that plane.
     if (map.plane > 0 || map.plane + map.planes <= 0) {
         return 1.0f;
@@ -81,9 +81,20 @@ float SampleGainMap(
     return std::max(0.0f, a * (1.0f - ty) + b * ty);
 }
 
-float SampleClamped(const std::vector<float>& mosaic, int width, int height, int x, int y) {
-    const int qx = std::clamp(x, 0, width - 1);
-    const int qy = std::clamp(y, 0, height - 1);
+int MirrorCfaCoordinate(int coordinate, int size) {
+    if (coordinate >= 0 && coordinate < size) return coordinate;
+    if (size <= 1) return 0;
+    const int span = size - 1;
+    const int phase = PositiveModulo(coordinate, 2 * span);
+    return span - std::abs(phase - span);
+}
+
+float SampleCfaMirrored(const std::vector<float>& mosaic, int width, int height, int x, int y) {
+    // Match the GPU's reflection without duplicating the boundary sample.
+    // Even coordinate changes keep a requested red/green/blue sample in the
+    // same Bayer phase, including kernels that extend past several corners.
+    const int qx = MirrorCfaCoordinate(x, width);
+    const int qy = MirrorCfaCoordinate(y, height);
     return mosaic[static_cast<std::size_t>(qy) * static_cast<std::size_t>(width) + static_cast<std::size_t>(qx)];
 }
 
@@ -102,13 +113,23 @@ float ApplyKernel(
             const int kernelY = transpose ? kx : ky;
             const std::size_t index =
                 static_cast<std::size_t>(kernelY + 2) * 5u + static_cast<std::size_t>(kernelX + 2);
-            sum += kernel[index] * SampleClamped(mosaic, width, height, x + kx, y + ky);
+            sum += kernel[index] * SampleCfaMirrored(mosaic, width, height, x + kx, y + ky);
         }
     }
     return sum * 0.125f;
 }
 
 } // namespace
+
+float SampleDngGainMap(
+    const DngGainMapOpcode& map,
+    int imageWidth,
+    int imageHeight,
+    int imageX,
+    int imageY) {
+    return SampleGainMap(
+        map, imageWidth, imageHeight, imageX, imageY);
+}
 
 RawSensorRect ResolveActiveArea(const RawMetadata& metadata) {
     if (metadata.hasDngActiveArea &&
@@ -492,7 +513,7 @@ std::array<float, 3> DemosaicMalvarHeCutlerAt(
     };
 
     const int color = PatternColor(pattern, x, y);
-    const float center = SampleClamped(mosaic, width, height, x, y);
+    const float center = SampleCfaMirrored(mosaic, width, height, x, y);
     if (color == 0) {
         return {
             center,
@@ -515,6 +536,72 @@ std::array<float, 3> DemosaicMalvarHeCutlerAt(
         center,
         ApplyKernel(mosaic, width, height, x, y, kRedOrBlueAtGreenHorizontal, horizontalRed)
     };
+}
+
+std::array<float, 3> DemosaicNearestNeighborAt(
+    const std::vector<float>& mosaic,
+    int width,
+    int height,
+    CfaPattern pattern,
+    int x,
+    int y) {
+    if (width <= 0 || height <= 0 ||
+        mosaic.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        return { 0.0f, 0.0f, 0.0f };
+    }
+    std::array<float, 3> result {};
+    for (int wanted = 0; wanted < 3; ++wanted) {
+        int bestDistance = 1000000;
+        for (int radius = 0; radius <= 2; ++radius) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (std::abs(dx) != radius && std::abs(dy) != radius) continue;
+                    if (PatternColor(pattern, x + dx, y + dy) != wanted) continue;
+                    const int distance = std::abs(dx) + std::abs(dy);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        result[static_cast<std::size_t>(wanted)] =
+                            SampleCfaMirrored(mosaic, width, height, x + dx, y + dy);
+                    }
+                }
+            }
+            if (bestDistance < 1000000) break;
+        }
+    }
+    return result;
+}
+
+std::array<float, 3> DemosaicHamiltonAdamsAt(
+    const std::vector<float>& mosaic,
+    int width,
+    int height,
+    CfaPattern pattern,
+    int x,
+    int y) {
+    if (width <= 0 || height <= 0 ||
+        mosaic.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        return { 0.0f, 0.0f, 0.0f };
+    }
+    const auto s = [&](int dx, int dy) { return SampleCfaMirrored(mosaic, width, height, x + dx, y + dy); };
+    const int color = PatternColor(pattern, x, y);
+    const float center = s(0, 0);
+    std::array<float, 3> result { center, center, center };
+    if (color == 0 || color == 2) {
+        const float horizontal = 0.5f * (s(-1, 0) + s(1, 0));
+        const float vertical = 0.5f * (s(0, -1) + s(0, 1));
+        const float horizontalGradient = std::abs(s(-1, 0) - s(1, 0)) +
+            std::abs(2.0f * center - s(-2, 0) - s(2, 0));
+        const float verticalGradient = std::abs(s(0, -1) - s(0, 1)) +
+            std::abs(2.0f * center - s(0, -2) - s(0, 2));
+        result[1] = horizontalGradient <= verticalGradient ? horizontal : vertical;
+        const float diagonal = 0.25f * (s(-1, -1) + s(1, -1) + s(-1, 1) + s(1, 1));
+        result[static_cast<std::size_t>(color == 0 ? 2 : 0)] = diagonal;
+        return result;
+    }
+    const bool horizontalRed = PatternColor(pattern, x - 1, y) == 0 || PatternColor(pattern, x + 1, y) == 0;
+    result[0] = horizontalRed ? 0.5f * (s(-1, 0) + s(1, 0)) : 0.5f * (s(0, -1) + s(0, 1));
+    result[2] = horizontalRed ? 0.5f * (s(0, -1) + s(0, 1)) : 0.5f * (s(-1, 0) + s(1, 0));
+    return result;
 }
 
 float EncodeSrgb(float linearValue) {

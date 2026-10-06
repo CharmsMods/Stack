@@ -11,17 +11,28 @@
 
 namespace EditorNodeGraph {
 
+struct CompoundOutputBinding {
+    int authoredNodeId = 0;
+    std::string authoredSocketId;
+    int expandedNodeId = 0;
+    std::string expandedSocketId;
+};
+
 struct CompoundExpansionResult {
     bool success = false;
     std::string error;
     std::vector<int> expandedNodeIds;
     std::vector<int> authoredCompoundNodeIds;
+    std::vector<CompoundOutputBinding> outputBindings;
 };
 
 struct GraphLookupCache;
 
 class Graph {
 public:
+    // Structural/semantic queries share image pixels and omit encoded and UI
+    // buffers. Never use this reduced copy as an authored document commit.
+    Graph CloneForAnalysis() const;
     void Clear();
     void ResetFromLayers(int layerCount, bool hasActiveImage);
     void SyncLayerNodes(int layerCount);
@@ -38,8 +49,10 @@ public:
     Node* AddMfsrNode(MfsrPayload payload, Vec2 position);
     Node* AddRawProjectFrameNode(RawProjectFramePayload payload, Vec2 position);
     Node* AddMultiFrameDenoiseNode(MultiFrameDenoisePayload payload, Vec2 position);
+    Node* AddMultiFrameHdrNode(MultiFrameHdrPayload payload, Vec2 position);
     Node* AddRawProjectSourceSetNode(RawProjectSourceSetPayload payload, Vec2 position);
     Node* AddLutNode(LutPayload payload, Vec2 position);
+    Node* AddRawOperationNode(Stack::RawRecipe::GraphOperationKind kind, Vec2 position);
     Node* AddLayerNode(LayerType type, int layerIndex, Vec2 position);
     Node* AddScopeNode(ScopeKind scopeKind, Vec2 position);
     Node* AddMaskGeneratorNode(MaskGeneratorKind maskKind, Vec2 position);
@@ -116,7 +129,8 @@ public:
         int nodeId,
         const Stack::NodeMath::DefinitionReference& definition,
         std::string* error = nullptr);
-    bool UnpackCompoundNode(int nodeId, std::vector<int>* unpackedNodeIds = nullptr, std::string* error = nullptr);
+    bool UnpackCompoundNode(int nodeId, std::vector<int>* unpackedNodeIds = nullptr, std::string* error = nullptr,
+        std::vector<CompoundOutputBinding>* outputBindings = nullptr);
     bool ExpandAllCompoundNodes(Graph& expanded, CompoundExpansionResult* result = nullptr) const;
     bool CreateCompoundFromSelection(
         const std::vector<int>& nodeIds,

@@ -94,9 +94,11 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
             case NodeKind::HdrMerge:
             case NodeKind::Mfsr:
             case NodeKind::MultiFrameDenoise:
+            case NodeKind::MultiFrameHdr:
             case NodeKind::RawProjectSourceSet:
             case NodeKind::Lut:
             case NodeKind::Layer:
+            case NodeKind::RawOperation:
             case NodeKind::TechnicalImage:
             case NodeKind::Mix:
             case NodeKind::DataMath:
@@ -156,6 +158,7 @@ int Graph::FindAdjacentMainChainNodeId(int nodeId, int direction) const {
         switch (node->kind) {
             case NodeKind::Layer:
             case NodeKind::Lut:
+            case NodeKind::RawOperation:
             case NodeKind::TechnicalImage:
             case NodeKind::Output:
             case NodeKind::RawDetailAutoMask:
@@ -262,6 +265,12 @@ ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
                 state.hasViewTransform =
                     node.multiFrameDenoise.internalViewTransformEnabled;
                 break;
+            case NodeKind::MultiFrameHdr:
+                state.sceneReferred =
+                    !node.multiFrameHdr.internalViewTransformEnabled;
+                state.hasViewTransform =
+                    node.multiFrameHdr.internalViewTransformEnabled;
+                break;
             case NodeKind::RawDevelopment:
                 state.sceneReferred = true;
                 if (Stack::RawRecipe::IsViewTransformEnabled(
@@ -305,6 +314,7 @@ ScenePathInfo AnalyzeScenePath(const Graph& graph, int nodeId) {
                 }
                 addInput(kImageInputSocketId);
                 break;
+            case NodeKind::RawOperation:
             case NodeKind::TechnicalImage:
             case NodeKind::Reformat:
                 addInput(kImageInputSocketId);

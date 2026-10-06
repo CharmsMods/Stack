@@ -1,10 +1,13 @@
+#include "HdrDisplayMapping.h"
 #include "Raw/RawDevelopmentRecipe.h"
+#include "Raw/RawZoneArea.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <unordered_set>
 
 namespace Stack::RawRecipe {
@@ -12,13 +15,6 @@ namespace {
 
 constexpr std::size_t kMaxRawToneCurvePoints = 12;
 constexpr std::size_t kMaxRawLocalRangePoints = 12;
-
-std::vector<RawToneCurvePoint> DefaultToneCurvePoints() {
-    return {
-        RawToneCurvePoint{ 0.0f, 0.0f },
-        RawToneCurvePoint{ 1.0f, 1.0f }
-    };
-}
 
 nlohmann::json DefaultToneCurveLayerPointsJson() {
     return nlohmann::json::array({
@@ -42,10 +38,29 @@ float ClampFinite(float value, float fallback, float minValue, float maxValue) {
     return std::clamp(value, minValue, maxValue);
 }
 
+nlohmann::json SerializeBezierHandle(const RawBezierHandleState& input);
+float JsonFloat(const nlohmann::json& value, const char* key, float fallback);
+
+bool HasPreparedColorWarpEffect(const RawColorWarpRecipe& colorWarp) {
+    if (!colorWarp.enabled || colorWarp.strength <= 0.0001f) {
+        return false;
+    }
+    return std::any_of(
+        colorWarp.pins.begin(),
+        colorWarp.pins.end(),
+        [](const RawColorWarpPin& pin) {
+            return pin.enabled && pin.strength > 0.0001f &&
+                (pin.protectColor ||
+                    std::abs(pin.targetA - pin.sourceA) > 0.000001f ||
+                    std::abs(pin.targetB - pin.sourceB) > 0.000001f ||
+                    std::abs(pin.lightnessDeltaEv) > 0.000001f);
+        });
+}
+
 Raw::RawMosaicDenoiseSettings SanitizeMosaicDenoiseSettings(
     Raw::RawMosaicDenoiseSettings settings) {
     const Raw::RawMosaicDenoiseSettings defaults;
-    if (settings.mode != Raw::RawMosaicDenoiseMode::LegacyFixedThreshold &&
+    if (settings.mode != Raw::RawMosaicDenoiseMode::FixedThreshold &&
         settings.mode != Raw::RawMosaicDenoiseMode::DngNoiseProfile) {
         settings.mode = defaults.mode;
     }
@@ -96,26 +111,16 @@ float LocalRangeEdgeAwareWeight(float evDifference, const RawLocalRangeRecipe& l
     return (1.0f - edgeProtection) + edgeProtection * std::clamp(rangeWeight, 0.0f, 1.0f);
 }
 
-bool IsIdentityToneCurve(const RawToneCurveRecipe& toneCurve) {
-    if (toneCurve.points.empty()) {
-        return true;
-    }
-    for (const RawToneCurvePoint& point : toneCurve.points) {
-        if (!std::isfinite(point.input) ||
-            !std::isfinite(point.output) ||
-            std::abs(std::clamp(point.input, 0.0f, 1.0f) - std::clamp(point.output, 0.0f, 1.0f)) > 0.0001f) {
-            return false;
+nlohmann::json SanitizeFinishToneJson(nlohmann::json value) {
+    const nlohmann::json input = value.is_object()
+        ? std::move(value)
+        : nlohmann::json::object();
+    value = DefaultFinishToneJson();
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const auto inputValue = input.find(it.key());
+        if (inputValue != input.end()) {
+            it.value() = *inputValue;
         }
-    }
-    return true;
-}
-
-nlohmann::json SanitizeFinishToneJson(
-    nlohmann::json value,
-    const RawToneCurveRecipe& legacyToneCurve,
-    int storedRecipeVersion) {
-    if (!value.is_object()) {
-        value = FinishToneJsonFromLegacyToneCurve(legacyToneCurve);
     }
     value["type"] = "ToneCurve";
     value["mode"] = std::clamp(value.value("mode", 1), 0, 4);
@@ -124,6 +129,7 @@ nlohmann::json SanitizeFinishToneJson(
     value["logMinEv"] = ClampFinite(value.value("logMinEv", -10.0f), -10.0f, -20.0f, 0.0f);
     value["logMaxEv"] = ClampFinite(value.value("logMaxEv", 6.0f), 6.0f, 0.0f, 20.0f);
     value["middleGrey"] = ClampFinite(value.value("middleGrey", 0.18f), 0.18f, 0.01f, 1.0f);
+    value["curveRangeMode"] = kFinishToneRangeExtendedSceneV1;
     if (value["logMaxEv"].get<float>() <= value["logMinEv"].get<float>() + 0.1f) {
         value["logMaxEv"] = value["logMinEv"].get<float>() + 0.1f;
     }
@@ -133,14 +139,23 @@ nlohmann::json SanitizeFinishToneJson(
     if (!value.contains("preparedPoints") || !value["preparedPoints"].is_array() || value["preparedPoints"].size() < 2) {
         value["preparedPoints"] = value["points"];
     }
-    return SanitizeFinishTonePointCurveJson(std::move(value), storedRecipeVersion);
+    return SanitizeFinishTonePointCurveJson(std::move(value));
 }
 
 nlohmann::json SanitizeViewTransformJson(nlohmann::json value) {
-    if (!value.is_object()) {
-        value = DefaultViewTransformJson();
+    const nlohmann::json input = value.is_object()
+        ? std::move(value)
+        : nlohmann::json::object();
+    value = DefaultViewTransformJson();
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const auto inputValue = input.find(it.key());
+        if (inputValue != input.end()) {
+            it.value() = *inputValue;
+        }
     }
     value["type"] = "ViewTransform";
+    value["displayCurve"] = value.value("displayCurve", std::string("standard")) == Raw::HdrDisplay::Photographic
+        ? Raw::HdrDisplay::Photographic : "standard";
     value["enabled"] =
         value.contains("enabled") && value["enabled"].is_boolean()
             ? value["enabled"].get<bool>()
@@ -152,42 +167,30 @@ nlohmann::json SanitizeViewTransformJson(nlohmann::json value) {
     value["shoulder"] = ClampFinite(value.value("shoulder", 0.45f), 0.45f, 0.05f, 4.0f);
     value["toe"] = ClampFinite(value.value("toe", 0.18f), 0.18f, 0.0f, 1.0f);
     value["contrast"] = ClampFinite(value.value("contrast", 1.0f), 1.0f, 0.25f, 2.5f);
+    value["contrastPivotEv"] = ClampFinite(
+        value.value("contrastPivotEv", 0.0f),
+        0.0f,
+        -8.0f,
+        8.0f);
+    value["contrastModel"] = kViewContrastModelPivotedLogV2;
+    const float minimumPivot = std::max(
+        -8.0f,
+        value["blackEv"].get<float>() + 0.1f);
+    const float maximumPivot = std::min(
+        8.0f,
+        value["whiteEv"].get<float>() - 0.1f);
+    if (minimumPivot <= maximumPivot) {
+        value["contrastPivotEv"] = std::clamp(
+            value["contrastPivotEv"].get<float>(),
+            minimumPivot,
+            maximumPivot);
+    }
     value["saturation"] = ClampFinite(value.value("saturation", 1.0f), 1.0f, 0.0f, 2.0f);
     value["preserveHue"] = value.value("preserveHue", true);
     value["debugFalseColor"] = value.value("debugFalseColor", false);
     value["inputWorkingSpace"] = value.value("inputWorkingSpace", std::string("linear-rec2020-d65"));
     value["encodeSrgbOutput"] = value.value("encodeSrgbOutput", true);
     return value;
-}
-
-RawLocalExposureRecipe SanitizeLocalExposureRecipe(RawLocalExposureRecipe localExposure) {
-    RawLocalExposureRecipe defaults;
-    localExposure.amount = ClampFinite(localExposure.amount, defaults.amount, 0.0f, 1.0f);
-    localExposure.shadowLiftEv = ClampFinite(localExposure.shadowLiftEv, defaults.shadowLiftEv, 0.0f, 4.0f);
-    localExposure.highlightCompressionEv = ClampFinite(
-        localExposure.highlightCompressionEv,
-        defaults.highlightCompressionEv,
-        -4.0f,
-        0.0f);
-    localExposure.localBaselineEv = ClampFinite(localExposure.localBaselineEv, defaults.localBaselineEv, -1.25f, 1.25f);
-    localExposure.noiseGuardBias = ClampFinite(localExposure.noiseGuardBias, defaults.noiseGuardBias, -1.0f, 1.0f);
-    localExposure.highlightGuardBias = ClampFinite(
-        localExposure.highlightGuardBias,
-        defaults.highlightGuardBias,
-        -1.0f,
-        1.0f);
-    localExposure.shadowGuardBias = ClampFinite(
-        localExposure.shadowGuardBias,
-        defaults.shadowGuardBias,
-        -1.0f,
-        1.0f);
-    localExposure.smoothGradientProtection = ClampFinite(
-        localExposure.smoothGradientProtection,
-        defaults.smoothGradientProtection,
-        0.0f,
-        1.0f);
-    localExposure.haloGuard = ClampFinite(localExposure.haloGuard, defaults.haloGuard, 0.0f, 1.0f);
-    return localExposure;
 }
 
 bool IsSupportedLocalRangeMaskPreviewMode(const std::string& value) {
@@ -230,7 +233,9 @@ nlohmann::json LocalRangeJson(const RawLocalRangeRecipe& input) {
     for (const RawLocalRangePoint& point : localRange.points) {
         points.push_back({
             { "ev", point.ev },
-            { "deltaEv", point.deltaEv }
+            { "deltaEv", point.deltaEv },
+            { "incomingHandle", SerializeBezierHandle(point.incoming) },
+            { "outgoingHandle", SerializeBezierHandle(point.outgoing) }
         });
     }
     nlohmann::json targetZones = nlohmann::json::array();
@@ -291,112 +296,75 @@ nlohmann::json LocalRangeJson(const RawLocalRangeRecipe& input) {
         { "colorMaskMinChroma", localRange.colorMaskMinChroma },
         { "targetZoneCombineMode",
             LocalRangeZoneCombineModeStableString(localRange.targetZoneCombineMode) },
-        { "targetZones", std::move(targetZones) }
+        { "targetZones", std::move(targetZones) },
+        { "areasVersion", localRange.areasVersion },
+        { "areas", SerializeZoneAreas(localRange.areas) }
     };
 }
 
-std::vector<std::string> NormalizeStageOrder(std::vector<std::string> order) {
-    if (order.empty()) {
-        return DefaultStageOrder();
-    }
-
-    auto hasStage = [&](const char* stage) {
-        return std::find(order.begin(), order.end(), stage) != order.end();
-    };
-
-    auto insertBeforeFirstKnownStage = [&](const char* stage) {
-        auto toneIt = std::find(order.begin(), order.end(), "tone-curve");
-        if (toneIt != order.end()) {
-            order.insert(toneIt, stage);
-            return;
-        }
-
-        auto viewIt = std::find(order.begin(), order.end(), "view-transform");
-        if (viewIt != order.end()) {
-            order.insert(viewIt, stage);
-            return;
-        }
-
-        auto outputIt = std::find(order.begin(), order.end(), "output");
-        if (outputIt != order.end()) {
-            order.insert(outputIt, stage);
-            return;
-        }
-
-        order.push_back(stage);
-    };
-
-    if (!hasStage("rgb-denoise")) {
-        auto exposureIt = std::find(order.begin(), order.end(), "pre-tone-exposure");
-        if (exposureIt != order.end()) {
-            order.insert(exposureIt, "rgb-denoise");
-        } else {
-            auto localExposureIt = std::find(order.begin(), order.end(), "local-exposure");
-            if (localExposureIt != order.end()) {
-                order.insert(localExposureIt, "rgb-denoise");
-            } else {
-                insertBeforeFirstKnownStage("rgb-denoise");
-            }
-        }
-    }
-    if (!hasStage("local-exposure")) {
-        auto localRangeIt = std::find(order.begin(), order.end(), "local-range");
-        if (localRangeIt != order.end()) {
-            order.insert(localRangeIt, "local-exposure");
-        } else {
-            insertBeforeFirstKnownStage("local-exposure");
-        }
-    }
-    if (!hasStage("local-range")) {
-        insertBeforeFirstKnownStage("local-range");
-    }
-    return order;
+RawGradientMask SanitizeGradientMask(RawGradientMask mask) {
+    mask.geometryVersion = 1;
+    mask.centerU = ClampFinite(mask.centerU, 0.5f, -2.0f, 3.0f);
+    mask.centerV = ClampFinite(mask.centerV, 0.5f, -2.0f, 3.0f);
+    mask.angleRadians = ClampFinite(mask.angleRadians, 0.0f, -100.0f, 100.0f);
+    mask.lowBoundary = ClampFinite(mask.lowBoundary, -0.15f, -4.0f, 3.99f);
+    mask.highBoundary = ClampFinite(mask.highBoundary, 0.15f,
+        mask.lowBoundary + 0.001f, 4.0f);
+    mask.radiusX = ClampFinite(mask.radiusX, 0.25f, 0.001f, 4.0f);
+    mask.radiusY = ClampFinite(mask.radiusY, 0.25f, 0.001f, 4.0f);
+    mask.innerScale = ClampFinite(mask.innerScale, 0.65f, 0.0f, 0.999f);
+    return mask;
 }
 
-std::vector<Raw::RawToneCurvePoint> BuildRawToneCurveSettingsPoints(
-    const RawToneCurveRecipe& toneCurve) {
-    if (toneCurve.mode != ToneCurveMode::Custom) {
-        return {};
-    }
+nlohmann::json GradientMaskJson(const RawGradientMask& input) {
+    const RawGradientMask mask = SanitizeGradientMask(input);
+    return {
+        {"id", mask.id}, {"geometryVersion", mask.geometryVersion},
+        {"shape", mask.shape == RawGradientShape::Linear ? "linear" : "radial"},
+        {"enabled", mask.enabled}, {"inverted", mask.inverted},
+        {"centerU", mask.centerU}, {"centerV", mask.centerV},
+        {"angleRadians", mask.angleRadians},
+        {"lowBoundary", mask.lowBoundary}, {"highBoundary", mask.highBoundary},
+        {"radiusX", mask.radiusX}, {"radiusY", mask.radiusY},
+        {"innerScale", mask.innerScale}
+    };
+}
 
-    std::vector<Raw::RawToneCurvePoint> points;
-    points.reserve(toneCurve.points.size() + 2);
-    for (const RawToneCurvePoint& point : toneCurve.points) {
-        if (!std::isfinite(point.input) || !std::isfinite(point.output)) {
-            continue;
-        }
-        points.push_back({
-            std::clamp(point.input, 0.0f, 1.0f),
-            std::clamp(point.output, 0.0f, 1.0f)
-        });
-    }
-    points.push_back({ 0.0f, 0.0f });
-    points.push_back({ 1.0f, 1.0f });
+RawGradientMask GradientMaskFromJson(const nlohmann::json& value) {
+    RawGradientMask mask;
+    if (!value.is_object()) return mask;
+    mask.id = value.value("id", std::string{});
+    mask.shape = value.value("shape", std::string("linear")) == "radial"
+        ? RawGradientShape::Radial : RawGradientShape::Linear;
+    mask.enabled = value.value("enabled", true);
+    mask.inverted = value.value("inverted", false);
+    mask.centerU = JsonFloat(value, "centerU", mask.centerU);
+    mask.centerV = JsonFloat(value, "centerV", mask.centerV);
+    mask.angleRadians = JsonFloat(value, "angleRadians", mask.angleRadians);
+    mask.lowBoundary = JsonFloat(value, "lowBoundary", mask.lowBoundary);
+    mask.highBoundary = JsonFloat(value, "highBoundary", mask.highBoundary);
+    mask.radiusX = JsonFloat(value, "radiusX", mask.radiusX);
+    mask.radiusY = JsonFloat(value, "radiusY", mask.radiusY);
+    mask.innerScale = JsonFloat(value, "innerScale", mask.innerScale);
+    return SanitizeGradientMask(std::move(mask));
+}
 
-    std::sort(points.begin(), points.end(), [](const auto& a, const auto& b) {
-        return a.input < b.input;
-    });
+nlohmann::json GradientEvJson(const std::vector<RawGradientEvAdjustment>& items) {
+    nlohmann::json result = nlohmann::json::array();
+    for (std::size_t i = 0; i < std::min(items.size(), kMaxRawGradientAdjustments); ++i) {
+        result.push_back({{"mask", GradientMaskJson(items[i].mask)},
+            {"curve", LocalRangeJson(items[i].curve)}});
+    }
+    return result;
+}
 
-    std::vector<Raw::RawToneCurvePoint> uniquePoints;
-    uniquePoints.reserve(points.size());
-    for (const Raw::RawToneCurvePoint& point : points) {
-        if (!uniquePoints.empty() &&
-            std::abs(uniquePoints.back().input - point.input) < 0.0001f) {
-            uniquePoints.back() = point;
-            continue;
-        }
-        uniquePoints.push_back(point);
+nlohmann::json GradientToneJson(const std::vector<RawGradientToneAdjustment>& items) {
+    nlohmann::json result = nlohmann::json::array();
+    for (std::size_t i = 0; i < std::min(items.size(), kMaxRawGradientAdjustments); ++i) {
+        result.push_back({{"mask", GradientMaskJson(items[i].mask)},
+            {"curve", SanitizeFinishToneJson(items[i].curveJson)}});
     }
-    if (uniquePoints.empty()) {
-        return {};
-    }
-
-    uniquePoints.front() = { 0.0f, 0.0f };
-    uniquePoints.back() = { 1.0f, 1.0f };
-    while (uniquePoints.size() > kMaxRawToneCurvePoints) {
-        uniquePoints.erase(uniquePoints.end() - 2);
-    }
-    return uniquePoints;
+    return result;
 }
 
 std::string FileNameFromPath(const std::string& path) {
@@ -456,16 +424,90 @@ std::int64_t JsonInt64(const nlohmann::json& value, const char* key, std::int64_
 
 } // namespace
 
+RawColorWarpEvCurve MakeUniformColorWarpEvCurve(float qualification) {
+    RawColorWarpEvCurve curve;
+    curve.samples.assign(
+        kRawColorWarpEvCurveSampleCount,
+        std::clamp(std::isfinite(qualification) ? qualification : 1.0f, 0.0f, 1.0f));
+    return curve;
+}
+
+RawColorWarpEvCurve MakeColorWarpEvCurveHump(
+    float centerEv,
+    float coreHalfWidthEv,
+    float featherEv) {
+    centerEv = std::clamp(
+        std::isfinite(centerEv) ? centerEv : 0.0f,
+        kRawColorWarpEvMinimum,
+        kRawColorWarpEvMaximum);
+    coreHalfWidthEv = std::clamp(
+        std::isfinite(coreHalfWidthEv) ? coreHalfWidthEv : 0.75f,
+        0.0f,
+        16.0f);
+    featherEv = std::clamp(
+        std::isfinite(featherEv) ? featherEv : 0.75f,
+        0.0f,
+        16.0f);
+    RawColorWarpEvCurve curve = MakeUniformColorWarpEvCurve(0.0f);
+    const float low = centerEv - coreHalfWidthEv;
+    const float high = centerEv + coreHalfWidthEv;
+    for (std::size_t index = 0; index < curve.samples.size(); ++index) {
+        const float t = static_cast<float>(index) /
+            static_cast<float>(curve.samples.size() - 1u);
+        const float ev = kRawColorWarpEvMinimum +
+            t * (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum);
+        const float lowWeight = featherEv <= 0.0001f
+            ? (ev >= low ? 1.0f : 0.0f)
+            : SmoothStep(low - featherEv, low, ev);
+        const float highWeight = featherEv <= 0.0001f
+            ? (ev <= high ? 1.0f : 0.0f)
+            : 1.0f - SmoothStep(high, high + featherEv, ev);
+        curve.samples[index] = lowWeight * highWeight;
+    }
+    return curve;
+}
+
+float EvaluateColorWarpEvCurve(
+    const RawColorWarpEvCurve& curve,
+    float sceneEv) {
+    if (curve.samples.empty()) {
+        return 1.0f;
+    }
+    const float normalized = std::clamp(
+        (sceneEv - kRawColorWarpEvMinimum) /
+            (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum),
+        0.0f,
+        1.0f);
+    const float position = normalized *
+        static_cast<float>(curve.samples.size() - 1u);
+    const std::size_t lower = std::min(
+        curve.samples.size() - 1u,
+        static_cast<std::size_t>(std::floor(position)));
+    const std::size_t upper = std::min(curve.samples.size() - 1u, lower + 1u);
+    const float fraction = position - static_cast<float>(lower);
+    const float low = std::clamp(
+        std::isfinite(curve.samples[lower]) ? curve.samples[lower] : 1.0f,
+        0.0f,
+        1.0f);
+    const float high = std::clamp(
+        std::isfinite(curve.samples[upper]) ? curve.samples[upper] : low,
+        0.0f,
+        1.0f);
+    return low + (high - low) * fraction;
+}
+
 const std::vector<std::string>& DefaultStageOrder() {
     static const std::vector<std::string> kOrder = {
         "source",
         "raw-decode",
         "white-balance",
         "rgb-denoise",
+        "color-calibration",
         "pre-tone-exposure",
-        "local-exposure",
         "local-range",
         "tone-curve",
+        "color-warp",
+        "detail-contrast",
         "view-transform",
         "crop-rotation",
         "output"
@@ -479,77 +521,91 @@ RawDevelopmentRecipe MakeDefaultRecipe(std::string sourcePath, std::string displ
     recipe.source.relativePathKey = recipe.source.sourcePath;
     recipe.source.displayName = displayName.empty() ? FileNameFromPath(recipe.source.sourcePath) : std::move(displayName);
     recipe.localRange = DefaultLocalRangeRecipe();
-    recipe.toneCurve.points = DefaultToneCurvePoints();
     recipe.finishTone.layerJson = DefaultFinishToneJson();
     recipe.viewTransform.layerJson = DefaultViewTransformJson();
     recipe.stageOrder = DefaultStageOrder();
     return recipe;
 }
 
+RawDevelopmentRecipe BuildNeutralComparisonRecipe(
+    const RawDevelopmentRecipe& currentRecipe) {
+    RawDevelopmentRecipe neutral = MakeDefaultRecipe(
+        currentRecipe.source.sourcePath,
+        currentRecipe.source.displayName);
+    neutral.source = currentRecipe.source;
+
+    // Keep the current technical and color-domain foundation while resetting
+    // authored denoise, tone, and color controls.
+    neutral.technical.processingVersion =
+        Raw::RawProcessingVersion::TruthfulV2;
+    neutral.technical.demosaicMethod =
+        currentRecipe.technical.demosaicMethod;
+    neutral.technical.workingSpace =
+        currentRecipe.technical.workingSpace;
+    neutral.technical.applyBaselineExposure =
+        currentRecipe.technical.applyBaselineExposure;
+    neutral.technical.encodeSrgbOutput =
+        currentRecipe.technical.encodeSrgbOutput;
+
+    // Crop and orientation define which pixels are being compared. They are
+    // deliberately retained even though every creative adjustment is reset.
+    neutral.cropRotation = currentRecipe.cropRotation;
+
+    // Neutral Compare is the one deliberate bypass snapshot. Ordinary Color
+    // Warp recipes default on, but this comparison removes the entire stage.
+    neutral.colorWarp.enabled = false;
+
+    // Preserve internal-vs-graph View placement without preserving a custom
+    // authored View curve. Otherwise an external View node could be applied
+    // twice in the comparison snapshot.
+    const bool currentInternalViewEnabled =
+        currentRecipe.viewTransform.layerJson.value("enabled", true);
+    neutral.viewTransform.layerJson["enabled"] =
+        currentInternalViewEnabled;
+    return neutral;
+}
+
 const char* WhiteBalanceModeStableString(WhiteBalanceMode mode) {
     switch (mode) {
         case WhiteBalanceMode::AsShot: return "as-shot";
-        case WhiteBalanceMode::Auto: return "auto";
         case WhiteBalanceMode::CustomMultipliers: return "custom-multipliers";
-        case WhiteBalanceMode::SampledGrayPoint: return "sampled-gray-point";
     }
     return "as-shot";
 }
 
 WhiteBalanceMode WhiteBalanceModeFromStableString(const std::string& value) {
-    if (value == "auto") {
-        return WhiteBalanceMode::Auto;
-    }
-    if (value == "custom" || value == "custom-multipliers") {
+    if (value == "custom-multipliers") {
         return WhiteBalanceMode::CustomMultipliers;
-    }
-    if (value == "sample" || value == "sampled-gray-point") {
-        return WhiteBalanceMode::SampledGrayPoint;
     }
     return WhiteBalanceMode::AsShot;
 }
 
-const char* ToneCurveModeStableString(ToneCurveMode mode) {
-    switch (mode) {
-        case ToneCurveMode::Default: return "default";
-        case ToneCurveMode::Custom: return "custom";
-    }
-    return "default";
-}
-
-ToneCurveMode ToneCurveModeFromStableString(const std::string& value) {
-    if (value == "custom") {
-        return ToneCurveMode::Custom;
-    }
-    return ToneCurveMode::Default;
-}
-
 const char* ProcessingVersionStableString(Raw::RawProcessingVersion version) {
     switch (version) {
-        case Raw::RawProcessingVersion::LegacyV1: return "legacy-v1";
-        case Raw::RawProcessingVersion::TruthfulV1: return "truthful-v1";
+        case Raw::RawProcessingVersion::TruthfulV2: return "truthful-v2";
     }
-    return "legacy-v1";
-}
-
-Raw::RawProcessingVersion ProcessingVersionFromStableString(const std::string& value) {
-    if (value == "truthful-v1") {
-        return Raw::RawProcessingVersion::TruthfulV1;
-    }
-    return Raw::RawProcessingVersion::LegacyV1;
+    return "truthful-v2";
 }
 
 const char* DemosaicMethodStableString(Raw::DemosaicMethod method) {
     switch (method) {
         case Raw::DemosaicMethod::Bilinear: return "bilinear";
         case Raw::DemosaicMethod::MalvarHeCutler: return "malvar-he-cutler-5x5";
+        case Raw::DemosaicMethod::NearestNeighbor: return "nearest-neighbor";
+        case Raw::DemosaicMethod::HamiltonAdams: return "hamilton-adams";
     }
     return "bilinear";
 }
 
 Raw::DemosaicMethod DemosaicMethodFromStableString(const std::string& value) {
-    if (value == "malvar-he-cutler" || value == "malvar-he-cutler-5x5" || value == "mhc") {
+    if (value == "malvar-he-cutler-5x5") {
         return Raw::DemosaicMethod::MalvarHeCutler;
+    }
+    if (value == "nearest-neighbor") {
+        return Raw::DemosaicMethod::NearestNeighbor;
+    }
+    if (value == "hamilton-adams") {
+        return Raw::DemosaicMethod::HamiltonAdams;
     }
     return Raw::DemosaicMethod::Bilinear;
 }
@@ -563,7 +619,7 @@ const char* WorkingSpaceStableString(Raw::RawWorkingSpace workingSpace) {
 }
 
 Raw::RawWorkingSpace WorkingSpaceFromStableString(const std::string& value) {
-    if (value == "linear-rec2020-d65" || value == "linear-rec2020") {
+    if (value == "linear-rec2020-d65") {
         return Raw::RawWorkingSpace::LinearRec2020D65;
     }
     return Raw::RawWorkingSpace::LinearSrgbD65;
@@ -571,8 +627,8 @@ Raw::RawWorkingSpace WorkingSpaceFromStableString(const std::string& value) {
 
 const char* MosaicDenoiseModeStableString(Raw::RawMosaicDenoiseMode mode) {
     switch (mode) {
-        case Raw::RawMosaicDenoiseMode::LegacyFixedThreshold:
-            return "legacy-fixed-threshold";
+        case Raw::RawMosaicDenoiseMode::FixedThreshold:
+            return "fixed-threshold";
         case Raw::RawMosaicDenoiseMode::DngNoiseProfile:
             return "dng-noise-profile-v1";
     }
@@ -581,8 +637,8 @@ const char* MosaicDenoiseModeStableString(Raw::RawMosaicDenoiseMode mode) {
 
 Raw::RawMosaicDenoiseMode MosaicDenoiseModeFromStableString(
     const std::string& value) {
-    if (value == "legacy-fixed-threshold") {
-        return Raw::RawMosaicDenoiseMode::LegacyFixedThreshold;
+    if (value == "fixed-threshold") {
+        return Raw::RawMosaicDenoiseMode::FixedThreshold;
     }
     return Raw::RawMosaicDenoiseMode::DngNoiseProfile;
 }
@@ -669,8 +725,50 @@ nlohmann::json IdentityPointCurveJson() {
     });
 }
 
+RawBezierHandleState SanitizeBezierHandle(
+    RawBezierHandleState handle,
+    float fallbackStrength = 0.0f) {
+    handle.strength = ClampFinite(
+        handle.strength,
+        fallbackStrength,
+        0.0f,
+        1.5f);
+    handle.offsetX = ClampFinite(handle.offsetX, 0.0f, -1.0f, 1.0f);
+    handle.offsetY = ClampFinite(handle.offsetY, 0.0f, -1.0f, 1.0f);
+    if (!handle.manual) {
+        handle.offsetX = 0.0f;
+        handle.offsetY = 0.0f;
+    }
+    return handle;
+}
+
+RawBezierHandleState BezierHandleFromJson(
+    const nlohmann::json& value,
+    float missingStrength) {
+    RawBezierHandleState handle;
+    handle.strength = missingStrength;
+    if (value.is_object()) {
+        handle.strength = JsonFloat(value, "strength", missingStrength);
+        handle.manual = value.value("manual", false);
+        handle.offsetX = JsonFloat(value, "offsetX", 0.0f);
+        handle.offsetY = JsonFloat(value, "offsetY", 0.0f);
+    }
+    return SanitizeBezierHandle(handle, missingStrength);
+}
+
+nlohmann::json SerializeBezierHandle(const RawBezierHandleState& input) {
+    const RawBezierHandleState handle = SanitizeBezierHandle(input);
+    return {
+        { "strength", handle.strength },
+        { "manual", handle.manual },
+        { "offsetX", handle.offsetX },
+        { "offsetY", handle.offsetY }
+    };
+}
+
 std::vector<RawPointCurveControlPoint> SanitizePointCurvePoints(
-    const nlohmann::json& value) {
+    const nlohmann::json& value,
+    float missingStrength = 0.0f) {
     std::vector<RawPointCurveControlPoint> points;
     if (value.is_array()) {
         points.reserve(std::min<std::size_t>(value.size(), kMaxRawPointCurvePoints));
@@ -682,6 +780,12 @@ std::vector<RawPointCurveControlPoint> SanitizePointCurvePoints(
             point.x = ClampFinite(JsonFloat(item, "x", 0.0f), 0.0f, 0.0f, 1.0f);
             point.y = ClampFinite(JsonFloat(item, "y", point.x), point.x, 0.0f, 1.0f);
             point.shape = std::clamp(JsonInteger(item, "shape", 1), 0, 2);
+            point.incoming = BezierHandleFromJson(
+                item.value("incomingHandle", nlohmann::json::object()),
+                missingStrength);
+            point.outgoing = BezierHandleFromJson(
+                item.value("outgoingHandle", nlohmann::json::object()),
+                missingStrength);
             points.push_back(point);
         }
     }
@@ -718,38 +822,55 @@ nlohmann::json SerializePointCurvePoints(
         result.push_back({
             { "x", point.x },
             { "y", point.y },
-            { "shape", std::clamp(point.shape, 0, 2) }
+            { "shape", std::clamp(point.shape, 0, 2) },
+            { "incomingHandle", SerializeBezierHandle(point.incoming) },
+            { "outgoingHandle", SerializeBezierHandle(point.outgoing) }
         });
     }
     return result;
 }
 
 RawPointCurveComponent SanitizePointCurveComponent(
-    const nlohmann::json& value,
-    const char* defaultInterpolation = "monotone-cubic-v1") {
+    const nlohmann::json& value) {
     RawPointCurveComponent component;
     const nlohmann::json object = value.is_object() ? value : nlohmann::json::object();
-    component.interpolation = defaultInterpolation;
-    const auto interpolation = object.find("interpolation");
-    if (interpolation != object.end() && interpolation->is_string()) {
-        component.interpolation = interpolation->get<std::string>();
-    }
-    if (component.interpolation != "monotone-cubic-v1" &&
-        component.interpolation != "legacy-segment-v1") {
-        component.interpolation = defaultInterpolation;
-    }
+    component.interpolation = "bezier-segments-v1";
     component.points = SanitizePointCurvePoints(
-        object.value("points", IdentityPointCurveJson()));
+        object.value("points", IdentityPointCurveJson()),
+        0.0f);
     if (object.contains("basePoints")) {
-        component.basePoints = SanitizePointCurvePoints(object["basePoints"]);
+        component.basePoints = SanitizePointCurvePoints(
+            object["basePoints"],
+            0.0f);
     }
     return component;
 }
 
 nlohmann::json SerializePointCurveComponent(const RawPointCurveComponent& component) {
+    const auto hasOnlyDefaultHandles = [](
+        const std::vector<RawPointCurveControlPoint>& points) {
+        for (const RawPointCurveControlPoint& point : points) {
+            for (const RawBezierHandleState* handle :
+                 { &point.incoming, &point.outgoing }) {
+                if (handle->manual ||
+                    std::abs(handle->strength) > 0.000001f ||
+                    std::abs(handle->offsetX) > 0.000001f ||
+                    std::abs(handle->offsetY) > 0.000001f) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    const bool compactIdentity =
+        component.basePoints.empty() &&
+        IsIdentityRawPointCurveComponent(component) &&
+        hasOnlyDefaultHandles(component.points);
     nlohmann::json result = {
         { "interpolation", component.interpolation },
-        { "points", SerializePointCurvePoints(component.points) }
+        { "points", compactIdentity
+            ? nlohmann::json::array()
+            : SerializePointCurvePoints(component.points) }
     };
     if (!component.basePoints.empty()) {
         result["basePoints"] = SerializePointCurvePoints(component.basePoints);
@@ -757,34 +878,7 @@ nlohmann::json SerializePointCurveComponent(const RawPointCurveComponent& compon
     return result;
 }
 
-float EvaluateLegacyPointCurve(
-    const std::vector<RawPointCurveControlPoint>& points,
-    float x) {
-    if (points.empty()) {
-        return std::clamp(x, 0.0f, 1.0f);
-    }
-    x = std::clamp(x, 0.0f, 1.0f);
-    if (x <= points.front().x) {
-        return points.front().y;
-    }
-    for (std::size_t index = 1; index < points.size(); ++index) {
-        const RawPointCurveControlPoint& a = points[index - 1u];
-        const RawPointCurveControlPoint& b = points[index];
-        if (x <= b.x) {
-            float t = (x - a.x) / std::max(0.0001f, b.x - a.x);
-            if (a.shape == 2) {
-                return a.y;
-            }
-            if (a.shape == 0) {
-                t = t * t * (3.0f - 2.0f * t);
-            }
-            return std::clamp(a.y + (b.y - a.y) * t, 0.0f, 1.0f);
-        }
-    }
-    return points.back().y;
-}
-
-float PointCurveCoordinateFromScene(
+float PointCurveCoordinateFromSceneUnclamped(
     float value,
     int domain,
     float minimumEv,
@@ -792,22 +886,19 @@ float PointCurveCoordinateFromScene(
     float middleGrey) {
     if (domain == 1) {
         const float ev = std::log2(
-            std::max(value, 0.000001f) / std::max(middleGrey, 0.000001f));
-        return std::clamp(
-            (ev - minimumEv) / std::max(0.0001f, maximumEv - minimumEv),
-            0.0f,
-            1.0f);
+            std::max(value, std::numeric_limits<float>::min()) / std::max(middleGrey, 0.000001f));
+        return (ev - minimumEv) /
+            std::max(0.0001f, maximumEv - minimumEv);
     }
-    return std::clamp(value, 0.0f, 1.0f);
+    return value;
 }
 
-float PointCurveSceneFromCoordinate(
+float PointCurveSceneFromCoordinateUnclamped(
     float coordinate,
     int domain,
     float minimumEv,
     float maximumEv,
     float middleGrey) {
-    coordinate = std::clamp(coordinate, 0.0f, 1.0f);
     if (domain == 1) {
         return std::max(middleGrey, 0.000001f) *
             std::exp2(minimumEv + coordinate * (maximumEv - minimumEv));
@@ -829,14 +920,12 @@ const char* RawPointCurveChannelKey(RawPointCurveChannel channel) {
 
 nlohmann::json DefaultPointCurveComponentJson() {
     return {
-        { "interpolation", "monotone-cubic-v1" },
+        { "interpolation", "bezier-segments-v1" },
         { "points", nlohmann::json::array() }
     };
 }
 
-nlohmann::json SanitizeFinishTonePointCurveJson(
-    nlohmann::json finishTone,
-    int storedRecipeVersion) {
+nlohmann::json SanitizeFinishTonePointCurveJson(nlohmann::json finishTone) {
     if (!finishTone.is_object()) {
         finishTone = nlohmann::json::object();
     }
@@ -845,68 +934,31 @@ nlohmann::json SanitizeFinishTonePointCurveJson(
         finishTone.contains("pointCurves") && finishTone["pointCurves"].is_object()
             ? finishTone["pointCurves"]
             : nlohmann::json::object();
-    if (storedRecipeVersion < 13) {
-        curveSet = nlohmann::json::object();
-        for (int index = 0; index < 4; ++index) {
-            curveSet[RawPointCurveChannelKey(static_cast<RawPointCurveChannel>(index))] =
-                DefaultPointCurveComponentJson();
-        }
-        const int legacyMode = std::clamp(JsonInteger(finishTone, "mode", 1), 0, 4);
-        nlohmann::json migrated = {
-            { "interpolation", "legacy-segment-v1" },
-            { "basePoints", finishTone.value("preparedPoints", IdentityPointCurveJson()) },
-            { "points", finishTone.value("points", IdentityPointCurveJson()) }
-        };
-        if (legacyMode == 0) {
-            finishTone["legacyLuma"] = {
-                { "enabled", true },
-                { "interpolation", "legacy-segment-v1" },
-                { "basePoints", migrated["basePoints"] },
-                { "points", migrated["points"] }
-            };
-        } else {
-            const RawPointCurveChannel channel = static_cast<RawPointCurveChannel>(legacyMode - 1);
-            curveSet[RawPointCurveChannelKey(channel)] = std::move(migrated);
-        }
-    }
-
     for (int index = 0; index < 4; ++index) {
         const char* key = RawPointCurveChannelKey(static_cast<RawPointCurveChannel>(index));
-        const RawPointCurveComponent component = SanitizePointCurveComponent(
-            curveSet.value(key, DefaultPointCurveComponentJson()));
+        const nlohmann::json componentValue =
+            curveSet.value(key, DefaultPointCurveComponentJson());
+        const RawPointCurveComponent component =
+            SanitizePointCurveComponent(componentValue);
         curveSet[key] = SerializePointCurveComponent(component);
     }
-    finishTone["pointCurveSetVersion"] = 1;
+    finishTone["pointCurveSetVersion"] = 2;
     finishTone["pointCurves"] = std::move(curveSet);
-
-    if (finishTone.contains("legacyLuma") && finishTone["legacyLuma"].is_object()) {
-        const bool enabled = finishTone["legacyLuma"].value("enabled", false);
-        RawPointCurveComponent component = SanitizePointCurveComponent(
-            finishTone["legacyLuma"],
-            "legacy-segment-v1");
-        finishTone["legacyLuma"] = SerializePointCurveComponent(component);
-        finishTone["legacyLuma"]["enabled"] = enabled;
-    }
+    finishTone["luminanceTone"] = SerializeSceneTone(ReadSceneTone(
+        finishTone.value("luminanceTone", nlohmann::json::object())));
     return finishTone;
 }
 
 RawPointCurveSet PointCurveSetFromFinishToneJson(const nlohmann::json& finishTone) {
-    const nlohmann::json sanitized = SanitizeFinishTonePointCurveJson(
-        finishTone,
-        JsonInteger(finishTone, "pointCurveSetVersion", 0) == 1 ? 13 : 12);
+    const nlohmann::json sanitized =
+        SanitizeFinishTonePointCurveJson(finishTone);
     RawPointCurveSet result;
-    result.version = 1;
+    result.version = 2;
     const nlohmann::json& pointCurves = sanitized["pointCurves"];
     for (int index = 0; index < 4; ++index) {
         const char* key = RawPointCurveChannelKey(static_cast<RawPointCurveChannel>(index));
         result.curves[static_cast<std::size_t>(index)] =
             SanitizePointCurveComponent(pointCurves[key]);
-    }
-    if (sanitized.contains("legacyLuma") && sanitized["legacyLuma"].is_object()) {
-        result.legacyLumaEnabled = sanitized["legacyLuma"].value("enabled", false);
-        result.legacyLuma = SanitizePointCurveComponent(
-            sanitized["legacyLuma"],
-            "legacy-segment-v1");
     }
     return result;
 }
@@ -914,8 +966,8 @@ RawPointCurveSet PointCurveSetFromFinishToneJson(const nlohmann::json& finishTon
 void StorePointCurveSetInFinishToneJson(
     nlohmann::json& finishTone,
     const RawPointCurveSet& curveSet) {
-    finishTone = SanitizeFinishTonePointCurveJson(finishTone, 13);
-    finishTone["pointCurveSetVersion"] = 1;
+    finishTone = SanitizeFinishTonePointCurveJson(finishTone);
+    finishTone["pointCurveSetVersion"] = 2;
     for (int index = 0; index < 4; ++index) {
         const RawPointCurveComponent& component =
             curveSet.curves[static_cast<std::size_t>(index)];
@@ -923,16 +975,6 @@ void StorePointCurveSetInFinishToneJson(
             static_cast<RawPointCurveChannel>(index))] =
             SerializePointCurveComponent(SanitizePointCurveComponent(
                 SerializePointCurveComponent(component)));
-    }
-    if (curveSet.legacyLumaEnabled ||
-        !IsIdentityRawPointCurveComponent(curveSet.legacyLuma)) {
-        finishTone["legacyLuma"] = SerializePointCurveComponent(
-            SanitizePointCurveComponent(
-                SerializePointCurveComponent(curveSet.legacyLuma),
-                "legacy-segment-v1"));
-        finishTone["legacyLuma"]["enabled"] = curveSet.legacyLumaEnabled;
-    } else {
-        finishTone.erase("legacyLuma");
     }
 }
 
@@ -947,66 +989,314 @@ void StorePointCurveComponentInFinishToneJson(
     nlohmann::json& finishTone,
     RawPointCurveChannel channel,
     const RawPointCurveComponent& component) {
-    finishTone = SanitizeFinishTonePointCurveJson(std::move(finishTone), 13);
+    finishTone = SanitizeFinishTonePointCurveJson(std::move(finishTone));
     finishTone["pointCurves"][RawPointCurveChannelKey(channel)] =
         SerializePointCurveComponent(SanitizePointCurveComponent(
             SerializePointCurveComponent(component)));
 }
 
-float EvaluateRawPointCurve(
-    const std::vector<RawPointCurveControlPoint>& points,
-    const std::string& interpolation,
-    float x) {
-    if (interpolation != "monotone-cubic-v1" || points.size() < 3u) {
-        return EvaluateLegacyPointCurve(points, x);
+namespace {
+
+float BezierCoordinate(float p0, float p1, float p2, float p3, float t) {
+    const float inverse = 1.0f - t;
+    return inverse * inverse * inverse * p0 +
+        3.0f * inverse * inverse * t * p1 +
+        3.0f * inverse * t * t * p2 +
+        t * t * t * p3;
+}
+
+std::array<float, 2> NormalizeCurveVector(float x, float y) {
+    const float length = std::sqrt(x * x + y * y);
+    if (length <= 0.000001f) {
+        return { 1.0f, 0.0f };
     }
+    return { x / length, y / length };
+}
 
-    x = std::clamp(x, 0.0f, 1.0f);
-    if (x <= points.front().x) return points.front().y;
-    if (x >= points.back().x) return points.back().y;
-
-    const std::size_t count = std::min(points.size(), kMaxRawPointCurvePoints);
-    std::array<float, kMaxRawPointCurvePoints> widths {};
-    std::array<float, kMaxRawPointCurvePoints> slopes {};
-    for (std::size_t index = 0; index + 1u < count; ++index) {
+std::vector<float> MonotoneCurveTangents(
+    const std::vector<RawBezierCurvePoint>& points) {
+    std::vector<float> tangents(points.size(), 0.0f);
+    if (points.size() < 2u) {
+        return tangents;
+    }
+    std::vector<float> widths(points.size() - 1u, 0.0f);
+    std::vector<float> slopes(points.size() - 1u, 0.0f);
+    for (std::size_t index = 0; index + 1u < points.size(); ++index) {
         widths[index] = std::max(0.0001f, points[index + 1u].x - points[index].x);
         slopes[index] = (points[index + 1u].y - points[index].y) / widths[index];
     }
-    std::array<float, kMaxRawPointCurvePoints> tangents {};
     tangents.front() = slopes.front();
     tangents.back() = slopes.back();
-    for (std::size_t index = 1; index + 1u < count; ++index) {
+    for (std::size_t index = 1; index + 1u < points.size(); ++index) {
         if (slopes[index - 1u] * slopes[index] <= 0.0f) {
             tangents[index] = 0.0f;
-        } else {
-            const float w1 = 2.0f * widths[index] + widths[index - 1u];
-            const float w2 = widths[index] + 2.0f * widths[index - 1u];
-            tangents[index] = (w1 + w2) /
-                (w1 / slopes[index - 1u] + w2 / slopes[index]);
+            continue;
         }
+        const float w1 = 2.0f * widths[index] + widths[index - 1u];
+        const float w2 = widths[index] + 2.0f * widths[index - 1u];
+        tangents[index] = (w1 + w2) /
+            (w1 / slopes[index - 1u] + w2 / slopes[index]);
+    }
+    return tangents;
+}
+
+std::array<float, 2> RotateCurveHandleToward(
+    float baseX,
+    float baseY,
+    float targetX,
+    float targetY,
+    float amount) {
+    const float length = std::sqrt(baseX * baseX + baseY * baseY);
+    if (length <= 0.000001f) {
+        return { 0.0f, 0.0f };
+    }
+    const std::array<float, 2> baseDirection =
+        NormalizeCurveVector(baseX, baseY);
+    const std::array<float, 2> targetDirection =
+        NormalizeCurveVector(targetX, targetY);
+    std::array<float, 2> direction = NormalizeCurveVector(
+        baseDirection[0] + (targetDirection[0] - baseDirection[0]) * amount,
+        baseDirection[1] + (targetDirection[1] - baseDirection[1]) * amount);
+    return { direction[0] * length, direction[1] * length };
+}
+
+std::array<float, 2> ClampCurveHandleFromAnchor(
+    float anchorX,
+    float anchorY,
+    float handleX,
+    float handleY,
+    float minimumX,
+    float maximumX) {
+    const float dx = handleX - anchorX;
+    const float dy = handleY - anchorY;
+    float scale = 1.0f;
+    if (dx > 0.000001f) {
+        scale = std::min(scale, (maximumX - anchorX) / dx);
+    } else if (dx < -0.000001f) {
+        scale = std::min(scale, (minimumX - anchorX) / dx);
+    }
+    if (dy > 0.000001f) {
+        scale = std::min(scale, (1.0f - anchorY) / dy);
+    } else if (dy < -0.000001f) {
+        scale = std::min(scale, (0.0f - anchorY) / dy);
+    }
+    scale = std::clamp(scale, 0.0f, 1.0f);
+    return {
+        anchorX + dx * scale,
+        anchorY + dy * scale
+    };
+}
+
+} // namespace
+
+RawBezierSegment BuildRawBezierSegment(
+    const std::vector<RawBezierCurvePoint>& inputPoints,
+    std::size_t segmentIndex) {
+    RawBezierSegment result;
+    if (inputPoints.size() < 2u) {
+        return result;
+    }
+    const std::size_t count = std::min(inputPoints.size(), kMaxRawPointCurvePoints);
+    segmentIndex = std::min(segmentIndex, count - 2u);
+    std::vector<RawBezierCurvePoint> points(inputPoints.begin(), inputPoints.begin() + count);
+    for (RawBezierCurvePoint& point : points) {
+        point.x = std::clamp(point.x, 0.0f, 1.0f);
+        point.y = std::clamp(point.y, 0.0f, 1.0f);
+        point.incoming = SanitizeBezierHandle(point.incoming);
+        point.outgoing = SanitizeBezierHandle(point.outgoing);
+    }
+    result.left = points[segmentIndex];
+    result.right = points[segmentIndex + 1u];
+    const float width = std::max(0.0001f, result.right.x - result.left.x);
+    const float straightLeftX = result.left.x + width / 3.0f;
+    const float straightLeftY = result.left.y + (result.right.y - result.left.y) / 3.0f;
+    const float straightRightX = result.right.x - width / 3.0f;
+    const float straightRightY = result.right.y - (result.right.y - result.left.y) / 3.0f;
+    const std::vector<float> tangents = MonotoneCurveTangents(points);
+
+    const RawBezierHandleState& leftState = result.left.outgoing;
+    float baseLeftX = leftState.manual
+        ? result.left.x + leftState.offsetX
+        : result.left.x + width / 3.0f;
+    float baseLeftY = leftState.manual
+        ? result.left.y + leftState.offsetY
+        : result.left.y + tangents[segmentIndex] * width / 3.0f;
+    const float leftBlend = std::min(leftState.strength, 1.0f);
+    result.leftHandleX = straightLeftX + (baseLeftX - straightLeftX) * leftBlend;
+    result.leftHandleY = straightLeftY + (baseLeftY - straightLeftY) * leftBlend;
+    if (leftState.strength > 1.0f) {
+        const RawBezierCurvePoint& targetPoint = segmentIndex > 0u
+            ? points[segmentIndex - 1u]
+            : result.right;
+        const float targetX = segmentIndex > 0u
+            ? result.left.x - targetPoint.x
+            : result.right.x - result.left.x;
+        const float targetY = segmentIndex > 0u
+            ? result.left.y - targetPoint.y
+            : result.right.y - result.left.y;
+        const auto rotated = RotateCurveHandleToward(
+            result.leftHandleX - result.left.x,
+            result.leftHandleY - result.left.y,
+            targetX,
+            targetY,
+            (leftState.strength - 1.0f) / 0.5f);
+        result.leftHandleX = result.left.x + rotated[0];
+        result.leftHandleY = result.left.y + rotated[1];
     }
 
-    std::size_t segment = 0;
-    while (segment + 1u < count && x > points[segment + 1u].x) {
-        ++segment;
+    const RawBezierHandleState& rightState = result.right.incoming;
+    float baseRightX = rightState.manual
+        ? result.right.x + rightState.offsetX
+        : result.right.x - width / 3.0f;
+    float baseRightY = rightState.manual
+        ? result.right.y + rightState.offsetY
+        : result.right.y - tangents[segmentIndex + 1u] * width / 3.0f;
+    const float rightBlend = std::min(rightState.strength, 1.0f);
+    result.rightHandleX = straightRightX + (baseRightX - straightRightX) * rightBlend;
+    result.rightHandleY = straightRightY + (baseRightY - straightRightY) * rightBlend;
+    if (rightState.strength > 1.0f) {
+        const RawBezierCurvePoint& targetPoint = segmentIndex + 2u < points.size()
+            ? points[segmentIndex + 2u]
+            : result.left;
+        const float targetX = segmentIndex + 2u < points.size()
+            ? result.right.x - targetPoint.x
+            : result.left.x - result.right.x;
+        const float targetY = segmentIndex + 2u < points.size()
+            ? result.right.y - targetPoint.y
+            : result.left.y - result.right.y;
+        const auto rotated = RotateCurveHandleToward(
+            result.rightHandleX - result.right.x,
+            result.rightHandleY - result.right.y,
+            targetX,
+            targetY,
+            (rightState.strength - 1.0f) / 0.5f);
+        result.rightHandleX = result.right.x + rotated[0];
+        result.rightHandleY = result.right.y + rotated[1];
     }
-    segment = std::min(segment, count - 2u);
-    const float width = widths[segment];
-    const float t = std::clamp((x - points[segment].x) / width, 0.0f, 1.0f);
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    const float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
-    const float h10 = t3 - 2.0f * t2 + t;
-    const float h01 = -2.0f * t3 + 3.0f * t2;
-    const float h11 = t3 - t2;
-    const float value =
-        h00 * points[segment].y +
-        h10 * width * tangents[segment] +
-        h01 * points[segment + 1u].y +
-        h11 * width * tangents[segment + 1u];
-    const float minimum = std::min(points[segment].y, points[segment + 1u].y);
-    const float maximum = std::max(points[segment].y, points[segment + 1u].y);
-    return std::clamp(value, minimum, maximum);
+
+    const auto clampedLeft = ClampCurveHandleFromAnchor(
+        result.left.x,
+        result.left.y,
+        result.leftHandleX,
+        result.leftHandleY,
+        result.left.x,
+        result.right.x);
+    result.leftHandleX = clampedLeft[0];
+    result.leftHandleY = clampedLeft[1];
+    const auto clampedRight = ClampCurveHandleFromAnchor(
+        result.right.x,
+        result.right.y,
+        result.rightHandleX,
+        result.rightHandleY,
+        result.left.x,
+        result.right.x);
+    result.rightHandleX = clampedRight[0];
+    result.rightHandleY = clampedRight[1];
+    if (result.leftHandleX > result.rightHandleX) {
+        const float meetingX =
+            (result.leftHandleX + result.rightHandleX) * 0.5f;
+        const float leftDx = result.leftHandleX - result.left.x;
+        const float rightDx = result.rightHandleX - result.right.x;
+        if (leftDx > 0.000001f) {
+            const float scale = std::clamp(
+                (meetingX - result.left.x) / leftDx,
+                0.0f,
+                1.0f);
+            result.leftHandleX = result.left.x + leftDx * scale;
+            result.leftHandleY = result.left.y +
+                (result.leftHandleY - result.left.y) * scale;
+        }
+        if (rightDx < -0.000001f) {
+            const float scale = std::clamp(
+                (meetingX - result.right.x) / rightDx,
+                0.0f,
+                1.0f);
+            result.rightHandleX = result.right.x + rightDx * scale;
+            result.rightHandleY = result.right.y +
+                (result.rightHandleY - result.right.y) * scale;
+        }
+    }
+    return result;
+}
+
+float EvaluateRawBezierCurve(
+    const std::vector<RawBezierCurvePoint>& points,
+    float x) {
+    if (points.empty()) {
+        return std::clamp(x, 0.0f, 1.0f);
+    }
+    if (points.size() == 1u) {
+        return std::clamp(points.front().y, 0.0f, 1.0f);
+    }
+    x = std::clamp(x, 0.0f, 1.0f);
+    if (x <= points.front().x) return std::clamp(points.front().y, 0.0f, 1.0f);
+    if (x >= points.back().x) return std::clamp(points.back().y, 0.0f, 1.0f);
+    std::size_t segmentIndex = 0u;
+    while (segmentIndex + 1u < points.size() &&
+           x > points[segmentIndex + 1u].x) {
+        ++segmentIndex;
+    }
+    segmentIndex = std::min(segmentIndex, points.size() - 2u);
+    const RawBezierSegment segment = BuildRawBezierSegment(points, segmentIndex);
+    float low = 0.0f;
+    float high = 1.0f;
+    for (int iteration = 0; iteration < 18; ++iteration) {
+        const float middle = (low + high) * 0.5f;
+        const float curveX = BezierCoordinate(
+            segment.left.x,
+            segment.leftHandleX,
+            segment.rightHandleX,
+            segment.right.x,
+            middle);
+        if (curveX < x) low = middle;
+        else high = middle;
+    }
+    const float t = (low + high) * 0.5f;
+    return std::clamp(
+        BezierCoordinate(
+            segment.left.y,
+            segment.leftHandleY,
+            segment.rightHandleY,
+            segment.right.y,
+            t),
+        0.0f,
+        1.0f);
+}
+
+std::vector<RawBezierCurvePoint> RawPointCurveBezierPoints(
+    const RawPointCurveComponent& component) {
+    std::vector<RawBezierCurvePoint> result;
+    result.reserve(component.points.size());
+    for (const RawPointCurveControlPoint& point : component.points) {
+        result.push_back({ point.x, point.y, point.incoming, point.outgoing });
+    }
+    return result;
+}
+
+std::vector<RawBezierCurvePoint> RawLocalRangeBezierPoints(
+    const RawLocalRangeRecipe& localRangeInput) {
+    const RawLocalRangeRecipe localRange = SanitizeLocalRangeRecipe(localRangeInput);
+    const float evSpan = std::max(0.1f, localRange.maxEv - localRange.minEv);
+    std::vector<RawBezierCurvePoint> result;
+    result.reserve(localRange.points.size());
+    for (const RawLocalRangePoint& point : localRange.points) {
+        result.push_back({
+            (point.ev - localRange.minEv) / evSpan,
+            (point.deltaEv + 4.0f) / 8.0f,
+            point.incoming,
+            point.outgoing
+        });
+    }
+    return result;
+}
+
+float EvaluateRawPointCurve(
+    const std::vector<RawPointCurveControlPoint>& points,
+    const std::string&,
+    float x) {
+    RawPointCurveComponent component;
+    component.points = points;
+    return EvaluateRawBezierCurve(RawPointCurveBezierPoints(component), x);
 }
 
 float EvaluateRawPointCurveComponent(const RawPointCurveComponent& component, float x) {
@@ -1021,10 +1311,19 @@ float EvaluateRawPointCurveComponent(const RawPointCurveComponent& component, fl
 }
 
 bool IsIdentityRawPointCurveComponent(const RawPointCurveComponent& component) {
-    auto identity = [](const std::vector<RawPointCurveControlPoint>& points) {
+    auto identity = [&](const std::vector<RawPointCurveControlPoint>& points) {
         if (points.empty()) return true;
         for (const RawPointCurveControlPoint& point : points) {
             if (std::abs(point.x - point.y) > 0.0001f) return false;
+        }
+        for (int sample = 0; sample <= 64; ++sample) {
+            const float coordinate = static_cast<float>(sample) / 64.0f;
+            if (std::abs(EvaluateRawPointCurve(
+                    points,
+                    component.interpolation,
+                    coordinate) - coordinate) > 0.0001f) {
+                return false;
+            }
         }
         return true;
     };
@@ -1034,6 +1333,18 @@ bool IsIdentityRawPointCurveComponent(const RawPointCurveComponent& component) {
 std::array<float, 3> EvaluateFinishTonePointCurveRgb(
     const nlohmann::json& finishTone,
     const std::array<float, 3>& sceneRgb) {
+    const Raw::RawWorkingSpace workingSpace =
+        finishTone.value("inputWorkingSpace", std::string("linear-srgb-d65")) ==
+                "linear-rec2020-d65"
+            ? Raw::RawWorkingSpace::LinearRec2020D65
+            : Raw::RawWorkingSpace::LinearSrgbD65;
+    return EvaluateFinishTonePointCurveRgb(finishTone, sceneRgb, workingSpace);
+}
+
+std::array<float, 3> EvaluateFinishTonePointCurveRgb(
+    const nlohmann::json& finishTone,
+    const std::array<float, 3>& sceneRgb,
+    Raw::RawWorkingSpace workingSpace) {
     const RawPointCurveSet curveSet = PointCurveSetFromFinishToneJson(finishTone);
     const int domain = std::clamp(finishTone.value("domain", 1), 0, 1);
     const float minimumEv = ClampFinite(
@@ -1043,42 +1354,35 @@ std::array<float, 3> EvaluateFinishTonePointCurveRgb(
         ClampFinite(finishTone.value("logMaxEv", 6.0f), 6.0f, 0.0f, 20.0f));
     const float middleGrey = ClampFinite(
         finishTone.value("middleGrey", 0.18f), 0.18f, 0.01f, 1.0f);
-
-    std::array<float, 3> rgb {
-        std::max(0.0f, sceneRgb[0]),
-        std::max(0.0f, sceneRgb[1]),
-        std::max(0.0f, sceneRgb[2])
-    };
-    if (curveSet.legacyLumaEnabled) {
-        const float oldLuma =
-            0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
-        const float coordinate = PointCurveCoordinateFromScene(
-            oldLuma, domain, minimumEv, maximumEv, middleGrey);
-        const float newLuma = PointCurveSceneFromCoordinate(
-            EvaluateRawPointCurveComponent(curveSet.legacyLuma, coordinate),
-            domain,
-            minimumEv,
-            maximumEv,
-            middleGrey);
-        const float gain = newLuma / std::max(oldLuma, 0.000001f);
-        for (float& value : rgb) value *= gain;
-    }
+    std::array<float, 3> rgb = ApplySceneTone(ReadSceneTone(
+        finishTone.value("luminanceTone", nlohmann::json::object())), sceneRgb,
+        workingSpace == Raw::RawWorkingSpace::LinearRec2020D65
+            ? std::array<float,3>{0.2627002f,0.6779981f,0.0593017f}
+            : std::array<float,3>{0.2126729f,0.7151522f,0.0721750f});
 
     const RawPointCurveComponent& composite =
         curveSet.curves[static_cast<std::size_t>(RawPointCurveChannel::Composite)];
     for (int channel = 0; channel < 3; ++channel) {
-        float coordinate = PointCurveCoordinateFromScene(
-            rgb[static_cast<std::size_t>(channel)],
-            domain,
-            minimumEv,
-            maximumEv,
-            middleGrey);
-        coordinate = EvaluateRawPointCurveComponent(composite, coordinate);
-        coordinate = EvaluateRawPointCurveComponent(
+        const std::size_t channelIndex = static_cast<std::size_t>(channel);
+        if (rgb[channelIndex] <= 0.0f) {
+            continue;
+        }
+        float coordinate = PointCurveCoordinateFromSceneUnclamped(
+            rgb[channelIndex], domain, minimumEv, maximumEv, middleGrey);
+        const float clampedCoordinate = std::clamp(coordinate, 0.0f, 1.0f);
+        float mapped = EvaluateRawPointCurveComponent(
+            composite,
+            clampedCoordinate);
+        mapped = EvaluateRawPointCurveComponent(
             curveSet.curves[static_cast<std::size_t>(channel + 1)],
-            coordinate);
-        rgb[static_cast<std::size_t>(channel)] = PointCurveSceneFromCoordinate(
-            coordinate, domain, minimumEv, maximumEv, middleGrey);
+            mapped);
+        if (coordinate < 0.0f) {
+            mapped += coordinate;
+        } else if (coordinate > 1.0f) {
+            mapped += coordinate - 1.0f;
+        }
+        rgb[channelIndex] = PointCurveSceneFromCoordinateUnclamped(
+            mapped, domain, minimumEv, maximumEv, middleGrey);
     }
     return rgb;
 }
@@ -1108,17 +1412,590 @@ nlohmann::json DefaultFinishToneJson() {
         { "points", DefaultToneCurveLayerPointsJson() },
         { "freeEndpoints", true },
         { "activeGraphView", 0 },
-        { "pointCurveSetVersion", 1 },
+        { "curveRangeMode", kFinishToneRangeExtendedSceneV1 },
+        { "inputWorkingSpace", "linear-rec2020-d65" },
+        { "pointCurveSetVersion", 2 },
         { "pointCurves", std::move(pointCurves) },
+        { "luminanceTone", SerializeSceneTone(SceneTone{}) },
         { "logMinEv", -10.0f },
         { "logMaxEv", 6.0f },
         { "middleGrey", 0.18f }
     };
 }
 
+const char* RawColorWarpInterpretationModeStableString(
+    RawColorWarpInterpretationMode mode) {
+    switch (mode) {
+        case RawColorWarpInterpretationMode::DominantFamily: return "dominant-family";
+        case RawColorWarpInterpretationMode::ConnectedFamily: return "connected-family";
+        case RawColorWarpInterpretationMode::MultipleColors: return "multiple-colors";
+        case RawColorWarpInterpretationMode::ColorOnly: return "color-only";
+        case RawColorWarpInterpretationMode::ColorAndBrightness: return "color-and-brightness";
+        case RawColorWarpInterpretationMode::FullContents: return "full-contents";
+        case RawColorWarpInterpretationMode::GuidedFamily:
+        default: return "guided-family";
+    }
+}
+
+RawColorWarpInterpretationMode RawColorWarpInterpretationModeFromStableString(
+    const std::string& value) {
+    if (value == "dominant-family") return RawColorWarpInterpretationMode::DominantFamily;
+    if (value == "connected-family") return RawColorWarpInterpretationMode::ConnectedFamily;
+    if (value == "multiple-colors") return RawColorWarpInterpretationMode::MultipleColors;
+    if (value == "color-only") return RawColorWarpInterpretationMode::ColorOnly;
+    if (value == "color-and-brightness") return RawColorWarpInterpretationMode::ColorAndBrightness;
+    if (value == "full-contents") return RawColorWarpInterpretationMode::FullContents;
+    return RawColorWarpInterpretationMode::GuidedFamily;
+}
+
+const char* RawColorWarpSpatialModeStableString(RawColorWarpSpatialMode mode) {
+    switch (mode) {
+        case RawColorWarpSpatialMode::Connected: return "connected";
+        case RawColorWarpSpatialMode::Cohesive: return "cohesive";
+        case RawColorWarpSpatialMode::EdgeAwareReach: return "edge-aware-reach";
+        case RawColorWarpSpatialMode::AssistedRegion: return "assisted-region";
+        case RawColorWarpSpatialMode::AllMatches:
+        default: return "all-matches";
+    }
+}
+
+RawColorWarpSpatialMode RawColorWarpSpatialModeFromStableString(
+    const std::string& value) {
+    if (value == "connected") return RawColorWarpSpatialMode::Connected;
+    if (value == "cohesive") return RawColorWarpSpatialMode::Cohesive;
+    if (value == "edge-aware-reach") return RawColorWarpSpatialMode::EdgeAwareReach;
+    if (value == "assisted-region") return RawColorWarpSpatialMode::AssistedRegion;
+    return RawColorWarpSpatialMode::AllMatches;
+}
+
+const char* RawColorWarpFeatherDirectionStableString(
+    RawColorWarpFeatherDirection direction) {
+    switch (direction) {
+        case RawColorWarpFeatherDirection::Inward: return "inward";
+        case RawColorWarpFeatherDirection::Outward: return "outward";
+        case RawColorWarpFeatherDirection::Centered:
+        default: return "centered";
+    }
+}
+
+RawColorWarpFeatherDirection RawColorWarpFeatherDirectionFromStableString(
+    const std::string& value) {
+    if (value == "inward") return RawColorWarpFeatherDirection::Inward;
+    if (value == "outward") return RawColorWarpFeatherDirection::Outward;
+    return RawColorWarpFeatherDirection::Centered;
+}
+
+RawColorWarpRecipe SanitizeColorWarpRecipe(RawColorWarpRecipe colorWarp) {
+    colorWarp.version = 2;
+    colorWarp.strength = ClampFinite(colorWarp.strength, 1.0f, 0.0f, 2.0f);
+    if (colorWarp.pins.size() > kMaxRawColorWarpPins) {
+        colorWarp.pins.resize(kMaxRawColorWarpPins);
+    }
+    if (colorWarp.regions.size() > kMaxRawColorWarpRegions) {
+        colorWarp.regions.resize(kMaxRawColorWarpRegions);
+    }
+    if (colorWarp.linkGroups.size() > kMaxRawColorWarpLinkGroups) {
+        colorWarp.linkGroups.resize(kMaxRawColorWarpLinkGroups);
+    }
+
+    std::unordered_set<std::string> usedRegionIds;
+    for (std::size_t regionIndex = 0; regionIndex < colorWarp.regions.size(); ++regionIndex) {
+        RawColorWarpRegion& region = colorWarp.regions[regionIndex];
+        if (region.id.empty() || usedRegionIds.find(region.id) != usedRegionIds.end()) {
+            region.id = "region-" + std::to_string(regionIndex + 1u);
+            while (usedRegionIds.find(region.id) != usedRegionIds.end()) {
+                region.id += "-copy";
+            }
+        }
+        usedRegionIds.insert(region.id);
+        if (region.circles.size() > kMaxRawColorWarpSampleCircles) {
+            region.circles.resize(kMaxRawColorWarpSampleCircles);
+        }
+        std::unordered_set<std::string> usedCircleIds;
+        for (std::size_t circleIndex = 0; circleIndex < region.circles.size(); ++circleIndex) {
+            RawColorWarpSampleCircle& circle = region.circles[circleIndex];
+            if (circle.id.empty() || usedCircleIds.find(circle.id) != usedCircleIds.end()) {
+                circle.id = "sample-" + std::to_string(circleIndex + 1u);
+                while (usedCircleIds.find(circle.id) != usedCircleIds.end()) {
+                    circle.id += "-copy";
+                }
+            }
+            usedCircleIds.insert(circle.id);
+            circle.centerU = ClampFinite(circle.centerU, 0.5f, 0.0f, 1.0f);
+            circle.centerV = ClampFinite(circle.centerV, 0.5f, 0.0f, 1.0f);
+            circle.radiusU = ClampFinite(circle.radiusU, 0.02f, 0.000001f, 1.0f);
+            circle.radiusV = ClampFinite(circle.radiusV, 0.02f, 0.000001f, 1.0f);
+        }
+        region.reachPixels = ClampFinite(region.reachPixels, 24.0f, 0.0f, 4096.0f);
+        region.spatialSupport = ClampFinite(region.spatialSupport, 1.0f, 0.0f, 1.0f);
+        region.edgeStop = ClampFinite(region.edgeStop, 0.65f, 0.0f, 1.0f);
+        region.featherPixels = ClampFinite(region.featherPixels, 0.0f, 0.0f, 4096.0f);
+    }
+
+    std::unordered_set<std::string> usedIds;
+    for (std::size_t index = 0; index < colorWarp.pins.size(); ++index) {
+        RawColorWarpPin& pin = colorWarp.pins[index];
+        if (pin.id.empty() || usedIds.find(pin.id) != usedIds.end()) {
+            pin.id = "color-" + std::to_string(index + 1u);
+            while (usedIds.find(pin.id) != usedIds.end()) {
+                pin.id += "-copy";
+            }
+        }
+        usedIds.insert(pin.id);
+        if (pin.name.empty()) {
+            pin.name = pin.protectColor
+                ? "Protected Color " + std::to_string(index + 1u)
+                : "Color " + std::to_string(index + 1u);
+        }
+        pin.sourceA = ClampFinite(pin.sourceA, 0.0f, -1.0f, 1.0f);
+        pin.sourceB = ClampFinite(pin.sourceB, 0.0f, -1.0f, 1.0f);
+        pin.targetA = ClampFinite(pin.targetA, pin.sourceA, -1.0f, 1.0f);
+        pin.targetB = ClampFinite(pin.targetB, pin.sourceB, -1.0f, 1.0f);
+        pin.radius = ClampFinite(pin.radius, 0.12f, 0.005f, 1.0f);
+        pin.softness = ClampFinite(pin.softness, 0.55f, 0.0f, 1.0f);
+        pin.qualifierDirectionality = ClampFinite(
+            pin.qualifierDirectionality, 0.0f, 0.0f, 1.0f);
+        pin.qualifierOrientationRadians = ClampFinite(
+            pin.qualifierOrientationRadians,
+            0.0f,
+            -3.14159265358979323846f,
+            3.14159265358979323846f);
+        pin.qualifierAperture = ClampFinite(
+            pin.qualifierAperture, 0.45f, 0.10f, 1.0f);
+        pin.strength = ClampFinite(pin.strength, 1.0f, 0.0f, 2.0f);
+        if (usedRegionIds.find(pin.regionId) == usedRegionIds.end()) {
+            pin.regionId.clear();
+        }
+        if (pin.evCurve.samples.empty()) {
+            pin.evCurve = MakeUniformColorWarpEvCurve();
+        } else if (pin.evCurve.samples.size() !=
+                   kRawColorWarpEvCurveSampleCount) {
+            const RawColorWarpEvCurve original = pin.evCurve;
+            pin.evCurve = MakeUniformColorWarpEvCurve();
+            for (std::size_t sampleIndex = 0;
+                 sampleIndex < pin.evCurve.samples.size();
+                 ++sampleIndex) {
+                const float t = static_cast<float>(sampleIndex) /
+                    static_cast<float>(pin.evCurve.samples.size() - 1u);
+                const float ev = kRawColorWarpEvMinimum +
+                    t * (kRawColorWarpEvMaximum - kRawColorWarpEvMinimum);
+                pin.evCurve.samples[sampleIndex] =
+                    EvaluateColorWarpEvCurve(original, ev);
+            }
+        }
+        for (float& sample : pin.evCurve.samples) {
+            sample = ClampFinite(sample, 1.0f, 0.0f, 1.0f);
+        }
+        pin.lightnessDeltaEv = ClampFinite(
+            pin.lightnessDeltaEv, 0.0f, -4.0f, 4.0f);
+    }
+
+    std::unordered_set<std::string> usedGroupIds;
+    for (std::size_t groupIndex = 0; groupIndex < colorWarp.linkGroups.size(); ++groupIndex) {
+        RawColorWarpLinkGroup& group = colorWarp.linkGroups[groupIndex];
+        if (group.id.empty() || usedGroupIds.find(group.id) != usedGroupIds.end()) {
+            group.id = "group-" + std::to_string(groupIndex + 1u);
+            while (usedGroupIds.find(group.id) != usedGroupIds.end()) {
+                group.id += "-copy";
+            }
+        }
+        usedGroupIds.insert(group.id);
+        if (group.name.empty()) {
+            group.name = "Color Group " + std::to_string(groupIndex + 1u);
+        }
+        std::unordered_set<std::string> groupPinIds;
+        group.pinIds.erase(
+            std::remove_if(
+                group.pinIds.begin(),
+                group.pinIds.end(),
+                [&](const std::string& pinId) {
+                    return usedIds.find(pinId) == usedIds.end() ||
+                        !groupPinIds.insert(pinId).second;
+                }),
+            group.pinIds.end());
+    }
+    colorWarp.linkGroups.erase(
+        std::remove_if(
+            colorWarp.linkGroups.begin(),
+            colorWarp.linkGroups.end(),
+            [](const RawColorWarpLinkGroup& group) { return group.pinIds.empty(); }),
+        colorWarp.linkGroups.end());
+    return colorWarp;
+}
+
+nlohmann::json SerializeColorWarpRecipe(const RawColorWarpRecipe& input) {
+    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
+    nlohmann::json result = nlohmann::json::object();
+    result["version"] = colorWarp.version;
+    result["enabled"] = colorWarp.enabled;
+    result["strength"] = colorWarp.strength;
+    result["coordinateModel"] = "oklab-ab-d65-v2";
+    result["regions"] = nlohmann::json::array();
+    for (const RawColorWarpRegion& region : colorWarp.regions) {
+        nlohmann::json item = nlohmann::json::object();
+        item["id"] = region.id;
+        item["spatialMode"] = RawColorWarpSpatialModeStableString(region.spatialMode);
+        item["reachPixels"] = region.reachPixels;
+        item["spatialSupport"] = region.spatialSupport;
+        item["edgeStop"] = region.edgeStop;
+        item["featherPixels"] = region.featherPixels;
+        item["featherDirection"] =
+            RawColorWarpFeatherDirectionStableString(region.featherDirection);
+        item["circles"] = nlohmann::json::array();
+        for (const RawColorWarpSampleCircle& circle : region.circles) {
+            nlohmann::json circleItem = nlohmann::json::object();
+            circleItem["id"] = circle.id;
+            circleItem["centerU"] = circle.centerU;
+            circleItem["centerV"] = circle.centerV;
+            circleItem["radiusU"] = circle.radiusU;
+            circleItem["radiusV"] = circle.radiusV;
+            circleItem["interpretationMode"] =
+                RawColorWarpInterpretationModeStableString(circle.interpretation);
+            circleItem["polarity"] = circle.polarity == RawColorWarpSamplePolarity::Exclude
+                ? "exclude"
+                : "include";
+            item["circles"].push_back(std::move(circleItem));
+        }
+        result["regions"].push_back(std::move(item));
+    }
+    result["pins"] = nlohmann::json::array();
+    for (const RawColorWarpPin& pin : colorWarp.pins) {
+        nlohmann::json item = nlohmann::json::object();
+        item["id"] = pin.id;
+        item["name"] = pin.name;
+        item["enabled"] = pin.enabled;
+        item["protectColor"] = pin.protectColor;
+        item["sourceA"] = pin.sourceA;
+        item["sourceB"] = pin.sourceB;
+        item["targetA"] = pin.targetA;
+        item["targetB"] = pin.targetB;
+        item["radius"] = pin.radius;
+        item["softness"] = pin.softness;
+        item["qualifierDirectionality"] = pin.qualifierDirectionality;
+        item["qualifierOrientationRadians"] = pin.qualifierOrientationRadians;
+        item["qualifierAperture"] = pin.qualifierAperture;
+        item["strength"] = pin.strength;
+        item["regionId"] = pin.regionId;
+        item["evCurve"] = {
+            { "minimumEv", kRawColorWarpEvMinimum },
+            { "maximumEv", kRawColorWarpEvMaximum },
+            { "samples", pin.evCurve.samples }
+        };
+        item["lightnessDeltaEv"] = pin.lightnessDeltaEv;
+        result["pins"].push_back(std::move(item));
+    }
+    result["linkGroups"] = nlohmann::json::array();
+    for (const RawColorWarpLinkGroup& group : colorWarp.linkGroups) {
+        nlohmann::json item = nlohmann::json::object();
+        item["id"] = group.id;
+        item["name"] = group.name;
+        item["pinIds"] = group.pinIds;
+        result["linkGroups"].push_back(std::move(item));
+    }
+    return result;
+}
+
+RawColorWarpRecipe DeserializeColorWarpRecipe(const nlohmann::json& value) {
+    RawColorWarpRecipe result;
+    if (!value.is_object()) {
+        return result;
+    }
+    if (value.value("version", 0) != 2 ||
+        value.value("coordinateModel", std::string()) !=
+            "oklab-ab-d65-v2") {
+        return result;
+    }
+    result.version = 2;
+    result.enabled = value.value("enabled", true);
+    result.strength = JsonFloat(value, "strength", 1.0f);
+    const nlohmann::json regions = value.value("regions", nlohmann::json::array());
+    if (regions.is_array()) {
+        for (const nlohmann::json& item : regions) {
+            if (!item.is_object()) continue;
+            RawColorWarpRegion region;
+            region.id = item.value("id", std::string());
+            region.spatialMode = RawColorWarpSpatialModeFromStableString(
+                item.value("spatialMode", std::string("cohesive")));
+            region.reachPixels = JsonFloat(item, "reachPixels", 24.0f);
+            region.spatialSupport = JsonFloat(item, "spatialSupport", 1.0f);
+            region.edgeStop = JsonFloat(item, "edgeStop", 0.65f);
+            region.featherPixels = JsonFloat(item, "featherPixels", 0.0f);
+            region.featherDirection = RawColorWarpFeatherDirectionFromStableString(
+                item.value("featherDirection", std::string("centered")));
+            const nlohmann::json circles = item.value("circles", nlohmann::json::array());
+            if (circles.is_array()) {
+                for (const nlohmann::json& circleItem : circles) {
+                    if (!circleItem.is_object()) continue;
+                    RawColorWarpSampleCircle circle;
+                    circle.id = circleItem.value("id", std::string());
+                    circle.centerU = JsonFloat(circleItem, "centerU", 0.5f);
+                    circle.centerV = JsonFloat(circleItem, "centerV", 0.5f);
+                    circle.radiusU = JsonFloat(circleItem, "radiusU", 0.02f);
+                    circle.radiusV = JsonFloat(circleItem, "radiusV", 0.02f);
+                    circle.interpretation = RawColorWarpInterpretationModeFromStableString(
+                        circleItem.value(
+                            "interpretationMode",
+                            std::string("guided-family")));
+                    circle.polarity = circleItem.value(
+                        "polarity", std::string("include")) == "exclude"
+                        ? RawColorWarpSamplePolarity::Exclude
+                        : RawColorWarpSamplePolarity::Include;
+                    region.circles.push_back(std::move(circle));
+                }
+            }
+            result.regions.push_back(std::move(region));
+        }
+    }
+    const nlohmann::json pins = value.value("pins", nlohmann::json::array());
+    if (pins.is_array()) {
+        for (const nlohmann::json& item : pins) {
+            if (!item.is_object()) {
+                continue;
+            }
+            RawColorWarpPin pin;
+            pin.id = item.value("id", std::string());
+            pin.name = item.value("name", std::string());
+            pin.enabled = item.value("enabled", true);
+            pin.protectColor = item.value("protectColor", false);
+            pin.sourceA = JsonFloat(item, "sourceA", 0.0f);
+            pin.sourceB = JsonFloat(item, "sourceB", 0.0f);
+            pin.targetA = JsonFloat(item, "targetA", pin.sourceA);
+            pin.targetB = JsonFloat(item, "targetB", pin.sourceB);
+            pin.radius = JsonFloat(item, "radius", 0.12f);
+            pin.softness = JsonFloat(item, "softness", 0.55f);
+            pin.qualifierDirectionality =
+                JsonFloat(item, "qualifierDirectionality", 0.0f);
+            pin.qualifierOrientationRadians =
+                JsonFloat(item, "qualifierOrientationRadians", 0.0f);
+            pin.qualifierAperture =
+                JsonFloat(item, "qualifierAperture", 0.45f);
+            pin.strength = JsonFloat(item, "strength", 1.0f);
+            pin.regionId = item.value("regionId", std::string());
+            const nlohmann::json evCurve = item.value(
+                "evCurve", nlohmann::json::object());
+            if (evCurve.is_object()) {
+                const nlohmann::json samples = evCurve.value(
+                    "samples", nlohmann::json::array());
+                if (samples.is_array()) {
+                    pin.evCurve.samples.reserve(samples.size());
+                    for (const nlohmann::json& sample : samples) {
+                        if (sample.is_number()) {
+                            pin.evCurve.samples.push_back(sample.get<float>());
+                        }
+                    }
+                }
+            }
+            pin.lightnessDeltaEv = JsonFloat(item, "lightnessDeltaEv", 0.0f);
+            result.pins.push_back(std::move(pin));
+        }
+    }
+    const nlohmann::json linkGroups = value.value("linkGroups", nlohmann::json::array());
+    if (linkGroups.is_array()) {
+        for (const nlohmann::json& item : linkGroups) {
+            if (!item.is_object()) continue;
+            RawColorWarpLinkGroup group;
+            group.id = item.value("id", std::string());
+            group.name = item.value("name", std::string());
+            const nlohmann::json pinIds = item.value("pinIds", nlohmann::json::array());
+            if (pinIds.is_array()) {
+                for (const nlohmann::json& pinId : pinIds) {
+                    if (pinId.is_string()) group.pinIds.push_back(pinId.get<std::string>());
+                }
+            }
+            result.linkGroups.push_back(std::move(group));
+        }
+    }
+    return SanitizeColorWarpRecipe(std::move(result));
+}
+
+bool IsColorWarpEnabled(const RawColorWarpRecipe& input) {
+    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
+    return HasPreparedColorWarpEffect(colorWarp);
+}
+
+float EvaluateColorWarpPinShapeDistance(
+    const RawColorWarpPin& pin,
+    float a,
+    float b) {
+    const float da = a - pin.sourceA;
+    const float db = b - pin.sourceB;
+    const float radius = std::max(0.005f, pin.radius);
+    const float radialDistance = std::sqrt(da * da + db * db);
+    const float circularDistance = radialDistance / radius;
+    const float directionality = std::clamp(
+        pin.qualifierDirectionality,
+        0.0f,
+        1.0f);
+    if (directionality <= 0.000001f || radialDistance <= 0.000001f) {
+        return circularDistance;
+    }
+    const float orientation = pin.qualifierOrientationRadians;
+    const float directionA = std::cos(orientation);
+    const float directionB = std::sin(orientation);
+    const float cosine = std::clamp(
+        (da * directionA + db * directionB) / radialDistance,
+        -1.0f,
+        1.0f);
+    const float forward = (cosine + 1.0f) * 0.5f;
+    const float aperture = std::clamp(pin.qualifierAperture, 0.10f, 1.0f);
+    const float lobePower = 1.0f + 4.0f * (1.0f - aperture);
+    const float directionalReach = std::max(
+        0.05f,
+        aperture + (1.0f - aperture) * std::pow(forward, lobePower));
+    const float directionalDistance = circularDistance / directionalReach;
+    return circularDistance +
+        (directionalDistance - circularDistance) * directionality;
+}
+
+float EvaluateColorWarpPinShapeWeight(
+    const RawColorWarpPin& pin,
+    float a,
+    float b) {
+    const float distance = EvaluateColorWarpPinShapeDistance(pin, a, b);
+    if (distance >= 1.0f) {
+        return 0.0f;
+    }
+    const float innerBoundary = std::max(
+        0.0f,
+        1.0f - std::clamp(pin.softness, 0.0f, 1.0f));
+    if (distance <= innerBoundary) {
+        return 1.0f;
+    }
+    return 1.0f - SmoothStep(innerBoundary, 1.0f, distance);
+}
+
+float EvaluateColorWarpPinLightnessWeight(
+    const RawColorWarpPin& pin,
+    float sceneEv) {
+    return EvaluateColorWarpEvCurve(pin.evCurve, sceneEv);
+}
+
+RawColorWarpCoordinate WorkingRgbToColorWarpCoordinate(
+    const std::array<float, 3>& rgb,
+    Raw::RawWorkingSpace workingSpace) {
+    const bool rec2020 =
+        workingSpace == Raw::RawWorkingSpace::LinearRec2020D65;
+    const float x = rec2020
+        ? 0.6369580f * rgb[0] + 0.1446169f * rgb[1] + 0.1688809f * rgb[2]
+        : 0.4124564f * rgb[0] + 0.3575761f * rgb[1] + 0.1804375f * rgb[2];
+    const float y = rec2020
+        ? 0.2627002f * rgb[0] + 0.6779981f * rgb[1] + 0.0593017f * rgb[2]
+        : 0.2126729f * rgb[0] + 0.7151522f * rgb[1] + 0.0721750f * rgb[2];
+    const float z = rec2020
+        ? 0.0280727f * rgb[1] + 1.0609851f * rgb[2]
+        : 0.0193339f * rgb[0] + 0.1191920f * rgb[1] + 0.9503041f * rgb[2];
+    const float l = std::cbrt(
+        0.8190224380f * x + 0.3619062601f * y - 0.1288737815f * z);
+    const float m = std::cbrt(
+        0.0329836539f * x + 0.9292868616f * y + 0.0361446664f * z);
+    const float s = std::cbrt(
+        0.0481771894f * x + 0.2642395318f * y + 0.6335478285f * z);
+    RawColorWarpCoordinate result;
+    result.lightness = 0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s;
+    result.a = 1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s;
+    result.b = 0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s;
+    result.sceneEv = std::log2(std::max(y, 0.000001f) / 0.18f);
+    return result;
+}
+
+std::array<float, 3> ColorWarpCoordinateToWorkingRgb(
+    const RawColorWarpCoordinate& coordinate,
+    Raw::RawWorkingSpace workingSpace) {
+    const float a = coordinate.a;
+    const float b = coordinate.b;
+    const float lRoot = coordinate.lightness + 0.3963377774f * a + 0.2158037573f * b;
+    const float mRoot = coordinate.lightness - 0.1055613458f * a - 0.0638541728f * b;
+    const float sRoot = coordinate.lightness - 0.0894841775f * a - 1.2914855480f * b;
+    const float l = lRoot * lRoot * lRoot;
+    const float m = mRoot * mRoot * mRoot;
+    const float s = sRoot * sRoot * sRoot;
+    const float x = 1.2268798734f * l - 0.5578149966f * m + 0.2813910502f * s;
+    const float y = -0.0405757626f * l + 1.1122868294f * m - 0.0717110667f * s;
+    const float z = -0.0763729497f * l - 0.4214933240f * m + 1.5869240244f * s;
+    if (workingSpace == Raw::RawWorkingSpace::LinearRec2020D65) {
+        return {
+            1.7166512f * x - 0.3556708f * y - 0.2533663f * z,
+            -0.6666844f * x + 1.6164812f * y + 0.0157685f * z,
+            0.0176399f * x - 0.0427706f * y + 0.9421031f * z
+        };
+    }
+    return {
+        3.2404542f * x - 1.5371385f * y - 0.4985314f * z,
+        -0.9692660f * x + 1.8760108f * y + 0.0415560f * z,
+        0.0556434f * x - 0.2040259f * y + 1.0572252f * z
+    };
+}
+
+std::array<float, 3> ApplyColorWarp(
+    const RawColorWarpRecipe& input,
+    const std::array<float, 3>& sceneRgb,
+    Raw::RawWorkingSpace workingSpace) {
+    const RawColorWarpRecipe colorWarp = SanitizeColorWarpRecipe(input);
+    return ApplyPreparedColorWarp(colorWarp, sceneRgb, workingSpace);
+}
+
+std::array<float, 3> ApplyPreparedColorWarp(
+    const RawColorWarpRecipe& colorWarp,
+    const std::array<float, 3>& sceneRgb,
+    Raw::RawWorkingSpace workingSpace) {
+    if (!HasPreparedColorWarpEffect(colorWarp)) {
+        return sceneRgb;
+    }
+    RawColorWarpCoordinate coordinate =
+        WorkingRgbToColorWarpCoordinate(
+            sceneRgb,
+            workingSpace);
+    float weightedA = 0.0f;
+    float weightedB = 0.0f;
+    float weightedLightnessEv = 0.0f;
+    float totalWeight = 0.0f;
+    for (const RawColorWarpPin& pin : colorWarp.pins) {
+        if (!pin.enabled || pin.strength <= 0.0001f) {
+            continue;
+        }
+        const float radialWeight = EvaluateColorWarpPinShapeWeight(
+            pin,
+            coordinate.a,
+            coordinate.b);
+        if (radialWeight <= 0.000001f) {
+            continue;
+        }
+        const float lightnessWeight = EvaluateColorWarpPinLightnessWeight(
+            pin,
+            coordinate.sceneEv);
+        const float weight = radialWeight * lightnessWeight * pin.strength;
+        if (weight <= 0.000001f) {
+            continue;
+        }
+        totalWeight += weight;
+        if (!pin.protectColor) {
+            weightedA += (pin.targetA - pin.sourceA) * weight;
+            weightedB += (pin.targetB - pin.sourceB) * weight;
+            weightedLightnessEv += pin.lightnessDeltaEv * weight;
+        }
+    }
+    if (totalWeight <= 0.000001f) {
+        return sceneRgb;
+    }
+    const float denominator = std::max(1.0f, totalWeight);
+    coordinate.a += colorWarp.strength * weightedA / denominator;
+    coordinate.b += colorWarp.strength * weightedB / denominator;
+    std::array<float, 3> output =
+        ColorWarpCoordinateToWorkingRgb(
+            coordinate,
+            workingSpace);
+    const float lightnessGain = std::exp2(
+        colorWarp.strength * weightedLightnessEv / denominator);
+    for (float& channel : output) {
+        channel *= lightnessGain;
+    }
+    return output;
+}
+
 nlohmann::json DefaultViewTransformJson() {
     return {
         { "type", "ViewTransform" },
+        { "displayCurve", "standard" },
         { "enabled", true },
         { "exposure", 0.0f },
         { "blackEv", -8.0f },
@@ -1127,6 +2004,8 @@ nlohmann::json DefaultViewTransformJson() {
         { "shoulder", 0.45f },
         { "toe", 0.18f },
         { "contrast", 1.0f },
+        { "contrastPivotEv", 0.0f },
+        { "contrastModel", kViewContrastModelPivotedLogV2 },
         { "saturation", 1.0f },
         { "preserveHue", true },
         { "debugFalseColor", false },
@@ -1143,7 +2022,8 @@ float EvaluateViewTransformDisplayLuma(
     float middleGrey,
     float shoulder,
     float toe,
-    float contrast) {
+    float contrast,
+    float contrastPivotEv) {
     // Keep this scalar reference in lockstep with filmicCurve() in
     // ToneLayerRendering.cpp. RAW Lab uses it only to visualize the existing
     // display transform; it does not define or replace the render path.
@@ -1151,7 +2031,14 @@ float EvaluateViewTransformDisplayLuma(
     const float white = middleGrey * std::exp2(whiteEv);
     float x = std::max(0.0f, input * std::exp2(exposure) - black);
     float normalized = x / std::max(0.000001f, white - black);
-    normalized = std::pow(std::max(0.0f, normalized), std::max(0.05f, contrast));
+    const float safeContrast = std::max(0.05f, contrast);
+    const float pivotInput = middleGrey * std::exp2(contrastPivotEv);
+    const float pivotNormalized = std::max(
+        0.000001f,
+        (pivotInput - black) / std::max(0.000001f, white - black));
+    normalized = pivotNormalized * std::pow(
+        std::max(0.0f, normalized) / pivotNormalized,
+        safeContrast);
     const float clampedToe = std::clamp(toe, 0.0f, 1.0f);
     const float toeMapped =
         (normalized + clampedToe * normalized / (normalized + 0.18f)) /
@@ -1161,28 +2048,6 @@ float EvaluateViewTransformDisplayLuma(
     const float mapped = normalized / (normalized + safeShoulder);
     const float whiteMapped = 1.0f / (1.0f + safeShoulder);
     return std::clamp(mapped / std::max(0.0001f, whiteMapped), 0.0f, 1.0f);
-}
-
-nlohmann::json FinishToneJsonFromLegacyToneCurve(const RawToneCurveRecipe& toneCurve) {
-    nlohmann::json finishTone = DefaultFinishToneJson();
-    if (IsIdentityToneCurve(toneCurve)) {
-        return finishTone;
-    }
-
-    nlohmann::json points = nlohmann::json::array();
-    for (const Raw::RawToneCurvePoint& point : BuildRawToneCurveSettingsPoints(toneCurve)) {
-        points.push_back({
-            { "x", point.input },
-            { "y", point.output },
-            { "shape", 1 }
-        });
-    }
-    if (points.size() >= 2) {
-        finishTone["domain"] = 0;
-        finishTone["points"] = points;
-        finishTone["preparedPoints"] = std::move(points);
-    }
-    return SanitizeFinishTonePointCurveJson(std::move(finishTone), 12);
 }
 
 std::vector<RawLocalRangePoint> DefaultLocalRangePoints(float minEv, float maxEv) {
@@ -1207,6 +2072,7 @@ RawLocalRangeRecipe DefaultLocalRangeRecipe() {
 }
 
 RawLocalRangeRecipe SanitizeLocalRangeRecipe(RawLocalRangeRecipe localRange) {
+    SanitizeZoneAreas(localRange.areas);
     RawLocalRangeRecipe defaults = DefaultLocalRangeRecipe();
     localRange.strength = ClampFinite(localRange.strength, defaults.strength, 0.0f, 1.0f);
     localRange.middleGrey = ClampFinite(localRange.middleGrey, defaults.middleGrey, 0.01f, 1.0f);
@@ -1305,7 +2171,9 @@ RawLocalRangeRecipe SanitizeLocalRangeRecipe(RawLocalRangeRecipe localRange) {
         }
         points.push_back({
             std::clamp(point.ev, localRange.minEv, localRange.maxEv),
-            std::clamp(point.deltaEv, -4.0f, 4.0f)
+            std::clamp(point.deltaEv, -4.0f, 4.0f),
+            SanitizeBezierHandle(point.incoming),
+            SanitizeBezierHandle(point.outgoing)
         });
     }
     if (points.empty()) {
@@ -1355,7 +2223,53 @@ RawRgbDenoiseRecipe SanitizeRgbDenoiseRecipe(RawRgbDenoiseRecipe rgbDenoise) {
         ClampFinite(rgbDenoise.luminanceNoise, defaults.luminanceNoise, 0.0f, 1.0f);
     rgbDenoise.detailProtection =
         ClampFinite(rgbDenoise.detailProtection, defaults.detailProtection, 0.0f, 1.0f);
+    rgbDenoise.edgeSensitivity =
+        ClampFinite(rgbDenoise.edgeSensitivity, defaults.edgeSensitivity, 0.0f, 1.0f);
+    rgbDenoise.maximumStructureSize = ClampFinite(
+        rgbDenoise.maximumStructureSize,
+        defaults.maximumStructureSize,
+        8.0f,
+        2048.0f);
+    rgbDenoise.lumaMap = SanitizeRawDenoiseControlMap(
+        std::move(rgbDenoise.lumaMap),
+        0.0f);
+    rgbDenoise.chromaMap = SanitizeRawDenoiseControlMap(
+        std::move(rgbDenoise.chromaMap),
+        0.0f);
+    if (rgbDenoise.diagnosticMode < RawDenoiseDiagnosticMode::None ||
+        rgbDenoise.diagnosticMode > RawDenoiseDiagnosticMode::EstimatedNoise) {
+        rgbDenoise.diagnosticMode = RawDenoiseDiagnosticMode::None;
+    }
+    if (rgbDenoise.diagnosticLayer != RawDenoiseMapLayer::Luma &&
+        rgbDenoise.diagnosticLayer != RawDenoiseMapLayer::Chroma) {
+        rgbDenoise.diagnosticLayer = RawDenoiseMapLayer::Luma;
+    }
+    std::uint64_t highestPointId = 0;
+    for (const RawDenoiseControlPoint& point : rgbDenoise.lumaMap.points) {
+        highestPointId = std::max(highestPointId, point.id);
+    }
+    for (const RawDenoiseControlPoint& point : rgbDenoise.chromaMap.points) {
+        highestPointId = std::max(highestPointId, point.id);
+    }
+    rgbDenoise.nextControlPointId = std::max(
+        std::max<std::uint64_t>(1, rgbDenoise.nextControlPointId),
+        highestPointId + 1);
     return rgbDenoise;
+}
+
+bool HasRgbDenoiseEffect(const RawRgbDenoiseRecipe& input) {
+    const RawRgbDenoiseRecipe rgbDenoise =
+        SanitizeRgbDenoiseRecipe(input);
+    if (rgbDenoise.method == RawRgbDenoiseMethod::ClassicalMultiscaleV1) {
+        return HasRawDenoiseControlMapEffect(rgbDenoise.lumaMap) ||
+            HasRawDenoiseControlMapEffect(rgbDenoise.chromaMap);
+    }
+    return rgbDenoise.colorNoise > 0.000001f ||
+        rgbDenoise.luminanceNoise > 0.000001f;
+}
+
+bool IsRgbDenoiseActive(const RawRgbDenoiseRecipe& input) {
+    return input.enabled && HasRgbDenoiseEffect(input);
 }
 
 RawLocalRangeRecipe ApplyLocalRangePreset(RawLocalRangeRecipe localRange, RawLocalRangePreset preset) {
@@ -1364,6 +2278,7 @@ RawLocalRangeRecipe ApplyLocalRangePreset(RawLocalRangeRecipe localRange, RawLoc
         RawLocalRangeRecipe reset = DefaultLocalRangeRecipe();
         reset.targetZoneCombineMode = sanitized.targetZoneCombineMode;
         reset.targetZones = sanitized.targetZones;
+        reset.areas = sanitized.areas;
         reset.enabled = std::any_of(
             reset.targetZones.begin(),
             reset.targetZones.end(),
@@ -1417,52 +2332,6 @@ RawLocalRangeRecipe ApplyLocalRangePreset(RawLocalRangeRecipe localRange, RawLoc
     return SanitizeLocalRangeRecipe(localRange);
 }
 
-RawLocalRangeRecipe LocalRangeRecipeFromLocalExposure(
-    const RawLocalExposureRecipe& localExposureInput,
-    const RawLocalRangeRecipe& baseLocalRange) {
-    const RawLocalExposureRecipe localExposure = SanitizeLocalExposureRecipe(localExposureInput);
-    RawLocalRangeRecipe localRange = SanitizeLocalRangeRecipe(baseLocalRange);
-    const bool hasEffect = localExposure.enabled &&
-        localExposure.amount > 0.0001f &&
-        (localExposure.shadowLiftEv > 0.0001f ||
-            -localExposure.highlightCompressionEv > 0.0001f ||
-            std::abs(localExposure.localBaselineEv) > 0.0001f);
-    if (!hasEffect) {
-        return localRange;
-    }
-
-    const float amount = std::clamp(localExposure.amount, 0.0f, 1.0f);
-    const float baseline = std::clamp(localExposure.localBaselineEv, -1.25f, 1.25f);
-    const float shadowDelta = std::clamp(localExposure.shadowLiftEv + baseline * 0.35f, -4.0f, 4.0f);
-    const float midShadowDelta = std::clamp(localExposure.shadowLiftEv * 0.45f + baseline * 0.65f, -4.0f, 4.0f);
-    const float midDelta = std::clamp(baseline, -4.0f, 4.0f);
-    const float midHighlightDelta =
-        std::clamp(localExposure.highlightCompressionEv * 0.45f + baseline * 0.65f, -4.0f, 4.0f);
-    const float highlightDelta = std::clamp(localExposure.highlightCompressionEv + baseline * 0.35f, -4.0f, 4.0f);
-
-    localRange.enabled = true;
-    localRange.strength = amount;
-    localRange.smoothness = std::max(localRange.smoothness, localExposure.smoothGradientProtection);
-    localRange.edgeProtection = std::max(localRange.edgeProtection, localExposure.haloGuard);
-    localRange.detailProtection = std::max(
-        localRange.detailProtection,
-        std::clamp(
-            (localExposure.noiseGuardBias + localExposure.highlightGuardBias + localExposure.shadowGuardBias) / 6.0f + 0.5f,
-            0.0f,
-            1.0f));
-    localRange.highlightProtection = std::max(
-        localRange.highlightProtection,
-        std::clamp(localExposure.highlightGuardBias * 0.5f + 0.5f, 0.0f, 1.0f));
-    localRange.points = {
-        { localRange.minEv, shadowDelta },
-        { -4.0f, midShadowDelta },
-        { 0.0f, midDelta },
-        { 3.0f, midHighlightDelta },
-        { localRange.maxEv, highlightDelta }
-    };
-    return SanitizeLocalRangeRecipe(localRange);
-}
-
 namespace {
 
 float EvaluateSanitizedLocalRangeControlDeltaEv(
@@ -1472,23 +2341,15 @@ float EvaluateSanitizedLocalRangeControlDeltaEv(
         return 0.0f;
     }
 
-    const float clampedEv = std::clamp(sceneEv, sanitized.minEv, sanitized.maxEv);
-    RawLocalRangePoint previous = sanitized.points.front();
-    if (clampedEv <= previous.ev) {
-        return previous.deltaEv;
-    }
-
-    for (std::size_t i = 1; i < sanitized.points.size(); ++i) {
-        const RawLocalRangePoint current = sanitized.points[i];
-        if (clampedEv <= current.ev) {
-            const float span = std::max(current.ev - previous.ev, 0.0001f);
-            const float t = std::clamp((clampedEv - previous.ev) / span, 0.0f, 1.0f);
-            return previous.deltaEv + (current.deltaEv - previous.deltaEv) * t;
-        }
-        previous = current;
-    }
-
-    return previous.deltaEv;
+    const float coordinate = std::clamp(
+        (sceneEv - sanitized.minEv) /
+            std::max(0.1f, sanitized.maxEv - sanitized.minEv),
+        0.0f,
+        1.0f);
+    return -4.0f +
+        EvaluateRawBezierCurve(
+            RawLocalRangeBezierPoints(sanitized),
+            coordinate) * 8.0f;
 }
 
 } // namespace
@@ -1809,11 +2670,24 @@ float EdgeAwareLocalRangeDeltaEvForSamples(
 
 bool FinishStateEquals(const RawDevelopmentRecipe& a, const RawDevelopmentRecipe& b) {
     return a.finishTone.layerJson == b.finishTone.layerJson &&
+        GradientToneJson(a.toneGradients) == GradientToneJson(b.toneGradients) &&
+        SerializeColorWarpRecipe(a.colorWarp) ==
+            SerializeColorWarpRecipe(b.colorWarp) &&
+        SerializeDetailContrast(a.detailContrast) == SerializeDetailContrast(b.detailContrast) &&
         a.viewTransform.layerJson == b.viewTransform.layerJson;
 }
 
 std::size_t FinishStateHash(const RawDevelopmentRecipe& recipe) {
     std::size_t seed = std::hash<std::string>{}(recipe.finishTone.layerJson.dump());
+    seed ^= std::hash<std::string>{}(SerializeDetailContrast(recipe.detailContrast).dump()) +
+        0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+    seed ^= std::hash<std::string>{}(GradientToneJson(recipe.toneGradients).dump()) +
+        0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+    seed ^= std::hash<std::string>{}(
+        SerializeColorWarpRecipe(recipe.colorWarp).dump()) +
+        0x9e3779b97f4a7c15ull +
+        (seed << 6) +
+        (seed >> 2);
     seed ^= std::hash<std::string>{}(recipe.viewTransform.layerJson.dump()) +
         0x9e3779b97f4a7c15ull +
         (seed << 6) +
@@ -1822,35 +2696,33 @@ std::size_t FinishStateHash(const RawDevelopmentRecipe& recipe) {
 }
 
 bool LocalRangeStateEquals(const RawDevelopmentRecipe& a, const RawDevelopmentRecipe& b) {
-    return LocalRangeJson(a.localRange) == LocalRangeJson(b.localRange);
+    return LocalRangeJson(a.localRange) == LocalRangeJson(b.localRange) &&
+        GradientEvJson(a.evGradients) == GradientEvJson(b.evGradients);
 }
 
 std::size_t LocalRangeStateHash(const RawDevelopmentRecipe& recipe) {
-    return std::hash<std::string>{}(LocalRangeJson(recipe.localRange).dump());
+    std::size_t seed = std::hash<std::string>{}(LocalRangeJson(recipe.localRange).dump());
+    seed ^= std::hash<std::string>{}(GradientEvJson(recipe.evGradients).dump()) +
+        0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+    return seed;
 }
 
 Raw::RawDevelopSettings ToRawDevelopSettings(const RawDevelopmentRecipe& recipe) {
     Raw::RawDevelopSettings settings;
-    settings.processingVersion = recipe.technical.processingVersion;
+    settings.processingVersion = Raw::RawProcessingVersion::TruthfulV2;
     settings.demosaicMethod = recipe.technical.demosaicMethod;
     settings.workingSpace = recipe.technical.workingSpace;
     settings.applyBaselineExposure = recipe.technical.applyBaselineExposure;
     settings.encodeSrgbOutput = recipe.technical.encodeSrgbOutput;
     settings.mosaicDenoise =
         SanitizeMosaicDenoiseSettings(recipe.technical.mosaicDenoise);
-    if (recipe.technical.processingVersion == Raw::RawProcessingVersion::TruthfulV1) {
-        settings.highlightMode = Raw::HighlightReconstructionMode::Off;
-        settings.falseColorSuppression = 0.0f;
-        settings.defringeStrength = 0.0f;
-        settings.highlightEdgeCleanup = 0.0f;
-    }
+    settings.highlightMode = Raw::HighlightReconstructionMode::Off;
+    settings.falseColorSuppression = 0.0f;
+    settings.defringeStrength = 0.0f;
+    settings.highlightEdgeCleanup = 0.0f;
     settings.exposureStops = recipe.preToneExposureEv;
     switch (recipe.whiteBalance.mode) {
-        case WhiteBalanceMode::Auto:
-            settings.whiteBalanceMode = Raw::WhiteBalanceMode::Auto;
-            break;
         case WhiteBalanceMode::CustomMultipliers:
-        case WhiteBalanceMode::SampledGrayPoint:
             settings.whiteBalanceMode = recipe.whiteBalance.hasMultipliers
                 ? Raw::WhiteBalanceMode::Manual
                 : Raw::WhiteBalanceMode::AsShot;
@@ -1869,46 +2741,8 @@ Raw::RawDevelopSettings ToRawDevelopSettings(const RawDevelopmentRecipe& recipe)
     return settings;
 }
 
-Raw::RawDetailFusionSettings ToRawDetailFusionSettings(const RawDevelopmentRecipe& recipe) {
-    const RawLocalExposureRecipe localExposure = SanitizeLocalExposureRecipe(recipe.localExposure);
-    Raw::RawDetailFusionSettings settings;
-    settings.mode = Raw::RawDetailFusionMode::AutoAnalyze;
-    settings.debugView = Raw::RawDetailFusionDebugView::FinalImage;
-    settings.autoSafetyEnabled = true;
-    settings.overrideMinEv = true;
-    settings.overrideMaxEv = true;
-    settings.overrideBaseEv = true;
-    settings.overrideNoiseProtection = false;
-    settings.overrideHighlightProtection = false;
-    settings.overrideShadowLiftLimit = false;
-    settings.overrideWellExposedTarget = false;
-    settings.strength = localExposure.amount;
-    settings.maxEv = localExposure.shadowLiftEv;
-    settings.minEv = localExposure.highlightCompressionEv;
-    settings.baseEv = localExposure.localBaselineEv;
-    settings.noiseProtectionBias = localExposure.noiseGuardBias;
-    settings.highlightProtectionBias = localExposure.highlightGuardBias;
-    settings.shadowLiftLimitBias = localExposure.shadowGuardBias;
-    settings.smoothGradientProtection = localExposure.smoothGradientProtection;
-    settings.haloGuard = localExposure.haloGuard;
-    settings.invertMask = false;
-    settings.maskBlackPoint = 0.0f;
-    settings.maskWhitePoint = 1.0f;
-    settings.maskGamma = 1.0f;
-    settings.manualBlend = 0.0f;
-    return settings;
-}
-
-bool IsLocalExposureEnabled(const RawDevelopmentRecipe& recipe) {
-    const RawLocalExposureRecipe localExposure = SanitizeLocalExposureRecipe(recipe.localExposure);
-    return localExposure.enabled &&
-        localExposure.amount > 0.0001f &&
-        (localExposure.shadowLiftEv > 0.0001f ||
-            -localExposure.highlightCompressionEv > 0.0001f ||
-            std::abs(localExposure.localBaselineEv) > 0.0001f);
-}
-
 bool IsLocalRangeEnabled(const RawLocalRangeRecipe& localRangeInput) {
+    if (HasZoneAreaGain(localRangeInput)) return true;
     const RawLocalRangeRecipe localRange = SanitizeLocalRangeRecipe(localRangeInput);
     if (!localRange.enabled || localRange.strength <= 0.0001f) {
         return false;
@@ -1927,7 +2761,11 @@ bool IsLocalRangeEnabled(const RawLocalRangeRecipe& localRangeInput) {
 }
 
 bool IsLocalRangeEnabled(const RawDevelopmentRecipe& recipe) {
-    return IsLocalRangeEnabled(recipe.localRange);
+    if (IsLocalRangeEnabled(recipe.localRange)) return true;
+    return std::any_of(recipe.evGradients.begin(), recipe.evGradients.end(),
+        [](const RawGradientEvAdjustment& adjustment) {
+            return adjustment.mask.enabled && IsLocalRangeEnabled(adjustment.curve);
+        });
 }
 
 bool IsViewTransformEnabled(const RawDevelopmentRecipe& recipe) {
@@ -1943,23 +2781,21 @@ nlohmann::json SerializeRecipe(const RawDevelopmentRecipe& recipe) {
         SanitizeMosaicDenoiseSettings(recipe.technical.mosaicDenoise);
     const RawRgbDenoiseRecipe rgbDenoise =
         SanitizeRgbDenoiseRecipe(recipe.rgbDenoise);
-    nlohmann::json tonePoints = nlohmann::json::array();
-    for (const RawToneCurvePoint& point : recipe.toneCurve.points) {
-        tonePoints.push_back({
-            { "input", point.input },
-            { "output", point.output }
-        });
-    }
-
-    return {
+    nlohmann::json finishTone = SanitizeFinishToneJson(
+        recipe.finishTone.layerJson);
+    finishTone["inputWorkingSpace"] =
+        WorkingSpaceStableString(recipe.technical.workingSpace);
+    const nlohmann::json viewTransform = SanitizeViewTransformJson(
+        recipe.viewTransform.layerJson);
+    nlohmann::json knownFields = {
         { "rawRecipeVersion", kRawDevelopmentRecipeVersion },
         { "processing", {
-            { "version", ProcessingVersionStableString(recipe.technical.processingVersion) },
+            { "version", "truthful-v2" },
             { "demosaic", DemosaicMethodStableString(recipe.technical.demosaicMethod) },
             { "workingSpace", WorkingSpaceStableString(recipe.technical.workingSpace) },
             { "applyBaselineExposure", recipe.technical.applyBaselineExposure },
             { "outputTransfer",
-                recipe.viewTransform.layerJson.value(
+                viewTransform.value(
                     "encodeSrgbOutput",
                     recipe.technical.encodeSrgbOutput)
                     ? "srgb"
@@ -1992,18 +2828,11 @@ nlohmann::json SerializeRecipe(const RawDevelopmentRecipe& recipe) {
         } },
         { "whiteBalance", {
             { "mode", WhiteBalanceModeStableString(recipe.whiteBalance.mode) },
-            { "hasTemperatureKelvin", recipe.whiteBalance.hasTemperatureKelvin },
-            { "temperatureKelvin", recipe.whiteBalance.temperatureKelvin },
-            { "hasTint", recipe.whiteBalance.hasTint },
-            { "tint", recipe.whiteBalance.tint },
             { "hasMultipliers", recipe.whiteBalance.hasMultipliers },
-            { "multipliers", recipe.whiteBalance.multipliers },
-            { "hasSamplePoint", recipe.whiteBalance.hasSamplePoint },
-            { "sampleX", recipe.whiteBalance.sampleX },
-            { "sampleY", recipe.whiteBalance.sampleY }
+            { "multipliers", recipe.whiteBalance.multipliers }
         } },
         { "rgbDenoise", {
-            { "version", 2 },
+            { "version", 5 },
             { "enabled", rgbDenoise.enabled },
             { "method", RgbDenoiseMethodStableString(rgbDenoise.method) },
             { "mapping", RgbDenoiseMappingStableString(rgbDenoise.mapping) },
@@ -2013,32 +2842,22 @@ nlohmann::json SerializeRecipe(const RawDevelopmentRecipe& recipe) {
             { "adapterVersion", rgbDenoise.adapterVersion },
             { "colorNoise", rgbDenoise.colorNoise },
             { "luminanceNoise", rgbDenoise.luminanceNoise },
-            { "detailProtection", rgbDenoise.detailProtection }
+            { "detailProtection", rgbDenoise.detailProtection },
+            { "edgeSensitivity", rgbDenoise.edgeSensitivity },
+            { "maximumStructureSize", rgbDenoise.maximumStructureSize },
+            { "lumaMap", SerializeRawDenoiseControlMap(rgbDenoise.lumaMap) },
+            { "chromaMap", SerializeRawDenoiseControlMap(rgbDenoise.chromaMap) },
+            { "nextControlPointId", rgbDenoise.nextControlPointId }
         } },
         { "exposureEv", recipe.preToneExposureEv },
-        { "localExposure", {
-            { "enabled", recipe.localExposure.enabled },
-            { "amount", recipe.localExposure.amount },
-            { "shadowLiftEv", recipe.localExposure.shadowLiftEv },
-            { "highlightCompressionEv", recipe.localExposure.highlightCompressionEv },
-            { "localBaselineEv", recipe.localExposure.localBaselineEv },
-            { "noiseGuardBias", recipe.localExposure.noiseGuardBias },
-            { "highlightGuardBias", recipe.localExposure.highlightGuardBias },
-            { "shadowGuardBias", recipe.localExposure.shadowGuardBias },
-            { "smoothGradientProtection", recipe.localExposure.smoothGradientProtection },
-            { "haloGuard", recipe.localExposure.haloGuard }
-        } },
+        { "colorCalibration", SerializeColorCalibration(recipe.colorCalibration) },
         { "localRange", LocalRangeJson(recipe.localRange) },
-        { "toneCurve", {
-            { "mode", ToneCurveModeStableString(recipe.toneCurve.mode) },
-            { "points", tonePoints }
-        } },
-        { "finishTone", recipe.finishTone.layerJson.is_object()
-            ? recipe.finishTone.layerJson
-            : DefaultFinishToneJson() },
-        { "viewTransform", recipe.viewTransform.layerJson.is_object()
-            ? recipe.viewTransform.layerJson
-            : DefaultViewTransformJson() },
+        { "evGradients", GradientEvJson(recipe.evGradients) },
+        { "finishTone", finishTone },
+        { "toneGradients", GradientToneJson(recipe.toneGradients) },
+        { "colorWarp", SerializeColorWarpRecipe(recipe.colorWarp) },
+        { "detailContrast", SerializeDetailContrast(recipe.detailContrast) },
+        { "viewTransform", viewTransform },
         { "cropRotate", {
             { "cropEnabled", recipe.cropRotation.cropEnabled },
             { "cropRect", {
@@ -2051,13 +2870,9 @@ nlohmann::json SerializeRecipe(const RawDevelopmentRecipe& recipe) {
             { "flipHorizontally", recipe.cropRotation.flipHorizontally },
             { "flipVertically", recipe.cropRotation.flipVertically }
         } },
-        { "previewOutput", {
-            { "intent", recipe.previewOutput.previewIntent },
-            { "internalViewTransform", recipe.previewOutput.internalViewTransform },
-            { "outputColorSpace", recipe.previewOutput.outputColorSpace }
-        } },
-        { "stageOrder", recipe.stageOrder.empty() ? DefaultStageOrder() : recipe.stageOrder }
+        { "stageOrder", DefaultStageOrder() }
     };
+    return knownFields;
 }
 
 RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
@@ -2067,88 +2882,81 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
     }
 
     const int storedRecipeVersion = value.value("rawRecipeVersion", 0);
+    if (storedRecipeVersion != kRawDevelopmentRecipeVersion) {
+        return recipe;
+    }
     recipe.rawRecipeVersion = kRawDevelopmentRecipeVersion;
-    if (storedRecipeVersion < 7) {
-        recipe.technical.processingVersion = Raw::RawProcessingVersion::LegacyV1;
-        recipe.technical.demosaicMethod = Raw::DemosaicMethod::Bilinear;
-        recipe.technical.workingSpace = Raw::RawWorkingSpace::LinearSrgbD65;
-        recipe.technical.applyBaselineExposure = false;
-        recipe.technical.encodeSrgbOutput = false;
-    } else {
-        const nlohmann::json processing = value.value("processing", nlohmann::json::object());
-        if (processing.is_object()) {
-            recipe.technical.processingVersion = ProcessingVersionFromStableString(
-                processing.value(
-                    "version",
-                    std::string(ProcessingVersionStableString(recipe.technical.processingVersion))));
-            recipe.technical.demosaicMethod = DemosaicMethodFromStableString(
-                processing.value(
-                    "demosaic",
-                    std::string(DemosaicMethodStableString(recipe.technical.demosaicMethod))));
-            recipe.technical.workingSpace = WorkingSpaceFromStableString(
-                processing.value(
-                    "workingSpace",
-                    std::string(WorkingSpaceStableString(recipe.technical.workingSpace))));
-            recipe.technical.applyBaselineExposure =
-                processing.value("applyBaselineExposure", recipe.technical.applyBaselineExposure);
-            recipe.technical.encodeSrgbOutput =
-                processing.value("outputTransfer", std::string("srgb")) == "srgb";
-            const nlohmann::json mosaicDenoise =
-                processing.value("mosaicDenoise", nlohmann::json::object());
-            if (mosaicDenoise.is_object()) {
-                recipe.technical.mosaicDenoise.enabled =
+    recipe.colorCalibration = DeserializeColorCalibration(
+        value.value("colorCalibration", nlohmann::json::object()));
+    recipe.technical.processingVersion = Raw::RawProcessingVersion::TruthfulV2;
+    const nlohmann::json processing = value.value("processing", nlohmann::json::object());
+    if (processing.is_object()) {
+        recipe.technical.demosaicMethod = DemosaicMethodFromStableString(
+            processing.value(
+                "demosaic",
+                std::string(DemosaicMethodStableString(recipe.technical.demosaicMethod))));
+        recipe.technical.workingSpace = WorkingSpaceFromStableString(
+            processing.value(
+                "workingSpace",
+                std::string(WorkingSpaceStableString(recipe.technical.workingSpace))));
+        recipe.technical.applyBaselineExposure =
+            processing.value("applyBaselineExposure", recipe.technical.applyBaselineExposure);
+        recipe.technical.encodeSrgbOutput =
+            processing.value("outputTransfer", std::string("srgb")) == "srgb";
+        const nlohmann::json mosaicDenoise =
+            processing.value("mosaicDenoise", nlohmann::json::object());
+        if (mosaicDenoise.is_object()) {
+            recipe.technical.mosaicDenoise.enabled =
+                mosaicDenoise.value(
+                    "enabled",
+                    recipe.technical.mosaicDenoise.enabled);
+            recipe.technical.mosaicDenoise.mode =
+                MosaicDenoiseModeFromStableString(
                     mosaicDenoise.value(
-                        "enabled",
-                        recipe.technical.mosaicDenoise.enabled);
-                recipe.technical.mosaicDenoise.mode =
-                    MosaicDenoiseModeFromStableString(
-                        mosaicDenoise.value(
-                            "mode",
-                            std::string(MosaicDenoiseModeStableString(
-                                recipe.technical.mosaicDenoise.mode))));
-                recipe.technical.mosaicDenoise.hotPixelSuppression =
-                    mosaicDenoise.value(
-                        "hotPixelSuppression",
-                        recipe.technical.mosaicDenoise.hotPixelSuppression);
-                recipe.technical.mosaicDenoise.hotPixelThreshold =
-                    JsonFloat(
-                        mosaicDenoise,
-                        "hotPixelThreshold",
-                        recipe.technical.mosaicDenoise.hotPixelThreshold);
-                recipe.technical.mosaicDenoise.lumaStrength =
-                    JsonFloat(
-                        mosaicDenoise,
-                        "greenPlaneStrength",
-                        recipe.technical.mosaicDenoise.lumaStrength);
-                recipe.technical.mosaicDenoise.chromaStrength =
-                    JsonFloat(
-                        mosaicDenoise,
-                        "redBluePlaneStrength",
-                        recipe.technical.mosaicDenoise.chromaStrength);
-                recipe.technical.mosaicDenoise.radius =
-                    JsonInteger(
-                        mosaicDenoise,
-                        "radius",
-                        recipe.technical.mosaicDenoise.radius);
-                recipe.technical.mosaicDenoise.edgeProtection =
-                    JsonFloat(
-                        mosaicDenoise,
-                        "edgeProtection",
-                        recipe.technical.mosaicDenoise.edgeProtection);
-                recipe.technical.mosaicDenoise.iterations =
-                    JsonInteger(
-                        mosaicDenoise,
-                        "iterations",
-                        recipe.technical.mosaicDenoise.iterations);
-            }
+                        "mode",
+                        std::string(MosaicDenoiseModeStableString(
+                            recipe.technical.mosaicDenoise.mode))));
+            recipe.technical.mosaicDenoise.hotPixelSuppression =
+                mosaicDenoise.value(
+                    "hotPixelSuppression",
+                    recipe.technical.mosaicDenoise.hotPixelSuppression);
+            recipe.technical.mosaicDenoise.hotPixelThreshold =
+                JsonFloat(
+                    mosaicDenoise,
+                    "hotPixelThreshold",
+                    recipe.technical.mosaicDenoise.hotPixelThreshold);
+            recipe.technical.mosaicDenoise.lumaStrength =
+                JsonFloat(
+                    mosaicDenoise,
+                    "greenPlaneStrength",
+                    recipe.technical.mosaicDenoise.lumaStrength);
+            recipe.technical.mosaicDenoise.chromaStrength =
+                JsonFloat(
+                    mosaicDenoise,
+                    "redBluePlaneStrength",
+                    recipe.technical.mosaicDenoise.chromaStrength);
+            recipe.technical.mosaicDenoise.radius =
+                JsonInteger(
+                    mosaicDenoise,
+                    "radius",
+                    recipe.technical.mosaicDenoise.radius);
+            recipe.technical.mosaicDenoise.edgeProtection =
+                JsonFloat(
+                    mosaicDenoise,
+                    "edgeProtection",
+                    recipe.technical.mosaicDenoise.edgeProtection);
+            recipe.technical.mosaicDenoise.iterations =
+                JsonInteger(
+                    mosaicDenoise,
+                    "iterations",
+                    recipe.technical.mosaicDenoise.iterations);
         }
     }
     recipe.technical.mosaicDenoise =
         SanitizeMosaicDenoiseSettings(recipe.technical.mosaicDenoise);
 
-    const nlohmann::json source = value.contains("sourceRef")
-        ? value.value("sourceRef", nlohmann::json::object())
-        : value.value("source", nlohmann::json::object());
+    const nlohmann::json source =
+        value.value("sourceRef", nlohmann::json::object());
     if (source.is_object()) {
         recipe.source.sourcePath = source.value("sourcePath", recipe.source.sourcePath);
         recipe.source.relativePathKey = source.value("relativePathKey", recipe.source.relativePathKey);
@@ -2156,8 +2964,6 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
         recipe.source.fileSizeBytes = JsonUInt64(source, "fileSizeBytes", recipe.source.fileSizeBytes);
         recipe.source.modifiedTimeTicks = JsonInt64(source, "modifiedTimeTicks", recipe.source.modifiedTimeTicks);
         recipe.source.displayName = source.value("displayName", recipe.source.displayName);
-    } else {
-        recipe.source.sourcePath = value.value("sourcePath", recipe.source.sourcePath);
     }
     if (recipe.source.relativePathKey.empty()) {
         recipe.source.relativePathKey = recipe.source.sourcePath;
@@ -2170,10 +2976,6 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
     if (whiteBalance.is_object()) {
         recipe.whiteBalance.mode = WhiteBalanceModeFromStableString(
             whiteBalance.value("mode", std::string(WhiteBalanceModeStableString(recipe.whiteBalance.mode))));
-        recipe.whiteBalance.hasTemperatureKelvin = whiteBalance.value("hasTemperatureKelvin", recipe.whiteBalance.hasTemperatureKelvin);
-        recipe.whiteBalance.temperatureKelvin = JsonFloat(whiteBalance, "temperatureKelvin", recipe.whiteBalance.temperatureKelvin);
-        recipe.whiteBalance.hasTint = whiteBalance.value("hasTint", recipe.whiteBalance.hasTint);
-        recipe.whiteBalance.tint = JsonFloat(whiteBalance, "tint", recipe.whiteBalance.tint);
         recipe.whiteBalance.hasMultipliers = whiteBalance.value("hasMultipliers", recipe.whiteBalance.hasMultipliers);
         const nlohmann::json multipliers = whiteBalance.value("multipliers", nlohmann::json::array());
         if (multipliers.is_array() && multipliers.size() >= 3) {
@@ -2181,16 +2983,16 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
             recipe.whiteBalance.multipliers[1] = multipliers[1].get<float>();
             recipe.whiteBalance.multipliers[2] = multipliers[2].get<float>();
         }
-        recipe.whiteBalance.hasSamplePoint = whiteBalance.value("hasSamplePoint", recipe.whiteBalance.hasSamplePoint);
-        recipe.whiteBalance.sampleX = JsonFloat(whiteBalance, "sampleX", recipe.whiteBalance.sampleX);
-        recipe.whiteBalance.sampleY = JsonFloat(whiteBalance, "sampleY", recipe.whiteBalance.sampleY);
     }
 
     const nlohmann::json rgbDenoise =
         value.value("rgbDenoise", nlohmann::json::object());
     if (rgbDenoise.is_object()) {
-        recipe.rgbDenoise.enabled =
+        const int rgbDenoiseVersion = rgbDenoise.value("version", 0);
+        const bool storedDenoiseEnabled =
             rgbDenoise.value("enabled", recipe.rgbDenoise.enabled);
+        recipe.rgbDenoise.enabled =
+            storedDenoiseEnabled;
         recipe.rgbDenoise.method = RgbDenoiseMethodFromStableString(
             rgbDenoise.value(
                 "method",
@@ -2213,37 +3015,51 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
             JsonFloat(rgbDenoise, "luminanceNoise", recipe.rgbDenoise.luminanceNoise);
         recipe.rgbDenoise.detailProtection =
             JsonFloat(rgbDenoise, "detailProtection", recipe.rgbDenoise.detailProtection);
-    }
-    if (storedRecipeVersion < 12 &&
-        recipe.rgbDenoise.adapterVersion == "restormer-rgb-adapter-v1") {
-        recipe.rgbDenoise.adapterVersion =
-            kRestormerDenoiseAdapterVersion;
-        recipe.rgbDenoise.packageVersion.clear();
-        recipe.rgbDenoise.modelSha256.clear();
+        recipe.rgbDenoise.edgeSensitivity =
+            JsonFloat(rgbDenoise, "edgeSensitivity", recipe.rgbDenoise.edgeSensitivity);
+        recipe.rgbDenoise.maximumStructureSize = JsonFloat(
+            rgbDenoise,
+            "maximumStructureSize",
+            recipe.rgbDenoise.maximumStructureSize);
+        if (rgbDenoiseVersion >= 3) {
+            recipe.rgbDenoise.lumaMap = DeserializeRawDenoiseControlMap(
+                rgbDenoise.value("lumaMap", nlohmann::json::object()),
+                0.0f);
+            recipe.rgbDenoise.chromaMap = DeserializeRawDenoiseControlMap(
+                rgbDenoise.value("chromaMap", nlohmann::json::object()),
+                0.0f);
+            if (rgbDenoiseVersion == 3) {
+                recipe.rgbDenoise.lumaMap.baseMultiplier = std::max(
+                    0.0f,
+                    recipe.rgbDenoise.lumaMap.baseMultiplier - 1.0f);
+                recipe.rgbDenoise.chromaMap.baseMultiplier = std::max(
+                    0.0f,
+                    recipe.rgbDenoise.chromaMap.baseMultiplier - 1.0f);
+                if (!storedDenoiseEnabled) {
+                    recipe.rgbDenoise.lumaMap = {};
+                    recipe.rgbDenoise.chromaMap = {};
+                }
+            }
+        } else if (storedDenoiseEnabled) {
+            recipe.rgbDenoise.lumaMap.baseMultiplier =
+                recipe.rgbDenoise.luminanceNoise;
+            recipe.rgbDenoise.chromaMap.baseMultiplier =
+                recipe.rgbDenoise.colorNoise;
+        }
+        recipe.rgbDenoise.nextControlPointId = JsonUInt64(
+            rgbDenoise,
+            "nextControlPointId",
+            recipe.rgbDenoise.nextControlPointId);
+        if (rgbDenoiseVersion < 5) {
+            // Earlier versions derived this field from whether any amount was
+            // nonzero, so false did not represent a user-authored bypass.
+            recipe.rgbDenoise.enabled = true;
+        }
     }
     recipe.rgbDenoise = SanitizeRgbDenoiseRecipe(recipe.rgbDenoise);
 
-    recipe.preToneExposureEv = value.contains("exposureEv")
-        ? JsonFloat(value, "exposureEv", recipe.preToneExposureEv)
-        : JsonFloat(value, "preToneExposureEv", recipe.preToneExposureEv);
-
-    const nlohmann::json localExposure = value.value("localExposure", nlohmann::json::object());
-    if (localExposure.is_object()) {
-        recipe.localExposure.enabled = localExposure.value("enabled", recipe.localExposure.enabled);
-        recipe.localExposure.amount = JsonFloat(localExposure, "amount", recipe.localExposure.amount);
-        recipe.localExposure.shadowLiftEv = JsonFloat(localExposure, "shadowLiftEv", recipe.localExposure.shadowLiftEv);
-        recipe.localExposure.highlightCompressionEv =
-            JsonFloat(localExposure, "highlightCompressionEv", recipe.localExposure.highlightCompressionEv);
-        recipe.localExposure.localBaselineEv = JsonFloat(localExposure, "localBaselineEv", recipe.localExposure.localBaselineEv);
-        recipe.localExposure.noiseGuardBias = JsonFloat(localExposure, "noiseGuardBias", recipe.localExposure.noiseGuardBias);
-        recipe.localExposure.highlightGuardBias =
-            JsonFloat(localExposure, "highlightGuardBias", recipe.localExposure.highlightGuardBias);
-        recipe.localExposure.shadowGuardBias = JsonFloat(localExposure, "shadowGuardBias", recipe.localExposure.shadowGuardBias);
-        recipe.localExposure.smoothGradientProtection =
-            JsonFloat(localExposure, "smoothGradientProtection", recipe.localExposure.smoothGradientProtection);
-        recipe.localExposure.haloGuard = JsonFloat(localExposure, "haloGuard", recipe.localExposure.haloGuard);
-    }
-    recipe.localExposure = SanitizeLocalExposureRecipe(recipe.localExposure);
+    recipe.preToneExposureEv =
+        JsonFloat(value, "exposureEv", recipe.preToneExposureEv);
 
     const nlohmann::json localRange = value.value("localRange", nlohmann::json::object());
     if (localRange.is_object()) {
@@ -2280,6 +3096,8 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
                 "targetZoneCombineMode",
                 std::string(LocalRangeZoneCombineModeStableString(
                     recipe.localRange.targetZoneCombineMode))));
+        recipe.localRange.areasVersion = localRange.value("areasVersion", 1);
+        recipe.localRange.areas = DeserializeZoneAreas(localRange.value("areas", nlohmann::json::array()));
         recipe.localRange.targetZones.clear();
         const nlohmann::json targetZones =
             localRange.value("targetZones", nlohmann::json::array());
@@ -2329,58 +3147,66 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
                 if (!item.is_object()) {
                     continue;
                 }
-                recipe.localRange.points.push_back({
-                    JsonFloat(item, "ev", 0.0f),
-                    JsonFloat(item, "deltaEv", 0.0f)
-                });
+                RawLocalRangePoint point;
+                point.ev = JsonFloat(item, "ev", 0.0f);
+                point.deltaEv = JsonFloat(item, "deltaEv", 0.0f);
+                point.incoming = BezierHandleFromJson(
+                    item.value("incomingHandle", nlohmann::json::object()),
+                    0.0f);
+                point.outgoing = BezierHandleFromJson(
+                    item.value("outgoingHandle", nlohmann::json::object()),
+                    0.0f);
+                recipe.localRange.points.push_back(point);
             }
         }
     }
     recipe.localRange = SanitizeLocalRangeRecipe(recipe.localRange);
 
-    const nlohmann::json toneCurve = value.value("toneCurve", nlohmann::json::object());
-    if (toneCurve.is_object()) {
-        recipe.toneCurve.mode = ToneCurveModeFromStableString(
-            toneCurve.value("mode", std::string(ToneCurveModeStableString(recipe.toneCurve.mode))));
-        recipe.toneCurve.points.clear();
-        const nlohmann::json points = toneCurve.value("points", nlohmann::json::array());
-        if (points.is_array()) {
-            for (const nlohmann::json& item : points) {
-                if (!item.is_object()) {
-                    continue;
-                }
-                recipe.toneCurve.points.push_back({
-                    JsonFloat(item, "input", 0.0f),
-                    JsonFloat(item, "output", 0.0f)
-                });
-            }
+    const nlohmann::json evGradients = value.value("evGradients", nlohmann::json::array());
+    if (evGradients.is_array()) {
+        for (const auto& item : evGradients) {
+            if (!item.is_object() || recipe.evGradients.size() >= kMaxRawGradientAdjustments) break;
+            RawGradientEvAdjustment adjustment;
+            adjustment.mask = GradientMaskFromJson(item.value("mask", nlohmann::json::object()));
+            // Use the same local-curve reader as Background. The small envelope
+            // contains no nested gradients, so this has one bounded level.
+            adjustment.curve = DeserializeRecipe({
+                {"rawRecipeVersion", kRawDevelopmentRecipeVersion},
+                {"localRange", item.value("curve", nlohmann::json::object())}}).localRange;
+            recipe.evGradients.push_back(std::move(adjustment));
         }
     }
-    if (recipe.toneCurve.points.empty()) {
-        recipe.toneCurve.points = DefaultToneCurvePoints();
-    }
+
     const nlohmann::json finishTone = value.value("finishTone", nlohmann::json::object());
-    recipe.finishTone.layerJson = storedRecipeVersion < 3
-        ? SanitizeFinishToneJson(
-              FinishToneJsonFromLegacyToneCurve(recipe.toneCurve),
-              recipe.toneCurve,
-              storedRecipeVersion)
-        : SanitizeFinishToneJson(finishTone, recipe.toneCurve, storedRecipeVersion);
+    recipe.finishTone.layerJson =
+        SanitizeFinishToneJson(finishTone);
+    recipe.finishTone.layerJson["inputWorkingSpace"] =
+        WorkingSpaceStableString(recipe.technical.workingSpace);
+    const nlohmann::json toneGradients = value.value("toneGradients", nlohmann::json::array());
+    if (toneGradients.is_array()) {
+        for (const auto& item : toneGradients) {
+            if (!item.is_object() || recipe.toneGradients.size() >= kMaxRawGradientAdjustments) break;
+            RawGradientToneAdjustment adjustment;
+            adjustment.mask = GradientMaskFromJson(item.value("mask", nlohmann::json::object()));
+            adjustment.curveJson = SanitizeFinishToneJson(
+                item.value("curve", nlohmann::json::object()));
+            recipe.toneGradients.push_back(std::move(adjustment));
+        }
+    }
+
+    recipe.colorWarp = DeserializeColorWarpRecipe(
+        value.value("colorWarp", nlohmann::json::object()));
+    recipe.detailContrast = ReadDetailContrast(value.value("detailContrast", nlohmann::json::object()));
 
     const nlohmann::json viewTransform = value.value("viewTransform", nlohmann::json::object());
     recipe.viewTransform.layerJson = SanitizeViewTransformJson(viewTransform);
-    if (storedRecipeVersion < 7) {
-        recipe.viewTransform.layerJson["inputWorkingSpace"] = "linear-srgb-d65";
-        recipe.viewTransform.layerJson["encodeSrgbOutput"] = false;
-    } else {
-        recipe.viewTransform.layerJson["inputWorkingSpace"] =
-            WorkingSpaceStableString(recipe.technical.workingSpace);
-        recipe.viewTransform.layerJson["encodeSrgbOutput"] = recipe.technical.encodeSrgbOutput;
-    }
+    recipe.viewTransform.layerJson["inputWorkingSpace"] =
+        WorkingSpaceStableString(recipe.technical.workingSpace);
+    recipe.viewTransform.layerJson["encodeSrgbOutput"] =
+        recipe.technical.encodeSrgbOutput;
 
-    const nlohmann::json cropRotation = value.contains("cropRotate")
-        ? value.value("cropRotate", nlohmann::json::object())
-        : value.value("cropRotation", nlohmann::json::object());
+    const nlohmann::json cropRotation =
+        value.value("cropRotate", nlohmann::json::object());
     if (cropRotation.is_object()) {
         recipe.cropRotation.cropEnabled = cropRotation.value("cropEnabled", recipe.cropRotation.cropEnabled);
         const nlohmann::json cropRect = cropRotation.value("cropRect", nlohmann::json::object());
@@ -2389,15 +3215,9 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
             recipe.cropRotation.cropY = JsonFloat(cropRect, "y", recipe.cropRotation.cropY);
             recipe.cropRotation.cropWidth = JsonFloat(cropRect, "width", recipe.cropRotation.cropWidth);
             recipe.cropRotation.cropHeight = JsonFloat(cropRect, "height", recipe.cropRotation.cropHeight);
-        } else {
-            recipe.cropRotation.cropX = JsonFloat(cropRotation, "cropX", recipe.cropRotation.cropX);
-            recipe.cropRotation.cropY = JsonFloat(cropRotation, "cropY", recipe.cropRotation.cropY);
-            recipe.cropRotation.cropWidth = JsonFloat(cropRotation, "cropWidth", recipe.cropRotation.cropWidth);
-            recipe.cropRotation.cropHeight = JsonFloat(cropRotation, "cropHeight", recipe.cropRotation.cropHeight);
         }
         recipe.cropRotation.rotationDegrees = cropRotation.value(
-            "userRotationDegrees",
-            cropRotation.value("rotationDegrees", recipe.cropRotation.rotationDegrees));
+            "userRotationDegrees", recipe.cropRotation.rotationDegrees);
         recipe.cropRotation.flipHorizontally = cropRotation.value(
             "flipHorizontally",
             recipe.cropRotation.flipHorizontally);
@@ -2406,32 +3226,7 @@ RawDevelopmentRecipe DeserializeRecipe(const nlohmann::json& value) {
             recipe.cropRotation.flipVertically);
     }
 
-    const nlohmann::json previewOutput = value.value("previewOutput", nlohmann::json::object());
-    if (previewOutput.is_object()) {
-        recipe.previewOutput.previewIntent = previewOutput.value(
-            "intent",
-            previewOutput.value("previewIntent", recipe.previewOutput.previewIntent));
-        recipe.previewOutput.internalViewTransform = previewOutput.value("internalViewTransform", recipe.previewOutput.internalViewTransform);
-        recipe.previewOutput.outputColorSpace = previewOutput.value("outputColorSpace", recipe.previewOutput.outputColorSpace);
-    }
-    if (recipe.technical.processingVersion == Raw::RawProcessingVersion::TruthfulV1) {
-        recipe.previewOutput.outputColorSpace = "sRGB";
-    }
-
-    recipe.stageOrder.clear();
-    const nlohmann::json stageOrder = value.value("stageOrder", nlohmann::json::array());
-    if (stageOrder.is_array()) {
-        for (const nlohmann::json& stage : stageOrder) {
-            if (stage.is_string()) {
-                recipe.stageOrder.push_back(stage.get<std::string>());
-            }
-        }
-    }
-    if (recipe.stageOrder.empty()) {
-        recipe.stageOrder = DefaultStageOrder();
-    } else {
-        recipe.stageOrder = NormalizeStageOrder(recipe.stageOrder);
-    }
+    recipe.stageOrder = DefaultStageOrder();
 
     return recipe;
 }

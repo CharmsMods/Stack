@@ -138,7 +138,7 @@ DevelopSubjectImportanceMap DeserializeDevelopSubjectImportanceMap(const nlohman
     if (!value.is_object()) {
         return map;
     }
-    map.schemaVersion = std::max(1, value.value("schemaVersion", map.schemaVersion));
+    map.schemaVersion = value.value("schemaVersion", map.schemaVersion);
     map.enabled = value.value("enabled", map.enabled);
     map.showOverlay = value.value("showOverlay", map.showOverlay);
     map.overlayOpacity = std::clamp(value.value("overlayOpacity", map.overlayOpacity), 0.05f, 1.0f);

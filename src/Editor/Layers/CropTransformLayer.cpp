@@ -1,3 +1,5 @@
+#include "Renderer/CoverageSampling.h"
+#include <string>
 #include "CropTransformLayer.h"
 #include "Renderer/FullscreenQuad.h"
 #include <imgui.h>
@@ -56,7 +58,7 @@ void main() {
     if (uv.x < left || uv.x > right || uv.y < top || uv.y > bottom) {
         FragColor = vec4(0.0, 0.0, 0.0, 0.0);
     } else {
-        FragColor = texture(uInputTex, uv);
+        FragColor = sampleCovered(uInputTex, uv);
     }
 }
 )";
@@ -68,7 +70,9 @@ CropTransformLayer::~CropTransformLayer() {
 }
 
 void CropTransformLayer::InitializeGL() {
-    m_ShaderProgram = GLHelpers::CreateShaderProgram(s_CropVert, s_CropFrag);
+    std::string fragment = s_CropFrag;
+    fragment.insert(fragment.find("void main()"), Stack::Renderer::CoverageSamplingGlsl);
+    m_ShaderProgram = GLHelpers::CreateShaderProgram(s_CropVert, fragment.c_str());
 }
 
 void CropTransformLayer::Execute(unsigned int inputTexture, int width, int height, FullscreenQuad& quad) {

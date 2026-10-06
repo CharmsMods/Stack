@@ -20,7 +20,22 @@ struct LibraryCardMotionState {
     float entrance = 1.0f;
     double entranceStartTime = 0.0;
     bool entranceInitialized = false;
+    float layoutX = 0.0f;
+    float layoutY = 0.0f;
+    float layoutTargetX = 0.0f;
+    float layoutTargetY = 0.0f;
+    float layoutScale = 1.0f;
+    float layoutTargetScale = 1.0f;
+    float layoutVelocityX = 0.0f;
+    float layoutVelocityY = 0.0f;
+    float layoutScaleVelocity = 0.0f;
+    bool layoutInitialized = false;
     int lastSeenFrame = 0;
+};
+
+struct RawFolderAnimationState {
+    float expansion = 1.0f;
+    bool initialized = false;
 };
 
 struct LibraryPreviewLaunchRect {
@@ -48,6 +63,7 @@ struct LibraryCachedPackedCard {
     float y = 0.0f;
     float width = 0.0f;
     float height = 0.0f;
+    float scaleMultiplier = 1.0f;
 };
 
 class LibraryModule : public IAppModule {
@@ -65,9 +81,18 @@ public:
         int rawWorkspaceTabId = -1,
         std::function<void(const std::string&)> onLoadEditorProject = {});
     void RenderGlobalPopups();
+    void SetSectionPanelHosted(bool hosted);
+    void RenderSectionPanel();
+    void SetNotificationScope(Stack::Notifications::Notifier notifier);
+    Stack::Notifications::Notifier& GetNotifier() { return m_Notifier; }
+    const Stack::Notifications::Notifier& GetNotifier() const { return m_Notifier; }
+    void UpdateNotificationDecisions();
     const LibraryRenderStats& GetLastRenderStats() const { return m_LastRenderStats; }
     void DismissPreviewsForProjectLoad();
     void OpenProjectPreviewByFileName(const std::string& fileName);
+    void AdjustViewScale(float steps);
+    bool CanZoomOut() const;
+    bool CanZoomIn() const;
     const char* GetName() override { return "Library"; }
 
 private:
@@ -82,16 +107,18 @@ private:
         class EditorModule* editor,
         class CompositeModule* composite,
         int* activeTab = nullptr);
-    void RenderConfirmLoadPopup();
     void RenderFolderImportPopup();
-    void RenderImportConflictPopup();
-    void RenderAssetConflictPopup();
+    void DrawImportConflictComparison(std::uint64_t id);
+    void DrawAssetConflictComparison(std::uint64_t id);
+    void RequestDeleteItems(std::vector<std::string> fileNames, bool assets);
     void RenderLibraryMenuOptions(bool importBusy, bool exportBusy);
     void RenderTagsDrawer(
         StackAppearance::AppearanceManager* appearance,
         bool wallpaperSurfaces,
         const StackAppearance::RuntimeSurfacePalette& surfacePalette,
         float dt);
+    void RenderTagFilters(bool wallpaperSurfaces,
+        const StackAppearance::RuntimeSurfacePalette& surfacePalette);
     void RenderLibraryGrid(
         class EditorModule* editor,
         StackAppearance::AppearanceManager* appearance,
@@ -123,6 +150,7 @@ private:
     float m_ConflictCompareSplit = 0.5f;
     float m_AssetConflictCompareSplit = 0.5f;
     bool m_FilterPanelExpanded = false;
+    bool m_SectionPanelHosted = false;
     float m_FilterPanelWidthAnim = 0.0f;
     float m_FilterPanelHoverGrace = 0.0f;
     std::string m_RenameTargetFileName;
@@ -134,12 +162,10 @@ private:
     float m_AssetPreviewTransition = 0.0f;
     bool m_AssetPreviewClosing = false;
 
-    enum class PendingLoadTarget { None, Editor, Composite };
-    PendingLoadTarget m_PendingLoadTarget = PendingLoadTarget::None;
-    std::string m_PendingLoadProjectFileName;
-    bool m_ConfirmLoadOpen = false;
-    bool m_SaveNamePromptOpen = false;
-    char m_SaveNameBuffer[256] = "";
+    Stack::Notifications::Notifier m_Notifier;
+    std::shared_ptr<int> m_NotificationLifetime = std::make_shared<int>(0);
+    std::unordered_map<std::uint64_t, Stack::Notifications::EventId> m_ConflictNotices;
+    std::unordered_map<std::uint64_t, Stack::Notifications::EventId> m_AssetConflictNotices;
 
     bool m_FolderImportPopupOpen = false;
     std::string m_PendingFolderImportPath;
@@ -190,11 +216,32 @@ private:
     std::vector<LibraryCachedPackedCard> m_CachedPackedCards;
     std::string m_CachedLayoutKey;
     float m_CachedPackedHeight = 0.0f;
+    std::string m_LastSearchLayoutQuery;
+    double m_SearchLayoutQueryChangedAt = 0.0;
 
     unsigned int m_OptionsIconTex = 0;
     unsigned int m_AllProjectsIconTex = 0;
     unsigned int m_AssetsIconTex = 0;
+    unsigned int m_SearchIconTex = 0;
+    unsigned int m_RawWorkspaceIconTex = 0;
+    unsigned int m_FileNewIconTex = 0;
+    unsigned int m_FileOpenIconTex = 0;
+    unsigned int m_FileSaveIconTex = 0;
+    unsigned int m_FileFolderIconTex = 0;
+    unsigned int m_ZoomMinusIconTex = 0;
+    unsigned int m_ZoomPlusIconTex = 0;
+    unsigned int m_ReloadIconTex = 0;
+    unsigned int m_ChevronIconTex = 0;
+    std::unordered_set<std::string> m_CollapsedRawFolders;
+    std::unordered_map<std::string, RawFolderAnimationState> m_RawFolderAnimations;
     float m_LibraryViewScale = 1.0f;
     float m_ScrollTargetY = -1.0f;
     float m_ScrollCurrentY = -1.0f;
+    std::string m_RawScrollWorkspaceKey;
+    float m_RawScrollTargetY = -1.0f;
+    float m_RawScrollCurrentY = -1.0f;
+    std::string m_FlashRawSourceKey;
+    double m_FlashRawStartTime = 0.0;
+    std::string m_ScrollToRawSourceKey;
+    std::unordered_map<std::string, float> m_MiniThumbHoverAnimations;
 };

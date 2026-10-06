@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <functional>
+#include <optional>
 
 namespace ImGuiExtras {
     struct NodeControlState {
@@ -35,6 +37,10 @@ namespace ImGuiExtras {
         bool useScrubHandles = false;
         GraphSliderRangePolicy rangePolicy = GraphSliderRangePolicy::Bounded;
         float scrubSensitivity = 1.0f;
+        float dragReferenceWidth = 0.0f;
+        // Values are in the control's displayed units. No resolver means no reset.
+        std::function<std::optional<double>(const char* label, const char* id,
+            double minimum, double maximum, const char* format)> numericDefault;
     };
 
     inline float GraphSliderDragStepPerPixel(
@@ -52,6 +58,7 @@ namespace ImGuiExtras {
     enum class CursorCaptureMode {
         None,
         LockedScrub,
+        LinearScrub, // Raw relative motion; no cursor warping or pointer acceleration.
         LockedPan
     };
 
@@ -67,16 +74,13 @@ namespace ImGuiExtras {
     bool IsSliderWheelModifierActive();
     bool IsSliderWheelConsumed();
     float GetSliderWheelDelta();
-    void DrawSpinner(const char* label, float radius, int thickness, ImU32 color);
-    void DrawSpinnerOnly(float radius, int thickness, ImU32 color);
-    void RenderSpinnerOnlyOverlay(float alpha = 1.0f);
-    void RenderBusyOverlay(const char* message);
-    void RenderProgressOverlay(const char* message, float progress);
+    void ConsumeSliderWheel();
     void ResetNodeControlState();
     const NodeControlState& GetNodeControlState();
     void BeginGraphNodeControlScope(const GraphNodeControlScopeConfig& config = {});
     void EndGraphNodeControlScope();
     bool IsGraphNodeControlScopeActive();
+    void SetNextNodeNumericDefault(double value);
     void SubmitCursorCaptureRequest(const CursorCaptureRequest& request);
     bool ConsumeCursorCaptureRequest(CursorCaptureRequest* outRequest);
     void RichSectionLabel(const char* label, float spacingAfter = 0.0f);

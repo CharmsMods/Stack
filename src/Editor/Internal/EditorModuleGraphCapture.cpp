@@ -1,3 +1,4 @@
+#include "App/settings/PrimaryAction.h"
 #include "Editor/EditorModule.h"
 
 #include "Renderer/GLLoader.h"
@@ -85,6 +86,27 @@ bool EditorModule::ConsumeGraphCaptureRequest(GraphCapture::Request& outRequest)
 
 void EditorModule::SetGraphCaptureProgress(std::string statusText) {
     m_GraphCaptureStatusText = std::move(statusText);
+    GetNotifier().UpdateActivity(m_GraphCaptureActivity, m_GraphCaptureStatusText);
+}
+
+bool EditorModule::BeginGraphCaptureSave(GraphCapture::Request request, std::string& error) {
+    std::error_code checkError;
+    const auto approval = Stack::FileSave::CaptureTargetApproval(
+        std::filesystem::u8path(request.targetPath), checkError);
+    if (!approval) {
+        error = "The graph image destination could not be checked: " + checkError.message();
+        return false;
+    }
+    request.targetApproval = *approval;
+    m_GraphCaptureActivity = GetNotifier().BeginActivity("Capturing graph");
+    if (m_GraphCaptureActivity) m_NotificationDecisionOwners.push_back({m_GraphCaptureActivity.operationId,
+        GetProjectDocumentId(), m_Project->files, m_Project->files->load.generation});
+    m_PendingGraphCaptureRequest = std::move(request);
+    m_GraphCaptureSavePending = false;
+    m_GraphCaptureBusy = true;
+    m_GraphCaptureStatusText = "Rendering graph off-screen...";
+    GetNotifier().UpdateActivity(m_GraphCaptureActivity, m_GraphCaptureStatusText);
+    return true;
 }
 
 void EditorModule::CompleteGraphCapture(GraphCapture::Result result) {
@@ -95,18 +117,13 @@ void EditorModule::CompleteGraphCapture(GraphCapture::Result result) {
     const bool fileSaved = m_LastGraphCaptureResult.fileSaved;
     const bool clipboardCopied = m_LastGraphCaptureResult.ClipboardSucceeded();
     const bool clipboardPartial = m_LastGraphCaptureResult.ClipboardPartiallySucceeded();
-    UiNotificationSeverity severity = UiNotificationSeverity::Error;
-    if (fileSaved && clipboardCopied) {
-        severity = UiNotificationSeverity::Success;
-    } else if (fileSaved || clipboardPartial) {
-        severity = UiNotificationSeverity::Info;
-    }
-    QueueUiNotification(
-        severity,
-        m_LastGraphCaptureResult.message.empty()
-            ? std::string("Graph capture did not complete.")
-            : m_LastGraphCaptureResult.message,
-        "editor-graph-capture");
+    const bool complete = fileSaved &&
+        (!m_LastGraphCaptureResult.clipboardRequested || clipboardCopied);
+    const auto outcome = complete ? Stack::Notifications::Outcome::Success :
+        fileSaved || clipboardPartial ? Stack::Notifications::Outcome::Partial : Stack::Notifications::Outcome::Failure;
+    const auto message = m_LastGraphCaptureResult.message.empty()
+        ? std::string("Graph capture did not complete.") : m_LastGraphCaptureResult.message;
+    GetNotifier().FinishActivity(m_GraphCaptureActivity, outcome, message, m_LastGraphCaptureResult.targetPath);
 }
 
 void EditorModule::RenderGraphCaptureCanvas(
@@ -121,7 +138,7 @@ void EditorModule::RenderGraphCaptureCanvas(
     renderer.RenderGraphCapture(
         this,
         graph,
-        &m_Layers,
+        &m_Project->layers,
         canvasMin,
         canvasMax,
         request.settings,
@@ -244,8 +261,8 @@ void EditorModule::RenderGraphCaptureWindow() {
             }
         }
         ImGui::SetNextItemWidth(std::min(420.0f, ImGui::GetContentRegionAvail().x));
-        if (ImGui::BeginCombo("Capture theme", themePreview.c_str())) {
-            if (ImGui::Selectable("Current working theme", m_GraphCaptureSettings.themePresetId.empty())) {
+        if (ImGui::BeginCombo("Capture palette", themePreview.c_str())) {
+            if (ImGui::Selectable("Current palette preview", m_GraphCaptureSettings.themePresetId.empty())) {
                 m_GraphCaptureSettings.themePresetId.clear();
             }
             for (const StackAppearance::ThemeDefinition& theme : m_Appearance->GetFactoryThemes()) {
@@ -253,8 +270,8 @@ void EditorModule::RenderGraphCaptureWindow() {
                     m_GraphCaptureSettings.themePresetId = theme.id;
                 }
             }
-            for (const StackAppearance::ThemeDefinition& theme : m_Appearance->GetLibrary().customPresets) {
-                const std::string label = theme.displayName + "##CaptureCustomTheme" + theme.id;
+            for (const StackAppearance::CreamPalette& theme : m_Appearance->GetLibrary().creamVariants) {
+                const std::string label = theme.name + "##CaptureCreamVariant" + theme.id;
                 if (ImGui::Selectable(label.c_str(), m_GraphCaptureSettings.themePresetId == theme.id)) {
                     m_GraphCaptureSettings.themePresetId = theme.id;
                 }
@@ -331,7 +348,7 @@ void EditorModule::RenderGraphCaptureWindow() {
             valid = false;
             validationError = "The edited resolution edge must be at least 256 pixels.";
         }
-        if (valid && m_GraphCaptureSettings.scope == GraphCapture::Scope::EntireGraph && m_NodeGraph.GetNodes().empty()) {
+        if (valid && m_GraphCaptureSettings.scope == GraphCapture::Scope::EntireGraph && m_Project->graph.GetNodes().empty()) {
             valid = false;
             validationError = "Entire graph capture requires at least one node.";
         }
@@ -347,7 +364,10 @@ void EditorModule::RenderGraphCaptureWindow() {
         ImGui::Text("Output: %d x %d", m_GraphCaptureSettings.width, m_GraphCaptureSettings.height);
         ImGui::TextDisabled("Estimated GPU + readback memory: %.1f MiB", workingMiB);
         if (!validationError.empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.52f, 0.44f, 1.0f));
+            const ImVec4 errorColor=m_Appearance
+                ? m_Appearance->ResolveSemanticUiColor(StackAppearance::SemanticUiColor::Error,ImVec4(0.94f,0.52f,0.44f,1.0f))
+                : ImVec4(0.94f,0.52f,0.44f,1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, errorColor);
             ImGui::TextWrapped("%s", validationError.c_str());
             ImGui::PopStyleColor();
         }
@@ -371,20 +391,21 @@ void EditorModule::RenderGraphCaptureWindow() {
             : m_GraphCaptureSettings.height;
         captureEnabled = captureEnabled && footerDrivenEdge >= footerLimits.minDrivenEdge;
         captureEnabled = captureEnabled &&
-            !(m_GraphCaptureSettings.scope == GraphCapture::Scope::EntireGraph && m_NodeGraph.GetNodes().empty());
-        captureEnabled = captureEnabled && !m_GraphCaptureBusy;
+            !(m_GraphCaptureSettings.scope == GraphCapture::Scope::EntireGraph && m_Project->graph.GetNodes().empty());
+        captureEnabled = captureEnabled && !m_GraphCaptureBusy && !m_GraphCaptureSavePending;
 
         ImGui::BeginDisabled(!captureEnabled);
-        if (ImGui::Button(
+        if (StackAppearance::PrimaryActionButton(
                 m_GraphCaptureBusy ? "Capturing..." : "Capture",
-                ImVec2(std::min(180.0f, ImGui::GetContentRegionAvail().x), 36.0f))) {
+                ImVec2(std::min(180.0f, ImGui::GetContentRegionAvail().x), 36.0f),
+                m_Appearance ? &m_Appearance->GetResolvedCreamPalette().primaryAction : nullptr)) {
             const bool allowBmp = m_GraphCaptureSettings.background != GraphCapture::Background::Transparent;
             const FileDialogs::RasterImageFormat preferred =
                 m_GraphCaptureSettings.format == GraphCapture::Format::Bmp
                     ? FileDialogs::RasterImageFormat::Bmp
                     : FileDialogs::RasterImageFormat::Png;
             const std::string stem = SanitizeCaptureFileStem(
-                m_CurrentProjectName.empty() ? std::string("editor") : m_CurrentProjectName) + "_graph";
+                m_Project->name.empty() ? std::string("editor") : m_Project->name) + "_graph";
             const std::string defaultName = stem +
                 (preferred == FileDialogs::RasterImageFormat::Bmp ? ".bmp" : ".png");
             const FileDialogs::RasterImageSaveResult save = FileDialogs::SaveGraphImageFileDialog(
@@ -409,9 +430,58 @@ void EditorModule::RenderGraphCaptureWindow() {
                     request.theme = m_Appearance->GetWorkingTheme();
                     request.settings.themePresetId.clear();
                 }
-                m_PendingGraphCaptureRequest = std::move(request);
-                m_GraphCaptureBusy = true;
-                m_GraphCaptureStatusText = "Rendering graph off-screen...";
+                std::error_code checkError;
+                const auto review = Stack::FileSave::ReviewNormalizedTarget(
+                    std::filesystem::u8path(save.selectedPath), std::filesystem::u8path(save.path), checkError);
+                if (review == Stack::FileSave::NormalizedTargetAction::Unavailable) {
+                    m_GraphCaptureStatusText = "The graph image destination could not be checked: " + checkError.message();
+                    GetNotifier().Error(m_GraphCaptureStatusText, "Graph image was not saved");
+                } else if (review == Stack::FileSave::NormalizedTargetAction::ConfirmReplacement) {
+                    namespace N = Stack::Notifications;
+                    const auto document = GetProjectDocumentId();
+                    const auto revision = m_Project->graph.GetStructureRevision();
+                    const auto generation = ++m_GraphCaptureSaveGeneration;
+                    m_GraphCaptureSavePending = true;
+                    m_GraphCaptureStatusText = "Waiting for replacement confirmation.";
+                    N::NoticeSpec notice;
+                    notice.title = "Replace graph image?";
+                    notice.message = "An image already exists at the filename for the selected format.";
+                    notice.details = save.path;
+                    notice.route = N::Route::Center;
+                    notice.foreground = m_NotificationForeground;
+                    notice.operationId = GetNotifier().NewOperation();
+                    N::ActionSpec replace;
+                    replace.label = "Replace";
+                    replace.destructive = true;
+                    replace.canInvoke = [this, document, revision, generation] {
+                        return GetProjectDocumentId() == document &&
+                            m_Project->graph.GetStructureRevision() == revision &&
+                            m_GraphCaptureSaveGeneration == generation && m_GraphCaptureSavePending && !m_GraphCaptureBusy;
+                    };
+                    replace.invoke = [this, request] {
+                        std::string error;
+                        return BeginGraphCaptureSave(request, error)
+                            ? N::ActionResult::Success() : N::ActionResult::Failure(std::move(error));
+                    };
+                    N::ActionSpec cancel;
+                    cancel.label = "Cancel";
+                    cancel.safeCancel = true;
+                    cancel.invoke = [this, generation] {
+                        if (m_GraphCaptureSaveGeneration == generation) {
+                            m_GraphCaptureSavePending = false;
+                            m_GraphCaptureStatusText = "Graph image save cancelled.";
+                        }
+                        return N::ActionResult::Success();
+                    };
+                    notice.actions = {std::move(replace), std::move(cancel)};
+                    RequestNotificationDecision(std::move(notice));
+                } else {
+                    std::string error;
+                    if (!BeginGraphCaptureSave(std::move(request), error)) {
+                        m_GraphCaptureStatusText = error;
+                        GetNotifier().Error(std::move(error), "Graph image was not saved");
+                    }
+                }
             }
         }
         ImGui::EndDisabled();

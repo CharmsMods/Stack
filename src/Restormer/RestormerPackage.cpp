@@ -9,6 +9,10 @@
 #include <fstream>
 #include <system_error>
 
+#ifndef STACK_ENABLE_RESTORMER_EXECUTION
+#define STACK_ENABLE_RESTORMER_EXECUTION 0
+#endif
+
 namespace Stack::Restormer {
 namespace {
 
@@ -154,11 +158,13 @@ const char* ModelKindStableString(ModelKind kind) {
 
 std::filesystem::path ResolvePackageRoot(
     const std::filesystem::path& executableDirectory) {
+#if STACK_ENABLE_RESTORMER_EXECUTION
     if (const char* explicitRoot = std::getenv("STACK_RESTORMER_DENOISE_DIR")) {
         if (*explicitRoot != '\0') {
             return std::filesystem::path(explicitRoot);
         }
     }
+#endif
     return executableDirectory /
         "packages" /
         RawRecipe::kRestormerDenoisePackageId;
@@ -166,11 +172,13 @@ std::filesystem::path ResolvePackageRoot(
 
 TrustPolicy TrustPolicyFromEnvironment() {
     TrustPolicy policy;
+#if STACK_ENABLE_RESTORMER_EXECUTION
     if (const char* allowDevelopment =
             std::getenv("STACK_ALLOW_LOCAL_RESTORMER_PACKAGE")) {
         policy.allowDevelopmentPackage =
             std::string(allowDevelopment) == "1";
     }
+#endif
     // Public release manifest digests are intentionally compiled here only
     // after legal and artifact review. The V1 list remains empty while
     // checkpoint redistribution authorization is unresolved.

@@ -43,16 +43,25 @@ using ReliabilityResidualEvaluator = std::function<bool(
     const LocalMotionFieldSample& motion,
     ReliabilityResidualSample& sample)>;
 
+struct ReliabilityMap;
 struct ReliabilityBuildRequest {
     PixelExtent rawExtent;
+    // One reliability sample normally represents one Bayer cell. Callers
+    // that already carry a smooth motion field may evaluate every Nth Bayer
+    // cell and map pixels back to the resulting grid. The default preserves
+    // the full-resolution MFD contract.
+    std::uint32_t cellStrideBayerCells = 1u;
     CfaLayout layout;
     const LocalMotionGrid* motionGrid = nullptr;
     LocalMotionOptions motionOptions;
     NoiseModelQuality noiseQuality = NoiseModelQuality::Unavailable;
     Parameters parameters;
+    std::uint32_t workerCount = 1u;
     ReliabilityResidualEvaluator residualEvaluator;
     std::function<bool()> shouldCancel;
     std::function<void(double)> reportProgress;
+    // Invoked between completed passes, with all workers joined.
+    std::function<void(const ReliabilityMap&,bool)> reportObservation;
 };
 
 struct ReliabilityCell {

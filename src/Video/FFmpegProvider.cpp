@@ -127,7 +127,7 @@ void PopulateStatusMessage(FFmpegProviderStatus& status) {
 } // namespace
 
 std::filesystem::path GetAppLocalFFmpegProviderDirectory() {
-    return AppPaths::GetExecutableDirectory() / "tools" / "ffmpeg";
+    return AppPaths::GetToolsDirectory() / "FFmpeg";
 }
 
 FFmpegProviderStatus ProbeFFmpegProviderDirectory(const std::filesystem::path& providerDirectory) {

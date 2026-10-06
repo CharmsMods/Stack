@@ -856,8 +856,14 @@ PreparationResult PrepareRawFrame(
             rawPixelCount)) {
         return FailureResult(PreparationFailure::InvalidDimensions, "MFD RAW dimensions overflow addressable memory.");
     }
-    if (raw.rawBuffer.size() != rawPixelCount) {
-        return FailureResult(PreparationFailure::IncompleteMosaic, "MFD RAW preparation requires one complete stored Bayer mosaic.");
+    const bool normalizedMeasurement = raw.normalizedMosaicBuffer &&
+        raw.normalizedMosaicInputContract != NormalizedMosaicInputContract::None;
+    if ((!normalizedMeasurement && raw.rawBuffer.size() != rawPixelCount) ||
+        (normalizedMeasurement && raw.normalizedMosaicBuffer->size() != rawPixelCount)) {
+        return FailureResult(PreparationFailure::IncompleteMosaic,
+            normalizedMeasurement
+                ? "MultiFrame virtual Bayer preparation requires one complete normalized mosaic."
+                : "MFD RAW preparation requires one complete stored Bayer mosaic.");
     }
     if (!metadata.mosaiced || metadata.pixelLayout != RawPixelLayout::MosaicBayer) {
         return FailureResult(PreparationFailure::UnsupportedPixelLayout, "MFD V1 accepts still-mosaiced Bayer RAW data only.");
@@ -1113,16 +1119,18 @@ PreparationResult PrepareRawFrame(
                         static_cast<std::int64_t>(activeX),
                         static_cast<std::int64_t>(activeY));
                     const std::size_t siteIndex = SiteIndex(site);
-                    if (!metadata.dngLinearizationTable.empty() &&
+                    if (!normalizedMeasurement &&
+                        !metadata.dngLinearizationTable.empty() &&
                         static_cast<std::size_t>(raw.rawBuffer[sensorIndex]) >=
                             metadata.dngLinearizationTable.size()) {
                         return FailureResult(PreparationFailure::MalformedMetadata, "MFD stored sample is outside the LinearizationTable.", std::move(prepared));
                     }
-                    const double black = BlackAtActiveCoordinate(
-                        metadata, site, activeX, activeY);
-                    const double normalized =
-                        (Linearize(metadata, raw.rawBuffer[sensorIndex]) - black) /
-                        prepared.calibration.usableSpanByCfaSite[siteIndex];
+                    const double normalized = normalizedMeasurement
+                        ? static_cast<double>((*raw.normalizedMosaicBuffer)[sensorIndex])
+                        : (Linearize(metadata, raw.rawBuffer[sensorIndex]) -
+                            BlackAtActiveCoordinate(
+                                metadata, site, activeX, activeY)) /
+                            prepared.calibration.usableSpanByCfaSite[siteIndex];
                     if (!std::isfinite(normalized)) {
                         return FailureResult(PreparationFailure::MalformedMetadata, "MFD normalization produced a non-finite sample.", std::move(prepared));
                     }
@@ -1158,6 +1166,21 @@ PreparationResult PrepareRawFrame(
                         options.decoderSaturationMask[sensorIndex] != 0u) {
                         flags |= SampleFlagMask(PreparedSampleFlag::Saturated);
                         flags |= SampleFlagMask(PreparedSampleFlag::ExplicitDecoderClip);
+                    }
+                    if (raw.multiFrameMeasurementSidecars) {
+                        const auto& sidecars = *raw.multiFrameMeasurementSidecars;
+                        if (sidecars.validity &&
+                            sidecars.validity->size() == rawPixelCount &&
+                            (*sidecars.validity)[sensorIndex] == 0u) {
+                            flags |= SampleFlagMask(PreparedSampleFlag::Defective);
+                        }
+                        if (sidecars.clipping &&
+                            sidecars.clipping->size() == rawPixelCount &&
+                            (*sidecars.clipping)[sensorIndex] != 0u) {
+                            flags |= SampleFlagMask(PreparedSampleFlag::Saturated);
+                            flags |= SampleFlagMask(
+                                PreparedSampleFlag::ExplicitDecoderClip);
+                        }
                     }
                     if (!options.decoderDefectMask.empty() &&
                         options.decoderDefectMask[sensorIndex] != 0u) {

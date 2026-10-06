@@ -1,3 +1,4 @@
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
 #include "Editor/NodeGraph/EditorNodeGraph.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphLookupCache.h"
@@ -46,19 +47,6 @@ bool IsSpecializedFrequencySocketType(SocketType type) {
         type == SocketType::SpectrumPhase;
 }
 
-bool IsImplementedTypedParameterInput(
-    const Node& node,
-    const std::string& socketId,
-    SocketType type) {
-    if (type != SocketType::Scalar) return false;
-    if (node.kind == NodeKind::TechnicalImage) {
-        return socketId == kExposureValueInputSocketId;
-    }
-    if (socketId.rfind("param:", 0) != 0) return false;
-    const std::string parameterId = socketId.substr(6);
-    return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), parameterId) !=
-        node.exposedParameterIds.end();
-}
 
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
     return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
@@ -456,174 +444,17 @@ ValidationResult Graph::Validate() const {
             from->kind == NodeKind::RawDevelopment ||
             from->kind == NodeKind::RawDecode ||
             from->kind == NodeKind::RawDevelop ||
-            from->kind == NodeKind::MultiFrameDenoise) {
+            from->kind == NodeKind::MultiFrameDenoise ||
+            from->kind == NodeKind::MultiFrameHdr) {
             outgoingImages.insert(from->id);
         }
 
-        if (GetLinkRole(link) == LinkRole::Scope) {
-            if (to->kind == NodeKind::Scope) {
-                const bool validScopeInput = link.toSocketId == kScopeInputSocketId &&
-                    (fromSocket.type == SocketType::Image ||
-                     fromSocket.type == SocketType::Channel ||
-                     fromSocket.type == SocketType::ScalarField ||
-                     (fromSocket.type == SocketType::Mask && IsScalarSocketStream(link.fromNodeId, link.fromSocketId)));
-                if (!validScopeInput) {
-                    result.valid = false;
-                    result.messages.push_back("Scope nodes can only analyze image or scalar outputs.");
-                }
-            } else if (to->kind == NodeKind::Preview) {
-                const bool validPreview = link.toSocketId == kPreviewInputSocketId &&
-                    (fromSocket.type == SocketType::Image ||
-                     fromSocket.type == SocketType::Channel ||
-                     fromSocket.type == SocketType::ScalarField ||
-                     (fromSocket.type == SocketType::Mask && IsScalarSocketStream(link.fromNodeId, link.fromSocketId)));
-                if (!validPreview) {
-                    result.valid = false;
-                    result.messages.push_back("Preview nodes can only inspect image or scalar outputs.");
-                }
-            } else {
-                result.valid = false;
-                result.messages.push_back("Invalid analysis link.");
-            }
-        } else if (fromSocket.type == SocketType::Raw || toSocket.type == SocketType::Raw) {
-            const bool validMfdBinding =
-                fromSocket.type == SocketType::Raw &&
-                toSocket.type == SocketType::Raw &&
-                from->kind == NodeKind::RawProjectFrame &&
-                to->kind == NodeKind::MultiFrameDenoise &&
-                link.fromSocketId == kRawOutputSocketId &&
-                link.toSocketId == MfdFrameInputSocketId(
-                    from->rawProjectFrame.frameId) &&
-                from->rawProjectFrame.sourceSetId ==
-                    to->multiFrameDenoise.sourceSetId;
-            const bool validRawPipelineLink =
-                fromSocket.type == SocketType::Raw &&
-                toSocket.type == SocketType::Raw &&
-                (from->kind == NodeKind::RawSource || from->kind == NodeKind::RawNeuralDenoise) &&
-                link.fromSocketId == kRawOutputSocketId &&
-                (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop) &&
-                link.toSocketId == kRawInputSocketId;
-            if (!validMfdBinding && !validRawPipelineLink) {
-                result.valid = false;
-                result.messages.push_back("Invalid RAW link.");
-            }
-        } else if (ConnectionRules::IsChannelProcessingBridge(
-                       *this,
-                       link.fromNodeId,
-                       link.fromSocketId,
-                       fromSocket,
-                       *to,
-                       link.toSocketId,
-                       toSocket)) {
-            // One shared Channel-role bridge owns authoring, validation, and
-            // renderer eligibility, including declared Mask/field inputs.
-        } else if (IsSpecializedFrequencySocketType(fromSocket.type) ||
-                   IsSpecializedFrequencySocketType(toSocket.type)) {
-            if (fromSocket.type != toSocket.type) {
-                result.valid = false;
-                result.messages.push_back(
-                    "Frequency links require exact Channel, Spectrum, Response, Magnitude, or Phase types.");
-            }
-        } else if (fromSocket.type == SocketType::Channel ||
-                   toSocket.type == SocketType::Channel) {
-            if (fromSocket.type != toSocket.type) {
-                result.valid = false;
-                result.messages.push_back(
-                    "A Channel link must target a declared Channel-capable input.");
-            }
-        } else if (IsUniformOrResourceSocketType(fromSocket.type) ||
-                   IsUniformOrResourceSocketType(toSocket.type)) {
-            const bool exactType = fromSocket.type == toSocket.type;
-            const bool implementedInput =
-                to->kind == NodeKind::Compound ||
-                IsImplementedTypedParameterInput(*to, link.toSocketId, toSocket.type);
-            if (!exactType || !implementedInput) {
-                result.valid = false;
-                result.messages.push_back(!exactType
-                    ? "Typed value link requires an exact type match."
-                    : "Typed value input is not implemented by the selected node definition.");
-            } else if (from->kind == NodeKind::Value &&
-                       from->value.value.availability != Stack::NodeMath::ValueAvailability::Known) {
-                result.valid = false;
-                result.messages.push_back("An execution-critical typed input is connected but its value is not known.");
-            }
-        } else if (fromSocket.type == SocketType::Mask || toSocket.type == SocketType::Mask ||
-                   fromSocket.type == SocketType::ScalarField || toSocket.type == SocketType::ScalarField) {
-            const bool fromIsScalarStream = IsScalarSocketStream(link.fromNodeId, link.fromSocketId);
-            const bool validScalarSource =
-                ((from->kind == NodeKind::MaskGenerator ||
-                  from->kind == NodeKind::MaskCombine ||
-                  from->kind == NodeKind::MaskUtility ||
-                  from->kind == NodeKind::CustomMask ||
-                  from->kind == NodeKind::ImageToMask ||
-                  from->kind == NodeKind::RawDetailAutoMask ||
-                  from->kind == NodeKind::RawDetailFusion ||
-                  from->kind == NodeKind::FrequencyMask ||
-                  from->kind == NodeKind::MagnitudePhase) && link.fromSocketId == kMaskOutputSocketId) ||
-                from->kind == NodeKind::Compound ||
-                (from->kind == NodeKind::ChannelSplit && IsChannelSocketId(link.fromSocketId)) ||
-                fromIsScalarStream;
-
-            const bool fromScalarField = fromSocket.type == SocketType::Mask || fromSocket.type == SocketType::ScalarField;
-            const bool toScalarField = toSocket.type == SocketType::Mask || toSocket.type == SocketType::ScalarField;
-            const bool isScalarToScalar = fromScalarField && toScalarField;
-            const bool isScalarImageToScalar = fromSocket.type == SocketType::Image && toScalarField && fromIsScalarStream;
-            const bool isScalarToImage = fromScalarField && toSocket.type == SocketType::Image;
-
-            if (isScalarToScalar || isScalarImageToScalar) {
-                const bool validScalarTarget = IsScalarTargetSocket(link.toNodeId, link.toSocketId);
-                if (!validScalarSource || !validScalarTarget) {
-                    result.valid = false;
-                    result.messages.push_back("Invalid scalar link.");
-                }
-            } else if (isScalarToImage) {
-                const bool validImageTarget =
-                    (to->kind == NodeKind::Layer && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::Lut && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::TechnicalImage && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::Reformat && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::RawDetailAutoMask && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::RawDetailFusion && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::Mix && (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
-                    (to->kind == NodeKind::ImageToMask && link.toSocketId == kImageToMaskInputSocketId) ||
-                    (to->kind == NodeKind::ChannelSplit && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::FrequencyFft && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::FrequencyIfft && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::SpectrumView && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::SpectrumAnalyzer && link.toSocketId == kImageInputSocketId) ||
-                    (to->kind == NodeKind::MagnitudePhase && link.toSocketId == kImageInputSocketId) ||
-                    to->kind == NodeKind::Compound ||
-                    (to->kind == NodeKind::SpectrumMath &&
-                        (link.toSocketId == kMixInputASocketId || link.toSocketId == kMixInputBSocketId)) ||
-                    DataMathAllowsScalarToImageTarget(*to, link.toSocketId);
-                if (!validScalarSource || !validImageTarget) {
-                    result.valid = false;
-                    result.messages.push_back("Invalid scalar-to-image link.");
-                }
-            } else {
-                result.valid = false;
-                result.messages.push_back("Cannot connect a full image output directly to a scalar input.");
-            }
-        } else {
-            if (fromSocket.type != SocketType::Image || toSocket.type != SocketType::Image) {
-                result.valid = false;
-                result.messages.push_back("Render-chain links must connect image sockets.");
-            }
-            if (!IsRenderChainNode(*from) || !IsRenderChainNode(*to) || to->kind == NodeKind::Image || to->kind == NodeKind::RawSource || to->kind == NodeKind::RawDevelopment || to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop || from->kind == NodeKind::Output) {
-                result.valid = false;
-                result.messages.push_back("Invalid render-chain link.");
-            }
-            if (to->kind == NodeKind::DataMath) {
-                const bool validDataMathImageTarget =
-                    DataMathAllowsFullImageTarget(*to, link.toSocketId) &&
-                    !(IsImageAverageNode(*to) && IsScalarSocketStream(link.fromNodeId, link.fromSocketId));
-                if (!validDataMathImageTarget) {
-                    result.valid = false;
-                    result.messages.push_back(IsScalarAverageNode(*to)
-                        ? "Average inputs require scalar masks or channel streams."
-                        : "Invalid Data Math image input.");
-                }
-            }
+        std::string normalized;
+        std::string reason;
+        if (!CanConnectSockets(link.fromNodeId, link.fromSocketId,
+                link.toNodeId, link.toSocketId, &normalized, &reason) || normalized != link.toSocketId) {
+            result.valid = false;
+            result.messages.push_back(reason.empty() ? "Connection requires an explicit socket conversion." : reason);
         }
     }
 
@@ -632,54 +463,6 @@ ValidationResult Graph::Validate() const {
         result.messages.push_back("No completed output chains are connected.");
     }
 
-    std::unordered_map<int, std::vector<int>> renderOutgoing;
-    std::unordered_map<int, std::size_t> renderIndegree;
-    renderOutgoing.reserve(ids.size());
-    renderIndegree.reserve(ids.size());
-    for (int nodeId : ids) {
-        renderOutgoing.emplace(nodeId, std::vector<int>{});
-        renderIndegree.emplace(nodeId, 0u);
-    }
-    for (const Link& link : m_Links) {
-        if (!IsRenderLink(link)) {
-            continue;
-        }
-        const auto fromIt = renderOutgoing.find(link.fromNodeId);
-        const auto toIt = renderIndegree.find(link.toNodeId);
-        if (fromIt == renderOutgoing.end() ||
-            toIt == renderIndegree.end()) {
-            continue;
-        }
-        fromIt->second.push_back(link.toNodeId);
-        ++toIt->second;
-    }
-
-    std::vector<int> ready;
-    ready.reserve(renderIndegree.size());
-    for (const auto& [nodeId, indegree] : renderIndegree) {
-        if (indegree == 0u) {
-            ready.push_back(nodeId);
-        }
-    }
-
-    std::size_t processedNodeCount = 0;
-    while (!ready.empty()) {
-        const int nodeId = ready.back();
-        ready.pop_back();
-        ++processedNodeCount;
-        for (int downstreamNodeId : renderOutgoing[nodeId]) {
-            auto downstreamIt = renderIndegree.find(downstreamNodeId);
-            if (downstreamIt != renderIndegree.end() &&
-                downstreamIt->second > 0u &&
-                --downstreamIt->second == 0u) {
-                ready.push_back(downstreamNodeId);
-            }
-        }
-    }
-    if (processedNodeCount != renderIndegree.size()) {
-        result.valid = false;
-        result.messages.push_back("Render chain contains a cycle.");
-    }
 
     return result;
 }
@@ -708,6 +491,7 @@ std::vector<int> Graph::GetRenderLayerNodePath(int outputNodeId) const {
             from->kind == NodeKind::RawDevelop ||
             from->kind == NodeKind::Mfsr ||
             from->kind == NodeKind::MultiFrameDenoise ||
+            from->kind == NodeKind::MultiFrameHdr ||
             from->kind == NodeKind::RawProjectSourceSet) {
             std::reverse(reversePath.begin(), reversePath.end());
             return reversePath;
@@ -760,6 +544,7 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::Mfsr ||
         node.kind == NodeKind::RawProjectFrame ||
         node.kind == NodeKind::MultiFrameDenoise ||
+        node.kind == NodeKind::MultiFrameHdr ||
         node.kind == NodeKind::RawProjectSourceSet ||
         node.kind == NodeKind::Lut ||
         node.kind == NodeKind::ImageGenerator ||
@@ -767,6 +552,7 @@ bool Graph::IsRenderChainNode(const Node& node) const {
         node.kind == NodeKind::Output ||
         node.kind == NodeKind::Mix ||
         node.kind == NodeKind::DataMath ||
+        node.kind == NodeKind::RawOperation ||
         node.kind == NodeKind::TechnicalImage ||
         node.kind == NodeKind::FieldMean ||
         node.kind == NodeKind::Reformat ||
@@ -806,6 +592,13 @@ bool Graph::IsRenderLink(const Link& link) const {
     if (!FindSocket(link.fromNodeId, link.fromSocketId, &fromSocket) ||
         !FindSocket(link.toNodeId, link.toSocketId, &toSocket)) {
         return false;
+    }
+
+    if (to->kind == NodeKind::Output && to->outputSettings.maskOutput &&
+        link.toSocketId == kImageInputSocketId) {
+        return fromSocket.type == SocketType::Mask ||
+            fromSocket.type == SocketType::ScalarField || fromSocket.type == SocketType::Channel ||
+            (fromSocket.type == SocketType::Image && IsScalarSocketStream(link.fromNodeId, link.fromSocketId));
     }
 
     if (fromSocket.type == SocketType::Raw && toSocket.type == SocketType::Raw) {

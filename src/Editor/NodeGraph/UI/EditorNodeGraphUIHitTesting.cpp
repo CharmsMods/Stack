@@ -61,6 +61,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindInputPinAt(const EditorNodeG
             continue;
         }
         for (const SocketAnchor& anchor : layout->socketAnchors) {
+            if (!IsSocketVisibleDuringDrag(graph, nodeId, anchor.socketId, anchor.direction)) continue;
             if (anchor.direction !=
                 EditorNodeGraph::SocketDirection::Input) {
                 continue;
@@ -91,6 +92,7 @@ EditorNodeGraphUI::SocketHit EditorNodeGraphUI::FindOutputPinAt(const EditorNode
             continue;
         }
         for (const SocketAnchor& anchor : layout->socketAnchors) {
+            if (!IsSocketVisibleDuringDrag(graph, nodeId, anchor.socketId, anchor.direction)) continue;
             if (anchor.direction !=
                 EditorNodeGraph::SocketDirection::Output) {
                 continue;
@@ -158,10 +160,7 @@ EditorNodeGraph::Link EditorNodeGraphUI::FindLinkAt(const EditorNodeGraph::Graph
 
         EditorNodeGraph::Vec2 fromPos = OutputPinScreenPos(*from, link.fromSocketId);
         EditorNodeGraph::Vec2 toPos = InputPinScreenPos(*to, link.toSocketId);
-        const auto visualStyle = ResolveLinkVisualStyle(graph, link);
-        const float laneOffset = ChannelLaneOffset(visualStyle.channel, m_Zoom);
-        fromPos.y += laneOffset;
-        toPos.y += laneOffset;
+        const auto visualStyle = ResolveLinkVisualStyle(graph, link, m_ActiveEditor);
 
         if (IsPointNearLink(screenPos, fromPos, toPos)) {
             CacheLinkHitTest(graph, screenPos, link);

@@ -33,6 +33,7 @@ bool EditorModule::PublishPreviewResultPixels(
     EditorRenderWorker::PreviewResult& previewResult) {
     GraphPreviewPixels cached;
     cached.pixels = std::move(previewResult.pixels);
+    cached.scopeData = std::move(previewResult.scopeData);
     cached.width = previewResult.width;
     cached.height = previewResult.height;
     cached.revision = previewResult.dirtyGeneration;

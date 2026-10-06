@@ -126,12 +126,19 @@ void EditorModule::RenderHdrMergeControls(EditorNodeGraph::Node& node, float con
     ImGui::TextDisabled("Output: scene-linear HDR radiance image");
     ImGui::TextDisabled("This is scene-linear HDR reconstruction. Alignment and deghosting are first-pass tools here; tone mapping stays downstream.");
 
-    const ImVec4 statusColor =
+    ImVec4 statusColor =
         status.state == HdrMergeRenderState::Failed || status.state == HdrMergeRenderState::IncompatibleInput
             ? ImVec4(0.95f, 0.55f, 0.42f, 1.0f)
             : (status.state == HdrMergeRenderState::BlockedMissingInput
                 ? ImVec4(0.92f, 0.76f, 0.42f, 1.0f)
                 : ImVec4(0.78f, 0.82f, 0.86f, 1.0f));
+    if (m_Appearance) {
+        const auto role=status.state == HdrMergeRenderState::Failed || status.state == HdrMergeRenderState::IncompatibleInput
+            ? StackAppearance::SemanticUiColor::Error
+            : status.state == HdrMergeRenderState::BlockedMissingInput
+                ? StackAppearance::SemanticUiColor::Warning : StackAppearance::SemanticUiColor::Info;
+        statusColor=m_Appearance->ResolveSemanticUiColor(role,statusColor);
+    }
     ImGui::TextColored(statusColor, "Status: %s", status.message.c_str());
     ImGui::TextDisabled("Inspection View: %s", HdrMergeDebugViewLabel(status.debugView));
     ImGui::TextDisabled("Alignment: %s", HdrMergeAlignmentModeLabel(settings.alignmentMode));
@@ -147,7 +154,10 @@ void EditorModule::RenderHdrMergeControls(EditorNodeGraph::Node& node, float con
         ImGui::TextDisabled("Reliability Status: %s", status.reliabilityMessage.c_str());
     }
     if (!status.warningMessage.empty()) {
-        ImGui::TextColored(ImVec4(0.92f, 0.76f, 0.42f, 1.0f), "%s", status.warningMessage.c_str());
+        const ImVec4 warning=m_Appearance
+            ? m_Appearance->ResolveSemanticUiColor(StackAppearance::SemanticUiColor::Warning,ImVec4(0.92f,0.76f,0.42f,1.0f))
+            : ImVec4(0.92f,0.76f,0.42f,1.0f);
+        ImGui::TextColored(warning, "%s", status.warningMessage.c_str());
     }
     if (status.stale) {
         ImGui::TextDisabled("The current output is older than the latest HDR Merge settings or connections.");

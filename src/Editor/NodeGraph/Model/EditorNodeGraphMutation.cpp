@@ -1,4 +1,6 @@
 #include "Editor/NodeGraph/EditorNodeGraph.h"
+#include "Editor/NodeGraph/UnifiedNodeDefinitionRegistry.h"
+#include "Editor/NodeGraph/GraphOutputSemantics.h"
 #include "Editor/NodeGraph/Model/EditorNodeGraphConnectionRules.h"
 
 #include <algorithm>
@@ -57,19 +59,6 @@ bool IsSpecializedFrequencySocketType(SocketType type) {
         type == SocketType::SpectrumPhase;
 }
 
-bool IsImplementedTypedParameterInput(
-    const Node& node,
-    const std::string& socketId,
-    SocketType type) {
-    if (type != SocketType::Scalar) return false;
-    if (node.kind == NodeKind::TechnicalImage) {
-        return socketId == kExposureValueInputSocketId;
-    }
-    if (socketId.rfind("param:", 0) != 0) return false;
-    const std::string parameterId = socketId.substr(6);
-    return std::find(node.exposedParameterIds.begin(), node.exposedParameterIds.end(), parameterId) !=
-        node.exposedParameterIds.end();
-}
 
 bool IsDataMathImageInputSocketId(const std::string& socketId) {
     return EditorNodeGraph::IsDataMathInputSocketId(socketId) ||
@@ -445,6 +434,51 @@ bool Graph::CanConnectSockets(
         return fromIsScalarStream;
     };
 
+    if (to->kind == NodeKind::Output && to->outputSettings.maskOutput &&
+        toSocketId == kImageInputSocketId) {
+        const auto description = DescribeGraphOutput(*this, fromNodeId, fromSocketId);
+        const bool coverage = fromSocket.type == SocketType::Mask ||
+            fromSocket.type == SocketType::ScalarField || fromSocket.type == SocketType::Channel ||
+            (fromSocket.type == SocketType::Image && (isFromScalarStream() ||
+                description.descriptor.logicalType == Stack::NodeMath::LogicalValueType::Invalid));
+        if (!coverage) {
+            if (errorMessage) *errorMessage = "Mask Output needs one channel. Select a channel or convert the image to a mask.";
+            return false;
+        }
+        if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
+            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            return false;
+        }
+        return true;
+    }
+
+    if (to->kind == NodeKind::MaskGenerator && toSocketId == kMatchExtentInputSocketId) {
+        if (fromSocket.type != SocketType::Image) {
+            if (errorMessage) *errorMessage = "A mask reference requires an image input.";
+            return false;
+        }
+        if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
+            if (errorMessage) *errorMessage = "That connection would create a cycle.";
+            return false;
+        }
+        return true;
+    }
+
+    if (((to->kind == NodeKind::RawOperation &&
+        (toSocketId == kImageInputSocketId || toSocketId == "referenceIn")) ||
+        (to->role == Stack::GraphModel::NodeRole::LayerResult && toSocketId == kImageInputSocketId)) &&
+        (fromSocket.type != SocketType::Image || isFromScalarStream())) {
+        if (errorMessage) *errorMessage = "Photo operations require a full scene-linear color image.";
+        return false;
+    }
+
+    std::string semanticError;
+    if (!EditorNodeGraphDefinitions::ValidateInputDescriptor(*this, *to, toSocketId,
+            DescribeGraphOutput(*this, fromNodeId, fromSocketId).descriptor, semanticError)) {
+        if (errorMessage) *errorMessage = semanticError;
+        return false;
+    }
+
     const bool toScope = to->kind == NodeKind::Scope && toSocketId == kScopeInputSocketId;
     if (toScope) {
         if (fromSocket.type != SocketType::Image &&
@@ -521,6 +555,14 @@ bool Graph::CanConnectSockets(
             toSocketId == MfdFrameInputSocketId(from->rawProjectFrame.frameId) &&
             from->rawProjectFrame.sourceSetId ==
                 to->multiFrameDenoise.sourceSetId;
+        const bool validHdrBinding =
+            fromSocket.type == SocketType::Raw &&
+            toSocket.type == SocketType::Raw &&
+            from->kind == NodeKind::RawProjectFrame &&
+            to->kind == NodeKind::MultiFrameHdr &&
+            fromSocketId == kRawOutputSocketId &&
+            toSocketId == MfdFrameInputSocketId(from->rawProjectFrame.frameId) &&
+            from->rawProjectFrame.sourceSetId == to->multiFrameHdr.sourceSetId;
         const bool validRawPipelineLink =
             fromSocket.type == SocketType::Raw &&
             toSocket.type == SocketType::Raw &&
@@ -528,9 +570,9 @@ bool Graph::CanConnectSockets(
             fromSocketId == kRawOutputSocketId &&
             (to->kind == NodeKind::RawNeuralDenoise || to->kind == NodeKind::RawDecode || to->kind == NodeKind::RawDevelop) &&
             toSocketId == kRawInputSocketId;
-        if (!validMfdBinding && !validRawPipelineLink) {
+        if (!validMfdBinding && !validHdrBinding && !validRawPipelineLink) {
             if (errorMessage) *errorMessage =
-                "RAW sockets connect through the RAW pipeline or from a managed RAW Project Frame into its MFD input.";
+                "RAW sockets connect through the RAW pipeline or from a managed RAW Project Frame into its burst input.";
             return false;
         }
         if (WouldCreateCycle(fromNodeId, fromSocketId, toNodeId, toSocketId)) {
@@ -597,8 +639,8 @@ bool Graph::CanConnectSockets(
                 return false;
             }
         }
-        if (to->kind != NodeKind::Compound &&
-            !IsImplementedTypedParameterInput(*to, toSocketId, toSocket.type)) {
+        if (to->kind != NodeKind::Compound && to->kind != NodeKind::Output &&
+            !EditorNodeGraphDefinitions::AcceptsTypedParameterInput(*to, toSocketId, toSocket.type)) {
             if (errorMessage) *errorMessage = "This typed value input is not implemented by the selected node definition.";
             return false;
         }
@@ -703,6 +745,16 @@ bool Graph::CanConnectSockets(
         if (errorMessage) *errorMessage = "Image links must target the layer image input.";
         return false;
     }
+    if (to->kind == NodeKind::Layer &&
+        to->layerType == LayerType::ViewTransform &&
+        toSocketId == kImageInputSocketId &&
+        AnalyzeScenePath(*this, fromNodeId).hasViewTransform) {
+        if (errorMessage) {
+            *errorMessage =
+                "This path already contains a View Transform. Turn Display Mapping off in the RAW View tab before adding a graph View Transform.";
+        }
+        return false;
+    }
     if (to->kind == NodeKind::Lut && toSocketId != kImageInputSocketId) {
         if (errorMessage) *errorMessage = "Image links must target the LUT image input.";
         return false;
@@ -773,7 +825,7 @@ bool Graph::CanConnectSockets(
             : "Image links must target a Data Math input or the masked Base input.";
         return false;
     }
-    if (to->kind != NodeKind::Compound && to->kind != NodeKind::Layer && to->kind != NodeKind::Lut && to->kind != NodeKind::TechnicalImage && to->kind != NodeKind::Reformat && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Mfsr && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath && to->kind != NodeKind::FrequencyFft && to->kind != NodeKind::FrequencyIfft && to->kind != NodeKind::SpectrumView && to->kind != NodeKind::SpectrumMath && to->kind != NodeKind::MagnitudePhase && to->kind != NodeKind::SpectrumAnalyzer) {
+    if (to->kind != NodeKind::RawOperation && to->kind != NodeKind::Compound && to->kind != NodeKind::Layer && to->kind != NodeKind::Lut && to->kind != NodeKind::TechnicalImage && to->kind != NodeKind::Reformat && to->kind != NodeKind::RawDetailAutoMask && to->kind != NodeKind::RawDetailFusion && to->kind != NodeKind::HdrMerge && to->kind != NodeKind::Mfsr && to->kind != NodeKind::Output && to->kind != NodeKind::Mix && to->kind != NodeKind::ImageToMask && to->kind != NodeKind::ChannelSplit && to->kind != NodeKind::DataMath && to->kind != NodeKind::FrequencyFft && to->kind != NodeKind::FrequencyIfft && to->kind != NodeKind::SpectrumView && to->kind != NodeKind::SpectrumMath && to->kind != NodeKind::MagnitudePhase && to->kind != NodeKind::SpectrumAnalyzer) {
         if (errorMessage) *errorMessage = "Image links must target a compatible compound, layer, LUT, Technical Image, HDR Merge, MFSR, blend node, data math node, split node, scalar converter, or the output.";
         return false;
     }
@@ -796,6 +848,7 @@ bool Graph::IsScalarTargetSocket(int nodeId, const std::string& socketId) const 
     }
 
     return to->kind == NodeKind::Compound ||
+        (to->kind == NodeKind::RawOperation && (socketId == kMaskInputSocketId || socketId.rfind("gradient:", 0) == 0 || socketId.rfind("area:", 0) == 0)) ||
         (to->kind == NodeKind::Layer && socketId == kMaskInputSocketId) ||
         (to->kind == NodeKind::Lut && socketId == kMaskInputSocketId) ||
         (to->kind == NodeKind::RawDevelop && socketId == kMaskInputSocketId) ||
@@ -967,6 +1020,10 @@ bool Graph::RemoveNode(int nodeId) {
         return false;
     }
 
+    if (node->role == Stack::GraphModel::NodeRole::OriginalImage ||
+        node->role == Stack::GraphModel::NodeRole::CurrentImage ||
+        node->role == Stack::GraphModel::NodeRole::LayerResult) return false;
+
     if (node->kind == NodeKind::Layer) {
         return false;
     }
@@ -1077,34 +1134,25 @@ bool Graph::HasLink(int fromNodeId, const std::string& fromSocketId, int toNodeI
 }
 
 bool Graph::WouldCreateCycle(int fromNodeId, const std::string& fromSocketId, int toNodeId, const std::string& toSocketId) const {
-    (void)fromSocketId;
-    (void)toSocketId;
-
-    std::unordered_set<int> visited;
-    visited.reserve(m_Nodes.size());
-    std::vector<int> pending { toNodeId };
+    // Walk the dependencies of the proposed source output. A cycle exists
+    // precisely when that output already depends on the destination input.
+    std::unordered_set<std::string> visited;
+    std::vector<std::pair<int, std::string>> pending{{fromNodeId, fromSocketId}};
     while (!pending.empty()) {
-        const int current = pending.back();
+        auto current = std::move(pending.back());
         pending.pop_back();
-        if (current == fromNodeId) {
-            return true;
+        if (!visited.insert(std::to_string(current.first) + "/" + current.second).second) continue;
+        const auto* node = FindNode(current.first);
+        if (!node) continue;
+        if (current.first == toNodeId &&
+            EditorNodeGraphDefinitions::OutputDependsOnInput(*this, *node, current.second, toSocketId)) return true;
+        for (const auto& link : m_Links) {
+            if (link.toNodeId != current.first) continue;
+            // Replacing a single-input binding removes its old edge.
+            if (link.toNodeId == toNodeId && link.toSocketId == toSocketId) continue;
+            if (EditorNodeGraphDefinitions::OutputDependsOnInput(*this, *node, current.second, link.toSocketId))
+                pending.emplace_back(link.fromNodeId, link.fromSocketId);
         }
-        if (!visited.insert(current).second) {
-            continue;
-        }
-        ForEachOutgoingLink(current, [&](const Link& link) {
-            const Node* target = FindNode(link.toNodeId);
-            const bool analysisTarget =
-                target &&
-                ((target->kind == NodeKind::Scope &&
-                  link.toSocketId == kScopeInputSocketId) ||
-                 (target->kind == NodeKind::Preview &&
-                  link.toSocketId == kPreviewInputSocketId));
-            if (!analysisTarget &&
-                link.fromSocketId != kPreFinishImageOutputSocketId) {
-                pending.push_back(link.toNodeId);
-            }
-        });
     }
     return false;
 }

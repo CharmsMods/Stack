@@ -331,8 +331,13 @@ nlohmann::json SerializeRect(const Raw::RawSensorRect& rect) {
 
 } // namespace
 
-SourceIdentity ComputeSourceIdentity(const std::filesystem::path& path) {
+SourceIdentity ComputeSourceIdentity(const std::filesystem::path& path,
+    const std::function<bool()>& shouldCancel) {
     SourceIdentity identity;
+    if (shouldCancel && shouldCancel()) {
+        identity.reason = "source-hash-canceled";
+        return identity;
+    }
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         identity.reason = "source-open-failed";
@@ -341,12 +346,20 @@ SourceIdentity ComputeSourceIdentity(const std::filesystem::path& path) {
     Sha256 hash;
     std::array<char, 64 * 1024> buffer {};
     while (file.good()) {
+        if (shouldCancel && shouldCancel()) {
+            identity.reason = "source-hash-canceled";
+            return identity;
+        }
         file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize count = file.gcount();
         if (count > 0) {
             hash.Update(buffer.data(), static_cast<std::size_t>(count));
             identity.byteSize += static_cast<std::uint64_t>(count);
         }
+    }
+    if (shouldCancel && shouldCancel()) {
+        identity.reason = "source-hash-canceled";
+        return identity;
     }
     if (!file.eof()) {
         identity.reason = "source-read-failed";

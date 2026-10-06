@@ -1,10 +1,16 @@
+#include "App/WorkspacePresentation.h"
 #include "EditorModule.h"
+#include "Editor/AutoBracket/AutoBracketCoordinator.h"
+#include "Editor/AutoBracket/AutoBracketPresentation.h"
+#include "Editor/AutoBracket/AutoBracketEditingScope.h"
+#include "Editor/Bracketing/BracketingSession.h"
 
 #include "Async/TaskSystem.h"
 #include "Layers/ToneLayers.h"
 #include "NodeGraph/EditorNodeGraphDefinitions.h"
 #include "NodeGraph/EditorNodeGraphSerializer.h"
 #include "NodeGraph/Serialization/EditorNodeGraphImageSerialization.h"
+#include "Internal/EditorRenderWorkerScheduling.h"
 #include "Library/LibraryManager.h"
 #include "Raw/LibRawRuntime.h"
 #include "Raw/RawLoader.h"
@@ -23,6 +29,7 @@
 #include <limits>
 #include <new>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -656,56 +663,96 @@ std::vector<unsigned char> GenerateMaskPreviewPixels(const EditorNodeGraph::Node
 
 } // namespace
 
-EditorModule::EditorModule() {}
+EditorModule::EditorModule(std::shared_ptr<Stack::Project::ProjectSession> project)
+    : m_Project(project ? std::move(project) : std::make_shared<Stack::Project::ProjectSession>()) {}
 
 EditorModule::~EditorModule() {
     Shutdown();
 }
 
 void EditorModule::MarkDirty() {
-    m_Dirty = true;
-    if (m_ActiveRawProjectSnapshot) {
-        m_ActiveRawProjectSnapshot->dirtyRevision =
-            m_ProjectSessionController.NoteEdit();
-        return;
+    m_Project->NoteEdit(ImGui::GetCurrentContext() ? ImGui::GetTime() : m_Project->lastEditTime);
+    if (!IsRawWorkspaceProjectActive() &&
+        m_Project->name.empty() &&
+        m_Project->fileName.empty() &&
+        !m_ProjectNamingPromptShown) {
+        m_ProjectNamingPromptShown = true;
+        m_ProjectNamingPromptRequested = true;
     }
-    if (IsRawWorkspaceProjectActive()) {
-        BumpRawWorkspaceProjectSaveRevision(
-            m_RawWorkspace.workspaceRoot,
-            m_ActiveRawWorkspaceSourceKey);
+    if (m_Project->snapshot) {
+        if (IsRawWorkspaceProjectActive()) {
+            // Covers are cache/presentation data and never gate the save. A
+            // settled render opportunistically replaces the original-source
+            // thumbnail with the edited result in Gallery.
+            m_MultiFrameProjectCoverRefreshPending = true;
+        }
     }
 }
 
 void EditorModule::ClearDirty() {
-    m_Dirty = false;
+    m_Project->dirty = false;
+}
+
+bool EditorModule::ClearDirtyIfRevision(std::uint64_t expectedRevision) {
+    return m_Project->ClearDirtyIfRevision(expectedRevision);
 }
 
 void EditorModule::RequestWorkerShutdownForAppClose() {
+    m_Project->tasks.Stop();
+    if(m_Bracketing) {
+        if(m_Bracketing->job)m_Bracketing->job->canceled=true;
+        if(m_Bracketing->preparationJob)m_Bracketing->preparationJob->canceled=true;
+        if(m_Bracketing->detailJob)m_Bracketing->detailJob->canceled=true;
+        if(m_Bracketing->inspectionJob)m_Bracketing->inspectionJob->canceled=true;
+    }
     CancelMfdExperimentalProcessing(
         "MFD processing canceled for application shutdown.");
-    RequestRawWorkspaceProjectSaveWorkerDrain();
+    CancelHdrProcessing("HDR processing canceled for application shutdown.");
+    CancelMultiFrameGraphProcessing(
+        "MultiFrame processing canceled for application shutdown.");
+    if (m_RawEditAttributePasteProgress) {
+        m_RawEditAttributePasteProgress->cancelRequested.store(
+            true, std::memory_order_relaxed);
+    }
+    // App shutdown discards queued shared-pool work. Invalidate its UI
+    // completion and release the editor-local busy flag immediately. The
+    // project task group retains this editor until its own workers drain.
+    m_RawEditAttributePasteGeneration.fetch_add(
+        1, std::memory_order_relaxed);
+    m_RawEditAttributePasteTaskState = Async::TaskState::Idle;
     m_RenderWorker.RequestStopForShutdown();
+    if (m_RawRenderClientId != 0) {
+        Stack::EditorRendering::RawRenderService::Get().ClearSession(m_RawRenderClientId);
+    }
     m_NodeBrowserRenderWorker.RequestStopForShutdown();
     m_RenderPending = false;
 }
 
 bool EditorModule::IsWorkerShutdownReadyForAppClose() const {
-    return !m_RenderPending &&
-        IsRawWorkspaceProjectSaveWorkerIdle() &&
+    return m_Project->tasks.IsIdle() && !m_RenderPending &&
+        !Async::IsBusy(m_RawEditAttributePasteTaskState) &&
         !m_RenderWorker.HasPendingOrBusyForShutdown() &&
+        (m_RawRenderClientId == 0 ||
+         !Stack::EditorRendering::RawRenderService::Get()
+              .HasPendingOrBusyForShutdown(m_RawRenderClientId)) &&
         !m_NodeBrowserRenderWorker.HasPendingOrBusyForShutdown();
 }
 
 void EditorModule::Shutdown() {
+    ShutdownAutoBracketing();
     if (m_ShutdownComplete) {
         return;
     }
     m_ShutdownComplete = true;
     CancelMfdExperimentalProcessing({}, true);
     CloseDetachedPreviewFullscreen();
-    ShutdownRawWorkspaceProjectSaveWorker();
     FlushRawWorkspacePersistenceForShutdown();
     m_RenderWorker.Shutdown();
+    if (m_RawRenderClientId != 0) {
+        Stack::EditorRendering::RawRenderService::Get().Release(
+            m_RawRenderClientId);
+        m_RawRenderClientId = 0;
+    }
     m_NodeBrowserRenderWorker.Shutdown();
     m_RenderWorkerAvailable = false;
     m_NodeBrowserRenderWorkerAvailable = false;
@@ -721,8 +768,33 @@ void EditorModule::Shutdown() {
     PumpViewportOutputTileTextureDeletes(true);
     ClearCompositeSceneTextures();
     ClearRawWorkspaceThumbnailTextures(true);
+    m_RawLayerPanel.Clear();
+    ClearRawWorkspaceLabGradingScope();
+    m_RawWorkspaceLabUi.colorWarpWheelRenderer.Shutdown();
+    if (m_RawWorkspaceLabUi.zoneAreas.overlayTexture) {
+        glDeleteTextures(1, &m_RawWorkspaceLabUi.zoneAreas.overlayTexture);
+        m_RawWorkspaceLabUi.zoneAreas.overlayTexture = 0;
+    }
+    if (m_RawGradientOverlayTexture) {
+        glDeleteTextures(1, &m_RawGradientOverlayTexture);
+        m_RawGradientOverlayTexture = 0;
+    }
+    if (m_RawGradientOverlayVertexArray) {
+        glDeleteVertexArrays(1, &m_RawGradientOverlayVertexArray);
+        m_RawGradientOverlayVertexArray = 0;
+    }
+    if (m_RawGradientOverlayProgram) {
+        glDeleteProgram(m_RawGradientOverlayProgram);
+        m_RawGradientOverlayProgram = 0;
+    }
+    if (m_RawGalleryInspectionTexture != 0) {
+        glDeleteTextures(1, &m_RawGalleryInspectionTexture);
+        m_RawGalleryInspectionTexture = 0;
+    }
     m_Sidebar.GetNodeGraphUI().Shutdown();
-    m_Layers.clear();
+    m_Project->layers.clear();
+    m_Viewport.FrameTransition().Shutdown();
+    m_RawViewportFadeRenderer.Shutdown();
     m_CompositePreviewPipeline.Shutdown();
     m_Pipeline.Shutdown();
     UnloadResourceTextures();
@@ -750,14 +822,14 @@ bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload pa
         }
     };
 
-    const EditorNodeGraph::Node* selected = m_NodeGraph.FindNode(m_NodeGraph.GetSelectedNodeId());
+    const EditorNodeGraph::Node* selected = m_Project->graph.FindNode(m_Project->graph.GetSelectedNodeId());
     const EditorNodeGraph::Vec2 graphPosition = selected
         ? EditorNodeGraph::Vec2{ selected->position.x + 300.0f, selected->position.y }
         : EditorNodeGraph::Vec2{ 260.0f, 180.0f };
     const bool selectedHasImageOutput = selected && nodeHasImageOutput(selected->kind);
     const int upstreamNodeId = selectedHasImageOutput ? selected->id : -1;
 
-    EditorNodeGraph::Node* lutNode = m_NodeGraph.AddLutNode(std::move(payload), graphPosition);
+    EditorNodeGraph::Node* lutNode = m_Project->graph.AddLutNode(std::move(payload), graphPosition);
     if (!lutNode) {
         return false;
     }
@@ -768,7 +840,7 @@ bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload pa
         graphPosition.x - 172.0f,
         graphPosition.y + 78.0f
     };
-    EditorNodeGraph::Node* solidMaskNode = m_NodeGraph.AddMaskGeneratorNode(
+    EditorNodeGraph::Node* solidMaskNode = m_Project->graph.AddMaskGeneratorNode(
         EditorNodeGraph::MaskGeneratorKind::Solid,
         maskPosition);
     if (solidMaskNode) {
@@ -779,7 +851,7 @@ bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload pa
                 EditorNodeGraph::kMaskInputSocketId,
                 &errorMessage) &&
             !errorMessage.empty()) {
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Error,
                 "Generated LUT mask auto-connect failed: " + errorMessage,
                 "generated-lut-mask-autoconnect");
@@ -795,7 +867,7 @@ bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload pa
                 EditorNodeGraph::kImageInputSocketId,
                 &errorMessage) &&
             !errorMessage.empty()) {
-            QueueUiNotification(
+            PostNotification(
                 UiNotificationSeverity::Error,
                 "Generated LUT auto-connect failed: " + errorMessage,
                 "generated-lut-autoconnect");
@@ -809,23 +881,382 @@ bool EditorModule::AddGeneratedLutNodeFromPayload(EditorNodeGraph::LutPayload pa
 }
 
 EditorNodeGraph::Graph& EditorModule::GetNodeGraph() {
-    return m_NodeGraph;
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->graph : m_Project->graph;
 }
 
 const EditorNodeGraph::Graph& EditorModule::GetNodeGraph() const {
-    return m_NodeGraph;
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->graph : m_Project->graph;
+}
+
+std::vector<std::shared_ptr<LayerBase>>& EditorModule::GetLayers() {
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->layers : m_Project->layers;
+}
+const std::vector<std::shared_ptr<LayerBase>>& EditorModule::GetLayers() const {
+    return IsEditingRawLayerMaskGraph() ? m_RawLayerMaskWorkspace->layers : m_Project->layers;
 }
 
 bool EditorModule::IsGraphOutputConnected() const {
-    return m_NodeGraph.IsOutputConnected();
+    return m_Project->graph.IsOutputConnected();
+}
+
+bool EditorModule::IsAnyRenderBackendBusy() const {
+    return m_RenderWorker.IsBusy() ||
+        (m_RawRenderClientId != 0 &&
+         Stack::EditorRendering::RawRenderService::Get().IsBusyFor(
+             m_RawRenderClientId));
+}
+
+EditorRenderWorker::RenderProgress
+EditorModule::GetActiveRenderBackendProgress() const {
+    if (m_RawRenderClientId != 0) {
+        EditorRenderWorker::RenderProgress rawProgress =
+            Stack::EditorRendering::RawRenderService::Get().GetProgressFor(
+                m_RawRenderClientId);
+        if (rawProgress.busy) return rawProgress;
+    }
+    return m_RenderWorker.GetProgress();
+}
+
+bool EditorModule::RequestFullQualityRender(std::string* errorMessage) {
+    if (errorMessage) errorMessage->clear();
+    if (!m_Project->graph.IsOutputConnected()) {
+        // A project may intentionally leave its only Output deactivated while
+        // RAW Lab remains the visible editing surface. Queue/inspection still
+        // need a terminal for the saved upstream Graph. Activate a connected
+        // Output only inside this isolated render session; the project file
+        // and the user's live editor are never mutated.
+        int renderOutputNodeId = m_Project->graph.GetOutputNodeId();
+        const auto hasImageInput = [&](int nodeId) {
+            return nodeId > 0 &&
+                m_Project->graph.FindInputLink(
+                    nodeId,
+                    EditorNodeGraph::kImageInputSocketId) != nullptr;
+        };
+        if (!hasImageInput(renderOutputNodeId)) {
+            renderOutputNodeId = -1;
+            for (const int candidate : m_Project->graph.GetOutputNodeIds()) {
+                if (hasImageInput(candidate)) {
+                    renderOutputNodeId = candidate;
+                    break;
+                }
+            }
+        }
+        if (renderOutputNodeId > 0) {
+            m_Project->graph.SetOutputNodeEnabled(renderOutputNodeId, true);
+            m_Project->graph.SetOutputNodeId(renderOutputNodeId);
+        }
+        if (!m_Project->graph.IsOutputConnected()) {
+            if (errorMessage) {
+                *errorMessage = m_Project->graph.GetOutputConnectionDiagnostic();
+                if (errorMessage->empty()) {
+                    *errorMessage =
+                        "The project has no complete Graph path to an Output.";
+                }
+            }
+            return false;
+        }
+    }
+    if (IsRenderSettledForFullQualityExport()) return true;
+
+    if (IsRawWorkspaceProjectActive()) {
+        const std::string identity = GetActiveRawWorkspacePreviewIdentity();
+        if (identity.empty()) {
+            if (errorMessage) {
+                *errorMessage =
+                    "The active RAW project has no renderable source identity.";
+            }
+            return false;
+        }
+
+        // Queue and Gallery inspection are explicit full-quality consumers.
+        // Do not rely on the visible RAW workspace's delayed preview settle:
+        // the isolated render session may never have displayed that workspace.
+        m_RawWorkspacePreviewSourceKey = identity;
+        m_RawWorkspaceFastPreviewUntilTime = -1.0;
+        m_RawWorkspaceFullResolutionPreviewPending = true;
+        m_RawWorkspaceFullResolutionPreviewRequested = true;
+        m_RawWorkspaceFullResolutionPreviewDeferredByBudget = false;
+        m_RawWorkspaceFullResolutionPreviewDeferredBudgetBytes = 0;
+        m_RawWorkspaceFullResolutionPreviewRequestGeneration = 0;
+        m_RawWorkspaceFullResolutionPreviewRetryCount = 0;
+        m_RawWorkspaceExplicitFullQualityRenderRequested = true;
+    }
+
+    // This is presentation invalidation only. It must not create an edit or
+    // autosave revision, but it does fence out any display-sized render that
+    // was still queued for the project-open reveal.
+    MarkRenderRefreshDirty();
+    return true;
+}
+
+float EditorModule::GetFullQualityRenderProgress(
+    std::string* statusText) const {
+    if (statusText) statusText->clear();
+    if (IsRenderSettledForFullQualityExport()) {
+        if (statusText) *statusText = "Full-quality render complete";
+        return 1.0f;
+    }
+
+    const EditorRenderWorker::RenderProgress progress =
+        GetActiveRenderBackendProgress();
+    if (statusText) {
+        if (!progress.label.empty()) {
+            *statusText = progress.label;
+        } else if (progress.busy) {
+            *statusText = "Rendering full quality";
+        } else if (m_RenderPending) {
+            *statusText = "Finalizing full-quality render";
+        } else if (m_RenderDirty) {
+            *statusText = "Preparing full-quality render";
+        } else if (m_ViewportOutputPreviewMaxDimension > 0) {
+            *statusText = "Replacing display preview with full quality";
+        } else {
+            *statusText = "Waiting for full-quality output";
+        }
+    }
+    if (progress.busy) {
+        const int totalSteps = std::max(1, progress.totalSteps);
+        return static_cast<float>(
+            std::clamp(progress.completedSteps, 0, totalSteps)) /
+            static_cast<float>(totalSteps);
+    }
+    return m_RenderPending ? 0.98f : 0.0f;
+}
+
+std::string EditorModule::GetFullQualityRenderDiagnostic() const {
+    const EditorRenderWorker::RenderProgress progress =
+        GetActiveRenderBackendProgress();
+    std::ostringstream diagnostic;
+    diagnostic
+        << "outputConnected="
+        << (m_Project->graph.IsOutputConnected() ? "true" : "false")
+        << ", renderDirty=" << (m_RenderDirty ? "true" : "false")
+        << ", renderPending=" << (m_RenderPending ? "true" : "false")
+        << ", backendBusy=" << (progress.busy ? "true" : "false")
+        << ", backendStep=" << progress.completedSteps << '/'
+        << std::max(1, progress.totalSteps)
+        << ", backendLabel="
+        << (progress.label.empty() ? "<empty>" : progress.label)
+        << ", previewMaxDimension=" << m_ViewportOutputPreviewMaxDimension
+        << ", renderRevision=" << m_RenderRevision
+        << ", submittedRevision=" << m_LastSubmittedRenderRevision
+        << ", renderGeneration=" << m_RenderGeneration
+        << ", completedGeneration=" << m_LastCompletedRenderGeneration;
+    if (IsRawWorkspaceProjectActive()) {
+        diagnostic
+            << ", activeRawIdentity="
+            << GetActiveRawWorkspacePreviewIdentity()
+            << ", presentedRawIdentity="
+            << (m_ViewportOutputRawWorkspaceSourceKey.empty()
+                    ? "<empty>"
+                    : m_ViewportOutputRawWorkspaceSourceKey)
+            << ", fullResolutionPending="
+            << (m_RawWorkspaceFullResolutionPreviewPending ? "true" : "false")
+            << ", fullResolutionRequested="
+            << (m_RawWorkspaceFullResolutionPreviewRequested ? "true" : "false")
+            << ", fullResolutionDeferredByBudget="
+            << (m_RawWorkspaceFullResolutionPreviewDeferredByBudget
+                    ? "true"
+                    : "false")
+            << ", fullResolutionDeferredBudgetBytes="
+            << m_RawWorkspaceFullResolutionPreviewDeferredBudgetBytes
+            << ", vramWorkingBudgetBytes="
+            << m_RawWorkspaceVramWorkingBudgetBytes
+            << ", vramAvailableBytes="
+            << m_RawWorkspaceVramAvailableBytes
+            << ", fullResolutionRetryCount="
+            << m_RawWorkspaceFullResolutionPreviewRetryCount
+            << ", fullResolutionRequestGeneration="
+            << m_RawWorkspaceFullResolutionPreviewRequestGeneration
+            << ", presentedRaster="
+            << m_RawWorkspacePresentationTexture.width << 'x'
+            << m_RawWorkspacePresentationTexture.height
+            << ", expectedNativeRaster="
+            << m_ViewportOutputExpectedNativeWidth << 'x'
+            << m_ViewportOutputExpectedNativeHeight
+            << ", nativeRasterVerified="
+            << (m_ViewportOutputNativeExtentVerified ? "true" : "false");
+    }
+    if (!m_RawWorkspaceStaleRenderStatusText.empty()) {
+        diagnostic << ", renderError=" << m_RawWorkspaceStaleRenderStatusText;
+    }
+    return diagnostic.str();
+}
+
+bool EditorModule::SubmitRenderSnapshot(
+    EditorRenderWorker::Snapshot snapshot) {
+    if (IsEditingRawLayerMaskGraph()) {
+        const auto owner = snapshot.graph.rawLayerMaskNodeIds.find(m_RawLayerMaskWorkspace->layerId);
+        for (auto& preview : snapshot.previews) {
+            if (!preview.rawLayerId.empty()) continue;
+            if (owner == snapshot.graph.rawLayerMaskNodeIds.end()) return false;
+            const auto source = owner->second.find(preview.sourceNodeId);
+            if (source == owner->second.end()) return false;
+            preview.sourceNodeId = source->second;
+        }
+    }
+    const bool rawSnapshot = !snapshot.rawWorkspace.sourceKey.empty();
+    if (!rawSnapshot || (!m_RawWorkspaceRootTabActive &&
+        snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)) {
+        snapshot.graphRequest = CurrentGraphRenderTag();
+        snapshot.previewMaxDimension = 0;
+    }
+    const std::uint64_t generation = snapshot.generation;
+    const RawRenderPurpose purpose = snapshot.rawRenderPurpose;
+    const bool proxyRender = snapshot.previewMaxDimension > 0;
+    const std::size_t rawRecipeRevision =
+        snapshot.rawWorkspace.recipeRevision;
+    if (!snapshot.rawWorkspace.sourceKey.empty() &&
+        m_RawRenderClientId != 0) {
+        Stack::EditorRendering::RawRenderService& service =
+            Stack::EditorRendering::RawRenderService::Get();
+        const bool rawStage = UsesRawWorkspaceStageRender();
+        // Recipe-only commands cannot update a lowered layer graph. Keeping
+        // that graph as their template would restore deleted layers after
+        // the final layer is removed and compact commands become eligible.
+        if (rawStage && snapshot.graph.rawLayerBackgroundNodeId <= 0) {
+            const std::uint64_t structureRevision =
+                m_Project->graph.GetStructureRevision();
+            const bool sessionMatches =
+                m_RawRenderSessionSourceIdentity ==
+                    snapshot.rawWorkspace.sourceKey &&
+                m_RawRenderSessionSourceHash ==
+                    snapshot.rawWorkspace.sourceHash &&
+                m_RawRenderSessionGraphStructureRevision ==
+                    structureRevision &&
+                m_RawRenderSessionContractRevision ==
+                    kRawRenderProcessingContractRevision;
+            if (!sessionMatches) {
+                Stack::EditorRendering::RawRenderSessionConfig config;
+                config.sourceIdentity = snapshot.rawWorkspace.sourceKey;
+                config.sourceHash = snapshot.rawWorkspace.sourceHash;
+                config.graphStructureRevision = structureRevision;
+                config.processingContractRevision =
+                    kRawRenderProcessingContractRevision;
+                try {
+                    config.snapshotTemplate =
+                        std::make_shared<const EditorRenderWorker::Snapshot>(
+                            snapshot);
+                } catch (...) {
+                    return false;
+                }
+                if (!service.ConfigureSession(
+                        m_RawRenderClientId,
+                        std::move(config))) {
+                    return false;
+                }
+                m_RawRenderSessionSourceIdentity =
+                    snapshot.rawWorkspace.sourceKey;
+                m_RawRenderSessionSourceHash =
+                    snapshot.rawWorkspace.sourceHash;
+                m_RawRenderSessionGraphStructureRevision =
+                    structureRevision;
+                m_RawRenderSessionContractRevision =
+                    kRawRenderProcessingContractRevision;
+            }
+        } else if (!m_RawRenderSessionSourceIdentity.empty()) {
+            ClearRawRenderSession();
+        }
+        if (rawStage) {
+            // Viewport sizing also needs these dimensions for layered
+            // submissions, even though they do not retain a command template.
+            m_RawRenderSessionFullFrameWidth =
+                snapshot.rawWorkspace.fullFrameWidth;
+            m_RawRenderSessionFullFrameHeight =
+                snapshot.rawWorkspace.fullFrameHeight;
+        }
+        const bool graphRequest = snapshot.graphRequest.enabled;
+        const bool submitted =
+            service.Submit(m_RawRenderClientId, std::move(snapshot));
+        if (!submitted && graphRequest) {
+            PostNotification(UiNotificationSeverity::Error,
+                "Graph rendering is unavailable. The previous image has been retained.",
+                "graph-render-worker-unavailable");
+        }
+        Stack::EditorRenderScheduling::CommitRawSubmissionGeneration(
+            submitted,
+            RawRenderPurposeMayPublishPresentation(purpose),
+            generation,
+            m_LatestRawPresentationGeneration,
+            m_LatestRawAuxiliaryGeneration);
+        if (submitted) {
+            m_ActivityRawRenderIsProxy = proxyRender;
+            if (purpose == RawRenderPurpose::ViewportRefinement) {
+                m_RawWorkspaceFullResolutionPreviewRequestGeneration =
+                    generation;
+            }
+            if (RawRenderPurposeMayPublishPresentation(purpose)) {
+                m_LatestRawPresentationRecipeRevision =
+                    rawRecipeRevision;
+            } else {
+                m_LatestRawAuxiliaryRecipeRevision =
+                    rawRecipeRevision;
+            }
+        }
+        if (submitted && purpose == RawRenderPurpose::ExplicitExport) {
+            m_RawWorkspaceExportRenderGeneration = generation;
+        }
+        return submitted;
+    }
+    const bool submitted = m_RenderWorker.Submit(std::move(snapshot));
+    if (submitted) m_ActivityRawRenderIsProxy = proxyRender;
+    if (rawSnapshot) {
+        Stack::EditorRenderScheduling::CommitRawSubmissionGeneration(
+            submitted,
+            RawRenderPurposeMayPublishPresentation(purpose),
+            generation,
+            m_LatestRawPresentationGeneration,
+            m_LatestRawAuxiliaryGeneration);
+        if (submitted) {
+            if (purpose == RawRenderPurpose::ViewportRefinement) {
+                m_RawWorkspaceFullResolutionPreviewRequestGeneration =
+                    generation;
+            }
+            if (RawRenderPurposeMayPublishPresentation(purpose)) {
+                m_LatestRawPresentationRecipeRevision =
+                    rawRecipeRevision;
+            } else {
+                m_LatestRawAuxiliaryRecipeRevision =
+                    rawRecipeRevision;
+            }
+        }
+        if (submitted && purpose == RawRenderPurpose::ExplicitExport) {
+            m_RawWorkspaceExportRenderGeneration = generation;
+        }
+    }
+    return submitted;
+}
+
+void EditorModule::InvalidateRenderSnapshotsBefore(
+    std::uint64_t generation) {
+    if (m_RenderWorkerAvailable) {
+        m_RenderWorker.InvalidateSnapshotsBefore(generation);
+    }
+    if (m_RawRenderClientId != 0) {
+        Stack::EditorRendering::RawRenderService::Get()
+            .InvalidateSnapshotsBefore(
+                m_RawRenderClientId, generation);
+    }
+}
+
+bool EditorModule::ExecuteRenderOwnerOpenGlTaskBlocking(
+    EditorRenderWorker::OpenGlTask task,
+    std::string& error) {
+    if (m_RawRenderClientId != 0) {
+        return Stack::EditorRendering::RawRenderService::Get()
+            .ExecuteOpenGlTaskBlocking(std::move(task), error);
+    }
+    return m_RenderWorker.ExecuteOpenGlTaskBlocking(
+        std::move(task), error);
 }
 
 void EditorModule::ClearCompositeSelection() {
     m_CompositeSelectedOutputNodeId = -1;
-    m_NodeGraph.ClearSelection();
+    m_Project->graph.ClearSelection();
 }
 
-void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::AppearanceManager* appearance) {
+void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::AppearanceManager* appearance,
+    bool restoreWorkspace) {
     m_ShutdownComplete = false;
     m_Appearance = appearance;
     std::vector<std::string> registryErrors;
@@ -841,24 +1272,32 @@ void EditorModule::Initialize(GLFWwindow* sharedWindow, StackAppearance::Appeara
     m_Viewport.Initialize();
     m_Scopes.Initialize();
     m_RenderWorkerAvailable = sharedWindow && m_RenderWorker.Initialize(sharedWindow);
+    m_RawRenderClientId = sharedWindow
+        ? Stack::EditorRendering::RawRenderService::Get().Acquire(sharedWindow)
+        : 0;
     m_NodeBrowserRenderWorkerAvailable = sharedWindow && m_NodeBrowserRenderWorker.Initialize(sharedWindow);
     (void)Raw::GetLibRawRuntimeStatus();
 
-    m_Layers.clear();
+    m_Project->layers.clear();
     m_SelectedLayerIndex = -1;
     m_CanvasToolKind = CanvasToolKind::None;
     m_CanvasToolOwnerNodeId = -1;
     m_CanvasToolStatusText.clear();
     m_IsPickingColor = false;
     m_ColorPickerCallback = nullptr;
-    m_NodeGraph.ResetFromLayers(0, false);
+    m_Project->graph.ResetFromLayers(0, false);
     ClearCompositeRuntimeState();
-    MarkRenderDirty();
+    MarkRenderRefreshDirty();
 
-    m_Dirty = false;
-    m_LastUserActionTime = 0.0;
-    m_LastAutoSaveTime = -1.0;
-    LoadRawWorkspaceAppState();
+    m_Project->dirty = false;
+    m_Project->lastEditTime = 0.0;
+    m_Project->lastAutosaveTime = -1.0;
+    m_Project->lastAutosaveAttemptTime = -1.0;
+    // The shell supplies the shared RAW folder to additional tabs and assigns
+    // a single writer for the application's startup preferences.
+    m_WorkspaceAppStatePersistenceEnabled = restoreWorkspace;
+    if (restoreWorkspace) LoadRawWorkspaceAppState();
+    else m_RawWorkspaceAppStateLoaded = true;
 }
 void EditorModule::EnterSingleOutputPreviewMode() {
     ClearCompositeTransientInteractionState();
@@ -868,53 +1307,16 @@ void EditorModule::EnterSingleOutputPreviewMode() {
     m_Viewport.ResetSinglePreviewState();
     m_HoverFade = 0.0f;
 
-    const int previewOutputNodeId = m_NodeGraph.ResolvePreviewOutputNodeId();
+    const int previewOutputNodeId = m_Project->graph.ResolvePreviewOutputNodeId();
     if (previewOutputNodeId <= 0) {
         ClearViewportOutputTiles();
         m_Pipeline.ClearOutput();
-        MarkRenderDirty();
+        MarkRenderRefreshDirty();
         return;
     }
 
-    RefreshCompletedChainCacheIfNeeded();
-    const auto chainIt = std::find_if(
-        m_CachedCompletedChains.begin(),
-        m_CachedCompletedChains.end(),
-        [previewOutputNodeId](const CachedCompositeChainState& chain) {
-            return chain.info.outputNodeId == previewOutputNodeId;
-        });
-    if (chainIt == m_CachedCompletedChains.end()) {
-        MarkRenderDirty();
-        return;
-    }
-
-    const EditorNodeGraph::Node* sourceNode = m_NodeGraph.FindNode(chainIt->info.sourceNodeId);
-    if (sourceNode &&
-        sourceNode->kind == EditorNodeGraph::NodeKind::Image &&
-        !sourceNode->image.pixels.empty() &&
-        sourceNode->image.width > 0 &&
-        sourceNode->image.height > 0) {
-        LoadSourceFromPixels(
-            sourceNode->image.pixels.data(),
-            sourceNode->image.width,
-            sourceNode->image.height,
-            sourceNode->image.channels);
-        return;
-    }
-
-    int outW = 0;
-    int outH = 0;
-    (void)GetCompositePixelsForOutputNode(previewOutputNodeId, outW, outH);
-    if (outW > 0 && outH > 0) {
-        const std::vector<unsigned char> transparentPixels = BuildTransparentPixels(outW, outH);
-        LoadSourceFromPixels(
-            transparentPixels.empty() ? nullptr : transparentPixels.data(),
-            outW,
-            outH,
-            4);
-    } else {
-        MarkRenderDirty();
-    }
+    // Source selection and native raster preparation belong to the worker request.
+    MarkRenderRefreshDirty();
 }
 
 void EditorModule::HandleViewportModeTransition(ViewportMode previousMode, ViewportMode currentMode) {
@@ -958,57 +1360,17 @@ void EditorModule::BeginLibraryLoadReveal() {
 
 
 void EditorModule::RenderUI() {
+    Stack::AutoBracket::EditingScope autoBracketInput(*this,ImGui::GetCursorScreenPos(),ImGui::GetContentRegionAvail());
     PumpNonRenderingWork(2.5);
-    if (m_DetachedPreviewTogglePending) {
+    if (!Stack::Workspace::IsPreview() && m_DetachedPreviewTogglePending) {
         m_DetachedPreviewTogglePending = false;
         ToggleDetachedPreviewFullscreen();
     }
-    if (m_PendingAddImageNodePrompt) {
+    if (!Stack::Workspace::IsPreview() && m_PendingAddImageNodePrompt) {
         const EditorNodeGraph::Vec2 graphPosition = m_PendingAddImageNodeGraphPosition;
         m_PendingAddImageNodePrompt = false;
         m_PendingAddImageNodeGraphPosition = {};
         PromptAddImageNodeAt(graphPosition);
-    }
-
-    // User Activity Tracking & Auto-Save Check
-    {
-        const ImGuiIO& io = ImGui::GetIO();
-        bool userActive = false;
-        // Check for any keypress
-        for (ImGuiKey key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key = (ImGuiKey)(key + 1)) {
-            if (ImGui::IsKeyPressed(key)) {
-                userActive = true;
-                break;
-            }
-        }
-        // Check for mouse down
-        if (!userActive) {
-            for (int i = 0; i < 5; i++) {
-                if (ImGui::IsMouseDown(i)) {
-                    userActive = true;
-                    break;
-                }
-            }
-        }
-        // Check for mouse movement or characters typed
-        if (!userActive && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || io.InputQueueCharacters.Size > 0)) {
-            userActive = true;
-        }
-
-        if (userActive) {
-            m_LastUserActionTime = ImGui::GetTime();
-        }
-
-        if (m_Dirty &&
-            !IsRawWorkspaceProjectActive() &&
-            !m_CurrentProjectFileName.empty() &&
-            !Async::IsBusy(LibraryManager::Get().GetSaveTaskState())) {
-            double idleTime = ImGui::GetTime() - m_LastUserActionTime;
-            if (idleTime >= 10.0 && idleTime < 30.0 && m_LastAutoSaveTime < m_LastUserActionTime) {
-                RequestSaveCurrentProject(m_CurrentProjectName);
-                m_LastAutoSaveTime = ImGui::GetTime();
-            }
-        }
     }
 
     // Safety fallback: if ExportSettings is active or targeted but we have less than 2 completed chains, fallback to NodeGraph
@@ -1023,12 +1385,12 @@ void EditorModule::RenderUI() {
 
     // Safety fallback: if ComplexNode is active or targeted but the node no longer exists in the graph, fallback to NodeGraph
     if (m_ActiveSubWindow == EditorSubWindow::ComplexNode) {
-        if (!m_NodeGraph.FindNode(m_ActiveComplexNodeId)) {
+        if (!GetNodeGraph().FindNode(m_ActiveComplexNodeId)) {
             m_ActiveSubWindow = EditorSubWindow::NodeGraph;
         }
     }
     if (m_TargetSubWindow == EditorSubWindow::ComplexNode) {
-        if (!m_NodeGraph.FindNode(m_TargetComplexNodeId)) {
+        if (!GetNodeGraph().FindNode(m_TargetComplexNodeId)) {
             m_TargetSubWindow = EditorSubWindow::NodeGraph;
         }
     }
@@ -1092,7 +1454,7 @@ void EditorModule::RenderUI() {
     const float toolbarRevealAlpha = m_LibraryLoadToolbarRevealAlpha;
 
     const ImGuiIO& commandIo = ImGui::GetIO();
-    const bool altOnePressed =
+    const bool altOnePressed = false &&
         !commandIo.WantTextInput &&
         ImGui::IsKeyChordPressed(ImGuiMod_Alt | ImGuiKey_1);
     if (altOnePressed) {
@@ -1224,7 +1586,7 @@ void EditorModule::RenderUI() {
             targetWidth = 560.0f;
         } else if (m_TargetSubWindow == EditorSubWindow::ComplexNode) {
             const EditorNodeGraph::Node* targetComplexNode =
-                m_TargetComplexNodeId > 0 ? m_NodeGraph.FindNode(m_TargetComplexNodeId) : nullptr;
+                m_TargetComplexNodeId > 0 ? GetNodeGraph().FindNode(m_TargetComplexNodeId) : nullptr;
             targetWidth = targetComplexNode && targetComplexNode->kind == EditorNodeGraph::NodeKind::CustomMask
                 ? (workspaceSize.x - splitGap) * 0.5f
                 : 470.0f;
@@ -1279,7 +1641,7 @@ void EditorModule::RenderUI() {
     if (CanConsumeEditorCommandKeys() &&
         ImGui::GetIO().KeyCtrl &&
         ImGui::IsKeyPressed(ImGuiKey_S, false)) {
-        RequestSaveCurrentProject(m_CurrentProjectName.empty() ? "Untitled Project" : m_CurrentProjectName);
+        RequestSaveCurrentProject(m_Project->name.empty() ? "Untitled Project" : m_Project->name);
     }
 
     const float timelineHeight = UpdateTimelinePanelHeight(workspaceSize.y);
@@ -1294,6 +1656,29 @@ void EditorModule::RenderUI() {
     const bool timelineShortcutInputAllowed =
         CanConsumeEditorCommandKeys() &&
         !ImGui::IsAnyItemActive();
+    const bool rawFilmstripDrawerShortcut =
+        timelineShortcutInputAllowed &&
+        m_RawWorkspaceRootTabActive &&
+        m_RawWorkspaceLabUi.galleryHost == RawGalleryHost::Filmstrip &&
+        ImGui::GetIO().KeyCtrl &&
+        !ImGui::GetIO().KeyShift &&
+        !ImGui::GetIO().KeyAlt &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        ImGui::IsKeyPressed(ImGuiKey_Space, false);
+    if (rawFilmstripDrawerShortcut) {
+        m_RawWorkspaceLabFilmstripDrawerKeyboardToggleRequested = true;
+        m_SpacebarHeld = false;
+    }
+    // RAW Lab intentionally leaves Space unassigned. Keep it from falling
+    // through to the Graph split/timeline shortcut while the RAW workspace is
+    // active, without causing any render or comparison state change.
+    const bool rawWorkspaceConsumesSpace =
+        m_RawWorkspaceRootTabActive &&
+        (IsRawWorkspaceProjectActive() || rawFilmstripDrawerShortcut) &&
+        !ImGui::GetIO().WantTextInput;
+    if (rawWorkspaceConsumesSpace) {
+        m_SpacebarHeld = false;
+    }
 
     if (timelineShortcutInputAllowed && m_TimelineUi.open && ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
         StepTimelineFrame(-1);
@@ -1303,7 +1688,12 @@ void EditorModule::RenderUI() {
         StepTimelineFrame(1);
     }
 
-    if (timelineShortcutInputAllowed && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+    if (!rawWorkspaceConsumesSpace &&
+        timelineShortcutInputAllowed &&
+        !ImGui::GetIO().KeyCtrl &&
+        !ImGui::GetIO().KeyShift &&
+        !ImGui::GetIO().KeyAlt &&
+        ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
         if (m_TimelineUi.playing) {
             StopTimelinePlayback(false);
             m_SpacebarHeld = false;
@@ -1316,7 +1706,7 @@ void EditorModule::RenderUI() {
         }
     }
 
-    if (m_SpacebarHeld) {
+    if (!rawWorkspaceConsumesSpace && m_SpacebarHeld) {
         if (!ImGui::IsKeyDown(ImGuiKey_Space)) {
             const float holdTime = static_cast<float>(ImGui::GetTime() - m_SpacebarPressTime);
             if (holdTime >= 0.4f) {
@@ -1397,6 +1787,7 @@ void EditorModule::RenderUI() {
 
     // Update Left Panel Hover & Animation State
     const bool isGraphDrawerOpen = m_Sidebar.GetNodeGraphUI().HasDrawerOpen();
+    const bool graphCatalogHosted = m_Sidebar.GetNodeGraphUI().HasCatalogHost();
     const bool graphMiddlePanActive = m_Sidebar.GetNodeGraphUI().IsGraphMiddlePanActive();
     if (!graphMiddlePanActive &&
         m_ActiveSubWindow == EditorSubWindow::NodeGraph &&
@@ -1445,7 +1836,7 @@ void EditorModule::RenderUI() {
     }
 
     const float nodeBrowserMaxWidth = std::clamp(workspaceSize.x * 0.32f, 480.0f, 720.0f);
-    float nodesPanelTargetWidth = isGraphDrawerOpen ? std::min(nodeBrowserMaxWidth, workspaceSize.x) : 0.0f;
+    float nodesPanelTargetWidth = isGraphDrawerOpen && !graphCatalogHosted ? std::min(nodeBrowserMaxWidth, workspaceSize.x) : 0.0f;
     m_NodesPanelWidthAnim += (nodesPanelTargetWidth - m_NodesPanelWidthAnim) * animDt * 10.0f;
     if (std::abs(m_NodesPanelWidthAnim - nodesPanelTargetWidth) < 0.1f) {
         m_NodesPanelWidthAnim = nodesPanelTargetWidth;
@@ -1461,7 +1852,9 @@ void EditorModule::RenderUI() {
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_SubWindowTransitionAlpha);
+        RenderRawLayerGraphToolbar();
         m_Sidebar.Render(this);
+        FinishRawLayerGraphFrame();
         ImGui::PopStyleVar();
 
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, toolbarRevealAlpha);
@@ -1740,6 +2133,7 @@ void EditorModule::RenderUI() {
             !HasActiveCustomMaskOverlay();
         const bool viewportPaneHoveredForSplit =
             canDragSplitFromViewportPane &&
+            !m_LibraryWindowHovered &&
             ImGui::IsMouseHoveringRect(viewportPaneMin, viewportPaneMax, false);
         if (!handleHovered &&
             viewportPaneHoveredForSplit &&
@@ -1820,7 +2214,7 @@ void EditorModule::RenderUI() {
 
     ImGui::EndChild();
 
-    if (m_ActiveSubWindow == EditorSubWindow::NodeGraph && m_NodesPanelWidthAnim > 0.1f) {
+    if (m_ActiveSubWindow == EditorSubWindow::NodeGraph && (graphCatalogHosted || m_NodesPanelWidthAnim > 0.1f)) {
         m_Sidebar.GetNodeGraphUI().RenderNodesPanelDrawer(
             this,
             m_NodesPanelWidthAnim,
@@ -1829,33 +2223,10 @@ void EditorModule::RenderUI() {
             workspacePos);
     }
 
-    RenderManagedRawGraphMutationConfirmPopup();
     RenderMultiFrameSourceSetDeletePopup();
     RenderGraphCaptureWindow();
 
-    if (IsGraphDropImportBusy()) {
-        ImGuiExtras::RenderBusyOverlay(
-            GetGraphDropImportStatusText().empty()
-                ? "Importing images into graph..."
-                : GetGraphDropImportStatusText().c_str());
-    } else if (IsSourceLoadBusy()) {
-        ImGuiExtras::RenderBusyOverlay("Loading source image...");
-    } else if (IsExportBusy()) {
-        ImGuiExtras::RenderBusyOverlay(GetExportStatusText().empty() ? "Exporting..." : GetExportStatusText().c_str());
-    } else if (IsEditorRenderBusy()) {
-        EditorRenderWorker::RenderProgress progress = m_RenderWorker.GetProgress();
-        std::string label = progress.label.empty() ? std::string("Rendering...") : progress.label;
-        if (!progress.busy && m_RenderPending) {
-            label = "Finalizing render...";
-        }
-        const int totalSteps = std::max(1, progress.totalSteps);
-        float fraction = static_cast<float>(std::clamp(progress.completedSteps, 0, totalSteps)) /
-            static_cast<float>(totalSteps);
-        if (!progress.busy && m_RenderPending) {
-            fraction = std::max(fraction, 0.98f);
-        }
-        ImGuiExtras::RenderProgressOverlay(label.c_str(), fraction);
-    }
+
 }
 
 EditorModule::ViewportMode EditorModule::GetViewportMode() const {
@@ -1876,5 +2247,5 @@ int EditorModule::GetConnectedOutputCount() const {
 }
 
 bool EditorModule::CanConsumeEditorCommandKeys() const {
-    return !ImGui::GetIO().WantTextInput && !m_GraphCaptureWindowOpen;
+    return !Stack::Workspace::IsPreview() && !ImGui::GetIO().KeyAlt && !ImGui::GetIO().WantTextInput && !m_GraphCaptureWindowOpen;
 }

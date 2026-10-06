@@ -1,0 +1,19 @@
+BEFORE INSTALLING STACK
+
+Stack does not require an account, activation, payment, or permission to use.
+
+After you accept the EULA, Stack checks the official GitHub Releases API for
+updates when the app starts. You can disable "Check automatically when Stack
+starts" in Settings > Updates. Stack does not include intentional product
+analytics or a Stack-operated telemetry service.
+
+The installer places the EULA, Privacy Notice, Stack Source License,
+Third-Party Notices, and exact dependency license texts under:
+
+  Stack\App\Legal
+
+You can also open these documents from Settings > Legal inside Stack.
+
+The unchanged official installer may be shared with other people free of
+charge. It may not be sold, modified, repackaged, rebranded, or presented as
+someone else's product.

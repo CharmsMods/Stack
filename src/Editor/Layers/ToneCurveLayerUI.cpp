@@ -146,6 +146,49 @@ bool ResettableToneSliderInt(
     return ApplyResettableSliderValue(value, resetValue, changed, 0.0f);
 }
 
+class ToneCurveBorderlessControlScope {
+public:
+    ToneCurveBorderlessControlScope() {
+        const ImVec4 transparent(0.0f, 0.0f, 0.0f, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, transparent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, transparent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, transparent);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, transparent);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, transparent);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, transparent);
+        ImGui::PushStyleColor(ImGuiCol_Border, transparent);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
+    }
+
+    ~ToneCurveBorderlessControlScope() {
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(7);
+    }
+
+    ToneCurveBorderlessControlScope(const ToneCurveBorderlessControlScope&) = delete;
+    ToneCurveBorderlessControlScope& operator=(const ToneCurveBorderlessControlScope&) = delete;
+};
+
+bool ToneCurveFramelessTextButton(
+    const char* label,
+    bool active = false,
+    const ImVec2& size = ImVec2(0.0f, 0.0f)) {
+    const ImVec4 transparent(0.0f, 0.0f, 0.0f, 0.0f);
+    const ImVec4 textColor = active
+        ? ImGui::GetStyleColorVec4(ImGuiCol_SliderGrabActive)
+        : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    ImGui::PushStyleColor(ImGuiCol_Button, transparent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, transparent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, transparent);
+    ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    const bool pressed = ImGui::Button(label, size);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+    return pressed;
+}
+
 float Clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
@@ -568,12 +611,10 @@ bool ToneCurveLayer::RenderDevelopTargetingPanel(EditorModule* editor, int nodeI
     ImGui::TextDisabled("Use it when broad auto plus graph edits are close, but a specific sampled region still needs to move.");
 
     const bool targetActive = editor && editor->IsCanvasToolActiveForNode(nodeId, EditorModule::CanvasToolKind::ToneCurveTarget);
-    if (targetActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 128, 176, 215));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(72, 146, 198, 235));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(80, 156, 210, 255));
-    }
-    if (ImGuiExtras::RichFullWidthButton(targetActive ? "Stop On-Image Target" : "On-Image Target", controlWidth, 0.0f)) {
+    if (ToneCurveFramelessTextButton(
+            targetActive ? "Stop On-Image Target" : "On-Image Target",
+            targetActive,
+            ImVec2(controlWidth, 0.0f))) {
         if (editor) {
             if (targetActive) {
                 editor->CancelCanvasTool();
@@ -586,10 +627,6 @@ bool ToneCurveLayer::RenderDevelopTargetingPanel(EditorModule* editor, int nodeI
             }
         }
     }
-    if (targetActive) {
-        ImGui::PopStyleColor(3);
-    }
-
     const char* samplingLabels[] = { "Curve Input", "Final Preview" };
     int samplingBasis = static_cast<int>(m_SamplingBasis);
     ImGui::SetNextItemWidth(controlWidth);
@@ -884,6 +921,7 @@ void ToneCurveLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeS
         m_ContextPoint = -1;
     }
 
+    ToneCurveBorderlessControlScope borderlessControls;
     ImGuiExtras::RichSectionLabel("Tone Curve");
     const struct ModeButton { ToneCurveMode mode; const char* label; } modeButtons[] = {
         { ToneCurveMode::Luminance, "Y" },
@@ -896,17 +934,12 @@ void ToneCurveLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeS
     const float modeWidth = std::max(40.0f, (context.safeContentWidth - (modeGap * 4.0f)) / 5.0f);
     for (int i = 0; i < 5; ++i) {
         const bool selected = m_Mode == modeButtons[i].mode;
-        if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 128, 176, 215));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(72, 146, 198, 235));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(80, 156, 210, 255));
-        }
-        if (ImGuiExtras::RichFullWidthButton(modeButtons[i].label, modeWidth, 0.0f)) {
+        if (ToneCurveFramelessTextButton(
+                modeButtons[i].label,
+                selected,
+                ImVec2(modeWidth, 0.0f))) {
             m_Mode = modeButtons[i].mode;
             changed = true;
-        }
-        if (selected) {
-            ImGui::PopStyleColor(3);
         }
         if (i < 4) {
             ImGui::SameLine(0.0f, modeGap);
@@ -924,12 +957,12 @@ void ToneCurveLayer::RenderExpandedNodeSurface(EditorModule* editor, const NodeS
 
     const float actionGap = 8.0f;
     const float actionWidth = std::max(110.0f, (context.safeContentWidth - actionGap) * 0.5f);
-    if (ImGuiExtras::RichFullWidthButton("Reset Curve", actionWidth, 0.0f)) {
+    if (ToneCurveFramelessTextButton("Reset Curve", false, ImVec2(actionWidth, 0.0f))) {
         ResetActiveCurveToLinear();
         changed = true;
     }
     ImGui::SameLine(0.0f, actionGap);
-    if (ImGuiExtras::RichFullWidthButton("Reset Domain", actionWidth, 0.0f)) {
+    if (ToneCurveFramelessTextButton("Reset Domain", false, ImVec2(actionWidth, 0.0f))) {
         m_Domain = ToneCurveDomain::Linear;
         m_LogMinEv = authoredResetState.logMinEv;
         m_LogMaxEv = authoredResetState.logMaxEv;

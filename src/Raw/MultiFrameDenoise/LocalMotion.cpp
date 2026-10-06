@@ -5,10 +5,18 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
+#include <exception>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
 #include <set>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -119,6 +127,117 @@ RawCoordinate Subtract(RawCoordinate a, RawCoordinate b) {
 RawCoordinate Scale(RawCoordinate value, double scale) {
     return { value.x * scale, value.y * scale };
 }
+
+class PersistentParallelExecutor {
+public:
+    explicit PersistentParallelExecutor(std::uint32_t workerCount) {
+        const std::uint32_t backgroundCount =
+            std::max(1u, workerCount) - 1u;
+        m_Workers.reserve(backgroundCount);
+        try {
+            for (std::uint32_t index = 0u; index < backgroundCount; ++index) {
+                m_Workers.emplace_back([this]() { WorkerLoop(); });
+            }
+        } catch (...) {
+            StopWorkers();
+            throw;
+        }
+    }
+
+    ~PersistentParallelExecutor() {
+        StopWorkers();
+    }
+
+private:
+    void StopWorkers() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_Stop = true;
+            ++m_Generation;
+        }
+        m_WorkAvailable.notify_all();
+        for (std::thread& worker : m_Workers) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+public:
+    template <typename Function>
+    void Run(std::size_t count, Function&& function) {
+        if (count == 0u) return;
+        if (m_Workers.empty()) {
+            for (std::size_t index = 0u; index < count; ++index) {
+                function(index);
+            }
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_Function = std::forward<Function>(function);
+            m_Count = count;
+            m_Next.store(0u, std::memory_order_relaxed);
+            m_RemainingWorkers = m_Workers.size();
+            m_Exception = nullptr;
+            ++m_Generation;
+        }
+        m_WorkAvailable.notify_all();
+        ProcessAvailable();
+        std::unique_lock<std::mutex> lock(m_Mutex);
+        m_WorkComplete.wait(lock, [this]() {
+            return m_RemainingWorkers == 0u;
+        });
+        m_Function = {};
+        if (m_Exception) std::rethrow_exception(m_Exception);
+    }
+
+private:
+    void ProcessAvailable() {
+        while (true) {
+            const std::size_t index =
+                m_Next.fetch_add(1u, std::memory_order_relaxed);
+            if (index >= m_Count) break;
+            try {
+                m_Function(index);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                if (!m_Exception) m_Exception = std::current_exception();
+            }
+        }
+    }
+
+    void WorkerLoop() {
+        std::uint64_t observedGeneration = 0u;
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(m_Mutex);
+                m_WorkAvailable.wait(lock, [&]() {
+                    return m_Stop || m_Generation != observedGeneration;
+                });
+                if (m_Stop) return;
+                observedGeneration = m_Generation;
+            }
+            ProcessAvailable();
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                if (--m_RemainingWorkers == 0u) {
+                    m_WorkComplete.notify_one();
+                }
+            }
+        }
+    }
+
+    std::mutex m_Mutex;
+    std::condition_variable m_WorkAvailable;
+    std::condition_variable m_WorkComplete;
+    std::vector<std::thread> m_Workers;
+    std::function<void(std::size_t)> m_Function;
+    std::atomic<std::size_t> m_Next { 0u };
+    std::size_t m_Count = 0u;
+    std::size_t m_RemainingWorkers = 0u;
+    std::uint64_t m_Generation = 0u;
+    bool m_Stop = false;
+    std::exception_ptr m_Exception;
+};
 
 SymmetricRawCovariance AddCovariance(
     SymmetricRawCovariance a,
@@ -239,30 +358,37 @@ struct LevelSample {
     double gradientY = 0.0;
 };
 
+template<bool gradients>
 bool SampleLevelKeys(
     const CfaPyramidLevel& level,
     double x,
     double y,
     double keysParameter,
     LevelSample& sample) {
-    if (!ValidateLevel(level) || !Finite(x) || !Finite(y)) return false;
+    // EvaluatePatch validates the immutable level once per patch. Candidate
+    // scoring needs values and variance but no interpolation derivatives.
+    if (!Finite(x) || !Finite(y)) return false;
     const std::int64_t baseX = static_cast<std::int64_t>(std::floor(x));
     const std::int64_t baseY = static_cast<std::int64_t>(std::floor(y));
+    if (baseX < 1 || baseY < 1 ||
+        baseX + 2 >= static_cast<std::int64_t>(level.extent.width) ||
+        baseY + 2 >= static_cast<std::int64_t>(level.extent.height)) return false;
+    std::array<double,4> weightsX{},derivativesX{};
+    for (std::int64_t offsetX = -1; offsetX <= 2; ++offsetX) {
+        const double distance=x-static_cast<double>(baseX+offsetX);
+        weightsX[offsetX+1]=KeysBicubicKernel(distance,keysParameter);
+        if constexpr(gradients) derivativesX[offsetX+1]=KeysBicubicKernelDerivative(distance,keysParameter);
+    }
     sample = {};
     for (std::int64_t offsetY = -1; offsetY <= 2; ++offsetY) {
         const std::int64_t tapY = baseY + offsetY;
-        if (tapY < 0 || tapY >= static_cast<std::int64_t>(level.extent.height)) {
-            return false;
-        }
         const double wy = KeysBicubicKernel(
             y - static_cast<double>(tapY), keysParameter);
-        const double dwy = KeysBicubicKernelDerivative(
+        double dwy=0;
+        if constexpr(gradients) dwy = KeysBicubicKernelDerivative(
             y - static_cast<double>(tapY), keysParameter);
         for (std::int64_t offsetX = -1; offsetX <= 2; ++offsetX) {
             const std::int64_t tapX = baseX + offsetX;
-            if (tapX < 0 || tapX >= static_cast<std::int64_t>(level.extent.width)) {
-                return false;
-            }
             const std::size_t index = PixelIndex(
                 level.extent,
                 static_cast<std::uint64_t>(tapX),
@@ -273,15 +399,14 @@ bool SampleLevelKeys(
                 level.variance[index] < 0.0) {
                 return false;
             }
-            const double wx = KeysBicubicKernel(
-                x - static_cast<double>(tapX), keysParameter);
-            const double dwx = KeysBicubicKernelDerivative(
-                x - static_cast<double>(tapX), keysParameter);
+            const double wx = weightsX[offsetX+1];
             const double coefficient = wx * wy;
             sample.value += coefficient * level.signal[index];
             sample.variance += coefficient * coefficient * level.variance[index];
-            sample.gradientX += dwx * wy * level.signal[index];
-            sample.gradientY += wx * dwy * level.signal[index];
+            if constexpr(gradients) {
+                sample.gradientX += derivativesX[offsetX+1] * wy * level.signal[index];
+                sample.gradientY += wx * dwy * level.signal[index];
+            }
         }
     }
     return Finite(sample.value) && Finite(sample.variance) &&
@@ -488,6 +613,8 @@ struct PatchStatistics {
     double gradientX = 0.0;
     double gradientY = 0.0;
     std::vector<double> residuals;
+    std::array<double,4> siteSquared {};
+    std::array<std::uint64_t,4> siteCount {};
 };
 
 bool EvaluatePatch(
@@ -497,6 +624,7 @@ bool EvaluatePatch(
     RawCoordinate residualRaw,
     std::uint32_t patchLevelPixels,
     bool calculateNormal,
+    bool calculateFlatPhotometricCost,
     PatchStatistics& statistics) {
     statistics = {};
     if (!request.reference || !request.source || patchLevelPixels == 0u ||
@@ -513,7 +641,9 @@ bool EvaluatePatch(
     double robustCostSum = 0.0;
     double cappedSquaredSum = 0.0;
     std::vector<double> flatRatios;
-    flatRatios.reserve(static_cast<std::size_t>(statistics.nominalCount));
+    if (calculateFlatPhotometricCost) {
+        flatRatios.reserve(static_cast<std::size_t>(statistics.nominalCount));
+    }
 
     for (CfaSite site : kSites) {
         const CfaPyramidLevel* referenceLevel = FindCfaPyramidLevel(
@@ -566,12 +696,12 @@ bool EvaluatePatch(
                 const CfaPlaneCoordinate sourcePlane =
                     request.source->layout.RawToPlane(sourceRaw, site);
                 LevelSample sourceSample;
-                if (!SampleLevelKeys(
-                        *sourceLevel,
-                        sourcePlane.x / levelScale,
-                        sourcePlane.y / levelScale,
-                        request.options.registration.keysBicubicParameter,
-                        sourceSample)) {
+                const bool sampled = (calculateNormal || calculateFlatPhotometricCost)
+                    ? SampleLevelKeys<true>(*sourceLevel,sourcePlane.x/levelScale,sourcePlane.y/levelScale,
+                        request.options.registration.keysBicubicParameter,sourceSample)
+                    : SampleLevelKeys<false>(*sourceLevel,sourcePlane.x/levelScale,sourcePlane.y/levelScale,
+                        request.options.registration.keysBicubicParameter,sourceSample);
+                if (!sampled) {
                     continue;
                 }
                 const double variance =
@@ -587,23 +717,30 @@ bool EvaluatePatch(
                     denominator;
                 if (!Finite(residual)) continue;
                 ++statistics.validCount;
+                // Color contradictions must remain visible even when both
+                // candidates exceed the robust solver's ordinary cost cap.
+                statistics.siteSquared[SiteIndex(site)] += std::min(residual * residual,1e12);
+                ++statistics.siteCount[SiteIndex(site)];
                 robustCostSum += HuberLoss(
                     residual, request.options.registration.registrationHuberDelta);
                 cappedSquaredSum += std::min(
                     residual * residual,
                     request.options.registration.cappedResidualSquared);
 
-                const double gradientRawX =
-                    request.exposureScale * sourceSample.gradientX /
-                    rawPixelsPerLevelPixel;
-                const double gradientRawY =
-                    request.exposureScale * sourceSample.gradientY /
-                    rawPixelsPerLevelPixel;
-                const double flatVariance =
-                    request.options.registration.flatSafeCovarianceRawPixels *
-                    request.options.registration.flatSafeCovarianceRawPixels *
-                    (gradientRawX * gradientRawX + gradientRawY * gradientRawY);
-                flatRatios.push_back(flatVariance / variance);
+                if (calculateFlatPhotometricCost) {
+                    const double gradientRawX =
+                        request.exposureScale * sourceSample.gradientX /
+                        rawPixelsPerLevelPixel;
+                    const double gradientRawY =
+                        request.exposureScale * sourceSample.gradientY /
+                        rawPixelsPerLevelPixel;
+                    const double flatVariance =
+                        request.options.registration.flatSafeCovarianceRawPixels *
+                        request.options.registration.flatSafeCovarianceRawPixels *
+                        (gradientRawX * gradientRawX +
+                         gradientRawY * gradientRawY);
+                    flatRatios.push_back(flatVariance / variance);
+                }
 
                 if (calculateNormal) {
                     const double jacobianX =
@@ -633,10 +770,13 @@ bool EvaluatePatch(
         static_cast<double>(statistics.validCount);
     statistics.cappedChiSquared = cappedSquaredSum /
         static_cast<double>(statistics.validCount);
-    statistics.flatPhotometricCost = Median(std::move(flatRatios));
+    statistics.flatPhotometricCost = calculateFlatPhotometricCost
+        ? Median(std::move(flatRatios))
+        : 0.0;
     statistics.valid = Finite(statistics.robustCost) &&
         Finite(statistics.cappedChiSquared) &&
-        Finite(statistics.flatPhotometricCost);
+        (!calculateFlatPhotometricCost ||
+         Finite(statistics.flatPhotometricCost));
     return true;
 }
 
@@ -687,6 +827,165 @@ void AddUniqueSeed(std::vector<RawCoordinate>& seeds, RawCoordinate seed) {
     seeds.push_back(seed);
 }
 
+void BuildDiscreteCandidates(
+    const LocalMotionDirectionRequest& request,
+    std::uint32_t level,
+    const std::vector<RawCoordinate>& seedsRaw,
+    std::vector<Candidate>& candidates) {
+    candidates.clear();
+    const double rawPerLevelPixel = std::ldexp(2.0, level);
+    const std::uint32_t radius =
+        request.options.registration.searchRadiiFineToCoarse[level];
+    for (RawCoordinate seed : seedsRaw) {
+        for (std::int32_t dy = -static_cast<std::int32_t>(radius);
+             dy <= static_cast<std::int32_t>(radius);
+             ++dy) {
+            for (std::int32_t dx = -static_cast<std::int32_t>(radius);
+                 dx <= static_cast<std::int32_t>(radius);
+                 ++dx) {
+                const RawCoordinate residual {
+                    seed.x + static_cast<double>(dx) * rawPerLevelPixel,
+                    seed.y + static_cast<double>(dy) * rawPerLevelPixel
+                };
+                const bool duplicate = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [residual](const Candidate& existing) {
+                        return std::abs(
+                                   existing.residualRaw.x - residual.x) <=
+                                1.0e-9 &&
+                            std::abs(
+                                   existing.residualRaw.y - residual.y) <=
+                                1.0e-9;
+                    });
+                if (duplicate) continue;
+                Candidate candidate;
+                candidate.residualRaw = residual;
+                candidates.push_back(std::move(candidate));
+            }
+        }
+    }
+}
+
+bool SelectBestAndSecond(
+    const std::vector<Candidate>& candidates,
+    RawCoordinate predictionRaw,
+    double tolerance,
+    Candidate& best,
+    Candidate& second) {
+    std::size_t bestIndex = candidates.size();
+    for (std::size_t index = 0u; index < candidates.size(); ++index) {
+        if (!candidates[index].statistics.valid) continue;
+        if (bestIndex == candidates.size() ||
+            BetterCandidate(
+                candidates[index], candidates[bestIndex], predictionRaw,
+                tolerance)) {
+            bestIndex = index;
+        }
+    }
+    if (bestIndex == candidates.size()) return false;
+    best = candidates[bestIndex];
+    constexpr double minimumSecondDistanceRaw = 2.0;
+    std::size_t secondIndex = candidates.size();
+    for (std::size_t index = 0u; index < candidates.size(); ++index) {
+        if (index == bestIndex || !candidates[index].statistics.valid ||
+            std::sqrt(SquaredNorm(Subtract(
+                candidates[index].residualRaw, best.residualRaw))) + 1.0e-12 <
+                minimumSecondDistanceRaw) {
+            continue;
+        }
+        if (secondIndex == candidates.size() ||
+            BetterCandidate(
+                candidates[index], candidates[secondIndex], predictionRaw,
+                tolerance)) {
+            secondIndex = index;
+        }
+    }
+    second = {};
+    second.statistics.robustCost = std::numeric_limits<double>::infinity();
+    if (secondIndex != candidates.size()) second = candidates[secondIndex];
+    return true;
+}
+
+bool VerifyAcceleratedCandidates(
+    const LocalMotionDirectionRequest& request,
+    RawCoordinate centerRaw,
+    std::uint32_t level,
+    RawCoordinate predictionRaw,
+    std::vector<Candidate>& candidates,
+    Candidate& best,
+    Candidate& second) {
+    std::vector<std::size_t> ranked;
+    ranked.reserve(candidates.size());
+    for (std::size_t index = 0u; index < candidates.size(); ++index) {
+        if (candidates[index].statistics.valid &&
+            Finite(candidates[index].statistics.robustCost)) {
+            ranked.push_back(index);
+        }
+    }
+    if (ranked.empty()) return false;
+    std::stable_sort(
+        ranked.begin(), ranked.end(),
+        [&](std::size_t left, std::size_t right) {
+            return BetterCandidate(
+                candidates[left], candidates[right], predictionRaw,
+                request.options.registration.candidateTieTolerance);
+        });
+
+    // FP32 GPU scores only form a shortlist.  Re-evaluate a minimum rank
+    // window, every numerically close candidate, and enough spatially distinct
+    // candidates in the normative FP64 implementation.  Ambiguous/flat cost
+    // surfaces deliberately verify more work rather than trading safety for
+    // speed.
+    constexpr std::size_t minimumRankedVerification = 16u;
+    constexpr std::size_t minimumSeparatedVerification = 12u;
+    const double acceleratedBest =
+        candidates[ranked.front()].statistics.robustCost;
+    const double guard = std::max(
+        5.0e-4, 5.0e-3 * std::abs(acceleratedBest));
+    std::vector<std::uint8_t> verify(candidates.size(), 0u);
+    std::size_t separated = 0u;
+    const RawCoordinate acceleratedBestResidual =
+        candidates[ranked.front()].residualRaw;
+    for (std::size_t rank = 0u; rank < ranked.size(); ++rank) {
+        const std::size_t index = ranked[rank];
+        const bool isSeparated = std::sqrt(SquaredNorm(Subtract(
+            candidates[index].residualRaw, acceleratedBestResidual))) +
+                1.0e-12 >=
+            2.0;
+        const bool close =
+            candidates[index].statistics.robustCost <= acceleratedBest + guard;
+        if (rank < minimumRankedVerification || close ||
+            (isSeparated && separated < minimumSeparatedVerification)) {
+            verify[index] = 1u;
+            if (isSeparated) ++separated;
+        }
+    }
+
+    const std::uint32_t patch = level == 0u
+        ? request.options.registration.finestPatchPlanePixels
+        : request.options.registration.coarsePatchLevelPixels;
+    for (std::size_t index = 0u; index < candidates.size(); ++index) {
+        if (verify[index] == 0u) {
+            candidates[index].statistics.valid = false;
+            continue;
+        }
+        PatchStatistics authoritative;
+        if (!EvaluatePatch(
+                request, centerRaw, level, candidates[index].residualRaw,
+                patch, false, false, authoritative) ||
+            !authoritative.valid ||
+            authoritative.validFraction <
+                request.options.registration.minimumTileValidFraction) {
+            candidates[index].statistics = {};
+            continue;
+        }
+        candidates[index].statistics = std::move(authoritative);
+    }
+    return SelectBestAndSecond(
+        candidates, predictionRaw,
+        request.options.registration.candidateTieTolerance, best, second);
+}
+
 bool SearchTileAtLevel(
     const LocalMotionDirectionRequest& request,
     RawCoordinate centerRaw,
@@ -730,6 +1029,7 @@ bool SearchTileAtLevel(
                         level,
                         residual,
                         patch,
+                        false,
                         false,
                         candidate.statistics) ||
                     !candidate.statistics.valid ||
@@ -828,6 +1128,7 @@ bool RefineTileSubpixel(
             currentRaw,
             request.options.registration.finestPatchPlanePixels,
             true,
+            false,
             current) ||
         !current.valid ||
         current.validFraction <
@@ -877,6 +1178,7 @@ bool RefineTileSubpixel(
                 proposedRaw,
                 request.options.registration.finestPatchPlanePixels,
                 true,
+                false,
                 proposed) &&
             proposed.valid &&
             proposed.validFraction >=
@@ -892,6 +1194,7 @@ bool RefineTileSubpixel(
                     proposedRaw,
                     request.options.registration.finestPatchPlanePixels,
                     true,
+                    false,
                     proposed) &&
                 proposed.valid &&
                 proposed.validFraction >=
@@ -1112,6 +1415,36 @@ bool EstimateLocalMotionDirection(
     result.nodes.resize(nodeCount);
     std::vector<LevelNodeState> prior(nodeCount);
     std::vector<LevelNodeState> current(nodeCount);
+    auto observedAt=std::chrono::steady_clock::time_point{};
+    const auto observeSearch=[&] {try {
+        if(!request.reportObservation)return;
+        const auto now=std::chrono::steady_clock::now();
+        if(now-observedAt<std::chrono::milliseconds(100))return;
+        observedAt=now;
+        // Only completed wavefronts are inspected; no worker owns these nodes.
+        LocalMotionGrid sample;sample.referenceRawExtent=result.referenceRawExtent;
+        sample.sourceRawExtent=result.sourceRawExtent;sample.globalWarp=result.globalWarp;
+        const auto stride=std::max<std::size_t>(1,(nodeCount+383)/384);
+        for(std::size_t i=0;i<nodeCount;i+=stride)if(current[i].valid) {
+            MotionNode node;node.centerRaw={result.originRawX+(i%result.width)*spacingRaw,
+                result.originRawY+(i/result.width)*spacingRaw};
+            node.residualRaw=current[i].residualRaw;node.state=MotionNodeState::Structured;
+            sample.nodes.push_back(node);
+        }
+        if(!sample.nodes.empty())request.reportObservation(sample,true);
+        }catch(...) { /* Optional observers cannot invalidate a motion solution. */ }
+    };
+    std::unique_ptr<PersistentParallelExecutor> parallel;
+    if (request.workerCount > 1u) {
+        try {
+            parallel = std::make_unique<PersistentParallelExecutor>(
+                request.workerCount);
+        } catch (...) {
+            // Thread creation is an optimization. The exact single-worker
+            // path remains available under process or OS thread pressure.
+            parallel.reset();
+        }
+    }
     const std::uint64_t totalProgressRows =
         static_cast<std::uint64_t>(result.height) *
         (static_cast<std::uint64_t>(
@@ -1131,77 +1464,316 @@ bool EstimateLocalMotionDirection(
             static_cast<std::int32_t>(
                 request.options.registration.pyramidLevels) - 1;
          levelSigned >= 0;
-         --levelSigned) {
+        --levelSigned) {
         const std::uint32_t level = static_cast<std::uint32_t>(levelSigned);
         std::fill(current.begin(), current.end(), LevelNodeState {});
-        for (std::uint32_t gridY = 0u; gridY < result.height; ++gridY) {
-            if (request.shouldCancel && request.shouldCancel()) {
-                result.failure = LocalMotionFailure::NumericalFailure;
-                result.message = "MFD local-motion processing was canceled.";
-                return Fail(error, result.message);
-            }
-            for (std::uint32_t gridX = 0u; gridX < result.width; ++gridX) {
-                const std::size_t index = static_cast<std::size_t>(
-                    gridY * result.width + gridX);
-                const RawCoordinate center {
-                    result.originRawX + gridX * result.spacingRawX,
-                    result.originRawY + gridY * result.spacingRawY
+        if (request.evaluateDiscreteCandidates) {
+            struct AcceleratedNodeBatch {
+                std::size_t index = 0u;
+                RawCoordinate centerRaw;
+                RawCoordinate predictionRaw;
+                std::size_t scoreOffset = 0u;
+                std::vector<Candidate> candidates;
+            };
+            const std::uint64_t diagonalCount =
+                static_cast<std::uint64_t>(result.width) + result.height - 1u;
+            const std::uint64_t progressBase = completedProgressRows;
+            for (std::uint64_t diagonal = 0u;
+                 diagonal < diagonalCount;
+                 ++diagonal) {
+                if (request.shouldCancel && request.shouldCancel()) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message =
+                        "MFD local-motion processing was canceled.";
+                    return Fail(error, result.message);
+                }
+                std::vector<AcceleratedNodeBatch> nodes;
+                std::vector<LocalMotionDiscreteCandidate> accelerated;
+                const std::uint32_t firstX = diagonal >= result.height
+                    ? static_cast<std::uint32_t>(diagonal - result.height + 1u)
+                    : 0u;
+                const std::uint32_t lastX = static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(diagonal, result.width - 1u));
+                nodes.reserve(lastX - firstX + 1u);
+                for (std::uint32_t gridX = firstX;
+                     gridX <= lastX;
+                     ++gridX) {
+                    const std::uint32_t gridY =
+                        static_cast<std::uint32_t>(diagonal) - gridX;
+                    const std::size_t index = static_cast<std::size_t>(
+                        gridY * result.width + gridX);
+                    AcceleratedNodeBatch node;
+                    node.index = index;
+                    node.centerRaw = {
+                        result.originRawX + gridX * result.spacingRawX,
+                        result.originRawY + gridY * result.spacingRawY
+                    };
+                    if (level + 1u <
+                            request.options.registration.pyramidLevels &&
+                        prior[index].valid) {
+                        node.predictionRaw = prior[index].residualRaw;
+                    }
+                    std::vector<RawCoordinate> seeds;
+                    AddUniqueSeed(seeds, node.predictionRaw);
+                    if (level + 1u <
+                            request.options.registration.pyramidLevels &&
+                        prior[index].valid &&
+                        Finite(prior[index].second.statistics.robustCost)) {
+                        AddUniqueSeed(
+                            seeds, prior[index].second.residualRaw);
+                    }
+                    if (gridX > 0u && current[index - 1u].valid) {
+                        AddUniqueSeed(
+                            seeds, current[index - 1u].residualRaw);
+                    }
+                    if (gridY > 0u &&
+                        current[index - result.width].valid) {
+                        AddUniqueSeed(
+                            seeds,
+                            current[index - result.width].residualRaw);
+                    }
+                    if (gridX > 0u && gridY > 0u &&
+                        current[index - result.width - 1u].valid) {
+                        AddUniqueSeed(
+                            seeds,
+                            current[index - result.width - 1u].residualRaw);
+                    }
+                    BuildDiscreteCandidates(
+                        request, level, seeds, node.candidates);
+                    node.scoreOffset = accelerated.size();
+                    const std::uint32_t patch = level == 0u
+                        ? request.options.registration.finestPatchPlanePixels
+                        : request.options.registration.coarsePatchLevelPixels;
+                    for (const Candidate& candidate : node.candidates) {
+                        accelerated.push_back({
+                            node.centerRaw,
+                            candidate.residualRaw,
+                            level,
+                            patch
+                        });
+                    }
+                    nodes.push_back(std::move(node));
+                }
+
+                std::vector<LocalMotionDiscreteScore> scores;
+                std::string acceleratorError;
+                if (!request.evaluateDiscreteCandidates(
+                        request, accelerated, scores, acceleratorError) ||
+                    scores.size() != accelerated.size()) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message = acceleratorError.empty()
+                        ? "The local-motion accelerator returned an invalid score batch."
+                        : acceleratorError;
+                    return Fail(error, result.message);
+                }
+                const auto verifyNode = [&](std::size_t nodeIndex) {
+                    AcceleratedNodeBatch& node = nodes[nodeIndex];
+                    for (std::size_t candidateIndex = 0u;
+                         candidateIndex < node.candidates.size();
+                         ++candidateIndex) {
+                        const LocalMotionDiscreteScore& score =
+                            scores[node.scoreOffset + candidateIndex];
+                        PatchStatistics& statistics =
+                            node.candidates[candidateIndex].statistics;
+                        statistics.valid = score.valid &&
+                            Finite(score.validFraction) &&
+                            Finite(score.robustCost) &&
+                            Finite(score.cappedChiSquared);
+                        statistics.validCount = score.validCount;
+                        statistics.nominalCount =
+                            static_cast<std::uint64_t>(
+                                accelerated[node.scoreOffset + candidateIndex].
+                                    patchLevelPixels) *
+                            accelerated[node.scoreOffset + candidateIndex].
+                                patchLevelPixels *
+                            kSites.size();
+                        statistics.validFraction = score.validFraction;
+                        statistics.robustCost = score.robustCost;
+                        statistics.cappedChiSquared = score.cappedChiSquared;
+                    }
+                    Candidate best;
+                    Candidate second;
+                    if (!VerifyAcceleratedCandidates(
+                            request,
+                            node.centerRaw,
+                            level,
+                            node.predictionRaw,
+                            node.candidates,
+                            best,
+                            second)) {
+                        return;
+                    }
+                    LevelNodeState& state = current[node.index];
+                    state.valid = true;
+                    state.residualRaw = best.residualRaw;
+                    state.predictionBeforeFineRaw = level == 0u
+                        ? node.predictionRaw
+                        : best.residualRaw;
+                    state.best = std::move(best);
+                    state.second = std::move(second);
                 };
-                RawCoordinate prediction {};
-                if (level + 1u < request.options.registration.pyramidLevels &&
-                    prior[index].valid) {
-                    prediction = prior[index].residualRaw;
+                try {
+                    if (parallel) {
+                        parallel->Run(nodes.size(), verifyNode);
+                    } else {
+                        for (std::size_t nodeIndex = 0u;
+                             nodeIndex < nodes.size();
+                             ++nodeIndex) {
+                            verifyNode(nodeIndex);
+                        }
+                    }
+                } catch (const std::bad_alloc&) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message =
+                        "CPU verification of GPU local-motion scores exceeded available memory.";
+                    return Fail(error, result.message);
+                } catch (...) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message =
+                        "CPU verification of GPU local-motion scores failed unexpectedly.";
+                    return Fail(error, result.message);
                 }
-                std::vector<RawCoordinate> seeds;
-                AddUniqueSeed(seeds, prediction);
-                if (level + 1u < request.options.registration.pyramidLevels &&
-                    prior[index].valid &&
-                    Finite(prior[index].second.statistics.robustCost)) {
-                    AddUniqueSeed(seeds, prior[index].second.residualRaw);
+                observeSearch();
+                if (request.reportProgress) {
+                    request.reportProgress(
+                        static_cast<double>(progressBase) /
+                            static_cast<double>(totalProgressRows) +
+                        (static_cast<double>(result.height) /
+                            static_cast<double>(totalProgressRows)) *
+                            (static_cast<double>(diagonal + 1u) /
+                                static_cast<double>(diagonalCount)));
                 }
-                if (gridX > 0u && current[index - 1u].valid) {
-                    AddUniqueSeed(seeds, current[index - 1u].residualRaw);
-                }
-                if (gridY > 0u && current[index - result.width].valid) {
-                    AddUniqueSeed(
-                        seeds, current[index - result.width].residualRaw);
-                }
-                if (gridX > 0u && gridY > 0u &&
-                    current[index - result.width - 1u].valid) {
-                    AddUniqueSeed(
-                        seeds, current[index - result.width - 1u].residualRaw);
-                }
-                Candidate best;
-                Candidate second;
-                if (!SearchTileAtLevel(
-                        request,
-                        center,
-                        level,
-                        seeds,
-                        prediction,
-                        best,
-                        second)) {
-                    continue;
-                }
-                current[index].valid = true;
-                current[index].residualRaw = best.residualRaw;
-                current[index].predictionBeforeFineRaw = level == 0u
-                    ? prediction
-                    : best.residualRaw;
-                current[index].best = std::move(best);
-                current[index].second = std::move(second);
             }
-            ++completedProgressRows;
+            completedProgressRows += result.height;
+            reportProgress();
+        } else {
+            const std::uint64_t diagonalCount =
+                static_cast<std::uint64_t>(result.width) + result.height - 1u;
+            const std::uint64_t progressBase = completedProgressRows;
+            for (std::uint64_t diagonal = 0u;
+                 diagonal < diagonalCount;
+                 ++diagonal) {
+                if (request.shouldCancel && request.shouldCancel()) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message =
+                        "MFD local-motion processing was canceled.";
+                    return Fail(error, result.message);
+                }
+                const std::uint32_t firstX = diagonal >= result.height
+                    ? static_cast<std::uint32_t>(diagonal - result.height + 1u)
+                    : 0u;
+                const std::uint32_t lastX = static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(diagonal, result.width - 1u));
+                const std::size_t nodeCountOnDiagonal = lastX - firstX + 1u;
+                const auto searchNode = [&](std::size_t nodeIndex) {
+                    const std::uint32_t gridX =
+                        firstX + static_cast<std::uint32_t>(nodeIndex);
+                    const std::uint32_t gridY =
+                        static_cast<std::uint32_t>(diagonal) - gridX;
+                    const std::size_t index = static_cast<std::size_t>(
+                        gridY * result.width + gridX);
+                    const RawCoordinate center {
+                        result.originRawX + gridX * result.spacingRawX,
+                        result.originRawY + gridY * result.spacingRawY
+                    };
+                    RawCoordinate prediction {};
+                    if (level + 1u <
+                            request.options.registration.pyramidLevels &&
+                        prior[index].valid) {
+                        prediction = prior[index].residualRaw;
+                    }
+                    std::vector<RawCoordinate> seeds;
+                    AddUniqueSeed(seeds, prediction);
+                    if (level + 1u <
+                            request.options.registration.pyramidLevels &&
+                        prior[index].valid &&
+                        Finite(prior[index].second.statistics.robustCost)) {
+                        AddUniqueSeed(
+                            seeds, prior[index].second.residualRaw);
+                    }
+                    if (gridX > 0u && current[index - 1u].valid) {
+                        AddUniqueSeed(
+                            seeds, current[index - 1u].residualRaw);
+                    }
+                    if (gridY > 0u &&
+                        current[index - result.width].valid) {
+                        AddUniqueSeed(
+                            seeds,
+                            current[index - result.width].residualRaw);
+                    }
+                    if (gridX > 0u && gridY > 0u &&
+                        current[index - result.width - 1u].valid) {
+                        AddUniqueSeed(
+                            seeds,
+                            current[index - result.width - 1u].residualRaw);
+                    }
+                    Candidate best;
+                    Candidate second;
+                    if (!SearchTileAtLevel(
+                            request,
+                            center,
+                            level,
+                            seeds,
+                            prediction,
+                            best,
+                            second)) {
+                        return;
+                    }
+                    current[index].valid = true;
+                    current[index].residualRaw = best.residualRaw;
+                    current[index].predictionBeforeFineRaw = level == 0u
+                        ? prediction
+                        : best.residualRaw;
+                    current[index].best = std::move(best);
+                    current[index].second = std::move(second);
+                };
+                try {
+                    if (parallel) {
+                        parallel->Run(nodeCountOnDiagonal, searchNode);
+                    } else {
+                        for (std::size_t nodeIndex = 0u;
+                             nodeIndex < nodeCountOnDiagonal;
+                             ++nodeIndex) {
+                            searchNode(nodeIndex);
+                        }
+                    }
+                } catch (const std::bad_alloc&) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message =
+                        "CPU local-motion search exceeded available memory.";
+                    return Fail(error, result.message);
+                } catch (...) {
+                    result.failure = LocalMotionFailure::NumericalFailure;
+                    result.message =
+                        "CPU local-motion search failed unexpectedly.";
+                    return Fail(error, result.message);
+                }
+                observeSearch();
+                if (request.reportProgress) {
+                    request.reportProgress(
+                        static_cast<double>(progressBase) /
+                            static_cast<double>(totalProgressRows) +
+                        (static_cast<double>(result.height) /
+                            static_cast<double>(totalProgressRows)) *
+                            (static_cast<double>(diagonal + 1u) /
+                                static_cast<double>(diagonalCount)));
+                }
+            }
+            completedProgressRows += result.height;
             reportProgress();
         }
         prior.swap(current);
     }
 
-    for (std::uint32_t gridY = 0u; gridY < result.height; ++gridY) {
+    const std::uint64_t refinementProgressBase = completedProgressRows;
+    std::atomic<std::uint64_t> refinedRows { 0u };
+    std::atomic<bool> refinementCanceled { false };
+    std::mutex refinementProgressMutex;
+    const auto refineRow = [&](std::size_t rowIndex) {
+        const std::uint32_t gridY = static_cast<std::uint32_t>(rowIndex);
         if (request.shouldCancel && request.shouldCancel()) {
-            result.failure = LocalMotionFailure::NumericalFailure;
-            result.message = "MFD local-motion processing was canceled.";
-            return Fail(error, result.message);
+            refinementCanceled.store(true, std::memory_order_relaxed);
+            return;
         }
         for (std::uint32_t gridX = 0u; gridX < result.width; ++gridX) {
             const std::size_t index = static_cast<std::size_t>(
@@ -1300,6 +1872,7 @@ bool EstimateLocalMotionDirection(
                     prior[index].predictionBeforeFineRaw,
                     request.options.registration.finestPatchPlanePixels,
                     false,
+                    true,
                     flat) ||
                 !flat.valid ||
                 flat.validFraction <
@@ -1342,9 +1915,43 @@ bool EstimateLocalMotionDirection(
             node.confidence = ResidualConfidence(node.cappedChiSquared) *
                 CoverageConfidence(node.validFraction);
         }
-        ++completedProgressRows;
-        reportProgress();
+        const std::uint64_t completed =
+            refinedRows.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (request.reportProgress) {
+            std::lock_guard<std::mutex> lock(refinementProgressMutex);
+            request.reportProgress(
+                static_cast<double>(refinementProgressBase + completed) /
+                static_cast<double>(totalProgressRows));
+        }
+    };
+    try {
+        if (parallel) {
+            parallel->Run(result.height, refineRow);
+        } else {
+            for (std::uint32_t gridY = 0u;
+                 gridY < result.height;
+                 ++gridY) {
+                refineRow(gridY);
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        result.failure = LocalMotionFailure::NumericalFailure;
+        result.message =
+            "MFD local-motion subpixel refinement exceeded available memory.";
+        return Fail(error, result.message);
+    } catch (...) {
+        result.failure = LocalMotionFailure::NumericalFailure;
+        result.message =
+            "MFD local-motion subpixel refinement failed unexpectedly.";
+        return Fail(error, result.message);
     }
+    if (refinementCanceled.load(std::memory_order_relaxed)) {
+        result.failure = LocalMotionFailure::NumericalFailure;
+        result.message = "MFD local-motion processing was canceled.";
+        return Fail(error, result.message);
+    }
+    completedProgressRows += result.height;
+    reportProgress();
 
     for (MotionNode& node : result.nodes) {
         if (node.gridX == 0u) {
@@ -1402,6 +2009,7 @@ bool EstimateLocalMotionDirection(
                 prediction,
                 request.options.registration.finestPatchPlanePixels,
                 false,
+                true,
                 predictedFlat) &&
             predictedFlat.valid &&
             predictedFlat.validCount == predictedFlat.nominalCount &&
@@ -1599,6 +2207,65 @@ bool InvertAffineModel(
     return Finite(inverse.translationRaw);
 }
 
+bool RefineBidirectionalMotionPoint(const BidirectionalLocalMotionRequest& request,
+    RawCoordinate referenceRaw,RawCoordinate sourceRaw,MotionNode& result) {
+    result={};
+    if(!request.reference||!request.alternate||!Finite(request.exposureScale)||
+       request.exposureScale<=0||!Finite(referenceRaw)||!Finite(sourceRaw)||
+       (request.shouldCancel&&request.shouldCancel()))return false;
+    LocalMotionDirectionRequest forward;
+    forward.reference=request.reference;forward.source=request.alternate;
+    forward.globalWarp=request.referenceToAlternate;forward.exposureScale=request.exposureScale;
+    forward.options=request.options;forward.globalCovariance=request.forwardGlobalCovariance;
+    forward.shouldCancel=request.shouldCancel;
+    const auto seed=Subtract(sourceRaw,forward.globalWarp.Map(referenceRaw));
+    PatchStatistics before;
+    if(!EvaluatePatch(forward,referenceRaw,0,seed,forward.options.registration.finestPatchPlanePixels,
+        true,false,before)||!before.valid||before.robustCost<.6)return false;
+    RefinedTile refined;
+    if(!RefineTileSubpixel(forward,referenceRaw,seed,refined)||!refined.observable||
+       refined.statistics.robustCost>=before.robustCost*.95||
+       refined.statistics.validCount<before.validCount)return false;
+    const auto correction=Subtract(refined.residualRaw,seed);
+    const double displacement=std::sqrt(SquaredNorm(correction));
+    if(displacement<.02||displacement>1.5)return false;
+    for(unsigned c=0;c<4;++c) {
+        if(!before.siteCount[c]||refined.statistics.siteCount[c]<before.siteCount[c])return false;
+        if(refined.statistics.siteSquared[c]/refined.statistics.siteCount[c]>
+            before.siteSquared[c]/before.siteCount[c]*1.02+.02)return false;
+    }
+    if(request.shouldCancel&&request.shouldCancel())return false;
+    LocalMotionDirectionRequest reverse;
+    reverse.reference=request.alternate;reverse.source=request.reference;
+    if(!InvertAffineModel(forward.globalWarp,reverse.globalWarp))return false;
+    reverse.exposureScale=1/request.exposureScale;reverse.options=request.options;
+    reverse.globalCovariance=request.reverseGlobalCovariance;reverse.shouldCancel=request.shouldCancel;
+    const auto mapped=Add(forward.globalWarp.Map(referenceRaw),refined.residualRaw);
+    RefinedTile reversed;
+    if(!RefineTileSubpixel(reverse,mapped,Subtract(referenceRaw,reverse.globalWarp.Map(mapped)),reversed)||
+       !reversed.observable)return false;
+    const auto closure=Subtract(Add(reverse.globalWarp.Map(mapped),reversed.residualRaw),referenceRaw);
+    auto covariance=AddCovariance(refined.localCovarianceRaw,reversed.localCovarianceRaw);
+    const auto& p=request.options.registration;
+    const double floor=p.forwardBackwardCovarianceFloorRawPixels*p.forwardBackwardCovarianceFloorRawPixels;
+    covariance.xxRawPixelsSquared+=floor;covariance.yyRawPixelsSquared+=floor;
+    SymmetricRawCovariance inverse;
+    if(!InvertCovariance(covariance,inverse))return false;
+    const double mahalanobis=std::max(0.,QuadraticForm(closure,inverse));
+    if(!Finite(mahalanobis)||mahalanobis>p.forwardBackwardMahalanobisHardLimit||
+       std::sqrt(SquaredNorm(closure))>p.forwardBackwardEuclideanHardLimitRawPixels)return false;
+    result.centerRaw=referenceRaw;result.residualRaw=refined.residualRaw;
+    result.discreteResidualRaw=seed;result.covarianceRaw=refined.localCovarianceRaw;
+    result.state=MotionNodeState::Structured;result.rejectReason=MotionNodeRejectReason::None;
+    result.robustCost=refined.statistics.robustCost;result.secondBestCost=before.robustCost;
+    result.validFraction=refined.statistics.validFraction;result.cappedChiSquared=refined.statistics.cappedChiSquared;
+    result.confidence=ResidualConfidence(result.cappedChiSquared)*CoverageConfidence(result.validFraction)*
+        std::exp(-.5*std::max(mahalanobis-2.,0.));
+    result.forwardBackwardErrorRaw=closure;result.forwardBackwardMahalanobis=mahalanobis;
+    result.forwardBackwardEuclideanRaw=std::sqrt(SquaredNorm(closure));
+    return result.confidence>.2;
+}
+
 bool EstimateBidirectionalLocalMotion(
     const BidirectionalLocalMotionRequest& request,
     BidirectionalLocalMotionResult& result,
@@ -1616,6 +2283,16 @@ bool EstimateBidirectionalLocalMotion(
         return Fail(error, result.message);
     }
     if (request.reportProgress) request.reportProgress(0.0);
+
+    AffineModel inverseGlobal;
+    std::string localError;
+    if (!InvertAffineModel(
+            request.referenceToAlternate, inverseGlobal, &localError)) {
+        result.failure = LocalMotionFailure::InvalidInput;
+        result.message = localError;
+        return Fail(error, result.message);
+    }
+
     LocalMotionDirectionRequest forwardRequest;
     forwardRequest.reference = request.reference;
     forwardRequest.source = request.alternate;
@@ -1623,27 +2300,13 @@ bool EstimateBidirectionalLocalMotion(
     forwardRequest.exposureScale = request.exposureScale;
     forwardRequest.globalCovariance = request.forwardGlobalCovariance;
     forwardRequest.options = request.options;
+    forwardRequest.workerCount = request.evaluateDiscreteCandidates
+        ? std::max(1u, request.workerCount)
+        : std::max(1u, request.workerCount / 2u);
+    forwardRequest.evaluateDiscreteCandidates =
+        request.evaluateDiscreteCandidates;
     forwardRequest.shouldCancel = request.shouldCancel;
-    forwardRequest.reportProgress = [&request](double fraction) {
-        if (request.reportProgress) {
-            request.reportProgress(0.45 * std::clamp(fraction, 0.0, 1.0));
-        }
-    };
-    std::string localError;
-    if (!EstimateLocalMotionDirection(
-            forwardRequest, result.forward, &localError)) {
-        result.failure = result.forward.failure;
-        result.message = "MFD forward local registration failed: " + localError;
-        return Fail(error, result.message);
-    }
-
-    AffineModel inverseGlobal;
-    if (!InvertAffineModel(
-            request.referenceToAlternate, inverseGlobal, &localError)) {
-        result.failure = LocalMotionFailure::InvalidInput;
-        result.message = localError;
-        return Fail(error, result.message);
-    }
+    forwardRequest.reportObservation = request.reportObservation;
     LocalMotionDirectionRequest reverseRequest;
     reverseRequest.reference = request.alternate;
     reverseRequest.source = request.reference;
@@ -1651,17 +2314,119 @@ bool EstimateBidirectionalLocalMotion(
     reverseRequest.exposureScale = 1.0 / request.exposureScale;
     reverseRequest.globalCovariance = request.reverseGlobalCovariance;
     reverseRequest.options = request.options;
+    reverseRequest.workerCount = forwardRequest.workerCount;
+    reverseRequest.evaluateDiscreteCandidates =
+        request.evaluateDiscreteCandidates;
     reverseRequest.shouldCancel = request.shouldCancel;
-    reverseRequest.reportProgress = [&request](double fraction) {
-        if (request.reportProgress) {
-            request.reportProgress(
-                0.45 + 0.45 * std::clamp(fraction, 0.0, 1.0));
+    bool forwardValid = false;
+    bool reverseValid = false;
+    std::string forwardError;
+    std::string reverseError;
+    if (request.workerCount >= 2u &&
+        !request.evaluateDiscreteCandidates) {
+        std::atomic<double> forwardFraction { 0.0 };
+        std::atomic<double> reverseFraction { 0.0 };
+        std::mutex progressMutex;
+        const auto reportCombined = [&]() {
+            if (!request.reportProgress) return;
+            std::lock_guard<std::mutex> lock(progressMutex);
+            request.reportProgress(0.45 * (
+                forwardFraction.load(std::memory_order_relaxed) +
+                reverseFraction.load(std::memory_order_relaxed)));
+        };
+        forwardRequest.reportProgress = [&](double fraction) {
+            forwardFraction.store(
+                std::clamp(fraction, 0.0, 1.0),
+                std::memory_order_relaxed);
+            reportCombined();
+        };
+        reverseRequest.reportProgress = [&](double fraction) {
+            reverseFraction.store(
+                std::clamp(fraction, 0.0, 1.0),
+                std::memory_order_relaxed);
+            reportCombined();
+        };
+
+        std::thread reverseWorker;
+        try {
+            reverseWorker = std::thread([&]() {
+                try {
+                    reverseValid = EstimateLocalMotionDirection(
+                        reverseRequest, result.reverse, &reverseError);
+                } catch (const std::bad_alloc&) {
+                    reverseError =
+                        "MFD reverse local registration allocation failed.";
+                } catch (...) {
+                    reverseError =
+                        "MFD reverse local registration failed unexpectedly.";
+                }
+            });
+        } catch (...) {
+            // Thread creation is an optimization only. Preserve the exact
+            // sequential reference path when the host cannot create one.
         }
-    };
-    if (!EstimateLocalMotionDirection(
-            reverseRequest, result.reverse, &localError)) {
+        if (reverseWorker.joinable()) {
+            try {
+                forwardValid = EstimateLocalMotionDirection(
+                    forwardRequest, result.forward, &forwardError);
+            } catch (const std::bad_alloc&) {
+                forwardError =
+                    "MFD forward local registration allocation failed.";
+            } catch (...) {
+                forwardError =
+                    "MFD forward local registration failed unexpectedly.";
+            }
+            reverseWorker.join();
+        } else {
+            forwardRequest.reportProgress = [&request](double fraction) {
+                if (request.reportProgress) {
+                    request.reportProgress(
+                        0.45 * std::clamp(fraction, 0.0, 1.0));
+                }
+            };
+            reverseRequest.reportProgress = [&request](double fraction) {
+                if (request.reportProgress) {
+                    request.reportProgress(
+                        0.45 + 0.45 * std::clamp(fraction, 0.0, 1.0));
+                }
+            };
+            forwardValid = EstimateLocalMotionDirection(
+                forwardRequest, result.forward, &forwardError);
+            if (forwardValid) {
+                reverseValid = EstimateLocalMotionDirection(
+                    reverseRequest, result.reverse, &reverseError);
+            }
+        }
+    } else {
+        forwardRequest.reportProgress = [&request](double fraction) {
+            if (request.reportProgress) {
+                request.reportProgress(
+                    0.45 * std::clamp(fraction, 0.0, 1.0));
+            }
+        };
+        reverseRequest.reportProgress = [&request](double fraction) {
+            if (request.reportProgress) {
+                request.reportProgress(
+                    0.45 + 0.45 * std::clamp(fraction, 0.0, 1.0));
+            }
+        };
+        forwardValid = EstimateLocalMotionDirection(
+            forwardRequest, result.forward, &forwardError);
+        if (forwardValid) {
+            reverseValid = EstimateLocalMotionDirection(
+                reverseRequest, result.reverse, &reverseError);
+        }
+    }
+    if (!forwardValid) {
+        result.failure = result.forward.failure;
+        result.message =
+            "MFD forward local registration failed: " + forwardError;
+        return Fail(error, result.message);
+    }
+    if (!reverseValid) {
         result.failure = result.reverse.failure;
-        result.message = "MFD reverse local registration failed: " + localError;
+        result.message =
+            "MFD reverse local registration failed: " + reverseError;
         return Fail(error, result.message);
     }
 

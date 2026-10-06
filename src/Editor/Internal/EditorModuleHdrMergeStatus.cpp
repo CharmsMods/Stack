@@ -134,7 +134,7 @@ std::vector<int> EditorModule::CollectHdrMergeNodesForOutput(int outputNodeId) c
             continue;
         }
 
-        const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+        const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
         if (!node) {
             continue;
         }
@@ -142,11 +142,11 @@ std::vector<int> EditorModule::CollectHdrMergeNodesForOutput(int outputNodeId) c
             hdrNodes.push_back(nodeId);
         }
 
-        for (const EditorNodeGraph::SocketDefinition& socket : m_NodeGraph.GetSockets(*node, true)) {
+        for (const EditorNodeGraph::SocketDefinition& socket : m_Project->graph.GetSockets(*node, true)) {
             if (socket.direction != EditorNodeGraph::SocketDirection::Input) {
                 continue;
             }
-            if (const EditorNodeGraph::Link* input = m_NodeGraph.FindAnyInputLink(nodeId, socket.id)) {
+            if (const EditorNodeGraph::Link* input = m_Project->graph.FindAnyInputLink(nodeId, socket.id)) {
                 pending.push_back(input->fromNodeId);
             }
         }
@@ -160,9 +160,9 @@ EditorModule::HdrMergeConnectionTopology EditorModule::ResolveHdrMergeConnection
         return topology;
     }
 
-    topology.hasInput1 = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kHdrMergeInput1SocketId) != nullptr;
-    topology.hasInput2 = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kHdrMergeInput2SocketId) != nullptr;
-    topology.hasInput3 = m_NodeGraph.FindInputLink(node.id, EditorNodeGraph::kHdrMergeInput3SocketId) != nullptr;
+    topology.hasInput1 = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kHdrMergeInput1SocketId) != nullptr;
+    topology.hasInput2 = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kHdrMergeInput2SocketId) != nullptr;
+    topology.hasInput3 = m_Project->graph.FindInputLink(node.id, EditorNodeGraph::kHdrMergeInput3SocketId) != nullptr;
     topology.hasGap = topology.hasInput3 && !topology.hasInput2;
     topology.usesInput3 = topology.hasInput1 && topology.hasInput2 && topology.hasInput3 && !topology.hasGap;
     if (topology.hasInput1 && topology.hasInput2) {
@@ -188,8 +188,8 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
 
     const auto resolveInputContext = [&](int sourceNodeId) {
         HdrMergeInputContext context;
-        const int referenceNodeId = m_NodeGraph.ResolveReferenceSourceNodeId(sourceNodeId, EditorNodeGraph::kImageOutputSocketId);
-        const EditorNodeGraph::Node* referenceNode = m_NodeGraph.FindNode(referenceNodeId);
+        const int referenceNodeId = m_Project->graph.ResolveReferenceSourceNodeId(sourceNodeId, EditorNodeGraph::kImageOutputSocketId);
+        const EditorNodeGraph::Node* referenceNode = m_Project->graph.FindNode(referenceNodeId);
         if (!referenceNode) {
             return context;
         }
@@ -203,10 +203,10 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
                 referenceNode->kind == EditorNodeGraph::NodeKind::RawDecode
                     ? referenceNode->rawDecode.settings.exposureStops
                     : referenceNode->rawDevelop.settings.exposureStops;
-            const EditorNodeGraph::Link* rawInput = m_NodeGraph.FindInputLink(referenceNode->id, EditorNodeGraph::kRawInputSocketId);
+            const EditorNodeGraph::Link* rawInput = m_Project->graph.FindInputLink(referenceNode->id, EditorNodeGraph::kRawInputSocketId);
             std::unordered_set<int> visitedRawNodes;
             while (rawInput && visitedRawNodes.insert(rawInput->fromNodeId).second) {
-                const EditorNodeGraph::Node* rawNode = m_NodeGraph.FindNode(rawInput->fromNodeId);
+                const EditorNodeGraph::Node* rawNode = m_Project->graph.FindNode(rawInput->fromNodeId);
                 if (!rawNode) {
                     break;
                 }
@@ -218,7 +218,7 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
                 if (rawNode->kind != EditorNodeGraph::NodeKind::RawNeuralDenoise) {
                     break;
                 }
-                rawInput = m_NodeGraph.FindInputLink(rawNode->id, EditorNodeGraph::kRawInputSocketId);
+                rawInput = m_Project->graph.FindInputLink(rawNode->id, EditorNodeGraph::kRawInputSocketId);
             }
         }
 
@@ -233,12 +233,12 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
         input.socketId = socketId;
         input.label = label;
         input.active = active;
-        const EditorNodeGraph::Link* link = m_NodeGraph.FindInputLink(node.id, socketId);
+        const EditorNodeGraph::Link* link = m_Project->graph.FindInputLink(node.id, socketId);
         input.connected = link != nullptr;
         input.sourceNodeId = link ? link->fromNodeId : -1;
         input.sourceLabel = "Missing";
         input.compatible = true;
-        if (const EditorNodeGraph::Node* sourceNode = link ? m_NodeGraph.FindNode(link->fromNodeId) : nullptr) {
+        if (const EditorNodeGraph::Node* sourceNode = link ? m_Project->graph.FindNode(link->fromNodeId) : nullptr) {
             input.sourceLabel = sourceNode->title.empty() ? std::string("Node ") + std::to_string(sourceNode->id) : sourceNode->title;
         } else if (!active) {
             input.sourceLabel = "Inactive";
@@ -366,7 +366,7 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
         }
     }
 
-    const int previewOutputNodeId = m_NodeGraph.ResolvePreviewOutputNodeId();
+    const int previewOutputNodeId = m_Project->graph.ResolvePreviewOutputNodeId();
     if (previewOutputNodeId > 0) {
         const std::vector<int> activeHdrNodes = CollectHdrMergeNodesForOutput(previewOutputNodeId);
         status.feedsActiveOutput = std::find(activeHdrNodes.begin(), activeHdrNodes.end(), node.id) != activeHdrNodes.end();
@@ -458,7 +458,7 @@ EditorModule::HdrMergeNodeStatus EditorModule::BuildHdrMergeNodeStatus(const Edi
 }
 
 EditorModule::HdrMergeNodeStatus EditorModule::GetHdrMergeNodeStatus(int nodeId) const {
-    const EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    const EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::HdrMerge) {
         return {};
     }

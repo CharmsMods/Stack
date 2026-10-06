@@ -102,6 +102,7 @@ bool DeserializeToneCurveAutoAuthoredState(const json& value, ToneCurveLayer::Au
 
 json ToneCurveLayer::Serialize() const {
     json result{
+        { "luminanceTone", Stack::RawRecipe::SerializeSceneTone(m_SceneTone) },
         { "type", "ToneCurve" },
         { "mode", static_cast<int>(m_Mode) },
         { "domain", static_cast<int>(m_Domain) },
@@ -167,6 +168,11 @@ json ToneCurveLayer::Serialize() const {
         { "logMinEv", m_LogMinEv },
         { "logMaxEv", m_LogMaxEv },
         { "middleGrey", m_MiddleGrey },
+        { "curveRangeMode", Stack::RawRecipe::kFinishToneRangeExtendedSceneV1 },
+        { "inputWorkingSpace", m_LumaIsRec2020
+            ? "linear-rec2020-d65"
+            : "linear-srgb-d65" },
+        { "truthfulV2SignedMath", m_TruthfulV2SignedMath },
         { "lastAutoAuthoredStateValid", m_LastAutoAuthoredStateValid },
         { "lastAutoAuthoredState", m_LastAutoAuthoredStateValid ? SerializeToneCurveAutoAuthoredState(m_LastAutoAuthoredState) : json::object() }
     };
@@ -177,13 +183,15 @@ json ToneCurveLayer::Serialize() const {
 }
 
 void ToneCurveLayer::Deserialize(const json& j) {
+    m_SceneTone = Stack::RawRecipe::ReadSceneTone(j.value("luminanceTone", json::object()));
     const std::string type = j.value("type", std::string("ToneCurve"));
     if (type != "ToneCurve") {
         ResetLinear();
         return;
     }
+    const int pointCurveSetVersion = j.value("pointCurveSetVersion", 0);
     m_PointCurveSetEnabled =
-        j.value("pointCurveSetVersion", 0) == 1 &&
+        pointCurveSetVersion == 2 &&
         j.contains("pointCurves") &&
         j["pointCurves"].is_object();
     m_PointCurveSet = m_PointCurveSetEnabled
@@ -195,6 +203,11 @@ void ToneCurveLayer::Deserialize(const json& j) {
     if (j.contains("domain")) {
         m_Domain = static_cast<ToneCurveDomain>(std::clamp(j["domain"].get<int>(), 0, 1));
     }
+    m_ExtendedSceneRange = true;
+    m_LumaIsRec2020 = j.value(
+        "inputWorkingSpace",
+        std::string("linear-srgb-d65")) == "linear-rec2020-d65";
+    m_TruthfulV2SignedMath = j.value("truthfulV2SignedMath", false);
     if (j.contains("samplingBasis")) {
         m_SamplingBasis = static_cast<ToneCurveSamplingBasis>(std::clamp(j["samplingBasis"].get<int>(), 0, 1));
     }

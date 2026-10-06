@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Editor/LayerRegistry.h"
+#include "Graph/LayerIdentity.h"
 #include "Editor/NodeGraph/NodeGraphModelTypes.h"
 #include "ThirdParty/json.hpp"
 
@@ -27,6 +27,8 @@ enum class TimelineInterpolation {
 struct AnimatableParameterTarget {
     int nodeId = -1;
     std::string parameterId;
+    std::string graphId = "project";
+    std::string nodeUuid;
 };
 
 struct AnimatableParameterDefinition {
@@ -75,7 +77,7 @@ std::string BuildTargetKey(const AnimatableParameterTarget& target);
 
 std::vector<AnimatableParameterDefinition> CollectAnimatableParametersForNode(
     const EditorNodeGraph::Node& node,
-    const LayerBase* layer = nullptr);
+    const LayerBase* layer = nullptr, const std::string& graphId = "project");
 
 // Returns the same declarative parameter catalog used by the timeline without
 // requiring a live node instance. The unified node-definition registry uses
@@ -125,6 +127,6 @@ bool ApplyFrameEvaluationContextToLayerJson(
     const FrameEvaluationContext& context,
     int nodeId,
     LayerType layerType,
-    nlohmann::json& layerJson);
+    nlohmann::json& layerJson, const std::string& graphId = "project", const std::string& nodeUuid = {});
 
 } // namespace Stack::Timeline

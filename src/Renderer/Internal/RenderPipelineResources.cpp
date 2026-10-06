@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -51,7 +52,10 @@ RenderPipeline::RenderPipeline()
       m_RawDevelopmentRgbDenoiseBlurProgram(0),
       m_RawDevelopmentRgbDenoiseBandProgram(0),
       m_RawDevelopmentRgbDenoiseReconstructProgram(0),
-      m_RawDevelopmentExposureProgram(0)
+      m_RawDevelopmentExposureProgram(0),
+      m_RawDevelopmentColorWarpProgram(0),
+      m_RawDevelopmentColorWarpProxyProgram(0),
+      m_RawDevelopmentCropProgram(0)
 {}
 
 RenderPipeline::~RenderPipeline() {
@@ -63,23 +67,11 @@ void RenderPipeline::Shutdown() {
         return;
     }
     m_Shutdown = true;
+    m_RawZoneAreaRenderer.Clear();
 
-    if (m_RestormerAsyncCancel) {
-        m_RestormerAsyncCancel->store(true, std::memory_order_relaxed);
-    }
-    if (m_RestormerAsyncFuture.valid()) {
-        try {
-            m_RestormerAsyncFuture.wait();
-            (void)m_RestormerAsyncFuture.get();
-        } catch (...) {
-            // Shutdown must remain noexcept even if an asynchronous provider
-            // surfaced an exception through its future.
-        }
-    }
-    m_RestormerAsyncPending = false;
-    m_RestormerAsyncModelFingerprint = 0;
-    m_RestormerAsyncApplicationFingerprint = 0;
-    m_RestormerAsyncCancel.reset();
+    // Externally bound continuations belong to the render worker's owner map.
+    // Destroying a temporary pipeline must not cancel another owner's job.
+    m_DefaultRawRgbDenoiseState->CancelAndWait();
 
     CleanupFBOs();
     InvalidateGraphCaches();
@@ -91,6 +83,7 @@ void RenderPipeline::Shutdown() {
     ClearRawDevelopmentLocalRangeOverlay();
     ClearRawDevelopmentLocalRangeSelectionBits();
     ClearRawDevelopmentLocalRangeTargetPreviewSelection();
+    ReleaseRawDevelopmentGradingScopeReadbackResources();
 
     for (auto& [nodeId, rawPipeline] : m_RawPipelines) {
         (void)nodeId;
@@ -98,6 +91,7 @@ void RenderPipeline::Shutdown() {
     }
     m_RawPipelines.clear();
     m_RawDataCache.clear();
+    m_RawSharedSourceData.clear();
     m_RawDataCachePaths.clear();
     m_RawPreviewDataCache.clear();
     m_RawPreviewDataCacheKeys.clear();
@@ -118,6 +112,7 @@ void RenderPipeline::Shutdown() {
     deleteProgram(m_MaskProgram);
     deleteProgram(m_MaskCombineProgram);
     deleteProgram(m_MaskBlendProgram);
+    deleteProgram(m_RawGradientBlendProgram);
     deleteProgram(m_MixProgram);
     deleteProgram(m_MaskUtilityProgram);
     deleteProgram(m_ImageToMaskProgram);
@@ -141,6 +136,9 @@ void RenderPipeline::Shutdown() {
     deleteProgram(m_AutoGainStatsProgram);
     deleteProgram(m_RawDevelopmentToneCurveProgram);
     deleteProgram(m_RawDevelopmentLocalRangeProgram);
+    deleteProgram(m_RawSpatialInitProgram);
+    deleteProgram(m_RawSpatialFilterProgram);
+    deleteProgram(m_RawSpatialApplyProgram);
     deleteProgram(m_RawDevelopmentLocalRangeOverlayProgram);
     deleteProgram(m_RawDevelopmentLocalRangeQualifierProgram);
     deleteProgram(m_RawDevelopmentRgbDenoiseConvertProgram);
@@ -148,6 +146,20 @@ void RenderPipeline::Shutdown() {
     deleteProgram(m_RawDevelopmentRgbDenoiseBandProgram);
     deleteProgram(m_RawDevelopmentRgbDenoiseReconstructProgram);
     deleteProgram(m_RawDevelopmentExposureProgram);
+    deleteProgram(m_RawDevelopmentColorWarpProgram);
+    deleteProgram(m_RawDevelopmentColorWarpProxyProgram);
+    deleteProgram(m_RawDevelopmentCropProgram);
+    const auto deleteColorWarpMaskTexture = [](unsigned int& texture) {
+        if (texture != 0) {
+            glDeleteTextures(1, &texture);
+            texture = 0;
+        }
+    };
+    deleteColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.gateTexture);
+    deleteColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.supportTexture);
+    deleteColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.boundaryTexture);
+    deleteColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.guideTexture);
+    m_RawDevelopmentColorWarpMaskCache = {};
 
     m_GpuFft.Shutdown();
     m_Quad.Shutdown();
@@ -175,13 +187,27 @@ void RenderPipeline::CleanupFBOs() {
     if (m_PongTexture) { glDeleteTextures(1, &m_PongTexture); m_PongTexture = 0; }
 }
 
-void RenderPipeline::InvalidateGraphCaches() {
+void RenderPipeline::InvalidateGraphCaches(bool preserveRawDevelopStages) {
     DestroyGraphCache(m_GraphImageCache);
     DestroyGraphCache(m_GraphMaskCache);
     DestroyFrequencyCache();
     m_GraphScalarCache.clear();
     DestroyGraphCache(m_LutTextureCache);
-    DestroyRawDevelopStageCache();
+    if (!preserveRawDevelopStages) {
+        m_HasProvisionalRawRgbDenoiseOutput = false;
+        DestroyRawDevelopStageCache();
+        auto clearColorWarpMaskTexture = [](unsigned int& texture) {
+            if (texture != 0u) {
+                glDeleteTextures(1, &texture);
+                texture = 0u;
+            }
+        };
+        clearColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.gateTexture);
+        clearColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.supportTexture);
+        clearColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.boundaryTexture);
+        clearColorWarpMaskTexture(m_RawDevelopmentColorWarpMaskCache.guideTexture);
+        m_RawDevelopmentColorWarpMaskCache = {};
+    }
     m_LastGraphImageCacheHits.clear();
     m_AutoGainSceneStatsCache.clear();
 }
@@ -330,7 +356,11 @@ void RenderPipeline::LoadSourceFromPixels(const unsigned char* data, int w, int 
         return;
     }
 
-    InvalidateGraphCaches();
+    // A null source is a self-sizing graph source such as RAW Development.
+    // Its stage fingerprints own source identity and output resolution, so a
+    // proxy/native canvas transition must not erase otherwise valid entries.
+    // Generic graph caches still depend on the current canvas and are reset.
+    InvalidateGraphCaches(data == nullptr);
     if (m_SourceTexture) {
         glDeleteTextures(1, &m_SourceTexture);
         m_SourceTexture = 0;
@@ -391,14 +421,14 @@ void RenderPipeline::LoadSourceFromSharedPixels(const SharedPixelBuffer& data, i
         m_BaseCanvasHeight == targetHeight &&
         m_SourceChannels == ch &&
         m_SourceFingerprint == incomingFingerprint &&
-        m_SourcePixelsShared == data.bytes &&
         m_SourcePixels.empty()) {
+        m_SourcePixelsShared = data.bytes;
         m_Width = m_BaseCanvasWidth;
         m_Height = m_BaseCanvasHeight;
         return;
     }
 
-    InvalidateGraphCaches();
+    InvalidateGraphCaches(data.empty());
     if (m_SourceTexture) {
         glDeleteTextures(1, &m_SourceTexture);
         m_SourceTexture = 0;
@@ -478,6 +508,7 @@ void RenderPipeline::Clear() {
     InvalidateGraphCaches();
     m_RawPipelines.clear();
     m_RawDataCache.clear();
+    m_RawSharedSourceData.clear();
     m_RawDataCachePaths.clear();
     m_RawPreviewDataCache.clear();
     m_RawPreviewDataCacheKeys.clear();
@@ -486,6 +517,7 @@ void RenderPipeline::Clear() {
     ClearRawDevelopmentLocalRangeSelectionBits();
     ClearRawDevelopmentLocalRangeTargetPreviewSelection();
     ClearRawDevelopmentLocalRangeTargetSample();
+    ReleaseRawDevelopmentGradingScopeReadbackResources();
     m_RawDevelopmentLocalSuggestionImage = {};
 }
 
@@ -551,6 +583,26 @@ void RenderPipeline::ClearRawDevelopmentLocalRangeTargetPreviewSelection() {
     m_RawDevelopmentLocalRangeTargetPreviewMetrics = {};
 }
 
+void RenderPipeline::ReleaseRawDevelopmentGradingScopeReadbackResources() {
+    for (RawDevelopmentGradingScopeReadbackSlot& slot :
+         m_RawDevelopmentGradingScopeReadbackSlots) {
+        if (slot.fence != nullptr) {
+            glDeleteSync(slot.fence);
+            slot.fence = nullptr;
+        }
+        if (slot.pbo != 0) {
+            glDeleteBuffers(1, &slot.pbo);
+            slot.pbo = 0;
+        }
+        if (slot.plotBuffer != 0) glDeleteBuffers(1, &slot.plotBuffer);
+        slot = {};
+    }
+    m_RawDevelopmentGradingScopeGpu.Shutdown();
+    m_RawDevelopmentGradingScopeNextReadbackSlot = 0;
+    m_RawDevelopmentGradingScopeLastIssueTime = {};
+    ClearRawDevelopmentGradingScopeReadback();
+}
+
 void RenderPipeline::ClearRawDevelopmentLocalRangeTargetSample() {
     m_RawDevelopmentLocalRangeTargetSampleRequested = false;
     m_RawDevelopmentLocalRangeTargetSampleRequestU = 0.0f;
@@ -578,13 +630,13 @@ void RenderPipeline::ClearOutput() {
     m_GraphSourceTexture = 0;
 }
 
-unsigned int RenderPipeline::TakeExternalOutputTexture(int& outW, int& outH) {
+unsigned int RenderPipeline::TakeExternalOutputTexture(int& outW, int& outH, bool preserveCompareSource) {
     outW = 0;
     outH = 0;
     const unsigned int texture = m_ExternalOutputTexture;
     if (texture == 0) {
         m_OutputTexture = 0;
-        m_GraphSourceTexture = 0;
+        if (!preserveCompareSource) m_GraphSourceTexture = 0;
         return 0;
     }
 
@@ -594,7 +646,7 @@ unsigned int RenderPipeline::TakeExternalOutputTexture(int& outW, int& outH) {
     if (m_OutputTexture == texture) {
         m_OutputTexture = 0;
     }
-    m_GraphSourceTexture = 0;
+    if (!preserveCompareSource) m_GraphSourceTexture = 0;
     return texture;
 }
 
@@ -655,16 +707,28 @@ void RenderPipeline::AdoptExternalOutputTexture(unsigned int texture, int w, int
 unsigned int RenderPipeline::PublishSharedOutputTexture(
     int& outW,
     int& outH,
-    bool forceOpaqueSampling) {
+    bool forceOpaqueSampling,
+    std::string* error) {
+    if (error) error->clear();
+    const auto fail = [&](std::string reason) -> unsigned int {
+        if (error) *error = std::move(reason);
+        outW = outH = 0;
+        return 0;
+    };
     outW = m_Width;
     outH = m_Height;
     if (m_OutputTexture == 0 || m_Width <= 0 || m_Height <= 0) {
-        return 0;
+        if (!m_LastGraphExecutionStats.lastSpecializedFailure.empty())
+            return fail(m_LastGraphExecutionStats.lastSpecializedFailure);
+        if (!GetLastRawRgbDenoiseError().empty())
+            return fail(GetLastRawRgbDenoiseError());
+        return fail("The renderer did not produce an output image.");
     }
 
     const unsigned int publishedTexture = GLHelpers::CreateEmptyTexture(m_Width, m_Height);
     if (publishedTexture == 0) {
-        return 0;
+        return fail("Could not allocate the preview image on the GPU at " +
+            std::to_string(m_Width) + " x " + std::to_string(m_Height) + ".");
     }
 
     GLint prevReadFBO = 0;
@@ -682,18 +746,17 @@ unsigned int RenderPipeline::PublishSharedOutputTexture(
         if (srcFBO != 0) glDeleteFramebuffers(1, &srcFBO);
         if (dstFBO != 0) glDeleteFramebuffers(1, &dstFBO);
         glDeleteTextures(1, &publishedTexture);
-        outW = 0;
-        outH = 0;
-        return 0;
+        return fail("Could not create the GPU framebuffers for the preview image.");
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstFBO);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    const bool framebuffersComplete =
-        glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
-        glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    const GLenum readStatus = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+    const GLenum drawStatus = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+    const bool framebuffersComplete = readStatus == GL_FRAMEBUFFER_COMPLETE &&
+        drawStatus == GL_FRAMEBUFFER_COMPLETE;
     while (glGetError() != GL_NO_ERROR) {}
     if (framebuffersComplete) {
         glBlitFramebuffer(
@@ -713,9 +776,11 @@ unsigned int RenderPipeline::PublishSharedOutputTexture(
 
     if (!framebuffersComplete || copyError != GL_NO_ERROR) {
         glDeleteTextures(1, &publishedTexture);
-        outW = 0;
-        outH = 0;
-        return 0;
+        return fail(!framebuffersComplete
+            ? "The preview image has an incomplete GPU framebuffer. Read status " +
+                std::to_string(readStatus) + ", draw status " + std::to_string(drawStatus) + "."
+            : "Could not copy the rendered image to the preview. OpenGL error " +
+                std::to_string(copyError) + ".");
     }
 
     if (forceOpaqueSampling) {
@@ -733,11 +798,11 @@ unsigned int RenderPipeline::PublishSharedOutputTexture(
         glBindTexture(
             GL_TEXTURE_2D,
             static_cast<unsigned int>(previousTextureBinding));
-        if (glGetError() != GL_NO_ERROR) {
+        const GLenum samplingError = glGetError();
+        if (samplingError != GL_NO_ERROR) {
             glDeleteTextures(1, &publishedTexture);
-            outW = 0;
-            outH = 0;
-            return 0;
+            return fail("Could not prepare the preview image for display. OpenGL error " +
+                std::to_string(samplingError) + ".");
         }
     }
     return publishedTexture;

@@ -120,6 +120,7 @@ struct NodeLayoutBuildSpec {
     float height = kCollapsedNodeHeight;
     bool expanded = false;
     bool framelessMedia = false;
+    bool sharedIdentityRow = false;
     float headerInsetX = 12.0f;
     float headerInsetY = 10.0f;
     float bodyInsetBottom = 10.0f;
@@ -173,6 +174,7 @@ inline bool TryDefaultWidthClassForKind(
         case NodeKind::HdrMerge:
         case NodeKind::Mfsr:
         case NodeKind::MultiFrameDenoise:
+        case NodeKind::MultiFrameHdr:
         case NodeKind::RawProjectSourceSet:
         case NodeKind::Lut:
         case NodeKind::ChannelSplit:
@@ -201,6 +203,7 @@ inline bool TryDefaultWidthClassForKind(
         case NodeKind::ConstantChannel:
         case NodeKind::DataMath:
         case NodeKind::Value:
+        case NodeKind::RawOperation:
         case NodeKind::TechnicalImage:
         case NodeKind::FrequencyFft:
         case NodeKind::FrequencyIfft:
@@ -270,6 +273,7 @@ inline NodeLogicalLayout BuildLogicalNodeLayout(
         headerVisualHeight + spec.headerInsetY * 0.45f,
         height);
     const float headerBottom = std::clamp(
+        spec.expanded && spec.sharedIdentityRow ? spec.headerInsetY :
         spec.expanded ? expandedHeaderHeight : collapsedHeaderHeight,
         0.0f,
         height);

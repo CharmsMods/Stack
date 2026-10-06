@@ -12,6 +12,9 @@ struct PhysicalMemorySnapshot {
     std::uint64_t totalPhysicalBytes = 0;
     std::uint64_t availablePhysicalBytes = 0;
     bool valid = false;
+    // Windows system commit headroom. Zero is meaningful when known.
+    std::uint64_t availableCommitBytes = 0;
+    bool commitLimitKnown = false;
 };
 
 struct MfdProcessingMemoryBudgetDecision {

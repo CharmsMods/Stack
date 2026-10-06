@@ -1,5 +1,6 @@
 #include "Composite/Internal/CompositeModuleInternal.h"
 
+#include "App/AppPaths.h"
 #include "Composite/EmbeddedCompositeFont.h"
 #include "Editor/EditorModule.h"
 #include "Library/LibraryManager.h"
@@ -53,18 +54,9 @@ std::string NewLayerId() {
 }
 
 std::filesystem::path FindBundledCompositeFontPath() {
-    std::filesystem::path current = std::filesystem::current_path();
-    for (int depth = 0; depth < 6; ++depth) {
-        const std::filesystem::path candidate = current / kDefaultCompositeFontRelativePath;
-        if (std::filesystem::exists(candidate)) {
-            return candidate;
-        }
-        if (!current.has_parent_path()) {
-            break;
-        }
-        current = current.parent_path();
-    }
-    return {};
+    const std::filesystem::path candidate =
+        AppPaths::GetResourcesDirectory() / kDefaultCompositeFontRelativePath;
+    return std::filesystem::exists(candidate) ? candidate : std::filesystem::path();
 }
 
 bool ReadFileBytes(const std::filesystem::path& path, std::vector<unsigned char>& outBytes) {

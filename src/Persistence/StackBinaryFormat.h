@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 #include "Persistence/ProjectStore.h"
@@ -79,14 +80,17 @@ struct NodePresetLoadOptions {
 };
 
 struct ProjectDocument {
+    std::string projectId;
+    std::filesystem::path adoptedFrom;
     ProjectMetadata metadata;
     std::vector<unsigned char> thumbnailBytes;
     std::vector<unsigned char> sourceImageBytes;
     json pipelineData = json();
     std::vector<NodeBrowserThumbnailEntry> nodeBrowserThumbnailEntries;
     json rawWorkspaceData = json();
-    // RAW Workspace v3 keeps exact originals behind a lazy store handle. The
-    // legacy sourceImageBytes member remains for v1/v2 compatibility only.
+    // Current projects of every workflow use the same lazy managed-asset
+    // store. sourceImageBytes is an in-memory capture surface, not a second
+    // authoritative copy in project.stack.
     Stack::Project::ProjectStoreHandle projectStore;
     std::shared_ptr<Stack::Project::RawProjectSnapshot> rawProjectSnapshot;
 };
@@ -114,8 +118,36 @@ struct LibraryBundleDocument {
     std::vector<AssetDocument> assets;
 };
 
-bool WriteProjectFile(const std::filesystem::path& path, const ProjectDocument& document);
+// Missing-store recovery must claim a new destination instead of overwriting
+// a replacement project created after the save check.
+struct ProjectWriteResult {
+    Stack::Project::ProjectStoreHandle store;
+    Stack::Project::RawProjectSnapshot snapshot;
+    Stack::Project::ProjectStoreCommitResult commit;
+
+    explicit operator bool() const { return store && static_cast<bool>(commit); }
+};
+
+// A supplied baseline belongs to the captured document. Zero claims a new
+// store; a nonzero value must match storage before publishing any changes.
+ProjectWriteResult WriteProjectFileWithResult(
+    const std::filesystem::path& path,
+    const ProjectDocument& document,
+    bool requireNewStore = false,
+    std::optional<std::uint64_t> expectedStorageRevision = std::nullopt);
+bool WriteProjectFile(
+    const std::filesystem::path& path,
+    const ProjectDocument& document,
+    bool requireNewStore = false);
 bool ReadProjectFile(const std::filesystem::path& path, ProjectDocument& document, const ProjectLoadOptions& options = {});
+
+// Rewrites in-document image payloads to managed asset references while the
+// caller's store transaction is active. This is shared by every project
+// workflow so Graph, RAW, burst, and HDR commits obey the same asset rules.
+bool ExternalizeManagedProjectAssets(
+    const Stack::Project::ProjectStoreHandle& store,
+    const Stack::Project::ProjectStoreTransaction& transaction,
+    Stack::Project::RawProjectSnapshot& snapshot);
 
 bool WriteNodePresetFile(const std::filesystem::path& path, const NodePresetDocument& document);
 bool ReadNodePresetFile(const std::filesystem::path& path, NodePresetDocument& document, const NodePresetLoadOptions& options = {});

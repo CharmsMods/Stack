@@ -1,5 +1,6 @@
 #include "Library/Internal/LibraryModuleUIHelpers.h"
 
+#include "App/AppPaths.h"
 #include "Library/TagManager.h"
 #include "Persistence/StackBinaryFormat.h"
 #include "Renderer/GLHelpers.h"
@@ -74,24 +75,10 @@ float LibraryPackedContactScore(const std::vector<LibraryPackedCard>& placed, co
 } // namespace
 
 unsigned int LoadIconTexture(const std::string& filename) {
-    std::vector<std::filesystem::path> searchPaths = {
-        std::filesystem::current_path() / "Icons" / filename,
-        std::filesystem::current_path() / "../Icons" / filename,
-        std::filesystem::current_path() / "../../Icons" / filename,
-        std::filesystem::path("Icons") / filename,
-        std::filesystem::path("../Icons") / filename,
-        std::filesystem::path("../../Icons") / filename
-    };
+    const std::filesystem::path resolvedPath =
+        AppPaths::GetResourcesDirectory() / "Icons" / filename;
 
-    std::filesystem::path resolvedPath;
-    for (const auto& path : searchPaths) {
-        if (std::filesystem::exists(path)) {
-            resolvedPath = path;
-            break;
-        }
-    }
-
-    if (resolvedPath.empty()) {
+    if (!std::filesystem::exists(resolvedPath)) {
         std::cerr << "[LibraryModule] Could not find icon: " << filename << std::endl;
         return 0;
     }
@@ -109,6 +96,31 @@ unsigned int LoadIconTexture(const std::string& filename) {
     unsigned int tex = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
     stbi_image_free(pixels);
     return tex;
+}
+
+unsigned int LoadIconTextureFromMemory(const unsigned char* data, unsigned int size) {
+    if (!data || size == 0) {
+        return 0;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load_thread(0);
+    unsigned char* pixels = stbi_load_from_memory(
+        data,
+        static_cast<int>(size),
+        &width,
+        &height,
+        &channels,
+        4);
+    if (!pixels) {
+        return 0;
+    }
+
+    const unsigned int texture = GLHelpers::CreateTextureFromPixels(pixels, width, height, 4);
+    stbi_image_free(pixels);
+    return texture;
 }
 
 void ComputeCoverUv(float sourceWidth, float sourceHeight, const ImRect& targetRect, ImVec2& outUv0, ImVec2& outUv1) {
@@ -318,67 +330,201 @@ ImVec2 ComputeLibraryCardSize(float sourceWidth, float sourceHeight, float viewS
     return thumbSize;
 }
 
-std::vector<LibraryPackedCard> PackLibraryCards(const std::vector<LibraryPackedCard>& inputCards, float contentWidth, float gap) {
-    std::vector<LibraryPackedCard> placed;
-    placed.reserve(inputCards.size());
+std::vector<LibraryPackedCard> PackLibraryCards(
+    const std::vector<LibraryPackedCard>& inputCards,
+    float contentWidth,
+    float gap,
+    float maximumScaleMultiplier) {
     contentWidth = std::max(contentWidth, 1.0f);
+    gap = std::max(0.0f, gap);
+    maximumScaleMultiplier = std::clamp(maximumScaleMultiplier, 1.0f, 1.08f);
 
-    float packedHeight = 0.0f;
-    for (const LibraryPackedCard& input : inputCards) {
-        LibraryPackedCard best = input;
-        bool found = false;
-        float bestScore = 0.0f;
+    const auto packInOrder = [&](const std::vector<LibraryPackedCard>& orderedCards) {
+        std::vector<LibraryPackedCard> placed;
+        placed.reserve(orderedCards.size());
+        float packedHeight = 0.0f;
 
-        std::vector<float> candidateXs;
-        std::vector<float> candidateYs;
-        candidateXs.reserve(placed.size() * 2 + 1);
-        candidateYs.reserve(placed.size() * 2 + 1);
-        candidateXs.push_back(0.0f);
-        candidateYs.push_back(0.0f);
+        for (const LibraryPackedCard& input : orderedCards) {
+            LibraryPackedCard best = input;
+            bool found = false;
+            float bestScore = 0.0f;
+            std::vector<float> candidateXs{ 0.0f };
+            std::vector<float> candidateYs{ 0.0f };
+            candidateXs.reserve(placed.size() * 2 + 1);
+            candidateYs.reserve(placed.size() * 2 + 1);
 
-        for (const LibraryPackedCard& card : placed) {
-            candidateXs.push_back(card.pos.x);
-            candidateXs.push_back(card.pos.x + card.size.x + gap);
-            candidateYs.push_back(card.pos.y);
-            candidateYs.push_back(card.pos.y + card.size.y + gap);
-        }
+            for (const LibraryPackedCard& card : placed) {
+                candidateXs.push_back(card.pos.x);
+                candidateXs.push_back(card.pos.x + card.size.x + gap);
+                candidateYs.push_back(card.pos.y);
+                candidateYs.push_back(card.pos.y + card.size.y + gap);
+            }
+            std::sort(candidateXs.begin(), candidateXs.end());
+            candidateXs.erase(std::unique(candidateXs.begin(), candidateXs.end()), candidateXs.end());
+            std::sort(candidateYs.begin(), candidateYs.end());
+            candidateYs.erase(std::unique(candidateYs.begin(), candidateYs.end()), candidateYs.end());
 
-        for (float y : candidateYs) {
-            if (y < 0.0f) continue;
-            for (float x : candidateXs) {
-                if (x < 0.0f || x + input.size.x > contentWidth + 0.5f) continue;
+            for (float y : candidateYs) {
+                for (float x : candidateXs) {
+                    if (x < 0.0f || y < 0.0f || x + input.size.x > contentWidth + 0.5f) continue;
+                    bool overlaps = false;
+                    for (const LibraryPackedCard& card : placed) {
+                        if (LibraryPackedRectsOverlap(card, ImVec2(x, y), input.size, gap)) {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+                    if (overlaps) continue;
 
-                bool overlaps = false;
-                for (const LibraryPackedCard& card : placed) {
-                    if (LibraryPackedRectsOverlap(card, ImVec2(x, y), input.size, gap)) {
-                        overlaps = true;
-                        break;
+                    const float heightAfter = std::max(packedHeight, y + input.size.y);
+                    const float contact = LibraryPackedContactScore(placed, ImVec2(x, y), input.size, gap);
+                    const float score =
+                        heightAfter * 100000.0f + y * 100.0f + x - contact * 3.0f;
+                    if (!found || score < bestScore) {
+                        best = input;
+                        best.pos = ImVec2(x, y);
+                        bestScore = score;
+                        found = true;
                     }
                 }
-                if (overlaps) continue;
+            }
 
-                const float heightAfter = std::max(packedHeight, y + input.size.y);
-                const float contact = LibraryPackedContactScore(placed, ImVec2(x, y), input.size, gap);
-                const float score = (heightAfter * 100000.0f) + (y * 100.0f) + x - (contact * 2.0f);
-                if (!found || score < bestScore) {
-                    best = input;
-                    best.pos = ImVec2(x, y);
-                    bestScore = score;
-                    found = true;
+            if (!found) {
+                best = input;
+                best.pos = ImVec2(0.0f, packedHeight > 0.0f ? packedHeight + gap : 0.0f);
+            }
+            placed.push_back(best);
+            packedHeight = std::max(packedHeight, best.pos.y + best.size.y);
+        }
+        return placed;
+    };
+
+    const auto layoutHeight = [](const std::vector<LibraryPackedCard>& cards) {
+        float height = 0.0f;
+        for (const LibraryPackedCard& card : cards) {
+            height = std::max(height, card.pos.y + card.size.y);
+        }
+        return height;
+    };
+    const auto layoutContact = [gap, contentWidth](const std::vector<LibraryPackedCard>& cards) {
+        float contact = 0.0f;
+        for (std::size_t i = 0; i < cards.size(); ++i) {
+            const LibraryPackedCard& a = cards[i];
+            if (std::abs(a.pos.x) < 0.5f || std::abs(a.pos.x + a.size.x - contentWidth) < 0.5f) {
+                contact += a.size.y * 0.25f;
+            }
+            if (std::abs(a.pos.y) < 0.5f) contact += a.size.x * 0.25f;
+            for (std::size_t j = i + 1; j < cards.size(); ++j) {
+                const LibraryPackedCard& b = cards[j];
+                const float verticalOverlap = std::max(
+                    0.0f,
+                    std::min(a.pos.y + a.size.y, b.pos.y + b.size.y) - std::max(a.pos.y, b.pos.y));
+                const float horizontalOverlap = std::max(
+                    0.0f,
+                    std::min(a.pos.x + a.size.x, b.pos.x + b.size.x) - std::max(a.pos.x, b.pos.x));
+                if (std::abs(a.pos.x + a.size.x + gap - b.pos.x) < 0.5f ||
+                    std::abs(b.pos.x + b.size.x + gap - a.pos.x) < 0.5f) {
+                    contact += verticalOverlap;
+                }
+                if (std::abs(a.pos.y + a.size.y + gap - b.pos.y) < 0.5f ||
+                    std::abs(b.pos.y + b.size.y + gap - a.pos.y) < 0.5f) {
+                    contact += horizontalOverlap;
                 }
             }
         }
+        return contact;
+    };
 
-        if (!found) {
-            best = input;
-            best.pos = ImVec2(0.0f, packedHeight > 0.0f ? packedHeight + gap : 0.0f);
-        }
-
-        placed.push_back(best);
-        packedHeight = std::max(packedHeight, best.pos.y + best.size.y);
+    std::vector<std::vector<LibraryPackedCard>> orders;
+    orders.push_back(inputCards);
+    auto addSortedOrder = [&](const auto& comparator) {
+        std::vector<LibraryPackedCard> order = inputCards;
+        std::stable_sort(order.begin(), order.end(), comparator);
+        orders.push_back(std::move(order));
+    };
+    addSortedOrder([](const LibraryPackedCard& a, const LibraryPackedCard& b) {
+        return a.size.x * a.size.y > b.size.x * b.size.y;
+    });
+    addSortedOrder([](const LibraryPackedCard& a, const LibraryPackedCard& b) {
+        return a.size.y > b.size.y;
+    });
+    if (inputCards.size() <= 80) {
+        addSortedOrder([](const LibraryPackedCard& a, const LibraryPackedCard& b) {
+            return std::max(a.size.x, a.size.y) > std::max(b.size.x, b.size.y);
+        });
     }
 
-    return placed;
+    std::vector<LibraryPackedCard> bestLayout;
+    float bestHeight = 0.0f;
+    float bestContact = 0.0f;
+    for (const auto& order : orders) {
+        std::vector<LibraryPackedCard> candidate = packInOrder(order);
+        const float candidateHeight = layoutHeight(candidate);
+        const float candidateContact = layoutContact(candidate);
+        if (bestLayout.empty() ||
+            candidateHeight < bestHeight - 0.5f ||
+            (std::abs(candidateHeight - bestHeight) <= 0.5f && candidateContact > bestContact)) {
+            bestLayout = std::move(candidate);
+            bestHeight = candidateHeight;
+            bestContact = candidateContact;
+        }
+    }
+
+    // Grow cards only into space that the selected packing left unused. Nine
+    // anchors allow growth away from a close neighbour; bounds and the normal
+    // inter-card gap are still enforced, and total layout height never grows.
+    std::vector<std::size_t> expansionOrder(bestLayout.size());
+    for (std::size_t i = 0; i < expansionOrder.size(); ++i) expansionOrder[i] = i;
+    std::stable_sort(expansionOrder.begin(), expansionOrder.end(), [&](std::size_t a, std::size_t b) {
+        return bestLayout[a].size.x * bestLayout[a].size.y <
+            bestLayout[b].size.x * bestLayout[b].size.y;
+    });
+    constexpr float anchors[] = { 0.0f, 0.5f, 1.0f };
+    for (std::size_t cardIndex : expansionOrder) {
+        const LibraryPackedCard original = bestLayout[cardIndex];
+        float chosenScale = 1.0f;
+        ImVec2 chosenPos = original.pos;
+        ImVec2 chosenSize = original.size;
+        for (float anchorY : anchors) {
+            for (float anchorX : anchors) {
+                float low = 1.0f;
+                float high = maximumScaleMultiplier;
+                for (int iteration = 0; iteration < 9; ++iteration) {
+                    const float scale = (low + high) * 0.5f;
+                    const ImVec2 size(original.size.x * scale, original.size.y * scale);
+                    const ImVec2 pos(
+                        original.pos.x - (size.x - original.size.x) * anchorX,
+                        original.pos.y - (size.y - original.size.y) * anchorY);
+                    bool fits = pos.x >= -0.5f && pos.y >= -0.5f &&
+                        pos.x + size.x <= contentWidth + 0.5f &&
+                        pos.y + size.y <= bestHeight + 0.5f;
+                    if (fits) {
+                        for (std::size_t otherIndex = 0; otherIndex < bestLayout.size(); ++otherIndex) {
+                            if (otherIndex == cardIndex) continue;
+                            if (LibraryPackedRectsOverlap(bestLayout[otherIndex], pos, size, gap)) {
+                                fits = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (fits) low = scale;
+                    else high = scale;
+                }
+                if (low > chosenScale + 0.0005f) {
+                    chosenScale = low;
+                    chosenSize = ImVec2(original.size.x * low, original.size.y * low);
+                    chosenPos = ImVec2(
+                        original.pos.x - (chosenSize.x - original.size.x) * anchorX,
+                        original.pos.y - (chosenSize.y - original.size.y) * anchorY);
+                }
+            }
+        }
+        bestLayout[cardIndex].pos = chosenPos;
+        bestLayout[cardIndex].size = chosenSize;
+        bestLayout[cardIndex].scaleMultiplier *= chosenScale;
+    }
+
+    return bestLayout;
 }
 
 std::uint64_t HashCombine(std::uint64_t seed, std::uint64_t value) {

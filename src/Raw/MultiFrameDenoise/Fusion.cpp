@@ -535,7 +535,22 @@ bool FuseRobustSample(
         }
         const double divisionVariance = std::max(
             candidate.fusionVariance, divisionFloor);
-        double weight = gate.gate / divisionVariance;
+        double fusionGate = gate.gate;
+        if (parameters.fusion.method == "weighted-average") {
+            // Smoothing changes how strongly an already-safe sample is
+            // discounted by spatial confidence. It never revives a rejected
+            // sample and leaves the redescending per-pixel outlier gate intact.
+            // At the maximum, a fourth-root confidence curve lets static,
+            // lower-confidence frames contribute meaningfully without giving
+            // them the same authority as a fully trusted sample.
+            const double reliabilityExponent =
+                1.0 - 0.75 * parameters.fusion.smoothing;
+            const double softenedReliability = std::pow(
+                std::clamp(candidate.reliability, 0.0, 1.0),
+                reliabilityExponent);
+            fusionGate = softenedReliability * gate.pixelGate;
+        }
+        double weight = fusionGate / divisionVariance;
         if (!Finite(weight) || weight <= 0.0) {
             RecordRejection(
                 FusionRejectReason::InvalidWeight,

@@ -803,18 +803,7 @@ bool RecipeFloatMatches(float a, float b, float tolerance = 0.001f) {
 bool WhiteBalanceStateMatches(
     const Stack::RawRecipe::RawWhiteBalanceRecipe& a,
     const Stack::RawRecipe::RawWhiteBalanceRecipe& b) {
-    if (a.mode != b.mode ||
-        a.hasTemperatureKelvin != b.hasTemperatureKelvin ||
-        a.hasTint != b.hasTint ||
-        a.hasMultipliers != b.hasMultipliers ||
-        a.hasSamplePoint != b.hasSamplePoint) {
-        return false;
-    }
-    if (a.hasTemperatureKelvin &&
-        !RecipeFloatMatches(a.temperatureKelvin, b.temperatureKelvin)) {
-        return false;
-    }
-    if (a.hasTint && !RecipeFloatMatches(a.tint, b.tint)) {
+    if (a.mode != b.mode || a.hasMultipliers != b.hasMultipliers) {
         return false;
     }
     if (a.hasMultipliers) {
@@ -823,11 +812,6 @@ bool WhiteBalanceStateMatches(
                 return false;
             }
         }
-    }
-    if (a.hasSamplePoint &&
-        (!RecipeFloatMatches(a.sampleX, b.sampleX) ||
-         !RecipeFloatMatches(a.sampleY, b.sampleY))) {
-        return false;
     }
     return true;
 }

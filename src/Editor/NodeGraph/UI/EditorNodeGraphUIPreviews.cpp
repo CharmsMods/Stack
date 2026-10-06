@@ -99,6 +99,7 @@ EditorNodeGraphUI::~EditorNodeGraphUI() {
 void EditorNodeGraphUI::Shutdown() {
     m_PresetPreviewCurrentRenderer.reset();
     m_PresetPreviewPreviousRenderer.reset();
+    m_SocketIconTexture.Reset();
     ResetPerGraphVisualCaches();
 }
 
@@ -231,9 +232,9 @@ unsigned int EditorNodeGraphUI::GetImagePreviewTexture(const EditorNodeGraph::No
         return 0;
     }
 
-    // Older projects and non-import image payloads do not carry a runtime
-    // thumbnail. Downsample them here before any GL upload so a tiny node never
-    // allocates a full-resolution graph-preview texture.
+    // Non-import image payloads may not carry a runtime thumbnail. Downsample
+    // them before any GL upload so a tiny node never allocates a full-resolution
+    // graph-preview texture.
     if (previewSourcePixels && (uploadWidth > 768 || uploadHeight > 768)) {
         int previewWidth = 0;
         int previewHeight = 0;

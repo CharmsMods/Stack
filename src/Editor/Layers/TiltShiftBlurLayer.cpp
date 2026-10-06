@@ -53,26 +53,26 @@ void main() {
     if (uBlurType == 1) {
         for (float i = -15.0; i <= 16.0; i += 1.0) {
             vec4 sampleColor = texture(uInputTex, vUV + uDir * i * uRadius * blurScale * 0.5);
-            color += sampleColor;
-            total += 1.0;
+            color += sampleColor * sampleColor.a;
+            total += sampleColor.a;
         }
     } else if (uBlurType == 2) {
         for (float i = -15.0; i <= 16.0; i += 1.0) {
             float weight = 1.0 - abs(i) / 16.0;
             vec4 sampleColor = texture(uInputTex, vUV + uDir * i * uRadius * blurScale);
-            color += sampleColor * weight;
-            total += weight;
+            color += sampleColor * (weight * sampleColor.a);
+            total += weight * sampleColor.a;
         }
     } else {
         for (float i = -15.0; i <= 16.0; i += 1.0) {
             float weight = exp(-(i * i) / 50.0);
             vec4 sampleColor = texture(uInputTex, vUV + uDir * i * uRadius * blurScale * 0.5);
-            color += sampleColor * weight;
-            total += weight;
+            color += sampleColor * (weight * sampleColor.a);
+            total += weight * sampleColor.a;
         }
     }
 
-    FragColor = color / max(total, 0.001);
+    FragColor = vec4(color.rgb / max(total, 0.001), original.a);
 }
 )";
 

@@ -1257,8 +1257,8 @@ const EditorNodeGraph::Node* FindUpstreamRawSourceNode(
 
 bool EditorModule::GetDevelopSubjectImportanceViewportState(DevelopSubjectViewportState& outState) const {
     outState = DevelopSubjectViewportState{};
-    const int selectedNodeId = m_NodeGraph.GetSelectedNodeId();
-    const EditorNodeGraph::Node* node = selectedNodeId > 0 ? m_NodeGraph.FindNode(selectedNodeId) : nullptr;
+    const int selectedNodeId = m_Project->graph.GetSelectedNodeId();
+    const EditorNodeGraph::Node* node = selectedNodeId > 0 ? m_Project->graph.FindNode(selectedNodeId) : nullptr;
     if (!node || node->kind != EditorNodeGraph::NodeKind::RawDevelop) {
         return false;
     }
@@ -1450,7 +1450,7 @@ bool EditorModule::GetDevelopSubjectImportanceViewportState(DevelopSubjectViewpo
 }
 
 bool EditorModule::SetDevelopSubjectImportanceActiveRegion(int nodeId, int regionId) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::RawDevelop || regionId <= 0) {
         return false;
     }
@@ -1465,7 +1465,7 @@ bool EditorModule::SetDevelopSubjectImportanceActiveRegion(int nodeId, int regio
         return false;
     }
     importance.activeRegionId = regionId;
-    m_Dirty = true;
+    MarkDirty();
     return true;
 }
 
@@ -1476,7 +1476,7 @@ bool EditorModule::UpdateDevelopSubjectImportanceRegionFromViewport(
     float centerY,
     float radiusX,
     float radiusY) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::RawDevelop || regionId <= 0) {
         return false;
     }
@@ -1517,7 +1517,7 @@ bool EditorModule::UpdateDevelopSubjectImportanceRegionFromViewport(
 
     if (geometryChanged) {
         RecordRawDevelopInteraction(nodeId);
-        const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_NodeGraph, *node);
+        const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_Project->graph, *node);
         if (node->rawDevelop.uiMode == EditorNodeGraph::RawDevelopUiMode::Auto &&
             rawSourceNode &&
             rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource) {
@@ -1525,13 +1525,13 @@ bool EditorModule::UpdateDevelopSubjectImportanceRegionFromViewport(
         }
         MarkRenderDirty(nodeId);
     } else {
-        m_Dirty = true;
+        MarkDirty();
     }
     return true;
 }
 
 int EditorModule::BeginDevelopSubjectImportanceBrushStroke(int nodeId, float x, float y) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::RawDevelop) {
         return 0;
     }
@@ -1560,12 +1560,12 @@ int EditorModule::BeginDevelopSubjectImportanceBrushStroke(int nodeId, float x, 
     importance.strokes.push_back(std::move(stroke));
     NormalizeDevelopSubjectImportance(importance);
     RecordRawDevelopInteraction(nodeId);
-    m_Dirty = true;
+    MarkDirty();
     return importance.activeStrokeId;
 }
 
 bool EditorModule::AppendDevelopSubjectImportanceBrushStroke(int nodeId, int strokeId, float x, float y) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::RawDevelop || strokeId <= 0) {
         return false;
     }
@@ -1599,12 +1599,12 @@ bool EditorModule::AppendDevelopSubjectImportanceBrushStroke(int nodeId, int str
     }
     strokeIt->points.push_back({ nextX, nextY });
     importance.activeStrokeId = strokeId;
-    m_Dirty = true;
+    MarkDirty();
     return true;
 }
 
 bool EditorModule::EndDevelopSubjectImportanceBrushStroke(int nodeId, int strokeId) {
-    EditorNodeGraph::Node* node = m_NodeGraph.FindNode(nodeId);
+    EditorNodeGraph::Node* node = m_Project->graph.FindNode(nodeId);
     if (!node || node->kind != EditorNodeGraph::NodeKind::RawDevelop || strokeId <= 0) {
         return false;
     }
@@ -1626,7 +1626,7 @@ bool EditorModule::EndDevelopSubjectImportanceBrushStroke(int nodeId, int stroke
     NormalizeDevelopSubjectImportance(importance);
     RecordRawDevelopInteraction(nodeId);
 
-    const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_NodeGraph, *node);
+    const EditorNodeGraph::Node* rawSourceNode = FindUpstreamRawSourceNode(m_Project->graph, *node);
     if (node->rawDevelop.uiMode == EditorNodeGraph::RawDevelopUiMode::Auto &&
         rawSourceNode &&
         rawSourceNode->kind == EditorNodeGraph::NodeKind::RawSource) {

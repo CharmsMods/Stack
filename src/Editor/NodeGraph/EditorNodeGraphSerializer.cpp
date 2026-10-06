@@ -1,7 +1,9 @@
+#include "Editor/LayerRegistry.h"
 #include "EditorNodeGraphSerializer.h"
 
 #include "EditorNodeGraphDefinitions.h"
 #include "UnifiedNodeDefinitionRegistry.h"
+#include "Raw/RawRecipeCompatibility.h"
 #include "Serialization/EditorNodeGraphCustomMaskSerialization.h"
 #include "Serialization/EditorNodeGraphDevelopSerialization.h"
 #include "Serialization/EditorNodeGraphImageSerialization.h"
@@ -29,6 +31,7 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Mfsr: return "MFSR";
         case NodeKind::RawProjectFrame: return "RawProjectFrame";
         case NodeKind::MultiFrameDenoise: return "MultiFrameDenoise";
+        case NodeKind::MultiFrameHdr: return "MultiFrameHdr";
         case NodeKind::RawProjectSourceSet: return "RawProjectSourceSet";
         case NodeKind::Lut: return "Lut";
         case NodeKind::Layer: return "Layer";
@@ -50,6 +53,7 @@ std::string NodeKindToString(NodeKind kind) {
         case NodeKind::Value: return "Value";
         case NodeKind::FieldMean: return "FieldMean";
         case NodeKind::Reformat: return "Reformat";
+        case NodeKind::RawOperation: return "RawOperation";
         case NodeKind::TechnicalImage: return "TechnicalImage";
         case NodeKind::Compound: return "Compound";
         case NodeKind::FrequencyFilter: return "FrequencyFilter";
@@ -96,51 +100,11 @@ Stack::Mfsr::MfsrSettings DeserializeMfsrSettings(const nlohmann::json& value) {
     return settings;
 }
 
-bool NodeUsuallyProducesFullImageForAverageMigration(const Node& node, const std::string& socketId) {
-    if (socketId != kImageOutputSocketId) {
-        return false;
-    }
-    switch (node.kind) {
-        case NodeKind::Image:
-        case NodeKind::RawDevelopment:
-        case NodeKind::RawDecode:
-        case NodeKind::RawDevelop:
-        case NodeKind::RawDetailFusion:
-        case NodeKind::HdrMerge:
-        case NodeKind::Mfsr:
-        case NodeKind::Lut:
-        case NodeKind::Layer:
-        case NodeKind::Mix:
-        case NodeKind::ImageGenerator:
-        case NodeKind::ChannelCombine:
-        case NodeKind::FrequencyFft:
-        case NodeKind::FrequencyIfft:
-        case NodeKind::SpectrumView:
-        case NodeKind::SpectrumMath:
-            return true;
-        case NodeKind::MagnitudePhase:
-            return true;
-        case NodeKind::DataMath:
-            return node.dataMathMode != DataMathMode::Average;
-        case NodeKind::TechnicalImage:
-        case NodeKind::Reformat:
-        case NodeKind::Compound:
-            return true;
-        default:
-            return false;
-    }
-}
-
-bool IsLegacyOutputComponentSocket(const std::string& socketId) {
-    return socketId == "r" ||
-        socketId == "g" ||
-        socketId == "b" ||
-        socketId == "a";
-}
-
 nlohmann::json SerializeOutputSettings(const OutputSettings& settings) {
     return {
         { "schemaVersion", OutputSettings::kSchemaVersion },
+        { "maskOutput", settings.maskOutput },
+        { "publishedType", static_cast<int>(settings.publishedType) },
         { "channelViewMode",
           Stack::NodeMath::OutputChannelViewModeToken(
               settings.channelViewMode) }
@@ -152,6 +116,10 @@ OutputSettings DeserializeOutputSettings(const nlohmann::json& value) {
     if (!value.is_object()) {
         return settings;
     }
+    settings.maskOutput = value.value("maskOutput", false);
+    settings.publishedType = static_cast<Stack::NodeMath::LogicalValueType>(value.value("publishedType",0));
+    if (settings.publishedType < Stack::NodeMath::LogicalValueType::Invalid || settings.publishedType >= Stack::NodeMath::LogicalValueType::Failure)
+        throw std::runtime_error("Unknown published output type.");
     Stack::NodeMath::OutputChannelViewMode parsed =
         Stack::NodeMath::OutputChannelViewMode::Neutral;
     if (Stack::NodeMath::ParseOutputChannelViewMode(
@@ -216,9 +184,6 @@ std::vector<unsigned char> BuildImagePayloadStoragePngBytes(const ImagePayload& 
 } // namespace
 
 nlohmann::json ExtractLayerArray(const nlohmann::json& pipelineData) {
-    if (pipelineData.is_array()) {
-        return pipelineData;
-    }
     if (pipelineData.is_object()) {
         const nlohmann::json layers = pipelineData.value("layers", nlohmann::json::array());
         return layers.is_array() ? layers : nlohmann::json::array();
@@ -226,18 +191,104 @@ nlohmann::json ExtractLayerArray(const nlohmann::json& pipelineData) {
     return nlohmann::json::array();
 }
 
+bool IsCurrentGraphPayload(const nlohmann::json& pipelineData) {
+    if (!pipelineData.is_object()) return false;
+    if (pipelineData.empty()) return true;
+    const auto layers = pipelineData.find("layers");
+    const auto graph = pipelineData.find("nodeGraph");
+    const bool currentEnvelope = layers != pipelineData.end() && layers->is_array() &&
+        graph != pipelineData.end() && graph->is_object() &&
+        graph->value("version", 0) == kEditorNodeGraphSchemaVersion;
+    if (!currentEnvelope) return false;
+    const nlohmann::json nodes = graph->value("nodes", nlohmann::json::array());
+    if (!nodes.is_array()) return false;
+    for (const nlohmann::json& node : nodes) {
+        if (!node.is_object()) return false;
+        const std::string kind = node.value("kind", std::string());
+        if (kind == "RawNeuralDenoise") return false;
+
+        if (kind == "RawDevelopment") {
+            const auto recipe = node.find("rawRecipe");
+            if (recipe == node.end() || !Stack::RawRecipe::IsCanonicalRawRecipeDocument(*recipe)) {
+                return false;
+            }
+        }
+        if (kind == "RawDecode" || kind == "RawDevelop") {
+            const auto settings = node.find("rawSettings");
+            if (settings == node.end() || !settings->is_object() ||
+                SerializeRawSettings(
+                    DeserializeRawSettings(*settings)).dump() !=
+                    settings->dump()) {
+                return false;
+            }
+        }
+        if (kind == "RawDevelop") {
+            const auto scenePrep = node.find("scenePrepSettings");
+            const auto subjectMap = node.find("developSubjectImportance");
+            if (scenePrep == node.end() || !scenePrep->is_object() ||
+                SerializeRawDetailFusionSettings(
+                    DeserializeRawDetailFusionSettings(*scenePrep)).dump() !=
+                    scenePrep->dump() ||
+                subjectMap == node.end() || !subjectMap->is_object() ||
+                subjectMap->value("schemaVersion", 0) !=
+                    DevelopSubjectImportanceMap{}.schemaVersion ||
+                SerializeDevelopSubjectImportanceMap(
+                    DeserializeDevelopSubjectImportanceMap(*subjectMap)).dump() !=
+                    subjectMap->dump()) {
+                return false;
+            }
+        }
+        if (kind == "RawDetailAutoMask" || kind == "RawDetailFusion") {
+            const char* field = kind == "RawDetailAutoMask"
+                ? "rawDetailAutoMaskSettings"
+                : "rawDetailFusionSettings";
+            const auto settings = node.find(field);
+            if (settings == node.end() || !settings->is_object() ||
+                SerializeRawDetailFusionSettings(
+                    DeserializeRawDetailFusionSettings(*settings)).dump() !=
+                    settings->dump()) {
+                return false;
+            }
+        }
+        if (kind == "CustomMask") {
+            const auto mask = node.find("customMask");
+            if (mask == node.end() || !mask->is_object() ||
+                mask->value("schemaVersion", 0) !=
+                    CustomMaskPayload{}.schemaVersion ||
+                SerializeCustomMaskPayload(
+                    DeserializeCustomMaskPayload(*mask)).dump() !=
+                    mask->dump()) {
+                return false;
+            }
+        }
+
+        if (kind == "RawProjectFrame" ||
+            kind == "MultiFrameDenoise" ||
+            kind == "MultiFrameHdr" ||
+            kind == "RawProjectSourceSet") {
+            const auto definition = node.find("definition");
+            if (definition == node.end() || !definition->is_object() ||
+                definition->value("id", std::string()).empty() ||
+                definition->value("version", std::string()).empty() ||
+                definition->value("contentHash", std::string()).empty()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Graph& graph) {
     nlohmann::json root = nlohmann::json::object();
     root["layers"] = layerArray.is_array() ? layerArray : nlohmann::json::array();
 
     nlohmann::json graphJson = nlohmann::json::object();
-    graphJson["version"] = 8;
+    graphJson["version"] = kEditorNodeGraphSchemaVersion;
     graphJson["allowNoOutput"] = graph.AllowsNoOutput();
     graphJson["nextNodeId"] = graph.GetNextNodeId();
     graphJson["nextGroupId"] = graph.GetNextGroupId();
     graphJson["selectedNodeId"] = graph.GetSelectedNodeId();
     graphJson["activeImageNodeId"] = graph.GetActiveImageNodeId();
-    graphJson["outputNodeId"] = graph.GetOutputNodeId();
     graphJson["outputNodeIds"] = graph.GetOutputNodeIds();
 
     nlohmann::json nodesJson = nlohmann::json::array();
@@ -245,6 +296,9 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         nlohmann::json item = nlohmann::json::object();
         item["id"] = node.id;
         item["instanceUuid"] = node.instanceUuid;
+        item["role"] = static_cast<int>(node.role);
+        item["referenceType"] = static_cast<int>(node.referenceType);
+        item["reference"] = {{"graph", node.reference.graphId}, {"node", node.reference.nodeUuid}, {"port", node.reference.portId}};
         item["kind"] = NodeKindToString(node.kind);
         item["layerIndex"] = node.layerIndex;
         item["typeId"] = node.typeId;
@@ -254,6 +308,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["expanded"] = node.expanded;
         item["scopeKind"] = ScopeKindToString(node.scopeKind);
         item["maskKind"] = MaskGeneratorKindToString(node.maskKind);
+        item["rawCoverage"] = node.rawCoverage;
         item["maskSettings"] = SerializeMaskSettings(node.maskSettings);
         item["maskCombineMode"] = MaskCombineModeToString(node.maskCombineMode);
         item["maskUtilityKind"] = MaskUtilityKindToString(node.maskUtilityKind);
@@ -266,6 +321,7 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
         item["mixFactor"] = node.mixFactor;
         item["dataMathMode"] = DataMathModeToString(node.dataMathMode);
         item["dataMathSettings"] = SerializeDataMathSettings(node.dataMathSettings);
+        if (node.kind == NodeKind::RawOperation) item["rawOperation"] = Stack::RawRecipe::SerializeGraphOperation(node.rawOperation);
         item["technicalImageSettings"] = SerializeTechnicalImageSettings(node.technicalImageSettings);
         item["reformatSettings"] = SerializeReformatSettings(node.reformatSettings);
         item["frequencyFilterSettings"] = SerializeFrequencyFilterSettings(node.frequencyFilterSettings);
@@ -312,7 +368,15 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["height"] = node.image.height;
             item["channels"] = node.image.channels;
             item["originalChannels"] = node.image.originalChannels;
-            item["pngBytes"] = nlohmann::json::binary(BuildImagePayloadStoragePngBytes(node.image));
+            if (!node.image.managedAssetId.empty()) {
+                item["managedAssetId"] = node.image.managedAssetId;
+                if (!node.image.projectAssetPath.empty()) {
+                    item["projectAssetPath"] = node.image.projectAssetPath;
+                }
+            } else {
+                item["pngBytes"] = nlohmann::json::binary(
+                    BuildImagePayloadStoragePngBytes(node.image));
+            }
             item["sourceColorMetadata"] =
                 Stack::NodeMath::SerializeSourceColorMetadata(node.image.sourceColorMetadata);
         } else if (node.kind == NodeKind::Value) {
@@ -329,8 +393,6 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             item["rawProjectStatus"] = node.rawDevelopment.projectStatus;
             item["rawEdited"] = node.rawDevelopment.edited;
             item["rawAutosaved"] = node.rawDevelopment.autosaved;
-        } else if (node.kind == NodeKind::RawNeuralDenoise) {
-            item["neuralDenoiseSettings"] = NeuralDenoise::SerializeSettings(node.rawNeuralDenoise.settings);
         } else if (node.kind == NodeKind::RawDecode) {
             item["rawSettings"] = SerializeRawSettings(node.rawDecode.settings);
         } else if (node.kind == NodeKind::RawDevelop) {
@@ -389,6 +451,26 @@ nlohmann::json SerializeGraphPayload(const nlohmann::json& layerArray, const Gra
             for (const MfdFrameBinding& binding :
                  node.multiFrameDenoise.frameBindings) {
                 item["mfdFrameBindings"].push_back({
+                    { "frameId", binding.frameId },
+                    { "socketId", binding.socketId },
+                    { "label", binding.label },
+                    { "enabled", binding.enabled },
+                    { "reference", binding.reference }
+                });
+            }
+        } else if (node.kind == NodeKind::MultiFrameHdr) {
+            item["sourceSetId"] = node.multiFrameHdr.sourceSetId;
+            item["hdrStatus"] = node.multiFrameHdr.presentationStatus;
+            item["hdrResultState"] = node.multiFrameHdr.resultState;
+            item["hdrInternalViewTransformEnabled"] =
+                node.multiFrameHdr.internalViewTransformEnabled;
+            item["hdrRadiometricAnchorFrameId"] =
+                node.multiFrameHdr.radiometricAnchorFrameId;
+            item["hdrManaged"] = node.multiFrameHdr.managed;
+            item["hdrQuarantined"] = node.multiFrameHdr.quarantined;
+            item["hdrFrameBindings"] = nlohmann::json::array();
+            for (const MfdFrameBinding& binding : node.multiFrameHdr.frameBindings) {
+                item["hdrFrameBindings"].push_back({
                     { "frameId", binding.frameId },
                     { "socketId", binding.socketId },
                     { "label", binding.label },
@@ -488,32 +570,18 @@ void DeserializeGraphPayload(
     int fallbackSourceChannels) {
 
     graph.Clear();
+    (void)layerCount;
+    (void)fallbackSourcePixels;
+    (void)fallbackSourceWidth;
+    (void)fallbackSourceHeight;
+    (void)fallbackSourceChannels;
 
-    const bool hasFallbackSource =
-        !fallbackSourcePixels.empty() && fallbackSourceWidth > 0 && fallbackSourceHeight > 0;
-
-    if (!pipelineData.is_object() || !pipelineData.contains("nodeGraph")) {
-        graph.ResetFromLayers(layerCount, hasFallbackSource);
-        if (hasFallbackSource) {
-            if (Node* imageNode = graph.FindNode(graph.GetActiveImageNodeId())) {
-                imageNode->image.label = "Image";
-                imageNode->image.width = fallbackSourceWidth;
-                imageNode->image.height = fallbackSourceHeight;
-                imageNode->image.channels = std::max(1, fallbackSourceChannels);
-                imageNode->image.pixels = fallbackSourcePixels;
-                imageNode->image.pngBytes = EncodeImagePayloadPngForStorage(
-                    fallbackSourcePixels,
-                    fallbackSourceWidth,
-                    fallbackSourceHeight,
-                    std::max(1, fallbackSourceChannels));
-                InvalidateImagePayloadRuntime(imageNode->image);
-            }
-        }
+    if (!IsCurrentGraphPayload(pipelineData) ||
+        !pipelineData.contains("nodeGraph")) {
         return;
     }
 
     const nlohmann::json graphJson = pipelineData.value("nodeGraph", nlohmann::json::object());
-    const int graphVersion = graphJson.value("version", 0);
     graph.SetAllowNoOutput(graphJson.value("allowNoOutput", false));
     const nlohmann::json compoundDefinitionsJson =
         graphJson.value("compoundDefinitions", nlohmann::json::array());
@@ -527,19 +595,6 @@ void DeserializeGraphPayload(
     }
     const nlohmann::json nodesJson = graphJson.value("nodes", nlohmann::json::array());
     const nlohmann::json linksJson = graphJson.value("links", nlohmann::json::array());
-    std::unordered_map<int, int> legacyOutputComponentCounts;
-    if (linksJson.is_array()) {
-        for (const nlohmann::json& item : linksJson) {
-            if (!item.is_object()) continue;
-            const std::string toSocket =
-                item.value("toSocket", std::string());
-            if (IsLegacyOutputComponentSocket(toSocket)) {
-                ++legacyOutputComponentCounts[
-                    item.value("toNodeId", item.value("to", 0))];
-            }
-        }
-    }
-
     int maxNodeId = 0;
     for (const nlohmann::json& item : nodesJson) {
         if (!item.is_object()) continue;
@@ -548,6 +603,17 @@ void DeserializeGraphPayload(
         bool compoundInstanceValid = true;
         node.id = item.value("id", 0);
         node.instanceUuid = item.value("instanceUuid", std::string());
+        const int role = item.value("role", 0);
+        if (role < 0 || role > static_cast<int>(Stack::GraphModel::NodeRole::Reference))
+            throw std::runtime_error("Unknown graph node role.");
+        node.role = static_cast<Stack::GraphModel::NodeRole>(role);
+        node.referenceType = static_cast<Stack::NodeMath::LogicalValueType>(item.value("referenceType",0));
+        if (node.referenceType < Stack::NodeMath::LogicalValueType::Invalid || node.referenceType >= Stack::NodeMath::LogicalValueType::Failure)
+            throw std::runtime_error("Unknown graph reference type.");
+        if (item.contains("reference")) {
+            const auto& reference = item.at("reference");
+            node.reference = {reference.at("graph").get<std::string>(), reference.at("node").get<std::string>(), reference.at("port").get<std::string>()};
+        }
         if (!Stack::NodeMath::IsValidCanonicalUuid(node.instanceUuid)) {
             node.instanceUuid = Stack::NodeMath::GenerateCanonicalUuid();
         }
@@ -572,6 +638,10 @@ void DeserializeGraphPayload(
             node.kind = NodeKind::Image;
             node.image.label = item.value("label", node.title.empty() ? std::string("Image") : node.title);
             node.image.sourcePath = item.value("sourcePath", std::string());
+            node.image.managedAssetId =
+                item.value("managedAssetId", std::string());
+            node.image.projectAssetPath =
+                item.value("projectAssetPath", std::string());
             DecodeImagePayloadPngBytes(ReadBinaryJsonBytes(item.value("pngBytes", nlohmann::json())), node.image);
             node.image.originalChannels = item.value("originalChannels", node.image.originalChannels);
             if (item.contains("sourceColorMetadata")) {
@@ -602,10 +672,6 @@ void DeserializeGraphPayload(
             node.rawDevelopment.edited = item.value("rawEdited", false);
             node.rawDevelopment.autosaved = item.value("rawAutosaved", false);
             if (node.title.empty()) node.title = "RAW Development";
-        } else if (kind == "RawNeuralDenoise") {
-            node.kind = NodeKind::RawNeuralDenoise;
-            node.rawNeuralDenoise.settings = NeuralDenoise::DeserializeSettings(item.value("neuralDenoiseSettings", nlohmann::json::object()));
-            if (node.title.empty()) node.title = "RAW/CFA Neural Denoise";
         } else if (kind == "RawDecode") {
             node.kind = NodeKind::RawDecode;
             node.rawDecode.settings = DeserializeRawSettings(item.value("rawSettings", nlohmann::json::object()));
@@ -697,6 +763,35 @@ void DeserializeGraphPayload(
                 }
             }
             if (node.title.empty()) node.title = "MFD";
+        } else if (kind == "MultiFrameHdr") {
+            node.kind = NodeKind::MultiFrameHdr;
+            node.multiFrameHdr.sourceSetId = item.value("sourceSetId", std::string());
+            node.multiFrameHdr.presentationStatus = item.value(
+                "hdrStatus", std::string(kHdrAwaitingProcessingStatus));
+            node.multiFrameHdr.resultState = item.value(
+                "hdrResultState", std::string("unavailable"));
+            node.multiFrameHdr.internalViewTransformEnabled = item.value(
+                "hdrInternalViewTransformEnabled", true);
+            node.multiFrameHdr.radiometricAnchorFrameId = item.value(
+                "hdrRadiometricAnchorFrameId", std::string());
+            node.multiFrameHdr.managed = item.value("hdrManaged", true);
+            node.multiFrameHdr.quarantined = item.value("hdrQuarantined", false);
+            const nlohmann::json bindings = item.value(
+                "hdrFrameBindings", nlohmann::json::array());
+            if (bindings.is_array()) {
+                for (const nlohmann::json& bindingValue : bindings) {
+                    if (!bindingValue.is_object()) continue;
+                    MfdFrameBinding binding;
+                    binding.frameId = bindingValue.value("frameId", std::string());
+                    binding.socketId = bindingValue.value(
+                        "socketId", MfdFrameInputSocketId(binding.frameId));
+                    binding.label = bindingValue.value("label", std::string());
+                    binding.enabled = bindingValue.value("enabled", true);
+                    binding.reference = bindingValue.value("reference", false);
+                    node.multiFrameHdr.frameBindings.push_back(std::move(binding));
+                }
+            }
+            if (node.title.empty()) node.title = "Multi-Frame HDR";
         } else if (kind == "RawProjectSourceSet") {
             node.kind = NodeKind::RawProjectSourceSet;
             node.rawProjectSourceSet.sourceSetId =
@@ -729,6 +824,7 @@ void DeserializeGraphPayload(
         } else if (kind == "MaskGenerator") {
             node.kind = NodeKind::MaskGenerator;
             node.maskKind = MaskGeneratorKindFromString(item.value("maskKind", std::string("Solid")));
+            node.rawCoverage = item.value("rawCoverage", nlohmann::json::object());
             node.maskSettings = DeserializeMaskSettings(item.value("maskSettings", nlohmann::json::object()));
             if (node.title.empty()) {
                 node.title = node.maskKind == MaskGeneratorKind::Solid ? "Solid Mask" :
@@ -806,6 +902,9 @@ void DeserializeGraphPayload(
             node.reformatSettings = DeserializeReformatSettings(
                 item.value("reformatSettings", nlohmann::json::object()));
             EditorNodeGraphDefinitions::ApplyNodeMetadata(node);
+        } else if (kind == "RawOperation") {
+            node.kind = NodeKind::RawOperation;
+            node.rawOperation = Stack::RawRecipe::DeserializeGraphOperation(item.at("rawOperation"));
         } else if (kind == "TechnicalImage") {
             node.kind = NodeKind::TechnicalImage;
             node.technicalImageSettings = DeserializeTechnicalImageSettings(
@@ -1015,63 +1114,13 @@ void DeserializeGraphPayload(
                     graph.FindCompoundDefinition(node.compound.instance.definition)) {
                 node.title = definition->label;
             }
-        } else if (graphVersion >= 5 &&
-                   graphVersion < 8 &&
-                   node.kind == NodeKind::Output &&
-                   legacyOutputComponentCounts[node.id] <= 1) {
-            // Output v2 is an intentional schema migration. A single legacy
-            // component link has an unambiguous Channel meaning and is moved
-            // to Result. Multi-component constructions are preserved below
-            // with their old exact identity and remain unresolved.
-            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
-        } else if (
-            graphVersion >= 5 &&
-            node.kind == NodeKind::ChannelCombine &&
-            savedDefinitionId == "stack:graph/channel-combine" &&
-            savedDefinitionVersion == "1.0.0") {
-            // Image Combine v2 adds only the persisted automatic-alpha
-            // suppression state. A v1 node has the exact v2 default
-            // (not suppressed), so this upgrade is unambiguous.
-            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
-        } else if (
-            graphVersion >= 5 &&
-            (node.kind == NodeKind::RawProjectFrame ||
-             node.kind == NodeKind::MultiFrameDenoise ||
-             node.kind == NodeKind::RawProjectSourceSet) &&
-            savedDefinitionId.empty() &&
-            savedDefinitionVersion.empty() &&
-            savedDefinitionHash.empty()) {
-            // Source-set graph nodes were introduced before their protected
-            // internal definitions were registered. Their kind and bindings
-            // are owned by the project manifest, so the previously empty
-            // identity has one unambiguous migration. A partial or mismatched
-            // identity still remains unresolved below.
-            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
-        } else if (graphVersion >= 5) {
+        } else {
             EditorNodeGraphDefinitions::ResolveSavedLiveDefinition(
                 node,
                 savedDefinitionId,
                 savedDefinitionVersion,
                 savedDefinitionHash,
                 nullptr);
-        } else {
-            // Forward rewrite identity begins with schema 5. Older documents are
-            // loaded through the existing reader but acquire the current exact
-            // identity only in memory; this is not a compatibility guarantee.
-            EditorNodeGraphDefinitions::ApplyLiveDefinitionIdentity(node);
-        }
-        if (graphVersion < 7 &&
-            (node.kind == NodeKind::FrequencyFft ||
-             node.kind == NodeKind::FrequencyIfft ||
-             node.kind == NodeKind::SpectrumView ||
-             node.kind == NodeKind::FrequencyMask ||
-             node.kind == NodeKind::SpectrumMath ||
-             node.kind == NodeKind::MagnitudePhase ||
-             node.kind == NodeKind::SpectrumAnalyzer)) {
-            node.definitionResolved = false;
-            node.definitionResolutionError =
-                "Legacy frequency nodes are intentionally not reinterpreted. "
-                "Replace this node with a Channel-First Frequency node.";
         }
 
         maxNodeId = std::max(maxNodeId, node.id);
@@ -1097,46 +1146,14 @@ void DeserializeGraphPayload(
             }
         }
     }
-    if (graph.GetOutputNodeId() <= 0) {
-        const int legacyOutputNodeId = graphJson.value("outputNodeId", -1);
-        const Node* outputNode = graph.FindNode(legacyOutputNodeId);
-        if (outputNode && outputNode->kind == NodeKind::Output) {
-            graph.SetOutputNodeId(legacyOutputNodeId);
-        }
-    }
-
     graph.SetNextNodeId(std::max(maxNodeId + 1, graphJson.value("nextNodeId", maxNodeId + 1)));
     graph.SelectNode(graphJson.value("selectedNodeId", -1));
     graph.SetActiveImageNodeId(graphJson.value("activeImageNodeId", -1));
 
-    if (linksJson.is_array()) {
-        for (const nlohmann::json& item : linksJson) {
-            if (!item.is_object()) continue;
-            const int from = item.value("fromNodeId", item.value("from", 0));
-            const int to = item.value("toNodeId", item.value("to", 0));
-            const std::string toSocket = item.value("toSocket", std::string());
-            if (from <= 0 || to <= 0 || !IsDataMathInputSocketId(toSocket)) {
-                continue;
-            }
-            const Node* fromNode = graph.FindNode(from);
-            Node* toNode = graph.FindNode(to);
-            if (fromNode &&
-                toNode &&
-                toNode->kind == NodeKind::DataMath &&
-                toNode->dataMathMode == DataMathMode::Average &&
-                NodeUsuallyProducesFullImageForAverageMigration(
-                    *fromNode,
-                    item.value("fromSocket", graph.DefaultOutputSocket(*fromNode)))) {
-                graph.SetDataMathMode(
-                    toNode->id,
-                    DataMathMode::ImageAverage);
-            }
-        }
-    }
     for (const nlohmann::json& item : linksJson) {
         if (!item.is_object()) continue;
-        const int from = item.value("fromNodeId", item.value("from", 0));
-        const int to = item.value("toNodeId", item.value("to", 0));
+        const int from = item.value("fromNodeId", 0);
+        const int to = item.value("toNodeId", 0);
         if (from <= 0 || to <= 0) {
             continue;
         }
@@ -1147,24 +1164,8 @@ void DeserializeGraphPayload(
             continue;
         }
 
-        const std::string fromSocket = item.value("fromSocket", graph.DefaultOutputSocket(*fromNode));
-        std::string toSocket = item.value("toSocket", graph.DefaultInputSocket(*toNode));
-        const bool legacyOutputComponent =
-            toNode->kind == NodeKind::Output &&
-            IsLegacyOutputComponentSocket(toSocket);
-        if (legacyOutputComponent && !toNode->definitionResolved) {
-            // Preserve authored multi-component legacy state losslessly. It
-            // intentionally does not become an executable render link until
-            // the user replaces it with an explicit Image Combine.
-            graph.EditLinks().push_back(
-                Link{ from, fromSocket, to, toSocket });
-            continue;
-        }
-        if (legacyOutputComponent &&
-            graphVersion < 8 &&
-            legacyOutputComponentCounts[to] == 1) {
-            toSocket = kImageInputSocketId;
-        }
+        const std::string fromSocket = item.value("fromSocket", std::string());
+        const std::string toSocket = item.value("toSocket", std::string());
         if (!fromSocket.empty() && !toSocket.empty() && !graph.HasLink(from, fromSocket, to, toSocket)) {
             if (graph.TryConnectSockets(from, fromSocket, to, toSocket)) {
                 for (Link& link : graph.EditLinks()) {
@@ -1180,10 +1181,6 @@ void DeserializeGraphPayload(
                 }
             }
         }
-    }
-
-    if (graph.GetLinks().empty() && graph.GetActiveImageNodeId() > 0) {
-        graph.RebuildLinks();
     }
 
     const nlohmann::json groupsJson = graphJson.value("groups", nlohmann::json::array());

@@ -2,9 +2,11 @@
 
 #include "Editor/NodeGraph/EditorNodeGraphDefinitions.h"
 #include "NodeMath/NodeDefinition.h"
+#include "Graph/OutputDependencies.h"
 #include "ThirdParty/json.hpp"
 
 #include <string>
+#include <optional>
 #include <vector>
 
 namespace EditorNodeGraphDefinitions {
@@ -31,6 +33,18 @@ struct LiveParameterDefinition {
     std::string storageKey;
 };
 
+enum class LiveGraphRole : unsigned { Composition = 1, RawLayer = 2, Compound = 4 };
+
+struct LivePortContract {
+    Stack::NodeMath::PortDefinition port;
+    Stack::NodeMath::ValueDescriptor requiredSemantics;
+    std::vector<Stack::NodeMath::AlphaMode> acceptedAlpha;
+    bool acceptsUnknownSemantics = true;
+    nlohmann::json defaultValue;
+    std::string defaultInput;
+    std::vector<Stack::NodeMath::DefinitionReference> explicitConversions;
+};
+
 struct LiveNodeDefinition {
     EditorNodeGraph::NodeKind kind = EditorNodeGraph::NodeKind::Layer;
     int variant = 0;
@@ -43,8 +57,14 @@ struct LiveNodeDefinition {
     std::uint32_t previewRecipeVersion = 1;
     NodeCatalogPreviewStrategy previewStrategy = NodeCatalogPreviewStrategy::Auto;
     bool visibleInBrowser = true;
+    bool executable = true;
+    unsigned graphRoles = 7;
+    bool requiresSceneLinearRgb = false;
+    // Each output may bypass through exactly one connected declared input.
+    std::vector<std::pair<std::string, std::string>> bypassBindings;
     std::vector<EditorNodeGraph::SocketDefinition> sockets;
     std::vector<LiveParameterDefinition> parameters;
+    std::vector<Stack::GraphModel::OutputDependency> outputDependencies;
 };
 
 const std::vector<LiveNodeDefinition>& GetUnifiedNodeDefinitionRegistry();
@@ -66,5 +86,19 @@ bool ResolveSavedLiveDefinition(
     std::string* error = nullptr);
 bool ValidateUnifiedNodeDefinitionRegistry(std::vector<std::string>* errors = nullptr);
 std::string ComputeLiveNodeDefinitionHash(const LiveNodeDefinition& definition);
+
+std::optional<LivePortContract> GetLivePortContract(const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node, const std::string& socketId);
+bool DefinitionSupportsGraphRole(const LiveNodeDefinition& definition, LiveGraphRole role);
+bool ValidateInputDescriptor(const EditorNodeGraph::Graph& graph,
+    const EditorNodeGraph::Node& node, const std::string& socketId,
+    const Stack::NodeMath::ValueDescriptor& value, std::string& error);
+
+bool AcceptsTypedParameterInput(const EditorNodeGraph::Node& node, const std::string& socketId, EditorNodeGraph::SocketType type);
+
+bool OutputDependsOnInput(const EditorNodeGraph::Graph& graph, const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input);
+bool OutputDependsOnInput(const EditorNodeGraph::Node& node,
+    const std::string& output, const std::string& input);
 
 } // namespace EditorNodeGraphDefinitions

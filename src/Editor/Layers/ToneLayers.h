@@ -245,6 +245,7 @@ private:
     bool m_LutDirty = true;
     bool m_PointCurveSetEnabled = false;
     Stack::RawRecipe::RawPointCurveSet m_PointCurveSet;
+    Stack::RawRecipe::SceneTone m_SceneTone;
     ToneCurveMode m_Mode = ToneCurveMode::RGB;
     ToneCurveDomain m_Domain = ToneCurveDomain::LogScene;
     ToneCurveOutputMode m_OutputMode = ToneCurveOutputMode::SceneLinear;
@@ -273,6 +274,9 @@ private:
     float m_LogMinEv = -10.0f;
     float m_LogMaxEv = 6.0f;
     float m_MiddleGrey = 0.18f;
+    bool m_ExtendedSceneRange = false;
+    bool m_LumaIsRec2020 = false;
+    bool m_TruthfulV2SignedMath = false;
     ToneCurveSamplingBasis m_SamplingBasis = ToneCurveSamplingBasis::CurveInput;
     ToneCurveTargetingMode m_TargetingMode = ToneCurveTargetingMode::RegionTarget;
     bool m_ProbeValid = false;
@@ -476,11 +480,13 @@ private:
     float m_Shoulder = 0.45f;
     float m_Toe = 0.18f;
     float m_Contrast = 1.0f;
+    float m_ContrastPivotEv = 0.0f;
     float m_Saturation = 1.0f;
     bool m_PreserveHue = true;
     bool m_DebugFalseColor = false;
     bool m_InputIsRec2020 = false;
     bool m_EncodeSrgbOutput = false;
+    bool m_PhotographicHdr = false;
     bool m_LastProbeValid = false;
     float m_LastMinRgb = 0.0f;
     float m_LastMaxRgb = 0.0f;

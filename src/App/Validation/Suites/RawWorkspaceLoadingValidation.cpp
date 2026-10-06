@@ -26,15 +26,18 @@ bool PathLooksLikeOption(const char* text) {
 
 bool ValidateRawWorkspaceLoadingSmoke(int rawArgCount, char** rawArgs) {
     if (rawArgCount <= 0 || rawArgs == nullptr || rawArgs[0] == nullptr || PathLooksLikeOption(rawArgs[0])) {
-        std::cerr << "RAW Workspace loading smoke usage: --validate-raw-workspace-loading-smoke <workspace-folder> [--expect-min-sources N]\n";
+        std::cerr << "RAW Workspace loading smoke usage: --validate-raw-workspace-loading-smoke <workspace-folder> [--expect-min-sources N] [--generate-thumbnails]\n";
         return false;
     }
 
     std::filesystem::path workspaceRoot = rawArgs[0];
     int expectMinSources = 1;
+    bool generateThumbnails = false;
     for (int i = 1; i < rawArgCount; ++i) {
         const std::string option = rawArgs[i] ? rawArgs[i] : "";
-        if (option == "--expect-min-sources") {
+        if (option == "--generate-thumbnails") {
+            generateThumbnails = true;
+        } else if (option == "--expect-min-sources") {
             if (i + 1 >= rawArgCount) {
                 std::cerr << "RAW Workspace loading smoke failed: --expect-min-sources requires a value.\n";
                 return false;
@@ -90,6 +93,17 @@ bool ValidateRawWorkspaceLoadingSmoke(int rawArgCount, char** rawArgs) {
         return false;
     }
 
+    if (generateThumbnails) {
+        for (const auto& source : scan.sources) {
+            const auto quick = Stack::RawWorkspace::GenerateFastNeutralThumbnail(scan.layout, source);
+            const auto standard = Stack::RawWorkspace::GenerateNeutralThumbnail(scan.layout, source);
+            if (!quick.success || !standard.success) {
+                std::cerr << "Thumbnail generation failed: " << quick.errorMessage << " " << standard.errorMessage << std::endl;
+                return false;
+            }
+        }
+        if (!Stack::RawWorkspace::RemoveTransientThumbnailCache(scan.layout)) return false;
+    }
     const Clock::time_point classifyStart = Clock::now();
     if (!Stack::RawWorkspace::ClassifyThumbnails(scan.layout, scan.sources)) {
         std::cerr << "RAW Workspace loading smoke failed: thumbnail classification was canceled unexpectedly.\n";
@@ -109,11 +123,41 @@ bool ValidateRawWorkspaceLoadingSmoke(int rawArgCount, char** rawArgs) {
         std::cerr << "RAW Workspace loading smoke failed: project discovery was canceled unexpectedly.\n";
         return false;
     }
+    std::vector<Stack::RawWorkspace::SourceSetProjectCatalogEntry>
+        sourceSetProjects;
+    if (!Stack::RawWorkspace::DiscoverSourceSetProjects(
+            scan.layout,
+            scan.sources,
+            sourceSetProjects)) {
+        std::cerr << "RAW Workspace loading smoke failed: source-set project discovery was canceled unexpectedly.\n";
+        return false;
+    }
     const Clock::time_point discoverEnd = Clock::now();
+
+    std::vector<Stack::RawWorkspace::SourceRecord> cachedDiscoverySources =
+        scan.sources;
+    std::vector<Stack::RawWorkspace::SourceSetProjectCatalogEntry>
+        cachedDiscoveryProjects;
+    const Clock::time_point cachedDiscoverStart = Clock::now();
+    if (!Stack::RawWorkspace::DiscoverProjects(
+            scan.layout, cachedDiscoverySources) ||
+        !Stack::RawWorkspace::DiscoverSourceSetProjects(
+            scan.layout,
+            cachedDiscoverySources,
+            cachedDiscoveryProjects)) {
+        std::cerr << "RAW Workspace loading smoke failed: cached project discovery failed.\n";
+        return false;
+    }
+    const Clock::time_point cachedDiscoverEnd = Clock::now();
+    if (cachedDiscoveryProjects.size() != sourceSetProjects.size()) {
+        std::cerr << "RAW Workspace loading smoke failed: cached project discovery changed the project count.\n";
+        return false;
+    }
 
     Stack::RawWorkspace::WorkspaceState state;
     state.workspaceRoot = scan.layout.workspaceRoot;
     state.sources = scan.sources;
+    state.sourceSetProjects = sourceSetProjects;
     if (!state.sources.empty()) {
         const std::string selectedKey = state.sources[state.sources.size() / 2].relativePathKey;
         if (!Stack::RawWorkspace::SelectSourceByKey(state, selectedKey) ||
@@ -184,9 +228,12 @@ bool ValidateRawWorkspaceLoadingSmoke(int rawArgCount, char** rawArgs) {
                      return source.project.status == Stack::RawWorkspace::ProjectStatus::Existing ||
                          source.project.status == Stack::RawWorkspace::ProjectStatus::Embedded;
                  })
+              << ", sourceSets=" << sourceSetProjects.size()
               << ") timings(ms scan=" << ElapsedMilliseconds(scanStart, scanEnd)
               << ", classify=" << ElapsedMilliseconds(classifyStart, classifyEnd)
               << ", discover=" << ElapsedMilliseconds(discoverStart, discoverEnd)
+              << ", cachedDiscover=" << ElapsedMilliseconds(
+                    cachedDiscoverStart, cachedDiscoverEnd)
               << ")\n";
     return true;
 }
